@@ -98,7 +98,7 @@ and always carries full frontmatter (see the Kill Criteria block under [Gates](#
 
 ### Plan Save Location
 
-Resolve the save path with `fno do plan path --slug "<slug>" [--node "<node-id>"]` - it joins the plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json`, then `plans_dir` in `.fno/config.toml` / `~/.fno/config.toml`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`). Do NOT hand-assemble the filename; the verb is the convention. If `fno` is unavailable, ask the user where to save and suggest running `/setup`.
+Resolve the save path with `fno do plan path --slug "<slug>" [--node "<node-id>"]`. The verb joins the plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json`, then `plans_dir` in `.fno/config.toml` / `~/.fno/config.toml`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`). Do NOT hand-assemble the filename. The verb is the convention. Run the verb from the node's project root, never from this session's cwd. The plans dir is project-anchored. From a foreign cwd the verb names that session's own plans dir, which sits outside git. `fno backlog get <node>` prints the project root as `cwd`. If the session is anchored elsewhere, `cd` there first. If `fno` is unavailable, ask the user where to save and suggest running `/setup`.
 
 ### Session State Initialization
 
@@ -203,9 +203,10 @@ fi
      preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
      into `…--.md` (US4). Do NOT rename a supplied doc.
    - **Creating fresh** (no design doc): write to the path printed by
-     `fno do plan path --slug "{slug}"`; when this is **node-seeded** (`$CLAIMS_ID` set,
-     e.g. a direct `/blueprint ` with no prior `/think`), pass the node too:
-     `fno do plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
+     `fno do plan path --slug "{slug}"`, run from the node's project root (see
+     Plan Save Location). For a **node-seeded** run (`$CLAIMS_ID` set, e.g. a
+     direct `/blueprint ` with no prior `/think`), pass the node too:
+     `cd <project-root> && fno do plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
      artifact author on the direct path and cannot lean on `/think`'s save rule,
      so it must produce the node-bearing name itself. First **reuse if claimed**:
      if a plans-dir file already carries `$CLAIMS_ID` in its frontmatter or ends

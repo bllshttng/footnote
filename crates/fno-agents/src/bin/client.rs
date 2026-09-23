@@ -174,13 +174,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("launch-workdir") {
         std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free, a
-    // transport-only arm like surface-check - it registers NO client action
-    // (the shrink law allows none), because its callers exec the binary
-    // directly: the Python typer leaf, worktree_gate.py, and
-    // scripts/lib/worktree-reapable.sh.
+    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-only
+    // (no client action - shrink law); callers: worktree_gate.py, worktree-reapable.sh.
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("pending-session-row") {
+        std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
@@ -188,19 +188,7 @@ fn main() {
     }
     // A fire answers in microseconds; the runtime never builds for one.
     if args.first().map(String::as_str) == Some("hook") {
-        let code = match args.get(1).map(String::as_str) {
-            Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
-            Some("prompt") => fno_agents::hook::prompt::run(&args[2..]),
-            Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
-            Some("stop") => fno_agents::hook::stop::run(&args[2..]),
-            other => {
-                eprintln!(
-                    "fno-agents hook: unknown entry {other:?}; expected king-guard, prompt, test-run-guard or stop"
-                );
-                2
-            }
-        };
-        std::process::exit(code);
+        std::process::exit(fno_agents::hook::dispatch(&args[1..]));
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -3244,7 +3232,7 @@ fn run_roster_reap(rest: &[String]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let scope = fno_agents::agents_config::roster_scope(&cwd);
-    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, scope, dry_run);
+    let summary = fno_agents::roster_reap::roster_reap(&home, &cwd, grace_secs, scope, dry_run);
     print!(
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)
@@ -3931,6 +3919,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     positional.push(a);
                 }
             }
+            // The resume arm re-parses the original `rest` with
+            // parse_conversion_args, which owns both flags; swallow them here
+            // so the catch-all does not refuse them first.
+            "--dry-run" | "--allow-new-id" if verb == "resume" => {}
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));
             }

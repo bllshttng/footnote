@@ -92,6 +92,10 @@ The count is `epic_cap::open_child_count`, the same function the write-time refu
 
 A fold whose `status` is not `ok` carries neither key, so an unread scope never reads as a scope with no epics.
 
+## Unplanned idea load
+
+Each `ok` fold also carries `idea_cap` and `ideas`. `idea_cap` is `backlog.max_open_ideas` as resolved beside the graph. It reports `{"cap": 25, "source": "default"}`, `{"cap": N, "source": "config"}`, or `{"cap": null, "source": "off"}`. `ideas` lists each nearest-epic or project scope with at least one capped idea as `{"scope", "open_ideas", "full"}`. It uses the same capped-row predicate and scope walk as the write-time refusal. A fold whose status is not `ok` carries neither field.
+
 ## Session ids on a row
 
 A node row's `sessions` is the ordered de-duplicated union of

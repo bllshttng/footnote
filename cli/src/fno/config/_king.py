@@ -16,8 +16,8 @@ KING_CHECKIN_TEXT = (
     "coverage is full, print 'no change' and stop. This beat is a heartbeat. "
 )
 KING_GOAL_TEXT = (
-    "reign goal. When every node in the crown scope reads done or "
-    "superseded, the goal is met. An open operator question blocks "
+    "reign goal. When every node in the crown scope reads done, superseded or "
+    "will not do, the goal is met. An open operator question blocks "
     "completion. An empty actionable queue is a quiet beat, never a "
     "finish line. A stand-down order from the operator ends the reign. "
     "Until then keep reigning. Never /goal clear on NoProgress."

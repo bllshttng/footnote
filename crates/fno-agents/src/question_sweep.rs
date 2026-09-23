@@ -73,10 +73,16 @@ fn fno_dir_of(home: &AgentsHome) -> PathBuf {
 fn journals_raw(fno_dir: &Path, cwd: &Path) -> String {
     let mut raw = String::new();
     for path in crate::needs::question_journals(fno_dir, cwd) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            raw.push_str(&content);
-            raw.push('\n');
-        }
+        let content = crate::event_store::journal_text(
+            &path,
+            &[
+                "operator_question",
+                "operator_question_closed",
+                "question_sweep",
+            ],
+        );
+        raw.push_str(&content);
+        raw.push('\n');
     }
     raw
 }
@@ -248,6 +254,23 @@ mod tests {
         let questions =
             std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
         assert!(!questions.contains("q-live"));
+    }
+
+    #[test]
+    fn journals_raw_reads_a_store_committed_question() {
+        // AC11-SWEEP: the sweep's raw read reaches the store now.
+        let _root = crate::paths::DeclaredRoot::declare("qswp_journals_raw_stor");
+        let home = tmp_home("store");
+        let cwd = home.root().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let space = crate::paths::space_dir(&cwd).join("events.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T10:00:00Z", "type": "operator_question", "source": "target",
+            "data": {"question_id": "q-store", "question": "which way?", "blocks": ["x-s"]}
+        });
+        crate::event_store::append_envelope(&space, &row.to_string(), None).unwrap();
+        let raw = journals_raw(&fno_dir_of(&home), &cwd);
+        assert!(raw.contains("q-store"), "{raw}");
     }
 
     #[test]

@@ -245,6 +245,10 @@ The refusal names the epic, its open count, the cap, and the next step. Run `fno
 
 The same count reads before any write, on the `epics:` line of `fno agents king checkin`. `19/15 full` means the next open child is refused at the current cap. `19/- (cap unset)` means no cap is configured, which is the OSS default. `fno agents court --nodes --json` carries the list per crown as `epics` and `epic_cap`.
 
+### Unplanned idea cap
+
+Machine-filed, unplanned idea rows use `backlog.max_open_ideas` in each nearest-epic scope. Rows without an epic use `project:<project>`. The default is 25. Every measured epic scope held nine or fewer ideas. A fresh install can accept a readable first batch. `0` turns the cap off. Rows with a plan, epic type, decompose group, or `source_kind = operator_request` are not capped. A refusal reports the count, cap, oldest rows, and fold path (`--wave-of`). It suggests an epic parent or closing stale ideas. Setting this key prints the Python loader's unknown-key warning until the config model carries it. Rust still reads the key at the publication seams.
+
 ## Finding work by meaning: find --fts
 
 `fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.

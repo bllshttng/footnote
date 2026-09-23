@@ -471,9 +471,7 @@ fn undeterminable_marker(cause: &str) -> Value {
 /// Used to fail closed on an unreadable plan only when probes are known to have
 /// existed - a probe-less session with a stale plan_path keeps today's behavior.
 fn prior_fires_declared_probes(events_path: &Path, session_id: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return false;
-    };
+    let content = crate::event_store::journal_text(events_path, &["loop_check"]);
     content.lines().any(|line| {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             return false;
@@ -2409,5 +2407,20 @@ mod acceptance_evidence_tests {
             }
             other => panic!("session must pass while close is pending, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prior_fires_read_a_store_committed_loop_check_row() {
+        // AC5-PROBE: a store-only loop_check row with probe results answers.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let line = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "loop_check", "source": "hook",
+            "data": {"session_id": "s1", "done_probes": {"p1": {"status": "satisfied"}}}
+        })
+        .to_string();
+        crate::event_store::append_envelope(&events, &line, None).unwrap();
+        assert!(prior_fires_declared_probes(&events, "s1"));
+        assert!(!prior_fires_declared_probes(&events, "s2"));
     }
 }

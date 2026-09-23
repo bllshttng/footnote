@@ -1110,6 +1110,45 @@ pub fn session_append(
     }
 }
 
+/// The deferred sessions-row open (the `pending-session-row` transport arm).
+/// Builds the record through the keeper's validating constructor and appends
+/// through the keeper's idempotent append - one implementation of the
+/// semantics, not a second one. Answers whether the node was found at all.
+/// The caller clears the registry park AFTER this returns Ok, so a failed
+/// graph write keeps the payload.
+#[allow(clippy::too_many_arguments)]
+pub fn session_open_parked(
+    store: &Store,
+    node_id: &str,
+    phase: &str,
+    harness: &str,
+    session_id: &str,
+    effort: Option<&str>,
+    merge_grant: Option<Value>,
+    started_at: &str,
+) -> Result<bool, ApiError> {
+    let record = crate::graph_keeper::session_row(
+        phase,
+        harness,
+        session_id,
+        effort,
+        Some(started_at),
+        None,
+        None,
+        merge_grant.as_ref(),
+    )
+    .map_err(|e| ApiError(e.to_string()))?;
+    let mut found = false;
+    mutate(store, "session_append", |rows| {
+        let (node_found, _added) =
+            crate::graph_keeper::session_append(rows, node_id, record.clone())
+                .map_err(|e| e.to_string())?;
+        found = node_found;
+        Ok(node_found)
+    })?;
+    Ok(found)
+}
+
 pub fn session_end(
     store: &Store,
     id: &str,

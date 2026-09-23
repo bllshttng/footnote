@@ -81,15 +81,16 @@ pub(crate) struct BlockedRow {
     pub(crate) evidence: Option<String>,
 }
 
-/// Every `type: "blocked"` row in one journal file, oldest-line-first (the
-/// file is append-only). A missing file reads as an honest empty list - a
-/// king board with nothing blocked yet must not read as unreadable.
+/// Every `type: "blocked"` row in one journal, oldest-first (the reader
+/// returns committed rows in commit order). A journal with neither a live
+/// file nor a store reads as an honest empty list - a king board with
+/// nothing blocked yet must not read as unreadable.
 pub(crate) fn read_blocked_rows(path: &Path) -> Result<Vec<BlockedRow>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
+    let text = crate::event_store::journal_text_checked(
+        path,
+        &crate::event_store::EventQuery::of_types(&["blocked"]),
+    )
+    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut out = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -2580,5 +2581,28 @@ mod tests {
         assert_eq!(verdict.as_deref(), Some("ghost"));
         let no_holder = verdict_for(Some(&payload), "20260915T033130Z-cl38242-b8e631", None);
         assert_eq!(no_holder, None);
+    }
+
+    #[test]
+    fn blocked_rows_read_a_store_committed_row() {
+        // AC4-HP
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let line = json!({"ts": "2026-09-17T12:00:00Z", "type": "blocked", "source": "agent",
+            "run": "run-1", "node": "x-1", "data": {"reason": "waiting on legal"}});
+        crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
+        let rows = read_blocked_rows(&journal).unwrap();
+        assert_eq!(rows.len(), 1, "the store-committed blocked row reads");
+        assert_eq!(rows[0].node.as_deref(), Some("x-1"));
+        assert_eq!(rows[0].reason, "waiting on legal");
+    }
+
+    #[test]
+    fn blocked_rows_err_on_a_broken_store() {
+        // AC4-ERR
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        std::fs::write(dir.path().join("events.db"), b"not a database").unwrap();
+        assert!(read_blocked_rows(&journal).is_err());
     }
 }

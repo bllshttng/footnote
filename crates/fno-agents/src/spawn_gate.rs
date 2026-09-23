@@ -1264,6 +1264,7 @@ pub struct GateInput {
     pub substrate: String,
     pub flags: GateFlags,
     pub route_provider: Option<String>,
+    pub node: Option<String>,
     pub account: Option<String>,
     pub caller_session: Option<String>,
     pub holder_pid: Option<u32>,
@@ -1326,6 +1327,7 @@ fn decide_gate(
     let substrate = input.substrate.as_str();
     let flags = input.flags;
     let route_provider = input.route_provider.as_deref();
+    let admitted_node = input.node.clone().or_else(gate_node);
     let holder_pid = input.holder_pid.unwrap_or_else(std::process::id);
     let holder = format!("spawn-gate:{}:{}", holder_pid, name);
     let root = gate_claims_root();
@@ -1388,7 +1390,7 @@ fn decide_gate(
         // Force speaks for the machine being busy, never for one territory
         // overrunning its team, so the per-territory cap stays enforced
         // here - the one axis --force does not excuse.
-        if let Some(node) = gate_node() {
+        if let Some(node) = admitted_node.as_deref() {
             let mut warnings = Vec::new();
             let live = live_rows(registry_path, &mut warnings);
             if let Err(receipt) = check_territory_cap(
@@ -1414,7 +1416,7 @@ fn decide_gate(
                 config_cwd,
                 registry_path,
                 name,
-                gate_node().as_deref(),
+                admitted_node.as_deref(),
                 &live,
             ) {
                 eprintln!("{receipt}");
@@ -1756,7 +1758,7 @@ fn decide_gate(
                             // never instead of it. Refuses (never queues) - waiting cannot
                             // help while the node's own territory is full, and other
                             // territories keep their headroom.
-                            if let Some(node) = gate_node() {
+                            if let Some(node) = admitted_node.as_deref() {
                                 if let Err(receipt) = check_territory_cap(
                                     config_cwd,
                                     registry_path,
@@ -1775,7 +1777,7 @@ fn decide_gate(
                                 config_cwd,
                                 registry_path,
                                 name,
-                                gate_node().as_deref(),
+                                admitted_node.as_deref(),
                                 &live,
                             ) {
                                 guard.release();

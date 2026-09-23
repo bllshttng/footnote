@@ -696,6 +696,7 @@ class AgentEntry:
     # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
     # as additive-optional passthrough.
     launch_account_source: Optional[str] = None
+    pending_session_row: Optional[dict] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -2348,7 +2349,7 @@ def restamp_harness_session_id(
         return None
 
     restamped: list[AgentEntry] = []
-
+    first_filled: list[AgentEntry] = []
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
             if (entry.name != name and name not in entry.aliases) or entry.harness != harness:
@@ -2442,10 +2443,14 @@ def restamp_harness_session_id(
                 if _DERIVED_SHORT_RE.match(lead) and entry.short_id in ("", stale_lead):
                     entry.short_id = lead
             restamped.append(entry)
+            if not stale:
+                first_filled.append(entry)
             return entries
         return entries
 
     update_registry(_updater, path=registry_path)
+    for filled in first_filled:
+        _flush_pending_session_row(filled, session_id)
     return restamped[0] if restamped else None
 
 
@@ -2589,6 +2594,17 @@ SESSION_OBSERVATION_OUTCOMES = (
     "succession",  # a dead predecessor retired; the primary advanced to B
     "branch",  # a live predecessor kept its row; B minted its own
 )
+
+
+def _flush_pending_session_row(entry: AgentEntry, session_id: str) -> None:
+    from fno.paths import agents_registry_path, graph_json
+    from fno.rust_binary import verb_call
+    try:
+        verb_call("pending-session-row", {"action": "open", "name": entry.name,
+                 "session_id": session_id, "graph": str(graph_json()),
+                 "registry": str(agents_registry_path())})
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the stamp
+        print(f"registry: deferred row open skipped: {exc}", file=sys.stderr)
 
 
 def record_session_observation(
@@ -2781,6 +2797,8 @@ def record_session_observation(
     outcome = (
         "primary" if observed[0].harness_session_id == session_id else "related"
     )
+    if outcome == "primary":
+        _flush_pending_session_row(observed[0], session_id)
     return observed[0], outcome
 
 
