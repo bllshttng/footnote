@@ -103,6 +103,7 @@ Apply the first matching lever to each row, in this order:
 3. If no crown covers a row, start a new small epic. Do not grow a running epic. A vote or priority does not dispatch. See [A finding starts a new epic](#a-finding-starts-a-new-epic).
 4. If the row is the problem, run `fno backlog undefer` or `supersede`.
 5. Keep a blueprint subagent on the territory's top unplanned node. This designs work without a user request.
+
 For each `start` line, run `/fno:blueprint subagent <id>` in check-in order. Do not start nodes the check-in omits. Its list is the ceiling. A `skip` needs no action. The row records it. When a lever needs the user, run `fno inbox outstanding ask`.
 
 ### A finding starts a new epic

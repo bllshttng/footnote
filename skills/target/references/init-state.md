@@ -61,7 +61,7 @@ The size profile sets the base values for all toggles. Individual flags then ove
 When `config.target.blast.enabled: true` and the input is a plan or node with a File Ownership Map, `fno do target init` reads blast radius before writing the immutable manifest. It checks the plan's touched paths and adjusts the size from Step 1c. This runs inside the verb with no LLM call. Tell the agent that `target_size` can differ from the user's size or the default. The verb prints an announce line to stderr.
 
 - **high blast** (touched surface matches the blast map: the loc-ratchet control-plane globs plus a general auth/migrations/sql/infra/billing list, extended by `config.target.blast.high_blast_globs`) → ceremony is **floored at `M`**, non-overridable downward even over an explicit `S`. Announce: `blast: high (<matched-path>) -> floor M ...`.
-- **low blast** (all paths known, none match) **and no size was pinned** → **downgraded to `S`** (do + PR, fast path).
+- **low blast** (known paths, no matches) **and no pinned size** → **downgraded to `S`** (do + PR, fast path).
   - Never downgrade an explicit user size. Announce: `blast: low -> fast path S ...`.
   - When `config.target.blast.downgrade: false`, suppress the downgrade. This is safety-only mode: size can rise, never fall.
 - **unknown** (empty/unparseable map, classifier error, or `fno do target blast-check` failure) → **no change**, fail-safe to the Step 1c size. A blast read never blocks init.

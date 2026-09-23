@@ -88,4 +88,4 @@ A `RECOMMEND RESTART` verdict MUST carry both:
 
 It must also name the honor sequence by explicit path: `skills/target/references/failure-recovery.md`, "Reviewer-ordered restart" section.
 
-**Malformed degrades to blocking.** If `RECOMMEND RESTART` lacks its rationale or lessons block, use a normal `Needs work` verdict. Degrade; never execute an incomplete restart. The user side never honors a malformed recommendation.
+If `RECOMMEND RESTART` lacks its rationale or lessons block, use a normal `Needs work` verdict. Malformed recommendations block. Never execute an incomplete restart. The user side never honors them.

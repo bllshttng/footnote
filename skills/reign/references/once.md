@@ -5,7 +5,7 @@ You have been crowned over one scope, and the crown expires when you exit. That 
 
 One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
 
-Pending work once let the session exit immediately. Now `config.king.enabled` arms the scope manifest when you run `fno agents crown` or spawn with `--crown`.
+Pending work once let the session exit immediately. Setting `config.king.enabled` now makes `fno agents crown` or `fno agents spawn --crown` arm the scope manifest.
 
 The `fno-agents loop-check --driver king` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the crown manifest. `--state <path>` reads outside it.
 

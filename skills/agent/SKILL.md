@@ -359,9 +359,7 @@ and clears `yolo`, so the yolo caveat alone would go silent - the helper instead
 caveats on the effective `bypassPermissions` mode (whether it came from `--yolo` or
 an explicit `--permission-mode`).
 
-It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line,
-and `reason`. `config.agents.confirm` (`always|auto|never`, model default `auto`)
-is repurposed to an **opt-in** "confirm even the free lanes" for a cautious user: only `always` confirms. `auto` (default) and `never` skip. A failed or invalid read uses the no-confirm default because the free lane has nothing to gate. The helper prints an `fno doctor update` hint. Do not re-derive this; the logic lives in the helper. The table it implements:
+It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line, and `reason`. `config.agents.confirm` (`always|auto|never`, default `auto`) is repurposed as an opt-in to confirm free lanes for cautious users. Only `always` confirms. `auto` (default) and `never` skip. Failed or invalid reads use the no-confirm default because free lanes have nothing to gate. The helper prints an `fno doctor update` hint. Do not re-derive this. The logic lives in the helper. The table it implements:
 
 | Condition | Result |
 |---|---|
