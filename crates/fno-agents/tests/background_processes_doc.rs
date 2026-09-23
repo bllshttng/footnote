@@ -172,7 +172,7 @@ fn the_background_processes_page_names_every_arm_and_shipped_label() {
     let launchd_rows = table_rows(launchd_section);
     let doc_labels: BTreeSet<String> = launchd_rows
         .iter()
-        .map(|(label, _)| label.clone())
+        .map(|(label, _)| label.trim_start_matches("sh.fno.").to_string())
         .collect();
 
     let mut failures: Vec<String> = Vec::new();
