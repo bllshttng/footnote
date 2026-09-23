@@ -743,22 +743,17 @@ def test_decompose_malformed_doc_warns_but_exits_zero(tmp_path, monkeypatch):
     assert len([e for e in read_entries() if e.get("parent") == "ab-epic0001"]) == 3
 
 
-def test_set_expected_count_spawn_failure_is_failed_not_skipped(tmp_path, monkeypatch):
-    """A spawn failure is indeterminate, so it maps to 'failed' (surfaced), not a
-    silent 'skipped' (an absent doc would prove no early-graduation risk; a spawn
-    error does not). The stamp module runs via ``python3 -m`` so no repo-root
-    resolution precedes the subprocess.run we stub to raise."""
+def test_set_expected_count_unreachable_writer_is_failed_not_skipped(monkeypatch):
+    """An unreachable writer is indeterminate, so it maps to 'failed' (surfaced),
+    not a silent 'skipped' (only an absent doc proves no early-graduation risk)."""
     import fno.graph.cli as gcli
-    import subprocess
+    import fno.plan._project as project_client
 
-    def _boom(*a, **k):
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(project_client, "plan_docs", lambda op, **params: None)
 
     status, detail = gcli._set_expected_count("/some/doc.md", 3)
     assert status == "failed"
-    assert "spawn failed" in detail
+    assert "unavailable" in detail
 
 
 # -- G2: hard|contract dependency classification --

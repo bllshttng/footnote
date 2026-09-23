@@ -28,9 +28,9 @@ def entries_for_scope(scope: str, *, faqs_dir: Path | None = None, max_entries: 
     matched = []
     for path in paths:
         try:
-            fields, _body = read_frontmatter(path)
             text = path.read_text(encoding="utf-8", errors="ignore")
-        except (OSError, ValueError, UnicodeDecodeError):
+            fields, _body = read_frontmatter(path)
+        except (OSError, ValueError):
             continue
         if fields.get("scope") == scope:
             matched.append(text.strip())

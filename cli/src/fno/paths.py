@@ -763,9 +763,7 @@ def github_cli_proxy_dir() -> Path:
 def locks_dir() -> Path:
     """Advisory-lock sidecar directory (``~/.fno/locks``).
 
-    Deliberately config-free (``$HOME`` only, no settings load) so the
-    stamp path can compute it under a bare interpreter - no tomli_w - that
-    Rust finalize invokes. The plan-doc lock is keyed by the plan's resolved path,
+    Deliberately config-free (``$HOME`` only, no settings load). The plan-doc lock is keyed by the plan's resolved path,
     so the two fno writers only need to agree on this directory; a config
     ``state_dir`` override deliberately does NOT move it (moving it would desync
     the config-loading append side from the config-free stamp side)."""

@@ -1961,7 +1961,7 @@ def cmd_decompose(
         verbatim_base_box[0] = base  # the relative base, for the source_doc seed
         # `base` (verbatim, possibly relative) is the node-identity key used by
         # child_plan_path below - DO NOT mutate it. For the set-expected
-        # call only, resolve a relative base against the epic's project
+        # shell-out only, resolve a relative base against the epic's project
         # root (its stored cwd) so a decompose run from a subdirectory still
         # locates the doc on disk; the writer resolves relative paths against
         # the process cwd, which would otherwise false-"missing" and skip
@@ -2372,9 +2372,9 @@ def cmd_decompose(
             if think_spawn_on_decompose_wave0(
                 project_root=Path(epic_cwd_box[0]) if epic_cwd_box[0] else None
             ):
-                from fno.plan._project import epic_waves
+                from fno.plan._project import plan_docs
 
-                wave_by_id, _ = epic_waves(epic_resolved_id)
+                wave_by_id = (plan_docs("waves", epic_id=epic_resolved_id) or {}).get("wave_by_id", {})
                 wave0_ids = {cid for cid, w in wave_by_id.items() if w == 0}
             for cid in spec_ids:
                 child = by_id.get(cid)
@@ -7493,29 +7493,23 @@ def _stamp_and_graduate_plan(
     url: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> bool:
-    """Best-effort: stamp a plan ``in_review`` (when a ship URL is known) then graduate.
+    """Best-effort: stamp a plan ``shipped`` (when a ship URL is known) then graduate.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.plan._project import graduate_plan, stamp_plan
+    from fno.plan._project import plan_docs
 
     stamped_shipped = False
     if url:
         sid = session_id or "backlog-close"
-        rc = stamp_plan(plan_path, sid, [url])
-        if rc != 0:
-            typer.echo(
-                f"warning: plan stamp exited {rc}",
-                err=True,
-            )
+        res = plan_docs("stamp", plan_path=plan_path, session_id=sid, urls=[url])
+        if res is None or res["exit"]:
             return False
         stamped_shipped = True
 
-    rc = graduate_plan(plan_path)
-    if rc != 0:
-        typer.echo(
-            f"warning: plan graduate exited {rc}",
-            err=True,
-        )
+    res = plan_docs("graduate", plan_path=plan_path)
+    if res is None or res["exit"]:
+        # A successful stamp already recorded the ship; report that win even if
+        # the graduate spawn failed.
         return stamped_shipped
     return True
 
@@ -7529,17 +7523,10 @@ def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, 
     """Authoritatively write expected_url_count=count onto a plan's frontmatter.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.plan._project import set_expected_count
+    from fno.plan._project import plan_docs
 
-    rc, message = set_expected_count(plan_path, count)
-    if rc == 0:
-        return "ok", ""
-    # Exit 3 == base doc absent: benign (cannot be stamped at ship either).
-    if rc == 3:
-        return "skipped", message.strip()
-    # Any other non-zero means the writer ran but could not write a doc it
-    # could see (malformed frontmatter, etc.) - the real degradation.
-    return "failed", message.strip() or f"exit {rc}"
+    res = plan_docs("set_expected", plan_path=plan_path, count=count)
+    return (res["status"], res["message"].strip()) if res else ("failed", "graph store unavailable")
 
 
 # -- gh cross-check helpers (injectable for tests) --

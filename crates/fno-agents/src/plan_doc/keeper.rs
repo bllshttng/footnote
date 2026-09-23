@@ -2,7 +2,7 @@
 //! and the plan-doc writer, so the Python callers are clients and no second
 //! writer leg exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
@@ -18,6 +18,14 @@ fn events_path<'a>(state: &'a StoreState, p: &'a Value) -> Option<&'a Path> {
     opt_str(p, "events_path")
         .map(Path::new)
         .or(state.events.as_deref())
+}
+
+/// The keeper runs in its own cwd, so a relative path means the caller's.
+fn caller_path(p: &Value, raw: &str) -> PathBuf {
+    match opt_str(p, "cwd") {
+        Some(cwd) => Path::new(cwd).join(raw),
+        None => PathBuf::from(raw),
+    }
 }
 
 /// `{op: "project"|"stamp"|"graduate"|"set_expected"|"waves", ...}`.
@@ -41,7 +49,16 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                 return Ok(json!({"rewritten": 0, "warnings": []}));
             }
             let cached = cached_entries(state, false, false)?;
-            let root = opt_str(params, "root").map(str::to_string);
+            // No root: a relative plan_path resolves against the caller's
+            // canonical checkout, as the Python converger's lazy repo_root did.
+            let root = opt_str(params, "root").map(str::to_string).or_else(|| {
+                opt_str(params, "cwd").map(|cwd| {
+                    crate::paths::canonical_repo_root(Path::new(cwd))
+                        .unwrap_or_else(|| PathBuf::from(cwd))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            });
             let pair = |key: &str| -> Option<(String, Vec<String>)> {
                 params.get(key).and_then(|p| {
                     let id = p.get("id").and_then(Value::as_str)?.to_string();
@@ -84,7 +101,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                 })
                 .unwrap_or_default();
             let result = super::stamp::cmd_stamp(
-                Path::new(plan_path),
+                &caller_path(params, plan_path),
                 session_id,
                 &urls,
                 params
@@ -106,7 +123,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                 ));
             };
             let result = super::stamp::cmd_graduate(
-                Path::new(plan_path),
+                &caller_path(params, plan_path),
                 params
                     .get("dry_run")
                     .and_then(Value::as_bool)
@@ -123,14 +140,21 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
             };
             let count = params.get("count").and_then(Value::as_u64).unwrap_or(0) as u32;
             let result = super::stamp::cmd_set_expected(
-                Path::new(plan_path),
+                &caller_path(params, plan_path),
                 count,
                 params
                     .get("dry_run")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             );
-            Ok(json!({"exit": result.exit, "message": result.message}))
+            // Exit 3 is a missing doc: benign for decompose, which cannot
+            // stamp it at ship either.
+            let status = match result.exit {
+                0 => "ok",
+                3 => "skipped",
+                _ => "failed",
+            };
+            Ok(json!({"exit": result.exit, "message": result.message, "status": status}))
         }
         "waves" => {
             let Some(epic_id) = opt_str(params, "epic_id") else {
@@ -144,8 +168,106 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                 .collect();
             Ok(json!({"wave_by_id": wave_by_id, "max_wave": max_wave}))
         }
+        // `fno do plan stamp|graduate|set-expected` hand their raw flags here.
+        "argv" => match argv_params(params) {
+            Ok(parsed) => handle_plan_docs(state, &parsed),
+            Err(message) => Ok(json!({"exit": 2, "message": message})),
+        },
         other => Err(StoreError::Invalid(format!(
             "unknown plan_docs op {other:?}"
         ))),
+    }
+}
+
+/// Parse the retired stamp module's command line into op params, keeping the
+/// caller's `cwd` and `events_path`.
+fn argv_params(params: &Value) -> Result<Value, String> {
+    let verb = opt_str(params, "verb").unwrap_or_default();
+    let args: Vec<&str> = params
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = Map::new();
+    for key in ["cwd", "events_path"] {
+        if let Some(v) = params.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    let mut urls = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i];
+        if flag == "--dry-run" {
+            out.insert("dry_run".into(), Value::Bool(true));
+            i += 1;
+            continue;
+        }
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("error: {flag} needs a value"))?;
+        let number = || {
+            value
+                .parse::<u64>()
+                .map(Value::from)
+                .map_err(|_| format!("error: {flag} needs an integer, got {value:?}"))
+        };
+        match flag {
+            "--plan-path" => out.insert("plan_path".into(), Value::from(*value)),
+            "--session-id" => out.insert("session_id".into(), Value::from(*value)),
+            "--url" => {
+                urls.push(Value::from(*value));
+                None
+            }
+            "--expected-url-count" => out.insert("expected_url_count".into(), number()?),
+            "--count" => out.insert("count".into(), number()?),
+            _ => return Err(format!("error: unknown {verb} flag {flag:?}")),
+        };
+        i += 2;
+    }
+    if !out.contains_key("plan_path") {
+        return Err(format!("error: {verb} needs --plan-path"));
+    }
+    let op = match verb {
+        "stamp" => "stamp",
+        "graduate" => "graduate",
+        "set-expected" => "set_expected",
+        _ => return Err(format!("error: unknown plan verb {verb:?}")),
+    };
+    out.insert("op".into(), Value::from(op));
+    out.insert("urls".into(), Value::Array(urls));
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argv_parses_the_stamp_command_line() {
+        let parsed = argv_params(&json!({
+            "verb": "stamp",
+            "cwd": "/w",
+            "args": ["--plan-path", "p.md", "--session-id", "s", "--url", "u1",
+                     "--url", "u2", "--expected-url-count", "2", "--dry-run"],
+        }))
+        .unwrap();
+        assert_eq!(parsed["op"], "stamp");
+        assert_eq!(parsed["plan_path"], "p.md");
+        assert_eq!(parsed["urls"], json!(["u1", "u2"]));
+        assert_eq!(parsed["expected_url_count"], 2);
+        assert_eq!(parsed["dry_run"], true);
+        assert_eq!(parsed["cwd"], "/w");
+        assert_eq!(caller_path(&parsed, "p.md"), PathBuf::from("/w/p.md"));
+    }
+
+    #[test]
+    fn argv_refuses_bad_input() {
+        let bad = |verb: &str, args: Value| argv_params(&json!({"verb": verb, "args": args}));
+        assert!(bad("stamp", json!(["--session-id", "s"])).is_err());
+        assert!(bad("set-expected", json!(["--plan-path", "p", "--count", "x"])).is_err());
+        assert!(bad("stamp", json!(["--plan-path"])).is_err());
+        assert!(bad("stamp", json!(["--plan-path", "p", "--bogus", "1"])).is_err());
+        assert!(bad("nope", json!(["--plan-path", "p"])).is_err());
     }
 }

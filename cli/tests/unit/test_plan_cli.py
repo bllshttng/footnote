@@ -3,17 +3,15 @@
 The wrappers are clients of the keeper-served plan-doc writer (via
 ``fno.plan._project``). Tests verify:
 1. Help text renders without error.
-2. Args + flags reach the client functions, parsed.
+2. Args + flags reach the writer unchanged.
 3. Exit codes propagate from the writer.
 """
 from __future__ import annotations
 
-import sys
-
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.plan import cli as plan_cli_module
 
 runner = CliRunner()
 
@@ -107,79 +105,41 @@ def test_plan_graduate_forwards_args(tmp_path):
     assert result.exit_code in (0, 1, 2)
 
 
-def test_plan_stamp_forwards_args_verbatim(tmp_path, monkeypatch):
-    """AC1-HP: every flag the user passes reaches the client function, parsed.
-
-    Stubs the client functions in fno.plan._project so we can capture the
-    arguments without contacting a keeper.
-    """
+def _stub_plan_docs(monkeypatch, exit_code=0):
+    """Capture what the verb hands the keeper client, without a keeper."""
     import fno.plan._project as project_client
 
-    captured: dict = {}
+    captured: list = []
 
-    def _stub_stamp(plan_path, session_id, urls, expected_url_count, dry_run):
-        captured["stamp"] = (plan_path, session_id, urls, expected_url_count, dry_run)
-        return 0
+    def _stub(op, **params):
+        captured.append((op, params))
+        return {"exit": exit_code}
 
-    monkeypatch.setattr(project_client, "stamp_plan", _stub_stamp)
+    monkeypatch.setattr(project_client, "plan_docs", _stub)
+    return captured
 
-    result = runner.invoke(
-        app,
-        [
-            "do", "plan", "stamp",
-            "--plan-path", "/tmp/some-plan.md",
-            "--session-id", "abc-123",
-            "--url", "https://example.com/pr/42",
-            "--expected-url-count", "1",
-        ],
-    )
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["stamp", "--plan-path", "/tmp/some-plan.md", "--session-id", "abc-123",
+         "--url", "https://example.com/pr/42", "--expected-url-count", "1"],
+        ["graduate", "--plan-path", "/tmp/some-plan.md"],
+        ["set-expected", "--plan-path", "/tmp/some-plan.md", "--count", "3"],
+    ],
+)
+def test_plan_verbs_forward_args_verbatim(monkeypatch, argv):
+    """AC1-HP: every flag reaches the writer unchanged; the keeper parses them."""
+    captured = _stub_plan_docs(monkeypatch)
+    result = runner.invoke(app, ["do", "plan", *argv])
     assert result.exit_code == 0
-    assert captured["stamp"] == (
-        "/tmp/some-plan.md",
-        "abc-123",
-        ["https://example.com/pr/42"],
-        1,
-        False,
-    )
+    assert captured == [("argv", {"verb": argv[0], "args": argv[1:]})]
 
 
-def test_plan_graduate_forwards_args_verbatim(tmp_path, monkeypatch):
-    """Same as stamp-forward but for graduate verb."""
-    import fno.plan._project as project_client
-
-    captured: dict = {}
-
-    def _stub_grad(plan_path, dry_run):
-        captured["grad"] = (plan_path, dry_run)
-        return 0
-
-    monkeypatch.setattr(project_client, "graduate_plan", _stub_grad)
-
-    result = runner.invoke(
-        app, ["do", "plan", "graduate", "--plan-path", "/tmp/some-plan.md"],
-    )
-    assert result.exit_code == 0
-    assert captured["grad"] == ("/tmp/some-plan.md", False)
-
-
-def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
-    """`fno do plan set-expected` forwards to the client with a parsed count."""
-    import fno.plan._project as project_client
-
-    captured: dict = {}
-
-    def _stub_set(plan_path, count, dry_run):
-        captured["set"] = (plan_path, count, dry_run)
-        return 0, ""
-
-    monkeypatch.setattr(project_client, "set_expected_count", _stub_set)
-
-    result = runner.invoke(
-        app,
-        ["do", "plan", "set-expected", "--plan-path", "/tmp/some-plan.md", "--count", "3"],
-    )
-    assert result.exit_code == 0
-    assert captured["set"] == ("/tmp/some-plan.md", 3, False)
+def test_plan_verb_propagates_the_writer_exit_code(monkeypatch):
+    _stub_plan_docs(monkeypatch, exit_code=2)
+    result = runner.invoke(app, ["do", "plan", "graduate", "--plan-path", "/tmp/p.md"])
+    assert result.exit_code == 2
 
 
 # ---------------------------------------------------------------------------

@@ -10,9 +10,7 @@ with ``os.replace``, which swaps the plan's inode out from under any lock held o
 that inode, so the next locker would lock a now-detached inode and fail to
 serialize. Keying a separate lockfile on the plan's resolved path avoids that.
 
-Advisory only - human editors are unguarded by design (two fno writers). Stdlib
-only (fcntl/hashlib/os): the stamp path runs under a typer-less interpreter,
-so this must not pull any third-party import.
+Advisory only - human editors are unguarded by design (two fno writers).
 """
 from __future__ import annotations
 

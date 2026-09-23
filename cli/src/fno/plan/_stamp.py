@@ -1,13 +1,3 @@
-"""Residual home of the atomic plan-file write (module fno/plan/_stamp.py).
-
-The frontmatter codec and the stamp/graduate/set-expected commands were
-ported to Rust (crates/fno-agents/src/plan_doc) and are served by the graph
-keeper's `plan_docs` method; the Python verbs are clients in
-`fno.plan._project`. Only `_atomic_write` remains here because three
-still-Python writers (status_fanout, migrate_keys, reconcile_status) import
-it; the module disappears when those legs port.
-"""
-
 from __future__ import annotations
 
 import os

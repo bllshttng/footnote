@@ -8,9 +8,6 @@ Verbs:
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
     path              - print the save path for a NEW plan/design doc (config.plans_filename)
-
-stamp, graduate, and set-expected route to the keeper-served plan-doc writer
-via the client in ``fno.plan._project``. brief is implemented in fno.plan.brief.
 """
 from __future__ import annotations
 
@@ -35,62 +32,16 @@ plan_app = typer.Typer(
 
 
 def _forward(verb: str, extra_args: List[str]) -> int:
-    """Route a stamp verb to the keeper-served plan-doc writer.
+    """Send verb + extra_args to the keeper-served plan-doc writer; return its exit code."""
+    from fno.plan._project import plan_docs
 
-    Flags mirror the retired in-package stamp module so existing
-    callers keep their command lines; the verb now calls the client in
-    `fno.plan._project` (the keeper's `plan_docs` method).
-    """
-    from fno.plan._project import graduate_plan, set_expected_count, stamp_plan
-
-    def _flag(name: str) -> "str | None":
-        if name in extra_args:
-            idx = extra_args.index(name)
-            if idx + 1 < len(extra_args):
-                return extra_args[idx + 1]
-        return None
-
-    def _flags(name: str) -> "list[str]":
-        out: "list[str]" = []
-        for i, arg in enumerate(extra_args):
-            if arg == name and i + 1 < len(extra_args):
-                out.append(extra_args[i + 1])
-        return out
-
-    plan_path = _flag("--plan-path")
-    if not plan_path:
-        print(f"error: {verb} needs --plan-path", file=sys.stderr)
-        return 2
-    dry_run = "--dry-run" in extra_args
-    try:
-        expected = _flag("--expected-url-count")
-        expected_n = int(expected) if expected is not None else None
-        count_n = int(_flag("--count") or 0)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    if verb == "stamp":
-        return stamp_plan(
-            plan_path,
-            _flag("--session-id") or "",
-            _flags("--url"),
-            expected_n,
-            dry_run,
-        )
-    if verb == "graduate":
-        return graduate_plan(plan_path, dry_run)
-    if verb == "set-expected":
-        rc, message = set_expected_count(plan_path, count_n, dry_run)
-        if message and rc != 0:
-            print(message, file=sys.stderr)
-        return rc
-    return 2
+    return (plan_docs("argv", verb=verb, args=extra_args) or {"exit": 1})["exit"]
 
 
 @plan_app.command(
     "stamp",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Stamp plan frontmatter with ship metadata.",
+    help="Stamp plan frontmatter with ship metadata. Forwards all args to the plan-doc writer.",
 )
 def stamp(ctx: typer.Context) -> None:
     rc = _forward("stamp", list(ctx.args))
@@ -100,7 +51,7 @@ def stamp(ctx: typer.Context) -> None:
 @plan_app.command(
     "graduate",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Graduate a stamped plan (in_review -> done).",
+    help="Graduate a stamped plan (in_review -> done). Forwards all args to the plan-doc writer.",
 )
 def graduate(ctx: typer.Context) -> None:
     rc = _forward("graduate", list(ctx.args))
@@ -111,8 +62,9 @@ def graduate(ctx: typer.Context) -> None:
     "set-expected",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Authoritatively set a plan's expected_url_count (count-only). Used to "
-        "record the group count on a shared epic-decomposition doc."
+        "Authoritatively set a plan's expected_url_count (count-only). Forwards "
+        "all args to the plan-doc writer. Used to record the "
+        "group count on a shared epic-decomposition doc."
     ),
 )
 def set_expected(ctx: typer.Context) -> None:
