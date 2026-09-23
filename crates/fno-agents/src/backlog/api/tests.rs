@@ -1005,3 +1005,118 @@ fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
         assert_eq!(one.additional_prs.unwrap().len(), 1);
     }
 }
+
+#[test]
+fn primary_pr_stamp_stamps_an_unrecorded_primary() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2180,
+                url: Some("https://github.com/o/r/pull/2180".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+        let payload = primary_pr_stamp(
+            store,
+            "ab-one",
+            2180,
+            Some("https://github.com/o/r/pull/2180"),
+            "merged",
+        )
+        .unwrap();
+        assert!(payload.success);
+        let stamped = payload.node.as_ref().unwrap();
+        let primary = stamped.primary_pr.as_ref().unwrap();
+        assert_eq!(primary.merge_status.as_deref(), Some("merged"));
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(
+            one.primary_pr.unwrap().merge_status.as_deref(),
+            Some("merged")
+        );
+    }
+}
+
+#[test]
+fn primary_pr_stamp_refuses_a_number_or_url_mismatch() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2180,
+                url: Some("https://github.com/o/r/pull/2180".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+        let wrong_number = primary_pr_stamp(
+            store,
+            "ab-one",
+            2181,
+            Some("https://github.com/o/r/pull/2180"),
+            "merged",
+        )
+        .unwrap();
+        assert!(!wrong_number.success);
+        let wrong_url = primary_pr_stamp(
+            store,
+            "ab-one",
+            2180,
+            Some("https://github.com/o/r/pull/9999"),
+            "merged",
+        )
+        .unwrap();
+        assert!(!wrong_url.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(one.primary_pr.unwrap().merge_status, None);
+    }
+}
+
+#[test]
+fn primary_pr_stamp_never_overwrites_a_recorded_value() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        mutate(store, "seed-failed-primary", |entries| {
+            entries.push(json!({
+                "id": "ab-failed", "slug": "ab-failed", "title": "Failed",
+                "type": "feature", "status": "done", "priority": "p2",
+                "created_at": "2026-09-11T00:00:00+00:00",
+                "pr_number": 2180, "merge_status": "failed"
+            }));
+            Ok(true)
+        })
+        .unwrap();
+        let refused = primary_pr_stamp(store, "ab-failed", 2180, None, "merged").unwrap();
+        assert!(!refused.success);
+        let seeded = node(store, "ab-failed").unwrap().unwrap();
+        assert_eq!(
+            seeded.primary_pr.unwrap().merge_status.as_deref(),
+            Some("failed")
+        );
+
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2199,
+                url: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        let stamped = primary_pr_stamp(store, "ab-one", 2199, None, "merged").unwrap();
+        assert!(stamped.success);
+        let again = primary_pr_stamp(store, "ab-one", 2199, None, "closed").unwrap();
+        assert!(!again.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(
+            one.primary_pr.unwrap().merge_status.as_deref(),
+            Some("merged")
+        );
+    }
+}
