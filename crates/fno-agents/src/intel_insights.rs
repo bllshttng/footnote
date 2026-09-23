@@ -380,7 +380,7 @@ pub(crate) fn response_gaps(operator_epochs: &[i64], assistant_ts: &[f64]) -> Ve
 // file become per-category metrics. Nothing here reads a transcript.
 
 #[derive(Deserialize)]
-struct FacetKey {
+pub(crate) struct FacetKey {
     #[allow(dead_code)]
     session: String,
     mtime: u64,
@@ -388,13 +388,13 @@ struct FacetKey {
 }
 
 #[derive(Deserialize)]
-struct Facet {
+pub(crate) struct Facet {
     key: FacetKey,
     friction: String,
 }
 
 #[derive(Deserialize, Debug)]
-struct RunCategory {
+pub(crate) struct RunCategory {
     name: String,
     #[serde(default)]
     #[allow(dead_code)]
@@ -405,7 +405,7 @@ struct RunCategory {
 }
 
 #[derive(Deserialize, Debug)]
-struct RunSubcategory {
+pub(crate) struct RunSubcategory {
     name: String,
     #[serde(default)]
     #[allow(dead_code)]
@@ -414,7 +414,7 @@ struct RunSubcategory {
 }
 
 #[derive(Deserialize, Debug)]
-struct Run {
+pub(crate) struct Run {
     schema: u64,
     #[serde(default)]
     #[allow(dead_code)]
@@ -427,7 +427,6 @@ struct Run {
 
 #[derive(Deserialize)]
 pub(crate) struct FoldRow {
-    pub(crate) harness: String,
     pub(crate) session: String,
     #[serde(default)]
     pub(crate) sampled: bool,

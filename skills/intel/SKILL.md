@@ -5,15 +5,15 @@ description: Session-provenance report for the operator - who typed, what was sa
 
 # intel
 
-The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail, counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions, samples idle substantive sessions, and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
+The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail. It counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions. It samples idle substantive sessions and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
 
 The one rule the whole report stands on: **operator turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
 
-The fold names its populations, and the report keeps them apart: every number says whether it rests on `scanned` sessions or on `judged` ones, and no line blends the two.
+The fold names its populations, and the report keeps them apart. Every number says whether it rests on `scanned` sessions or on `judged` ones. No line blends the two.
 
 ## Steps
 
-1. Run the fold once, save its JSON, and keep it: every report number and the categories post-process read this one file. Call shape:
+1. Run the fold once and save its JSON. Every report number and the categories post-process read this one file. Call shape:
 
    ```bash
    /fno:intel [--scope <project>[,<project>...]|all] [--harness claude,codex,opencode|all] [--period 2w|1m|2m|3m|all] [--sample N|all] [question]
@@ -21,7 +21,7 @@ The fold names its populations, and the report keeps them apart: every number sa
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the operator question; with no question, use `What were the operator's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
+   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the operator question. With no question, use `What were the operator's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
 
    ```bash
    fno-agents intel --json --days 30 --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
@@ -29,7 +29,7 @@ The fold names its populations, and the report keeps them apart: every number sa
 
    The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
 
-2. Judge the sampled sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only rows with `sampled: true`; they are idle and substantive by construction. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache. A matching facet that lacks the current question key gains only that one summary line:
+2. Judge the sampled sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only rows with `sampled: true`. They are idle and substantive by construction. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache. A matching facet that lacks the current question key gains only that one summary line:
 
    ```json
    {
@@ -46,7 +46,7 @@ The fold names its populations, and the report keeps them apart: every number sa
 
    Friction categories (keep to this set so downstream scorers can key on it): `misunderstood_instruction`, `repeated_correction`, `wrong_assumption`, `missing_context`, `workflow_friction`, `tool_failure`.
 
-3. Cluster the sampled sessions' summary lines into 3 to 8 categories that answer the question. Each category carries a name, a one-line description, and at most 5 optional subcategories. Every judged session goes into exactly one category; use `Other` for a session that fits none. Write `~/.fno/intel/runs/<date>-<question key>.json`, mode 0600, in this schema:
+3. Cluster the sampled sessions' summary lines into 3 to 8 categories that answer the question. Each category carries a name, a one-line description, and at most 5 optional subcategories. Every judged session goes into exactly one category. Use `Other` for a session that fits none. Write `~/.fno/intel/runs/<date>-<question key>.json`, mode 0600, in this schema:
 
    ```json
    {"schema": 1, "question": "<text>", "question_key": "<8 hex>",
@@ -56,7 +56,7 @@ The fold names its populations, and the report keeps them apart: every number sa
 
    If that run file exists and its question key and session set match this sample, reuse it.
 
-4. Metrics: the post-process reads the run file and the saved fold JSON, reads no transcript, and prints the fold JSON with a categories block:
+4. Metrics: the post-process reads the run file and the saved fold JSON. It reads no transcript. It prints the fold JSON with a categories block:
 
    ```bash
    fno-agents intel --categories <run file> --fold <saved fold JSON> > <vault>/fno/intel/<date>-<question key>.json

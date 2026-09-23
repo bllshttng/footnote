@@ -534,7 +534,7 @@ pub(crate) trait TranscriptSource {
     /// Activity counters (tokens, lines, tool errors, extensions, aborted
     /// turns, assistant timestamps) from the same raw text. A source with no
     /// parser returns `None`, and its report fields read null, never 0.
-    fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
+    fn activity(&self, _raw: &str) -> Option<crate::session_activity::Activity> {
         None
     }
 }

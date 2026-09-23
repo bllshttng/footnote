@@ -1,8 +1,8 @@
 # Report shape
 
-One markdown report per run: `<vault>/fno/intel/<date>-<question key>.md`. The section skeleton is Claude's `/insights` narrative adapted, plus the two sections Claude cannot write (relay, corrections). Numbers come from the saved fold JSON named in the frontmatter `fold:` field. Judgments come from the facets of the sampled sessions only. Populations never blend: fold counters, Usage over time, and Activity speak for the `scanned` population; the Executive summary, Categories, and the facet sections speak for the `judged` one.
+One markdown report per run: `<vault>/fno/intel/<date>-<question key>.md`. The section skeleton is Claude's `/insights` narrative adapted, plus the two sections Claude cannot write (relay, corrections). Numbers come from the saved fold JSON named in the frontmatter `fold:` field. Judgments come from the facets of the sampled sessions only. Populations never blend. Fold counters, Usage over time, and Activity speak for the `scanned` population. The Executive summary, Categories, and the facet sections speak for the `judged` one.
 
-The fold JSON fields the report and the renderer read: `populations`, `activity`, `hours`, `response_time`, `parallel`, `daily` (entries `{date, harness, sessions, operator_turns, tool_use, output_tokens}`, dates in the fold's local time), `daily_undated`, `sample`, `categories`.
+The fold JSON fields the report and the renderer read are: `populations`, `activity`, `hours`, `response_time`, `parallel`, `daily`, `daily_undated`, `sample`, `categories`. The `daily` entries carry `{date, harness, sessions, operator_turns, tool_use, output_tokens}`, with dates in the fold's local time.
 
 ```markdown
 ---
@@ -80,8 +80,8 @@ could not be read, with the reason. Counted, never guessed.
 
 Rules the renderer holds to:
 
-- Every number in the report traces to the saved fold JSON named in `fold:`. Every number names its population: `scanned` for fold counters, Usage over time, and Activity; `judged` for the Executive summary, Categories, and the facet-derived sections. A line never mixes two.
-- Anchors are `s-` plus the first 8 characters of the session id, and only sessions named in the run file get a Sessions line.
+- Every number in the report traces to the saved fold JSON named in `fold:`. Every number names its population: `scanned` for fold counters, Usage over time, and Activity. `judged` is the population for the Executive summary, Categories, and the facet-derived sections. A line never mixes two.
+- Anchors are `s-` plus the first 8 characters of the session id. Only sessions named in the run file get a Sessions line.
 - The new sections carry no transcript text beyond the one-line summaries.
 - The tag `#agent-correction` appears only in the Operator corrections section. The corrections line grammar does not change.
 - A section that cannot be written still appears, with one line `not written: <reason>`. It is never left out.
