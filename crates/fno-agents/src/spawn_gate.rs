@@ -4552,7 +4552,7 @@ MemAvailable:    8000000 kB\n";
         let _env = EnvPin::take(&["FNO_HOME"]);
         std::env::set_var("FNO_HOME", &dir);
         let mut warnings = Vec::new();
-        let of =
+        let mut of =
             |node: &str| territory_of_node(&dir, &reg, node, &mut warnings).expect("attributes");
         let under_epic = of("x-1");
         assert_eq!(under_epic.0, "x-epic");
