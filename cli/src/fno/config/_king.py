@@ -15,13 +15,6 @@ KING_CHECKIN_TEXT = (
     "Then act on the printout per the reign skill. When nothing changed and "
     "coverage is full, print 'no change' and stop. This beat is a heartbeat. "
 )
-KING_GOAL_TEXT = (
-    "reign goal. When every node in the crown scope reads done, superseded or "
-    "will not do, the goal is met. An open operator question blocks "
-    "completion. An empty actionable queue is a quiet beat, never a "
-    "finish line. A stand-down order from the operator ends the reign. "
-    "Until then keep reigning. Never /goal clear on NoProgress."
-)
 
 
 class KingBlock(BaseModel):
@@ -50,10 +43,9 @@ class KingBlock(BaseModel):
     # default.
     implementation_guard: str = "refuse"
     write_roots: list[str] = []
-    # The monitor and stop hook are the beat; the cron proves they are alive.
-    checkin_interval: str = "4h"
+    # The loop and settled-PR watch are the beat; the cron proves they are alive.
+    checkin_interval: str = "55m"
     checkin_text: str = KING_CHECKIN_TEXT
-    goal_text: str = KING_GOAL_TEXT
     # The verdict's compaction bound; default 3 because one crown
     # produced two compaction-caused retractions in one evening.
     compaction_ceiling: int = 3
@@ -61,14 +53,14 @@ class KingBlock(BaseModel):
     @field_validator("checkin_interval", mode="before")
     @classmethod
     def _coerce_checkin_interval(cls, v: object) -> str:
-        """Fail-safe to 4h on anything but ``<digits>[smhd]``.
+        """Fail-safe to 55m on anything but ``<digits>[smhd]``.
 
         A bad value degrades, never raises: the interval arms a self-injected
         /loop, and a typo there must not kill a reign at config load.
         """
         if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
             return v.strip()
-        return "4h"
+        return "55m"
 
     @field_validator("implementation_guard", mode="before")
     @classmethod
@@ -92,10 +84,10 @@ class KingBlock(BaseModel):
             return []
         return [s.strip() for s in v if isinstance(s, str) and s.strip()]
 
-    @field_validator("checkin_text", "goal_text", mode="before")
+    @field_validator("checkin_text", mode="before")
     @classmethod
     def _coerce_reign_text(cls, v: object, info: ValidationInfo) -> str:
         """Fail-safe to the block default on a non-string or blank value."""
         if isinstance(v, str) and v.strip():
             return v
-        return KING_CHECKIN_TEXT if info.field_name == "checkin_text" else KING_GOAL_TEXT
+        return KING_CHECKIN_TEXT
