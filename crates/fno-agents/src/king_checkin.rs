@@ -33,7 +33,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
-const NUMERIC_DIFF_KEYS: [&str; 9] = [
+const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
     "free_claim_no_driver",
     "blocked",
@@ -43,6 +43,8 @@ const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "live_workers",
     "undelivered",
     "held_open",
+    "blueprint_running",
+    "blueprint_ceiling",
 ];
 
 /// Diff keys absent from the previous beat's data: a hand-journaled baseline
@@ -3287,7 +3289,7 @@ mod tests {
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
                      "owned_active": 2, "live_workers": 3, "undelivered": 9,
-                     "held_open": 0}})
+                     "held_open": 0, "blueprint_running": 0, "blueprint_ceiling": 2}})
     }
 
     #[test]
