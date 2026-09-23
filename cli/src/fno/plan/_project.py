@@ -37,8 +37,13 @@ def _call(op: str, params: dict) -> "dict | None":
     prints one stderr warning naming `fno doctor` and returns None.
     """
     # The keeper runs in its own cwd; a relative path means the caller's.
+    # Stamp events belong in the caller's project journal, as before the port.
     if params.get("plan_path"):
-        params = {**params, "plan_path": os.path.abspath(params["plan_path"])}
+        params = {
+            **params,
+            "plan_path": os.path.abspath(params["plan_path"]),
+            "events_path": str(paths.project_events_json()),
+        }
     try:
         return _client_for(paths.graph_json()).request(
             "plan_docs", {"op": op, **params}

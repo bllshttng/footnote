@@ -13,12 +13,19 @@ fn opt_str<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
     p.get(key).and_then(Value::as_str)
 }
 
+/// The caller's project journal when it names one, else the keeper's own.
+fn events_path<'a>(state: &'a StoreState, p: &'a Value) -> Option<&'a Path> {
+    opt_str(p, "events_path")
+        .map(Path::new)
+        .or(state.events.as_deref())
+}
+
 /// `{op: "project"|"stamp"|"graduate"|"set_expected"|"waves", ...}`.
 /// `project` reads the graph this keeper owns and rewrites each named node's
 /// linked plan doc; `stamp`/`graduate`/`set_expected` write plan frontmatter
 /// with the same exit codes the Python module returned; `waves` derives an
-/// epic's wave strata. Plan-doc events ride the keeper's own `--events`
-/// journal when one is configured.
+/// epic's wave strata. Plan-doc events go to the caller's `events_path`,
+/// else the keeper's own `--events` journal.
 pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let op = opt_str(params, "op").unwrap_or_default();
     match op {
@@ -88,7 +95,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                     .get("dry_run")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                state.events.as_deref(),
+                events_path(state, params),
             );
             Ok(json!({"exit": result.exit, "message": result.message}))
         }
@@ -104,7 +111,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                     .get("dry_run")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                state.events.as_deref(),
+                events_path(state, params),
             );
             Ok(json!({"exit": result.exit, "message": result.message}))
         }
