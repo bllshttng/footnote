@@ -169,10 +169,10 @@ mod tests {
 
     #[test]
     fn process_argv_reads_a_real_child() {
-        // A DIRECT child, not a shell: std's spawn returns only after the
-        // exec, so /proc's argv is already populated. A `sh -c` middleman
-        // races its own exec of sleep, whose empty-cmdline gap is what the
-        // loaded CI runner kept hitting.
+        // A DIRECT child, not a shell: a `sh -c` middleman races its own
+        // exec of sleep, whose empty-cmdline gap is what the loaded CI
+        // runner kept hitting. Even a direct child can briefly show the
+        // parent's argv, so the loop below waits for the sleep image.
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("37")
             .spawn()
@@ -183,9 +183,15 @@ mod tests {
         let mut why = String::new();
         for _ in 0..20 {
             match process_argv(child.id()) {
-                Some(argv) => {
+                // A loaded runner can still show the forked parent's argv
+                // (the pre-exec image) after spawn returns; that is the same
+                // exec window, so retry rather than assert on it.
+                Some(argv) if argv.first().is_some_and(|t| t.ends_with("sleep")) => {
                     read = Some(argv);
                     break;
+                }
+                Some(argv) => {
+                    why = format!("pre-exec image still visible: {argv:?}");
                 }
                 None => {
                     // Name the platform fact instead of guessing: is the
