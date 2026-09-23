@@ -140,4 +140,4 @@ When your only outstanding work is a wait, do NOT keep waking every stop tick to
 
 3. **On wake, re-check and either proceed or re-arm.** The harness re-invokes you when the watcher exits (settle, timeout, or kill). If the state settled, proceed. If the timeout fired and it is still pending, re-arm the watcher and re-emit `<watching>` - one cheap turn per ~30 min instead of one per ~90 s.
 
-**Residual-turn austerity.** The few turns that remain (the initial arm-and-tag, a timeout re-arm) must be near-empty: the tag plus at most one short line. No status recap, no "waiting for it to settle" narration, no restating what you armed. The transcript is the user's review artifact; the wait machinery's job is to be invisible in it.
+**Residual-turn austerity.** The few turns that remain (the initial arm-and-tag, a timeout re-arm) must be near-empty: the tag plus at most one short line. No status recap, no "waiting for it to settle" narration, no restating what you armed. The transcript is the user's review artifact. The wait machinery's job is to be invisible in it.

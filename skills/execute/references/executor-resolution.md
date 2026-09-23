@@ -1,8 +1,6 @@
 # Per-task Executor Resolution
 
-The `waves` mode routes each task to a subagent based on a three-tier resolver. This
-doc describes the chain, the locked surface inference list, override paths,
-and failure modes.
+The `waves` mode routes tasks to subagents through a three-tier resolver. This doc covers the chain, surface patterns, overrides, and failure modes.
 
 ## Resolution chain
 
@@ -153,12 +151,9 @@ deviation from this locked contract.
 
 ## Trust boundary
 
-`/impeccable` is treated as a subprocess. The `frontend-executor` agent
-parses `/impeccable critique` output and decides whether to loop, but
-The `waves` runner owns the canonical gate-artifact write (`do-{sid}.md`) at wave
-end. If `/impeccable`'s output format changes, the parser falls back to
-`score=0` (treated as another iteration) and `next-subcommand=craft`. The
-max-iter ceiling guarantees termination.
+Treat `/impeccable` as a subprocess. The `frontend-executor` agent parses `/impeccable critique` output and decides whether to loop.
+
+The `waves` runner writes the canonical `do-{sid}.md` gate artifact at wave end. If the output format changes, the parser falls back to `score=0` (another iteration) and `next-subcommand=craft`. The max-iter ceiling guarantees termination.
 
 `/review` remains the canonical owner of the `quality_check_passed`
 gate (locked decision #3). Critique findings flow to sigma's input

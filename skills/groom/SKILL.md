@@ -93,8 +93,8 @@ fno agents mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-fil
 
 The report carries, in this order:
 
-0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal a user gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
-1. **Reversals** - `reversals: <n>` from `fno backlog maintain --suspect-reverts`. Print it even at zero. A lever that reverses a recent human decision is a distinct class from an ordinary mutation. It does not belong buried as one more line in the list below. This count is what makes it visible without the user diffing the whole mail.
+0. **Mechanical** - print one leading line with every dispatcher leg and its outcome. Example: `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. The seed brief carries these values verbatim. Report them as given. Name all four legs. An aggregate count can hide which leg failed. Put every non-`ok` outcome (`failed:` or `partial:`) under **Anomalies**. This line tells the user a leg has stopped working. Silent overnight degradation is the failure this pipeline prevents.
+1. **Reversals** - print `reversals: <n>` from `fno backlog maintain --suspect-reverts`, even at zero. A lever can reverse a recent human decision. Keep that count separate from ordinary mutations. This makes reversals visible without asking the user to diff all mail.
 2. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
 3. **Pile** - what is in the triage pile now, and what you added to it today.
 4. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.

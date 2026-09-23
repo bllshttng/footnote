@@ -223,12 +223,9 @@ Do NOT auto-insert a block to silence the gate. The point is to force the enumer
 
 ## Executor Lock Transcription (when a design doc supplies a Locked Decision)
 
-When a design doc carries a frontend or mixed surface, `/blueprint` runs the
-structural surface detector (`references/detect-surface.sh`) and captures the
-executor decision as a Locked Decisions entry (see
-`references/executor-routing-prompt.md`). `/blueprint` transcribes that lock
-into the plan's frontmatter so the `waves` resolver honors it
-without a runtime surface-inference fallback.
+When a design doc carries a frontend or mixed surface, `/blueprint` runs `references/detect-surface.sh`. The detector captures the executor decision as a Locked Decisions entry. See `references/executor-routing-prompt.md`.
+
+`/blueprint` copies that lock to plan frontmatter. The `waves` resolver honors it without runtime surface inference.
 
 Transcription is purely mechanical: same Locked Decisions input yields the
 same frontmatter output. No LLM judgment in this step.
@@ -248,12 +245,11 @@ Then:
 - **`tdd` or `impeccable`** - write `executor: <value>` to the plan `.md`
   frontmatter (the single doc is the only plan shape). Replace any existing
   `# executor:` comment from the template; never duplicate the key.
-- **`mixed`** - write `executor: tdd` at plan level (the safe default), then
-  emit `executor: impeccable` task blocks for any task whose file list
-  matches the user's locked surface-inference patterns
-  (`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`).
-  This mirrors the `waves` resolver and keeps cost honest: impeccable runs
-  only where it earns its keep.
+- **`mixed`** - both signals fire.
+  - Set plan-level `executor: tdd` as the safe default.
+  - When task files match the user's locked surface patterns, add `executor: impeccable`.
+  - Patterns: `**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, and `src/styles/**`.
+  - The `waves` resolver follows these patterns. Run impeccable only where it earns its keep.
 - **Empty** - write nothing. The runtime surface-inference fallback handles
   the plan correctly. No prompt; no warning.
 
@@ -352,11 +348,9 @@ Blueprint provenance is written by the identity-guarded `fno backlog session clo
 
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 
-When `/blueprint` generates a plan that locks `executor: impeccable` at the plan
-level OR via per-task overrides, it MUST check for a valid PRODUCT.md before
-the auto-intake step. This is the spec-time half of the defense-in-depth
-prereq strategy (decision 3a); the runtime half lives in the `waves`
-dispatch gate (Phase 03).
+When `/blueprint` locks `executor: impeccable` at plan or task level, it MUST check for a valid PRODUCT.md before auto-intake.
+
+This is the spec-time half of the defense-in-depth prerequisite strategy (decision 3a). The runtime half lives in the `waves` dispatch gate (Phase 03).
 
 Run the check script after writing the plan files but before collision check
 and auto-intake:

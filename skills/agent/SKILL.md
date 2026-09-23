@@ -361,11 +361,7 @@ an explicit `--permission-mode`).
 
 It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line,
 and `reason`. `config.agents.confirm` (`always|auto|never`, model default `auto`)
-is repurposed to an **opt-in** "confirm even the free lanes" for a cautious
-`operator`: only `always` confirms; `auto` (default) and `never` skip. A
-failed/invalid read degrades to the no-confirm default (the free lane has nothing
-to gate) with an `fno doctor update` hint - do not re-derive this; it lives in the
-helper. The table it implements:
+is repurposed to an **opt-in** "confirm even the free lanes" for a cautious user: only `always` confirms. `auto` (default) and `never` skip. A failed or invalid read uses the no-confirm default because the free lane has nothing to gate. The helper prints an `fno doctor update` hint. Do not re-derive this; the logic lives in the helper. The table it implements:
 
 | Condition | Result |
 |---|---|

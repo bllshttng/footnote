@@ -167,7 +167,7 @@ The research-verify panel is **advisory**: the green/red verdict on a research b
 
 ## Step 5: declare mode (self-cert attestation, the escape hatch)
 
-`declare` is the bottom of the `config.review.reviewers` trust spectrum (cross-model peer > the fno lane > **declare**): a pure user self-certification for a harness that has no other reviewer. It emits a head-pinned `review_attestation` event so a `reviewers: [declare]` gate can clear, and does nothing else. A declare attestation clears no fail-with-CONFIRMED-findings state; the class gate bounds it, which is why it survives at all.
+`declare` is the bottom of the `config.review.reviewers` trust spectrum, below a cross-model peer and the fno lane. It is user self-certification for a harness with no other reviewer. It emits a head-pinned `review_attestation` event so a `reviewers: [declare]` gate can clear. It does nothing else. A declare attestation cannot clear fail-with-CONFIRMED-findings state. The class gate bounds it, which is why it survives.
 
 Because it gives up "different model" entirely, it must be an **explicit** action - never inferred, never auto-emitted by any pipeline. State plainly what you are certifying (the current HEAD + the diff under review), then emit:
 
@@ -183,12 +183,21 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 - **the fno lane** (the default) emits `code-review` through the lane's emit step ([single-lane.md](references/single-lane.md)): `pass` only when `fno do review classify` yields zero blocking findings, `fail` carrying the classified record. One contract, one emit path, no hook-availability dependency.
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
-- **code-review** is the gate entry the fno lane satisfies above. The native verb path remains for a user who runs it by choice: `hooks/code-review-attest.sh` classifies the findings the native review produced and emits on EITHER outcome, with the dual Claude (`PostToolUse(ReportFindings)` / Skill-tool `SubagentStop`) and Codex (`Stop` payload with a readable structured completion) trigger shapes. `skills/review/scripts/emit-attestation.sh code-review` is recovery when the lane and the hook were both unavailable, never permission to attest a verdict a review did not produce. A separate session (user or otherwise) can emit the same label, yielding an `other_session` origin rather than `self_attested`; see the attestation-origin section in the review-lanes architecture doc. Spawning a reviewer session of your own is retired by user law - a review session costs a lane and buys only a different session id; run the lane inline instead.
+- **code-review** is the gate entry the fno lane satisfies above.
+  - Run `/fno:review` on the final HEAD. Its emit step produces the attestation on every harness without hook support.
+  - `/code-review` on Claude and `/review` on Codex remain the user's choice.
+  - `hooks/code-review-attest.sh` classifies native review findings and emits on either outcome. Claude triggers include `PostToolUse(ReportFindings)` and Skill-tool `SubagentStop`.
+  - Codex triggers on a `Stop` payload with a readable structured completion. Both hooks require an object-valued findings array equal to `[]`.
+  - The Codex attester runs before `target-stop-hook.sh`. No second step is needed.
+  - If the lane and hook are unavailable but review is clean, recover with `skills/review/scripts/emit-attestation.sh code-review`. Confirm the attestation before promising.
+  - Never use recovery to attest over findings.
+  - A separate session can emit the same label. Its origin is `other_session`, not `self_attested`. See the attestation-origin section in the review-lanes architecture doc.
+  - User law bars spawning a reviewer session. It costs a lane and adds only another session ID. Run the lane inline instead.
 - **declare** emits `declare` via Step 5 above. `sigma` is retired and emits nothing: a config still naming it fails loud at init with the default lane named as the replacement.
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
 
-**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap the review phase is complete, hard findings included. The PR merges on green CI, open findings stay in the PR conversation, and nobody asks the user. The live law is in `fno inbox decisions review-coverage`. If a gate still refuses at the cap, that is a gate defect: record it with `fno backlog encounter` and merge once it clears. Below the cap the gate can report IMPOSSIBLE. Then stop and report the blocking findings and the two remedies: a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
+**Termination (the round budget).** Fix blocking findings. The next review covers that fix delta. Your signature clears nothing. Non-blocking findings need no fix. Answer them in thread or skip them. Note each skip. If the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap, review ends even with hard findings. Merge the PR on green CI. Keep open findings in the PR conversation. Do not ask the user. Read the live law with `fno inbox decisions review-coverage`. If the gate refuses at the cap, record a defect with `fno backlog encounter`. Merge once the gate clears. Below the cap, the gate can report IMPOSSIBLE. Then stop and report the blocking findings and remedies: a non-author GitHub approval or the coverage-override label. Escalate a refused gate.
 
 ## The manual coverage emit (sanctioned, with preconditions)
 

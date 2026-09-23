@@ -48,6 +48,6 @@ Each phrasing below was weighed against the table during the authority rename an
 
 ## Before you run sed
 
-The address sense is renamed to `user` in skill prose; `scripts/ci/check-operator-address.sh` keeps it there.
+The address sense in skill prose is `user`. `scripts/ci/check-operator-address.sh` prevents drift.
 
 Read the tables first. Every row except the authority sense, which is done, is out of scope by decision, not by oversight. A rename of the address sense goes through `cli/src/fno/user.py` (`UserBlock`, `display_name()`), the three address strings that import it, and the `fno inbox user` verb. It does not touch the reserved senses, the wire values, the graph rows, the shipped config keys, or the shell homonym.

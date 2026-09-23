@@ -70,15 +70,11 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 
 ## Step 1.5: do provenance is stamped at claim release
 
-The `do` lifecycle row is no longer stamped here. It is written when the session
-releases its node claim at a finished terminal (`DonePRGreen`, `DoneAdvisory`,
-`DoneDelivery`, `NoWork`): `started_at` from the claim's acquire time, `ended_at`
-at the release instant - a true per-session hold window, the user's "who
-touched this node, and for how long". This is the third code choke point (ship =
-pr_number, blueprint = plan_path, do = claim release), so a direct CLI call or a
-non-Claude worker that skips this skill still gets the row. A session that stops
-without finishing (PR open, more work coming) keeps holding the claim and lands
-no `do` window yet; `fno-agents finalize` remains the ship-terminal backstop.
+The `do` lifecycle row is no longer stamped here. It is written when the session releases its claim at a finished terminal: `DonePRGreen`, `DoneAdvisory`, `DoneDelivery`, or `NoWork`. `started_at` uses claim acquisition time. `ended_at` uses release time. This records a per-session hold window: how long a user touched the node.
+
+This is the third code choke point. Ship writes `pr_number`; blueprint writes `plan_path`; claim release writes `do`. Direct CLI calls and non-Claude workers still get the row when they skip this skill.
+
+A session that stops before finishing keeps the claim and has no `do` window yet. This includes an open PR or more work ahead. `fno-agents finalize` remains the ship-terminal backstop.
 
 ## Step 2: flat mode (lightweight single-session, default)
 

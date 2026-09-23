@@ -10,4 +10,4 @@ The reign has one settled-PR watch contract. The cheap heartbeat and launcher va
 
 ## Triage lane
 
-A model triage lane, if the user authorizes it, is `claude --bare -p --model haiku --output-format json`. Bare mode skips PreToolUse guards, so it stays read-only or acts only through fno verbs, and wakes the king with one line naming the reason. This conflicts with the rule that agent launches go through `fno agents spawn` until the user rules; no reign step calls it today. `--fallback-model sonnet,haiku` / `fallbackModel` is the user's setting for an Opus outage, not a new reign arm.
+If the user authorizes model triage, run `claude --bare -p --model haiku --output-format json`. Bare mode skips PreToolUse guards. Keep it read-only or act only through fno verbs. Wake the king with one line naming the reason. Agent launches must use `fno agents spawn` until the user rules otherwise. No reign step calls this lane today. `--fallback-model sonnet,haiku` / `fallbackModel` is the user's Opus-outage setting, not a new reign arm.
