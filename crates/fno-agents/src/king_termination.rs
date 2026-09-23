@@ -394,15 +394,16 @@ pub(crate) fn probe_dispatch_capacity(fno_bin: &str, cwd: &Path) -> Result<GateP
     parse_gate_probe(&payload).ok_or_else(|| "spawn gate status payload unparseable".to_string())
 }
 
-/// The saturation decision for one board fire: a fire where the top
-/// actionable row is undispatched and the gate refuses means every candidate
-/// dispatch would be refused, so the stop is legitimate. `probe: None` (not
-/// asked, or asked and failed) and an accepted probe both return `None` - a
-/// broken probe must never convert a block into an allow.
+/// The saturation decision for one board fire: a refused gate blocks rows
+/// from queues with `/fno:target` (currently `undispatched`, `unheld_progress`,
+/// and `undriven_pr`). A readable non-spawn row keeps the block pointed at it.
+/// `probe: None` (not asked, or asked and failed) and an accepted probe return
+/// `None` - a broken probe must never convert a block into an allow.
 #[derive(Debug)]
 pub(crate) enum SaturationOutcome {
-    /// Every actionable row is undispatched: nothing on the board is reachable
-    /// without a dispatch.
+    /// Every readable actionable row uses `/fno:target` and needs dispatch
+    /// capacity. Current kinds are `undispatched`, `unheld_progress`, and
+    /// `undriven_pr`.
     Saturated { blocked: i64 },
     /// Every readable row needs dispatch, and at least one queue was not read.
     SaturatedBlind { blocked: i64 },
@@ -443,8 +444,9 @@ pub(crate) fn saturation_verdict(
 /// caller's two verdicts. Composition of the probe read, the pure
 /// saturation verdict, and the two messages the king block carries.
 pub(crate) enum CapacityGate {
-    /// Every actionable row is undispatched and the gate refuses: the stop is
-    /// legitimate, so the caller terminates NoWork with this message.
+    /// Every readable actionable row uses `/fno:target` (`undispatched`,
+    /// `unheld_progress`, or `undriven_pr`) and the gate refuses. With no blind
+    /// queues, the caller may terminate NoWork with this message.
     Saturated {
         message: String,
         blocked: i64,
