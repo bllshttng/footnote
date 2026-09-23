@@ -42,6 +42,8 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # node settlement, so they cannot drift.
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
 
+CLOSING_DEFER_KINDS: frozenset[str] = frozenset({"wont_do", "retracted"})
+
 # The label prefix every unmeasured admit carries. Readers split live from
 # unmeasured admits on this literal, so the wording is a contract, not prose.
 UNMEASURABLE_LABEL_MARK = "(unmeasurable:"
@@ -55,7 +57,7 @@ _LEGACY_DEFER_PREFIX = "deferred:"
 
 
 def is_terminal_entry(entry: object) -> bool:
-    """Is this entry closed for good (done/superseded), from its own fields?
+    """Is this entry closed for good (done, superseded, or a won't-do or retracted deferral), from its own fields?
 
     The derived status string plus the two closure signals it keys on, minus
     the legacy ``deferred:`` sentinel: a pre-migration row carries deferral
@@ -67,6 +69,11 @@ def is_terminal_entry(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
     if entry.get("status") in TERMINAL_RUNGS or entry.get("superseded_by"):
+        return True
+    if (
+        entry.get("status") == "deferred"
+        and entry.get("deferred_kind") in CLOSING_DEFER_KINDS
+    ):
         return True
     completed = entry.get("completed_at")
     return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
