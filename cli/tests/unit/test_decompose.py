@@ -619,9 +619,8 @@ def graph_env_real_doc(
     Returns (graph_path, read_entries, doc_path) so a test can assert that
     decompose stamps expected_url_count onto the shared design doc.
 
-    The decompose -> set-expected path now runs the in-package
-    ``fno.plan._stamp`` module via ``python3 -m``, which resolves regardless of
-    cwd, so no FNO_REPO_ROOT pinning is needed to locate it.
+    The decompose -> set-expected path is a keeper client call, so no
+    FNO_REPO_ROOT pinning is needed to locate a script.
     """
     import fno.graph._constants as gc
     import fno.graph.store as gs
@@ -683,10 +682,9 @@ def test_decompose_missing_doc_is_benign(graph_env, tmp_path):
 
 
 def _wire_graph(tmp_path, monkeypatch, epic):
-    """Wire a one-epic graph.json into the CLI. The set-expected path runs the
-    in-package ``fno.plan._stamp`` module via ``python3 -m`` (resolves regardless
-    of cwd), so no FNO_REPO_ROOT pinning is needed. Returns (graph_path,
-    read_entries)."""
+    """Wire a one-epic graph.json into the CLI. The set-expected path is a
+    keeper client call, so no FNO_REPO_ROOT pinning is needed. Returns
+    (graph_path, read_entries)."""
     import fno.graph._constants as gc
     import fno.graph.store as gs
 

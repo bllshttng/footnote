@@ -11,8 +11,8 @@ that inode, so the next locker would lock a now-detached inode and fail to
 serialize. Keying a separate lockfile on the plan's resolved path avoids that.
 
 Advisory only - human editors are unguarded by design (two fno writers). Stdlib
-only (fcntl/hashlib/os): ``fno.plan._stamp`` runs under a typer-less interpreter
-from Rust finalize, so this must not pull any third-party import.
+only (fcntl/hashlib/os): the stamp path runs under a typer-less interpreter,
+so this must not pull any third-party import.
 """
 from __future__ import annotations
 

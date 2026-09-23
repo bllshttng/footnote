@@ -1961,9 +1961,9 @@ def cmd_decompose(
         verbatim_base_box[0] = base  # the relative base, for the source_doc seed
         # `base` (verbatim, possibly relative) is the node-identity key used by
         # child_plan_path below - DO NOT mutate it. For the set-expected
-        # shell-out only, resolve a relative base against the epic's project
+        # call only, resolve a relative base against the epic's project
         # root (its stored cwd) so a decompose run from a subdirectory still
-        # locates the doc on disk; fno.plan._stamp resolves relative paths against
+        # locates the doc on disk; the writer resolves relative paths against
         # the process cwd, which would otherwise false-"missing" and skip
         # writing the count (reintroducing early graduation).
         if base and not os.path.isabs(base):
@@ -2372,9 +2372,9 @@ def cmd_decompose(
             if think_spawn_on_decompose_wave0(
                 project_root=Path(epic_cwd_box[0]) if epic_cwd_box[0] else None
             ):
-                from fno.plan._rollup import compute_waves
+                from fno.plan._project import epic_waves
 
-                wave_by_id, _ = compute_waves(epic_resolved_id, list(by_id.values()))
+                wave_by_id, _ = epic_waves(epic_resolved_id)
                 wave0_ids = {cid for cid, w in wave_by_id.items() if w == 0}
             for cid in spec_ids:
                 child = by_id.get(cid)
@@ -3480,13 +3480,12 @@ def cmd_update(
     linked_size: Optional[str] = None
     if plan_path is not None:
         try:
-            from fno.graph._intake import normalize_size, repo_root
-            from fno.plan._stamp import read_plan_file
+            from fno.graph._intake import _read_plan_frontmatter, normalize_size, repo_root
 
             pp = Path(plan_path)
             if not pp.is_absolute():
                 pp = Path(repo_root()) / pp
-            _, fm, _ = read_plan_file(pp)
+            fm = _read_plan_frontmatter(str(pp))
             linked_size = normalize_size(fm.get("size"))
         except Exception:
             linked_size = None
@@ -7494,59 +7493,27 @@ def _stamp_and_graduate_plan(
     url: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> bool:
-    """Best-effort: stamp a plan ``shipped`` (when a ship URL is known) then graduate.
+    """Best-effort: stamp a plan ``in_review`` (when a ship URL is known) then graduate.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    import subprocess
-
-    def _run(verb_args: list[str]):
-        try:
-            # sys.executable + ``-m fno.plan._stamp``: run the stamp under the
-            # same interpreter/venv as fno so it sees the same deps, and avoid
-            # failing where the binary is named "python".
-            return subprocess.run(
-                [sys.executable, "-m", "fno.plan._stamp", *verb_args],
-                check=False,
-                capture_output=True,
-                text=True,
-                # Bound the stamp so a hung subprocess never blocks a node close
-                # (gemini, PR #474). A timeout raises and is caught below ->
-                # treated as a failed run, non-fatal.
-                timeout=30,
-            )
-        except Exception as e:  # spawn failure / timeout: warn, treat as a failed run
-            typer.echo(
-                f"warning: fno.plan._stamp {verb_args[0]} failed to run: {e}",
-                err=True,
-            )
-            return None
+    from fno.plan._project import graduate_plan, stamp_plan
 
     stamped_shipped = False
     if url:
         sid = session_id or "backlog-close"
-        res = _run(["stamp", "--plan-path", plan_path, "--session-id", sid, "--url", url])
-        if res is None:
-            return False
-        if res.returncode != 0:
+        rc = stamp_plan(plan_path, sid, [url])
+        if rc != 0:
             typer.echo(
-                f"warning: fno.plan._stamp stamp exited {res.returncode}"
-                f"{f' - stderr: {res.stderr.strip()}' if res.stderr else ''}",
+                f"warning: plan stamp exited {rc}",
                 err=True,
             )
             return False
         stamped_shipped = True
 
-    res = _run(["graduate", "--plan-path", plan_path])
-    if res is None:
-        # A successful stamp already recorded the ship; report that win even if
-        # the graduate spawn failed.
-        return stamped_shipped
-    if res.returncode != 0:
-        # Surface the script's own error so a broken stamp run is diagnosable
-        # instead of silently eaten.
+    rc = graduate_plan(plan_path)
+    if rc != 0:
         typer.echo(
-            f"warning: fno.plan._stamp graduate exited {res.returncode}"
-            f"{f' - stderr: {res.stderr.strip()}' if res.stderr else ''}",
+            f"warning: plan graduate exited {rc}",
             err=True,
         )
         return stamped_shipped
@@ -7562,37 +7529,17 @@ def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, 
     """Authoritatively write expected_url_count=count onto a plan's frontmatter.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    import subprocess
+    from fno.plan._project import set_expected_count
 
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "fno.plan._stamp",
-                "set-expected",
-                "--plan-path",
-                plan_path,
-                "--count",
-                str(count),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return "ok", ""
-        # Exit 3 == base doc absent: benign (cannot be stamped at ship either).
-        if result.returncode == 3:
-            return "skipped", result.stderr.strip()
-        # Any other non-zero means the module ran but could not write a doc it
-        # could see (malformed frontmatter, etc.) - the real degradation.
-        return "failed", result.stderr.strip() or f"exit {result.returncode}"
-    except Exception as e:  # noqa: BLE001 - report any spawn failure to the caller
-        # A spawn failure is indeterminate: unlike an absent doc it does not
-        # prove the doc is unstampable at ship, so treat it as a surfaced
-        # failure rather than a silent skip.
-        return "failed", f"set-expected spawn failed: {e}"
+    rc, message = set_expected_count(plan_path, count)
+    if rc == 0:
+        return "ok", ""
+    # Exit 3 == base doc absent: benign (cannot be stamped at ship either).
+    if rc == 3:
+        return "skipped", message.strip()
+    # Any other non-zero means the writer ran but could not write a doc it
+    # could see (malformed frontmatter, etc.) - the real degradation.
+    return "failed", message.strip() or f"exit {rc}"
 
 
 # -- gh cross-check helpers (injectable for tests) --

@@ -9,17 +9,13 @@ Verbs:
     folder-audit      - count folder plans owned by a non-terminal graph node
     path              - print the save path for a NEW plan/design doc (config.plans_filename)
 
-stamp and graduate forward all unknown args + propagate exit codes from the
-in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
-
-Why a CLI verb at all? It's the polished surface skills can call instead of
-spawning ``python3 -m fno.plan._stamp`` directly.
+stamp, graduate, and set-expected route to the keeper-served plan-doc writer
+via the client in ``fno.plan._project``. brief is implemented in fno.plan.brief.
 """
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
@@ -39,21 +35,54 @@ plan_app = typer.Typer(
 
 
 def _forward(verb: str, extra_args: List[str]) -> int:
-    """Subprocess into the in-package stamp module with verb + extra_args.
+    """Route a stamp verb to the keeper-served plan-doc writer.
 
-    Runs ``python3 -m fno.plan._stamp`` under the current interpreter so the
-    module is always importable in-package (no repo-root resolution, no
-    script-missing degrade). Returns the module's exit code so callers chain.
+    Flags mirror the retired in-package stamp module so existing
+    callers keep their command lines; the verb now calls the client in
+    `fno.plan._project` (the keeper's `plan_docs` method).
     """
-    cmd = [sys.executable, "-m", "fno.plan._stamp", verb] + extra_args
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    from fno.plan._project import graduate_plan, set_expected_count, stamp_plan
+
+    def _flag(name: str) -> "str | None":
+        if name in extra_args:
+            idx = extra_args.index(name)
+            if idx + 1 < len(extra_args):
+                return extra_args[idx + 1]
+        return None
+
+    def _flags(name: str) -> "list[str]":
+        out: "list[str]" = []
+        for i, arg in enumerate(extra_args):
+            if arg == name and i + 1 < len(extra_args):
+                out.append(extra_args[i + 1])
+        return out
+
+    plan_path = _flag("--plan-path") or ""
+    dry_run = "--dry-run" in extra_args
+    if verb == "stamp":
+        expected = _flag("--expected-url-count")
+        return stamp_plan(
+            plan_path,
+            _flag("--session-id") or "",
+            _flags("--url"),
+            int(expected) if expected is not None else None,
+            dry_run,
+        )
+    if verb == "graduate":
+        return graduate_plan(plan_path, dry_run)
+    if verb == "set-expected":
+        count = _flag("--count")
+        rc, message = set_expected_count(plan_path, int(count or 0), dry_run)
+        if message and rc != 0:
+            print(message, file=sys.stderr)
+        return rc
+    return 2
 
 
 @plan_app.command(
     "stamp",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Stamp plan frontmatter with ship metadata. Forwards all args to fno.plan._stamp stamp.",
+    help="Stamp plan frontmatter with ship metadata.",
 )
 def stamp(ctx: typer.Context) -> None:
     rc = _forward("stamp", list(ctx.args))
@@ -63,7 +92,7 @@ def stamp(ctx: typer.Context) -> None:
 @plan_app.command(
     "graduate",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Graduate a stamped plan (shipped -> done). Forwards all args to fno.plan._stamp graduate.",
+    help="Graduate a stamped plan (in_review -> done).",
 )
 def graduate(ctx: typer.Context) -> None:
     rc = _forward("graduate", list(ctx.args))
@@ -74,9 +103,8 @@ def graduate(ctx: typer.Context) -> None:
     "set-expected",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Authoritatively set a plan's expected_url_count (count-only). Forwards "
-        "all args to fno.plan._stamp set-expected. Used to record the "
-        "group count on a shared epic-decomposition doc."
+        "Authoritatively set a plan's expected_url_count (count-only). Used to "
+        "record the group count on a shared epic-decomposition doc."
     ),
 )
 def set_expected(ctx: typer.Context) -> None:

@@ -46,10 +46,10 @@
 //! scalar-session-id dedup, first-writer-wins stamp, filename-keyed handoff).
 //!
 //! The proven Python helpers (`fno.cost._session_cost`, `fno.cost._register`,
-//! `fno.plan._stamp`, all in-package modules run via `python3 -m`) do the
-//! cost/dedup/flock/stamp work; this verb is a thin orchestrator (Locked
-//! Decision 6 - avoids the Python->Rust byte-parity trap), so the shim keeps
-//! its Rust-only dependency surface (Domain Pitfall).
+//! both in-package modules run via `python3 -m`) do the cost/dedup/flock work;
+//! the stamp is the in-process plan-doc writer. This verb is a thin
+//! orchestrator (Locked Decision 6 - avoids the Python->Rust byte-parity
+//! trap), so the shim keeps its Rust-only dependency surface (Domain Pitfall).
 
 use crate::finalize_run_summary;
 use crate::loopcheck::{emit_to_both, now_rfc3339_utc};
@@ -537,7 +537,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
             let do_graduate = predicates.graduate && (!m.cross_project || expected.is_some());
-            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
+            match stamp_and_graduate(
+                &cwd,
+                &plan,
+                &session_id,
+                expected,
+                do_graduate,
+                None,
+                &project_events,
+            ) {
                 Ok(()) => stamped = true,
                 Err(step) => {
                     eprintln!("finalize: {step} failed");
@@ -624,6 +632,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
                         expected,
                         do_graduate,
                         Some(&receipt.uri),
+                        &project_events,
                     ) {
                         Ok(()) => stamped = true,
                         Err(step) => failed.push(step),
@@ -1199,29 +1208,23 @@ fn stamp_and_graduate(
     expected_url_count: Option<u32>,
     do_graduate: bool,
     url_override: Option<&str>,
+    events_path: &Path,
 ) -> Result<(), String> {
     let pr_url = url_override.map(str::to_owned).or_else(|| gh_pr_url(cwd));
-    let mut stamp = py_module(cwd);
-    stamp
-        .arg("-m")
-        .arg("fno.plan._stamp")
-        .arg("stamp")
-        .arg("--plan-path")
-        .arg(plan_path)
-        .arg("--session-id")
-        .arg(session_id);
-    if let Some(n) = expected_url_count {
-        stamp.arg("--expected-url-count").arg(n.to_string());
-    }
-    if let Some(url) = &pr_url {
-        stamp.arg("--url").arg(url);
-    }
-    let out = stamp.output().map_err(|_| "stamp".to_string())?;
-    if !out.status.success() {
+    let urls: Vec<String> = pr_url.iter().map(|u| u.to_string()).collect();
+    let stamp_result = crate::plan_doc::stamp::cmd_stamp(
+        &cwd.join(plan_path),
+        session_id,
+        &urls,
+        expected_url_count,
+        false,
+        Some(events_path),
+    );
+    if stamp_result.exit != 0 {
         eprintln!(
-            "finalize: fno.plan._stamp stamp exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            "finalize: plan stamp exit {}: {}",
+            stamp_result.exit,
+            stamp_result.message.trim()
         );
         return Err("stamp".into());
     }
@@ -1237,19 +1240,13 @@ fn stamp_and_graduate(
         return Ok(());
     }
 
-    let out = py_module(cwd)
-        .arg("-m")
-        .arg("fno.plan._stamp")
-        .arg("graduate")
-        .arg("--plan-path")
-        .arg(plan_path)
-        .output()
-        .map_err(|_| "graduate".to_string())?;
-    if !out.status.success() {
+    let grad_result =
+        crate::plan_doc::stamp::cmd_graduate(&cwd.join(plan_path), false, Some(events_path));
+    if grad_result.exit != 0 {
         eprintln!(
-            "finalize: fno.plan._stamp graduate exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            "finalize: plan graduate exit {}: {}",
+            grad_result.exit,
+            grad_result.message.trim()
         );
         return Err("graduate".into());
     }
@@ -1257,7 +1254,7 @@ fn stamp_and_graduate(
 }
 
 /// Derive the expected URL count for graduation. Returns `None` for a
-/// single-project plan (let fno.plan._stamp keep any declared count, else
+/// single-project plan (let the plan-doc writer keep any declared count, else
 /// default to 1) and `Some(n)` for a cross-project plan, counting the direct keys under
 /// the plan's frontmatter `projects:` map. Returns `None` for a cross-project
 /// plan whose count can't be read (missing/garbled projects map) so the caller

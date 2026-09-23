@@ -326,23 +326,51 @@ class TestProjectableFrontmatter:
             f"kill_criteria list item not indented: {item!r}"
 
     def test_stamp_parse_reads_mutated_plan(self, tmp_path):
-        """AC3: _stamp.parse_frontmatter reads the mutated plan without a
-        ValueError and captures kill_criteria as a RawBlock."""
-        from fno.plan._stamp import RawBlock, parse_frontmatter
-        doc = self._mutate(tmp_path)
-        fields, _, _ = parse_frontmatter(doc.read_text(encoding="utf-8"))
-        assert isinstance(fields.get("kill_criteria"), RawBlock)
+        """AC3: the mutated plan's kill_criteria stays a parseable nested block
+        (a list of mappings), so the plan writer and every YAML reader agree."""
+        import yaml
 
-    def test_project_node_to_plan_succeeds(self, tmp_path, capsys):
-        """AC2: a freshly blueprint-mutated plan projects (returns True) with no
-        'plan projection skipped' warning on stderr."""
-        from fno.plan._project import project_node_to_plan
         doc = self._mutate(tmp_path)
-        node = {"priority": "p1", "type": "feature", "blocked_by": [], "project": "fno"}
-        result = project_node_to_plan(node, doc)
+        text = doc.read_text(encoding="utf-8")
+        fields = yaml.safe_load(
+            re.search(r"(?s)^---\n(.*?)\n---", text).group(1)
+        )
+        kill = fields.get("kill_criteria")
+        assert isinstance(kill, list) and kill and isinstance(kill[0], dict)
+
+    def test_project_graph_nodes_succeeds(self, tmp_path, capsys, monkeypatch):
+        """AC2: a freshly blueprint-mutated plan projects (rewritten 1) with no
+        'plan projection skipped' warning on stderr."""
+        import json as _json
+
+        import fno.paths as paths
+        from fno.plan._project import project_graph_nodes
+
+        doc = self._mutate(tmp_path)
+        g = tmp_path / "graph.json"
+        g.write_text(
+            _json.dumps(
+                {
+                    "entries": [
+                        {
+                            "id": "x-test",
+                            "slug": "test",
+                            "plan_path": str(doc),
+                            "priority": "p1",
+                            "type": "feature",
+                            "blocked_by": [],
+                            "project": "fno",
+                            "status": "ready",
+                        }
+                    ]
+                }
+            )
+        )
+        monkeypatch.setattr(paths, "graph_json", lambda: g)
+        rewritten = project_graph_nodes([{"id": "x-test"}], ["x-test"])
         captured = capsys.readouterr()
         assert "plan projection skipped" not in captured.err
-        assert result is True
+        assert rewritten == 1
 
 
 # ---------------------------------------------------------------------------
