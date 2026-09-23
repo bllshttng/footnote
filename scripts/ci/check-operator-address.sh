@@ -42,10 +42,27 @@ scan_and_count() {
     local path="$1"
     local output count
     output="$(scan_file "$path")" || fail "could not scan $path"
+    SCANNED=$((SCANNED + 1))
     if [ -n "$output" ]; then
         printf '%s\n' "$output"
         count="$(printf '%s\n' "$output" | wc -l | tr -d '[:space:]')"
         HITS=$((HITS + count))
+    fi
+}
+
+scan_path() {
+    local path="$1"
+    if [ -d "$path" ]; then
+        local files
+        files="$(git ls-files -- "$path/*.md" "$path/**/*.md")" ||
+            fail "could not enumerate markdown under $path"
+        [ -n "$files" ] || fail "no tracked markdown files under $path"
+        while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            scan_and_count "$file"
+        done <<< "$files"
+    else
+        scan_and_count "$path"
     fi
 }
 
@@ -61,12 +78,12 @@ canary_lines="$(printf '%s\n' "$canary_output" | wc -l | tr -d '[:space:]')"
 default_files="$(git ls-files -- 'skills/*.md' 'skills/**/*.md')" ||
     fail "could not enumerate tracked skill markdown"
 [ -n "$default_files" ] || fail "default skills markdown surface is empty"
-surface_count="$(printf '%s\n' "$default_files" | wc -l | tr -d '[:space:]')"
+SCANNED=0
 
 HITS=0
 if [ "$#" -gt 0 ]; then
     for path in "$@"; do
-        scan_and_count "$path"
+        scan_path "$path"
     done
 else
     while IFS= read -r path; do
@@ -80,4 +97,8 @@ if [ "$HITS" -gt 0 ]; then
     exit 1
 fi
 
-echo "check-operator-address: clean ($surface_count tracked skill markdown files)"
+if [ "$#" -gt 0 ]; then
+    echo "check-operator-address: clean ($SCANNED tracked markdown files from requested paths)"
+else
+    echo "check-operator-address: clean ($SCANNED tracked skill markdown files)"
+fi
