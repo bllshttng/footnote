@@ -6,6 +6,7 @@
 - Python `bg_create` crosses the fenced Rust birth-exec path. It preserves the client environment.
 - Rust owns live and parked Claude resume delivery. Account-pinned routes read roster, control key and transcript from the plan's config root.
 - Python wake and dead attach paths are removed. Python runtime refuses Claude resume.
+- The default supervisor config root comes from the shared ClaudeHome path resolver.
 - The env registry drives a compile-time supervisor classification test. This head has 163 `FNO_` rows: 34 kept, 118 held and 11 `FNO_TEST_` exemptions.
 - `FNO_INBOX_ROOT` remains held. Its documented purpose is a test override.
 - When `docs/env-vars.md` changes, the CI path filter schedules the registry check.
@@ -37,4 +38,6 @@ This head has 163.
 - I canceled it before argv started. It has no local source verdict.
 - The symlink regression target waited 20m13s.
 - I canceled it at the queue cutoff. It has no local source verdict.
-- CI will gate both paths. No whole-suite local run started.
+- PR CI found stale seam/reachable-path baselines, placement-path constructions and legacy Python resume test hooks.
+- The baselines and tests were updated. CI rerun is pending.
+- No whole-suite local run started.
