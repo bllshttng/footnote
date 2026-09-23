@@ -416,12 +416,7 @@ _STRANDED_FLOOR_S = 10.0
 #: Skipping under it costs nothing - the next tick starts the scan over.
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
-#: Per-phase alarm caps : each phase runs under its own slice,
-#: min(cap, seconds left before the tick ceiling). Every-tick caps are p90s
-#: of 50 measured ticks (2026-09-17, events.jsonl), rounded up; sweep and
-#: merge has no cap and runs last, taking whatever tick time remains.
-
-#: The fit test proves the _MERGE_FLOOR_S floor.
+#: Each phase has a measured cap, bounded by tick time. Merge runs last uncapped. The fit test proves _MERGE_FLOOR_S.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
@@ -1408,7 +1403,6 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
-        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)

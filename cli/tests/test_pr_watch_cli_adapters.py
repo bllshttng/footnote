@@ -743,10 +743,10 @@ def test_phase_caps_fit_ceiling():
     from fno.pr_watch.cli import (
         _EVERY_TICK_CAP_S,
         _FLEET_CAP_S,
-        _MERGE_FLOOR_S,
         _PHASE_CAP_S,
         _resolve_tick_deadline,
     )
+    from fno.pr_watch._dispatch import _MERGE_FLOOR_S
 
     cfg = SimpleNamespace(tick_timeout_seconds=None, interval_seconds=600)
     ceiling = _resolve_tick_deadline(cfg)
