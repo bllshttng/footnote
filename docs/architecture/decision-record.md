@@ -25,11 +25,11 @@ Both are explicit on purpose. Automatic classification of "was that a ruling?" i
 
 ## Closing a question
 
-`fno inbox outstanding clear <qid> --answer "..."` writes the graph decision first, mirrors its envelope to the project journal and decision index, then closes the question in the project journal and machine question store. The receipt for each id prints before node projection and mail delivery.
+`fno inbox outstanding clear <qid> --answer "..."` writes a graph decision, mirrors it to both decision stores, and closes the question in the project journal and question store. It prints an id receipt before node projection and mail delivery.
 
-The graph decision keyed by `question_id` is the resume record. Repeating the same answer reuses its decision id and finishes missing mirrors or close rows. A different answer refuses with the existing decision id and the safe close or retract path.
+When the same answer is cleared again, the graph decision supplies the resume key. The transport reuses its id and fills missing mirrors or close rows. A different answer is refused with the existing decision id and the safe close or retract path.
 
-Clear exits 0 when every id succeeds, 4 for unknown ids, 3 for a different-answer refusal, and 1 for a write failure. It prints labeled counts for closed, resumed, already closed, unknown, and refused ids; it never prints a bare count.
+When every id succeeds, clear exits 0. An unknown id exits 4, a different-answer refusal exits 3, and a write failure exits 1. The final line reports counts for closed, resumed, already closed, unknown, and refused ids. No line is a bare count.
 
 ## Authority lanes
 
