@@ -539,10 +539,11 @@ mod stale_crown_doc_tests {
         assert_eq!(code, 0);
         assert!(out.contains("no king manifest"), "{out}");
         // The reserve is armed despite the driver-blind stamp: pre-drain
-        // reads clamp to remaining-minus-reserve, the drain reads it whole.
+        // reads clamp to remaining-minus-reserve (34s) under the 30s read
+        // ceiling, so 30s stands; the drain reads the full remaining.
         let pre_drain = super::stopgate_read_timeout();
         assert!(
-            pre_drain <= Duration::from_secs(34) && pre_drain >= Duration::from_secs(33),
+            pre_drain <= Duration::from_secs(30) && pre_drain >= Duration::from_secs(29),
             "{pre_drain:?}"
         );
         let drain = super::stopgate_drain_timeout();

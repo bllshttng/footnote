@@ -579,9 +579,10 @@ fn emit_block_for_harness(reason: &str) -> i32 {
 
 /// One control-plane arm row for this fire. The row carries the fire's
 /// session id: `emit_tick` writes one row per SPACE with no session key of
-/// its own, so a reader of `fno agents status` could not tell a king's own
-/// fire from its newest neighbor - the exact misread that sent x-2440
-/// chasing a driver=target misclassification for days.
+/// its own, so a reader of `fno agents status` sees only the space's newest
+/// fire and cannot tell a king's own row from a neighbor's - the misread
+/// that once sent a drain-reserve fix chasing a driver=target
+/// misclassification for days.
 fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
     let project_events = events_path(cwd);
     let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")

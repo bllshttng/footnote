@@ -3145,13 +3145,13 @@ mod tests {
         // ONE stale claim: off-host holder with an expired TTL reads stale,
         // and a dead-stated holder is exactly the token the board probes.
         let now_ms = crate::claims::now_ms();
-        let lock = crate::claims::claim_path("node:x-2440-truth", Some(dir.path())).unwrap();
+        let lock = crate::claims::claim_path("node:king-truth-holder", Some(dir.path())).unwrap();
         std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
         std::fs::write(
             &lock,
             serde_json::json!({
                 "schema_version": crate::claims::SCHEMA_VERSION,
-                "key": "node:x-2440-truth",
+                "key": "node:king-truth-holder",
                 "holder": "claude:t-2440-truth",
                 "acquired_at": now_ms - 3_600_000,
                 "host": "board-test-off-host",
