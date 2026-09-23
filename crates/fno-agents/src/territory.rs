@@ -1894,7 +1894,9 @@ path = "/repo/alpha"
                 {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
                  "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
                 {"name": "king-bad", "status": "live", "crown_scope": "e-loose", "crown_level": 2,
-                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+                 "pid": std::process::id()}
             ]})
             .to_string(),
         )
