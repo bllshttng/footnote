@@ -187,6 +187,19 @@ assert_eq "a repo without .fno skips with rc 3" "3" "$rc"
 assert_eq "the opt-out stays silent" "" "$(cat "$stderr_file")"
 assert_eq "and creates no .fno" "no" "$([[ -d "$tmp/repo/.fno" ]] && echo yes || echo no)"
 
+# --- AC8: a caller that continues still shows the loss ------------------------
+
+stderr_file="$tmp/ac8.err"
+rc=$(FNO_BIN="$tmp/stub/refusing" EVENTS_FILE="$tmp/j/events.jsonl" \
+    bash -c '
+        source "$1" >/dev/null 2>&1 || exit 1
+        _guard_mark probe allow
+        printf "%s" "$?"
+    ' _ "$REPO_ROOT/hooks/lib/guard-mark.sh" 2>"$stderr_file")
+assert_eq "guard_mark continues after a failed append" "0" "$rc"
+assert_has "the guard row names its label" "guard_mark" "$(cat "$stderr_file")"
+assert_has "the guard row carries the store reason" "store refused" "$(cat "$stderr_file")"
+
 if (( fail )); then
     echo "test-emit-append-failure-visible: FAIL"
     exit 1
