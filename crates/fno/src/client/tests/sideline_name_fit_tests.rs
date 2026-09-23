@@ -6,13 +6,13 @@ use super::*;
 #[test]
 fn extended_table_keeps_distinguishing_name_suffixes() {
     let first = agent_row(
-        "blueprinter-fno-8bef7b",
+        "dispatch-fno-8bef7b",
         4,
         Some(AgentBadge::Working),
         false,
     );
     let second = agent_row(
-        "blueprinter-etl-631fd8",
+        "dispatch-etl-631fd8",
         5,
         Some(AgentBadge::Working),
         false,
@@ -29,7 +29,7 @@ fn extended_table_keeps_distinguishing_name_suffixes() {
 #[test]
 fn extended_table_prioritizes_name_suffix_over_context() {
     let mut agent = agent_row(
-        "blueprinter-fno-8bef7b",
+        "dispatch-fno-8bef7b",
         4,
         Some(AgentBadge::Working),
         false,
