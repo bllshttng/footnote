@@ -892,7 +892,7 @@ pub fn classify_with_basis_and_exclusivity(
             // byte-for-byte today's verdict, which every pre-change claim and
             // the reaper counts the 1511 revert restored depend on.
             if rec.session_id.as_deref().is_some_and(|s| !s.is_empty()) {
-                if rec.key.starts_with("node:")
+                if (rec.key.starts_with("node:") || rec.key.starts_with("task:"))
                     && is_same_machine(&rec.host, rec.machine_id.as_deref())
                     && matches!(witness(rec), SessionLiveness::Absent)
                 {
@@ -943,7 +943,7 @@ pub fn classify_with_basis_and_exclusivity(
             .filter(|session| !session.is_empty())
             .map(|_| witness(rec))
     });
-    if rec.key.starts_with("node:")
+    if (rec.key.starts_with("node:") || rec.key.starts_with("task:"))
         && is_same_machine(&rec.host, rec.machine_id.as_deref())
         && matches!(witnessed, Some(SessionLiveness::Absent))
     {

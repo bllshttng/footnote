@@ -5808,17 +5808,6 @@ def cmd_task_update(
 
     if status == "in_progress":
         pid = resolve_session_pid()
-        if pid is None:
-            # An unprovable pid would anchor the claim to this short-lived CLI
-            # process: it dies on exit, the claim reads stale, and a peer
-            # steals the task mid-flight - the exact double-dispatch the
-            # transition exists to prevent. Refuse instead of degrading.
-            typer.echo(
-                "cannot prove a session pid for the claim; "
-                "set FNO_SESSION_PID or run inside a harness session",
-                err=True,
-            )
-            raise typer.Exit(code=4)
         harness = resolve_session_harness()
         # acquire_task succeeds idempotently for a caller that ALREADY holds
         # the key, so releasing on a later refusal would drop a claim this
@@ -5827,13 +5816,11 @@ def cmd_task_update(
 
         try:
             _before = _claim_status(key)
-            # `holder` is reported for a STALE claim too, so name-only would
-            # read a resumed session's dead claim as one this call holds. The
-            # acquire then mints a genuinely new live claim that no refusal
-            # path releases. Task claims carry ttl_ms=None, so live/stale is
-            # the whole vocabulary here.
+            # A pid-less claim stays protected as suspect inside its lease.
+            # Keep a matching holder's claim across a later row refusal.
             held_before = (
-                _before.get("holder") == holder and _before.get("state") == "live"
+                _before.get("holder") == holder
+                and _before.get("state") in ("live", "suspect")
             )
         except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
             held_before = False
