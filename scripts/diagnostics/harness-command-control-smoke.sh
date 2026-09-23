@@ -14,9 +14,9 @@ usage: harness-command-control-smoke.sh --session <full-session-uuid> --harness 
 
 The selected session must already be a disposable session registered below
 the isolated FNO roots. This command does not create, restart, or re-point a
-live session. Set FNO_EMPTY_COMPOSER_EXPECT to an anchored line regex for the empty prompt
-and FNO_SCREEN_EXPECT_PICKER/STATUS/COMPACT/RESUME to post-submit markers absent
-before the matching screen action. FNO_SCREEN_EXPECT is the shared fallback.
+live session. Pane cases require FNO_EMPTY_COMPOSER_EXPECT as an anchored line
+regex for the blank prompt, plus FNO_SCREEN_EXPECT_PICKER/STATUS/COMPACT markers
+absent before the matching action. FNO_SCREEN_EXPECT is the shared fallback.
 USAGE
 }
 
@@ -84,9 +84,9 @@ if [[ ! -x "$MUX_BIN" ]]; then
   exit 2
 fi
 
-RUN_DIR="$ROOT/command-control-smoke"
-mkdir -p "$RUN_DIR"
 RUN_ID="command-control-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$ROOT/command-control-smoke/$RUN_ID"
+mkdir -p "$RUN_DIR"
 SCREEN_EXPECT="${FNO_SCREEN_EXPECT:-}"
 EMPTY_COMPOSER_EXPECT="${FNO_EMPTY_COMPOSER_EXPECT:-}"
 LS_OUT="$RUN_DIR/mux-ls.json"
@@ -242,8 +242,6 @@ if [[ "$HARNESS" == codex ]]; then
   run_case paused-to-active "/goal resume" goal-active verified 30
   run_case idle-goal "/goal" goal-active verified 30
   run_case busy-refusal "/goal" goal-active refused 30 "" "refusing before typing"
-  run_case pending-composer "/rc" screen refused 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}" "composer"
-  run_case screen-picker "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}"
   run_case timeout-no-retry "/compact" compact unknown 1
   run_case provider-compact "/compact" compact verified 30
 else
@@ -253,7 +251,6 @@ else
   run_case screen-picker "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}"
   run_case timeout-no-retry "/status" screen unknown 1 "${FNO_SCREEN_EXPECT_TIMEOUT:-$SCREEN_EXPECT}"
   run_case provider-compact "/compact" screen verified 30 "${FNO_COMPACT_SCREEN_EXPECT:-$SCREEN_EXPECT}"
-  run_case paused-to-active "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_RESUME:-$SCREEN_EXPECT}"
 fi
 
 python3 - "$RUN_DIR" "$SESSION" "$HARNESS" "$ROOT" "$RUN_ID" <<'PY'
@@ -274,7 +271,8 @@ for path in sorted(run_dir.glob("*.stdout")):
             continue
         if value.get("case"):
             rows.append(value)
-if len(rows) != 7 or any(
+expected_count = 5 if harness == "codex" else 6
+if len(rows) != expected_count or any(
     row.get("status") != row.get("expected")
     or row.get("status") not in {"verified", "refused", "unknown"}
     for row in rows
@@ -282,8 +280,8 @@ if len(rows) != 7 or any(
     print("command-control-blocked: command journey did not produce all seven classified receipts", file=sys.stderr)
     raise SystemExit(2)
 positive = [row for row in rows if row.get("status") == "verified"]
-if len(positive) < 4:
-    print("command-control-blocked: command journey lacks the four positive receipts", file=sys.stderr)
+if len(positive) < 3:
+    print("command-control-blocked: command journey lacks three positive receipts", file=sys.stderr)
     raise SystemExit(2)
 payload = "\n".join(path.read_text(errors="replace") for path in sorted(run_dir.glob("*.stdout")))
 receipt = {

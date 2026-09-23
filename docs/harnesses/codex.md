@@ -182,15 +182,17 @@ the turn transport, and `/review` continues over structured `review/start`.
 Use provider-backed compact and goal receipts. Manual Escape followed by
 `/compact` is a fallback only for a measured mux-hosted pane.
 
-The exact-session command journey is opt-in and must use a disposable session
-and the isolated roots below. It covers idle, busy refusal, pending-composer
-preservation, the `/rc` picker, timeout with no retry, provider compaction, and
-paused-to-active goal resume. Screen proofs require an `FNO_EMPTY_COMPOSER_EXPECT`
-anchored line regex that matches the blank prompt before typing and an `FNO_SCREEN_EXPECT`
-regex that appears only after the command. The command controller refuses a
-short selector, an identity mismatch, an unreadable registry, a non-empty
-composer, or any root outside this private set; a paneless pane action opens a
-new portal and closes only that command's portal after its terminal receipt.
+The exact-session command journey is opt-in and must use disposable sessions
+and the isolated roots below. A Codex thread run covers paused-to-active goal
+resume, goal readback, timeout retry idempotency, and provider compaction. An
+attached pane run covers busy refusal, pending-composer preservation, and the
+`/rc` picker. Pane proofs require `FNO_EMPTY_COMPOSER_EXPECT` as an anchored
+line regex that matches the blank prompt before typing, plus an
+`FNO_SCREEN_EXPECT_*` regex absent before and present after the command. The
+controller refuses a short selector, identity mismatch, unreadable registry,
+non-empty composer, or any root outside this private set. It opens a new portal
+only for an interactive attach row and closes only its own portal after the
+terminal receipt.
 
 ```bash
 FNO_HOME=/private/tmp/fno-continuation-proof \

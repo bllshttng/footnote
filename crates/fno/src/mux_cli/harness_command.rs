@@ -709,6 +709,31 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         print_receipt(&receipt);
         return EXIT_ERROR;
     }
+    if recipe.is_none() && row.mux.is_none() && row.attach_id.is_none() {
+        let receipt = CommandReceipt {
+            request_id,
+            selector: args.selector,
+            session_id: session_id.clone(),
+            harness,
+            transport: "portal".into(),
+            expected_identity: session_id,
+            command: args.text,
+            proof: proof.word().into(),
+            expected_screen: args.expect,
+            empty_composer: args.empty_composer,
+            status: CommandStatus::Refused.word().into(),
+            before_digest: String::new(),
+            after_digest: String::new(),
+            detail: "refused before typing: this paneless row has no interactive attach; a read-only portal is not a command transport".into(),
+        };
+        if let Err(error) = write_refused_receipt(&receipt) {
+            eprintln!("fno mux command: {error}");
+            return EXIT_ERROR;
+        }
+        eprintln!("fno mux command: {}", receipt.detail);
+        print_receipt(&receipt);
+        return EXIT_ERROR;
+    }
     if recipe.is_none() && proof != ProofKind::Screen {
         eprintln!(
             "fno mux command: {:?} proof requires a declared provider action",
