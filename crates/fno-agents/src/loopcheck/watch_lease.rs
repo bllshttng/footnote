@@ -17,6 +17,38 @@ pub(super) fn watch_window_ms(timeout: Option<&str>) -> i64 {
     declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
 }
 
+/// What a `<watching>` tag says the session waits on: the blocker class the
+/// idle event records, and the PR number only when the tag names a real one.
+/// `pr="0"`, `pr="pending"` and an absent pr all read as no PR. The tag's own
+/// `reason=`/`pr=` attributes are the only source here (the idle verifies
+/// nothing), so the blocker is only as trustworthy as the agent's tag.
+pub(super) fn watch_target(reason: &str, pr: Option<&str>) -> (&'static str, Option<i64>) {
+    let blocker = match reason {
+        "ci" => "ci",
+        "review" => "review",
+        "merge_slot" => "merge_slot",
+        "local" => "local",
+        _ => "unknown",
+    };
+    (
+        blocker,
+        pr.and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|n| *n > 0),
+    )
+}
+
+/// The only runtime text a session with no PR sees teaching the `<watching>`
+/// tag: the Step-5 continue message passed to the inbox nudge.
+pub(super) const CONTINUE_WORKING: &str = "continue working; no completion signal. If you are \
+only waiting with nothing to do, arm a harness-tracked watcher with a hard timeout and end your \
+turn with the tag. A PR wait: background Bash `fno do pr wait <N> --until settled \
+--timeout=30m` (REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, \
+which spends the shared GraphQL quota; a review wait is `--until review`), then `<watching \
+reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">`. A local run (a test suite, a build, a review \
+fork) is its own background task, then `<watching reason=\"local\" timeout=\"30m\">` with no \
+pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
+instead of re-waking every tick.";
+
 /// Whether a session's harness + substrate can park-and-wake on a `<watching>`
 /// idle. Only a Claude session's harness-tracked background/Monitor
 /// tasks re-invoke the model when they exit, so only Claude may idle. A
@@ -442,5 +474,56 @@ mod tests {
             "the anchor must MOVE to the live bg-job row pid"
         );
         assert_eq!(after.expires_at.unwrap() > crate::claims::now_ms(), true);
+    }
+
+    #[test]
+    fn watch_target_maps_known_reasons_and_local() {
+        assert_eq!(watch_target("ci", Some("404")), ("ci", Some(404)));
+        assert_eq!(watch_target("review", Some("9")), ("review", Some(9)));
+        assert_eq!(
+            watch_target("merge_slot", Some("1")),
+            ("merge_slot", Some(1))
+        );
+        assert_eq!(watch_target("local", None), ("local", None));
+        assert_eq!(watch_target("cargo-test", None), ("unknown", None));
+    }
+
+    #[test]
+    fn watch_target_never_reads_pr_zero_or_non_numbers() {
+        // AC1-ERR: pr="0" is no PR, never PR zero.
+        assert_eq!(watch_target("ci", Some("0")), ("ci", None));
+        // AC1-EDGE: non-numbers and non-positives all read absent.
+        assert_eq!(watch_target("review", Some("pending")), ("review", None));
+        assert_eq!(watch_target("ci", Some("")), ("ci", None));
+        assert_eq!(watch_target("ci", Some("-3")), ("ci", None));
+        assert_eq!(watch_target("local", Some("0")), ("local", None));
+    }
+
+    #[test]
+    fn watch_target_keeps_a_real_pr_number_even_padded() {
+        assert_eq!(watch_target("ci", Some(" 2206 ")), ("ci", Some(2206)));
+    }
+
+    #[test]
+    fn continue_working_teaches_local_and_never_pr_zero() {
+        // AC2-HP: the tag the message teaches for a local run parses back
+        // through the same reader the stop hook uses.
+        let start = CONTINUE_WORKING
+            .find("<watching reason=\"local\"")
+            .expect("the local tag form is taught");
+        let end = start + CONTINUE_WORKING[start..].find('>').unwrap() + 1;
+        let tag = &CONTINUE_WORKING[start..end];
+        assert_eq!(
+            super::super::detect_intent_from_text(tag),
+            super::super::Intent::Watching {
+                reason: "local".into(),
+                pr: None,
+                timeout: Some("30m".into()),
+            }
+        );
+        // AC2-ERR: the PR form stays taught, PR zero never is.
+        assert!(CONTINUE_WORKING.contains("reason=\"ci|review\" pr=\"<N>\""));
+        assert!(!CONTINUE_WORKING.contains("pr=\"0\""));
+        assert!(CONTINUE_WORKING.contains("pr is a real PR number or left out, never 0"));
     }
 }
