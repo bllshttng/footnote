@@ -1765,7 +1765,13 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
 
 def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
     if outgoing.harness == "claude":
-        return _vault("sync").get("verdict") == "written"
+        verdict = _vault("sync").get("verdict")
+        if verdict not in ("written", "unchanged"):
+            raise ManagedStoreError(
+                f"cannot sync outgoing Claude credential before overwrite "
+                f"(vault verdict: {verdict or 'unknown'}). The slot was not touched"
+            )
+        return True
     blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
     if len(blobs) != 1:
         return False

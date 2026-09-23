@@ -108,18 +108,13 @@ impl External for SystemExternal {
 
     fn live_claude(&self) -> Vec<LiveClaude> {
         let (rows, _unreadable) = crate::census::process_table();
-        let default_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
-            .unwrap_or_else(|| PathBuf::from(".claude"));
         rows.into_iter()
             .filter(|row| looks_like_claude(&row.command))
             .map(|row| LiveClaude {
-                // None is deliberately conservative: the process environment
-                // is absent or unreadable, so it may own the default slot.
+                // None is deliberately conservative: the process environment is
+                // absent or unreadable, so it may own the slot.
                 config_dir: crate::spawn_context::ancestor_env_marker(row.pid, "CLAUDE_CONFIG_DIR")
-                    .map(PathBuf::from)
-                    .or_else(|| Some(default_dir.clone())),
+                    .map(PathBuf::from),
             })
             .collect()
     }
@@ -219,7 +214,7 @@ fn parse_options(action: &str, args: &[String]) -> Result<Options, String> {
                 }
                 i += 2;
             }
-            "--json" => {
+            "--json" | "-J" => {
                 options.json = true;
                 i += 1;
             }
@@ -448,7 +443,7 @@ fn live_owner(
         process
             .config_dir
             .map(|path| normalized_path(&path) == wanted)
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -534,7 +529,7 @@ fn matching_records(store: &Path, wanted: &Principal) -> Vec<String> {
             matches.push(entry.file_name().to_string_lossy().to_string());
         }
     }
-    matches.sort();
+    matches.sort_unstable();
     matches
 }
 
