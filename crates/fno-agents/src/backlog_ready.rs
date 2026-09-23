@@ -2051,11 +2051,7 @@ mod tests {
                 "touched_at": null
             }),
         ];
-        let filter = parse_date_filter(
-            &["--touched-before".into(), "60d".into()],
-            now_ms,
-        )
-        .unwrap();
+        let filter = parse_date_filter(&["--touched-before".into(), "60d".into()], now_ms).unwrap();
 
         filter.apply(&mut rows);
 
@@ -2116,20 +2112,20 @@ mod tests {
             json!({"id": "x-missing"}),
             json!({"id": "x-recent", "created_at": "2026-09-13T00:00:00Z"}),
         ];
-        parse_date_filter(
-            &["--touched-after".into(), "30d".into()],
-            now_ms,
-        )
-        .unwrap()
-        .apply(&mut filtered);
+        parse_date_filter(&["--touched-after".into(), "30d".into()], now_ms)
+            .unwrap()
+            .apply(&mut filtered);
         assert_eq!(
             filtered.iter().map(entry_id).collect::<Vec<_>>(),
             vec![Some("x-recent")]
         );
 
-        let mut sorted = vec![json!({"id": "x-missing"}), json!({
-            "id": "x-recent", "created_at": "2026-09-13T00:00:00Z"
-        })];
+        let mut sorted = vec![
+            json!({"id": "x-missing"}),
+            json!({
+                "id": "x-recent", "created_at": "2026-09-13T00:00:00Z"
+            }),
+        ];
         parse_date_filter(&["--sort=touched".into()], now_ms)
             .unwrap()
             .apply(&mut sorted);
@@ -2142,11 +2138,8 @@ mod tests {
     #[test]
     fn split_and_inline_iso_dates_parse_to_the_same_cutoff() {
         let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
-        let split = parse_date_filter(
-            &["--created-after".into(), "2026-09-01".into()],
-            now_ms,
-        )
-        .unwrap();
+        let split =
+            parse_date_filter(&["--created-after".into(), "2026-09-01".into()], now_ms).unwrap();
         let inline = parse_date_filter(
             &["--created-after=2026-09-01T00:00:00Z".into()],
             now_ms,
