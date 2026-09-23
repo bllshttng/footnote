@@ -3521,7 +3521,7 @@ event_types:
           description: "Manifest node identity, or an empty string when no node is bound."
         driver:
           type: string
-          description: "The continuation driver that answered: target, king, or visitor."
+          description: "The continuation driver that answered, or unknown when ownership could not be resolved."
         continuation_owner:
           type: string
           enum: [goal, loop_check, none, refusal]

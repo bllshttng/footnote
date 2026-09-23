@@ -557,7 +557,16 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
         } else {
             format!("checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running")
         };
-        emit_stop_decision(cwd, fire, None, kind, "refusal", "block", "unavailable", "");
+        emit_stop_decision(
+            cwd,
+            fire,
+            None,
+            "unknown",
+            "refusal",
+            "block",
+            "unavailable",
+            "",
+        );
         return emit_block_for_harness(&msg);
     }
     if kind == "king" {
@@ -571,7 +580,16 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
             "target stop-hook: manifest resolver unavailable {count} times; allowing visitor stop"
         );
     }
-    emit_stop_decision(cwd, fire, None, kind, "refusal", "allow", "unavailable", "");
+    emit_stop_decision(
+        cwd,
+        fire,
+        None,
+        "unknown",
+        "refusal",
+        "allow",
+        "unavailable",
+        "",
+    );
     0
 }
 
