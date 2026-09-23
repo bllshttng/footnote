@@ -1133,7 +1133,7 @@ fn ambient_cwd() -> String {
 /// capture until the door enforces (schema v33 rollout).
 pub fn stamp_spawn_lineage(params: &mut serde_json::Map<String, Value>) -> Result<(), String> {
     // Explicit dispatch context outranks ambient capture: a daemon
-    // producer (mission drain, blueprinter) exports FNO_SPAWN_ORIGIN +
+    // producer (the mission drain) exports FNO_SPAWN_ORIGIN +
     // FNO_SPAWN_OWNER naming its arm and the responsible mission/crown, and
     // those ride the request verbatim. A malformed carrier is a producer bug
     // and refuses by name instead of falling back silently.
