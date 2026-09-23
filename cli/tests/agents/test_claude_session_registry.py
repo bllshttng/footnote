@@ -23,9 +23,11 @@ def _claude_home_setup(tmp_path: Path, monkeypatch) -> Path:
     """Point HOME at tmp_path and prepare ~/.claude/{sessions,jobs}.
 
     ``FNO_CONFIG`` is pinned to an empty tmp file so a developer's real
-    ``.fno/config.toml`` never leaks an account root into a test.
+    ``.fno/config.toml`` never leaks an account root into a test, and an
+    ambient ``CLAUDE_CONFIG_DIR`` is dropped for the same reason.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     config = tmp_path / "config.toml"
     config.touch()
     monkeypatch.setenv("FNO_CONFIG", str(config))
