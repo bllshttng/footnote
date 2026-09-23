@@ -176,8 +176,8 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 footnote can spawn a worker on another provider and coordinate with it over a message bus. Quickstart: [the agents guide](guides/agents-quickstart.md).
 
 ```bash
-fno agents spawn "review the diff on this branch" --name reviewer -H codex   # spawn a Codex peer
-fno agents ask reviewer "what did you find?"                          # message it; it works on its own
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
+fno agents ask helper "what did you find?"
 ```
 
 For a one-off question to another model without keeping a peer around, spawn an ephemeral worker:
