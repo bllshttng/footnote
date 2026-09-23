@@ -14,10 +14,6 @@ use crate::truth_probe::family1_truth_state;
 use serde_json::Value;
 use std::path::Path;
 
-/// Test TTL override for exercising expiry on a resume claim.
-#[cfg(test)]
-pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
-
 /// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
 /// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
 /// by the resumed claude and self-releases when the operator quits (no explicit
@@ -26,6 +22,16 @@ pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
 /// one transcript - the residual double-writer window the liveness probe alone
 /// cannot close. `root` is `None` in prod (session: keys route to
 /// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
+/// How long the session single-writer claim guards a mux-pane relaunch.
+/// The launching process exits once the pane is up, so the claim cannot ride
+/// the holder pid the way the in-terminal exec's does (a PID-only claim goes
+/// Stale the moment that pid dies, so a second resumer would steal it before
+/// the resumed claude is probe-live). This TTL keeps the claim Live across
+/// that launch-to-probe-live window; once claude is probe-live the truth probe
+/// (not this claim) stops a second relaunch. Picked wide against slow startup;
+/// after it expires, a crashed worker can be re-resumed rather than blocked.
+pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
+
 pub(crate) fn acquire_resume_session_claim(
     uuid: &str,
     root: Option<&Path>,
@@ -201,6 +207,9 @@ pub(crate) fn codex_resume_route(
     loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
     io: &dyn ViewportIo,
 ) -> Option<i32> {
+    if entry.get("harness").and_then(Value::as_str) != Some("codex") {
+        return None;
+    }
     // A thread row delivers over the daemon, never a terminal exec:
     // `codex resume <id>` needs a tty and a headless caller has none.
     if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
@@ -395,63 +404,6 @@ pub(crate) fn codex_resume_wake_route(
         &loaded,
         &ShellViewportIo,
     )
-}
-
-/// The Working-route delivery: one wrapped `mail send --body` (never --raw),
-/// judged by its receipt, not its exit code - exit 0 covers both
-/// `delivered (hosted)` and `queued (durable)`, so only the receipt says
-/// which. Exit 16 keeps meaning "not delivered live" for every caller
-/// (`pr_nudge.rs` reads nonzero as undelivered).
-fn deliver_working_mail(
-    name: &str,
-    short_id: &str,
-    message: &str,
-    mut run_mail: impl FnMut(&[String]) -> (i32, String, String),
-) -> i32 {
-    let argv: Vec<String> = ["fno", "agents", "mail", "send", name, "--body", message]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let (code, stdout, stderr) = run_mail(&argv);
-    if code != 0 {
-        // A refusal (style gate, budget, unknown recipient) relays whole.
-        eprint!("{stderr}");
-        print!("{stdout}");
-        return code;
-    }
-    let receipt = crate::mail_inject::mail_send_receipt(&stdout);
-    if crate::mail_inject::mail_send_accepted(code, &stdout) {
-        println!(
-            "fno agents resume: '{name}' ({short}) is 'Working'; delivered live: {receipt}",
-            short = short_id
-        );
-        0
-    } else {
-        eprintln!(
-            "fno agents resume: '{name}' ({short}) is 'Working'; the message was \
-             NOT delivered live. {receipt}. It lands at the session's next turn \
-             boundary. Do not resend it.",
-            short = short_id
-        );
-        16
-    }
-}
-
-/// The mail transport for the Working route: one `fno agents mail send`.
-/// The verb carries its own poll budget (~30s live-confirm on a busy
-/// recipient), no extra bound here.
-fn claude_live_mail_runner(argv: &[String]) -> (i32, String, String) {
-    match std::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .output()
-    {
-        Ok(o) => (
-            o.status.code().unwrap_or(1),
-            String::from_utf8_lossy(&o.stdout).into_owned(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-        ),
-        Err(e) => (1, String::new(), e.to_string()),
-    }
 }
 
 /// The delivered-but-not-rebound floor: rebind the row to the thread lane so
@@ -1105,7 +1057,6 @@ pub(crate) fn claude_live_route(
     row_name: &str,
     cwd: &str,
     message: Option<&str>,
-    message_already_queued: bool,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     cross_project: bool,
     home: &AgentsHome,
@@ -1116,7 +1067,6 @@ pub(crate) fn claude_live_route(
         row_name,
         cwd,
         message,
-        message_already_queued,
         reentry_plan,
         cross_project,
         home,
@@ -1136,30 +1086,26 @@ pub(crate) fn claude_live_route(
             )
             .map_err(|reason| reason.to_string())
         },
-        claude_live_mail_runner,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn claude_live_route_with<F, I, M>(
+fn claude_live_route_with<F, I>(
     entry: &Value,
     name: &str,
     row_name: &str,
     cwd: &str,
     message: Option<&str>,
-    message_already_queued: bool,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     _cross_project: bool,
     home: &AgentsHome,
     claims_root: Option<&Path>,
     read_roster: F,
     mut inject: I,
-    mut run_mail: M,
 ) -> i32
 where
     F: Fn(Option<&Path>) -> crate::claude_roster::ClaudeAgentsSnapshot,
     I: FnMut(&Path, &Path, &str, &str) -> Result<(), String>,
-    M: FnMut(&[String]) -> (i32, String, String),
 {
     let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     if short_id.is_empty() {
@@ -1189,38 +1135,19 @@ where
         return live_claude_missing_row(name, short_id, session_uuid, cwd);
     };
     let state_lower = state.to_ascii_lowercase();
-    if matches!(state_lower.as_str(), "working" | "busy") {
-        if message_already_queued {
-            eprintln!(
-                "fno agents resume: '{name}' ({short_id}) is 'Working'; \
-                 the message is already queued and will not be resent."
-            );
-            return 16;
-        }
-        if let Some(message) = message {
-            return deliver_working_mail(name, short_id, message, &mut run_mail);
-        }
-        let label = if state_lower == "working" {
-            "Working"
-        } else {
-            "Busy"
-        };
-        println!("{name} ({short_id}): {label} -> {label}");
-        return 0;
-    }
-    let message = if message_already_queued {
-        None
-    } else {
-        message
-    };
-    if state_lower == "done" {
+    if matches!(state_lower.as_str(), "working" | "done") {
         if let Some(message) = message {
             eprintln!(
                 "fno agents resume: '{name}' ({short_id}) is '{state_lower}'; it was not woken and the message '{message}' was NOT delivered. Re-run without --message for a bare no-op resume, or `fno agents attach {name}` to deliver it yourself."
             );
             return 16;
         }
-        println!("{name} ({short_id}): Done -> Done");
+        let label = if state_lower == "working" {
+            "Working"
+        } else {
+            "Done"
+        };
+        println!("{name} ({short_id}): {label} -> {label}");
         return 0;
     }
 
@@ -1932,12 +1859,18 @@ mod tests {
         let jobs = claude_home.jobs_dir_for("abcd1234");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        crate::write_exec_stub(
-            &bin,
-            "claude",
+        std::fs::write(
+            bin.join("claude"),
             "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
              echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"idle\"}]'; fi\n",
-        );
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", crate::path_with(&bin));
 
@@ -2004,11 +1937,17 @@ mod tests {
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stop_log = temp.path().join("stop.log");
-        crate::write_exec_stub(
-            &bin,
-            "claude",
-            &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", stop_log.display()),
-        );
+        std::fs::write(
+            bin.join("claude"),
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", stop_log.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", crate::path_with(&bin));
 
@@ -2636,31 +2575,24 @@ mod tests {
         std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn call_live_claude_route_with_mail<M>(
+    fn call_live_claude_route(
         home: &AgentsHome,
         entry: &Value,
         state: Option<&str>,
         message: Option<&str>,
-        message_already_queued: bool,
         plan: Option<&crate::reentry::ReentryPlan>,
         claims_root: &Path,
         read_roots: &std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
         deliveries: &std::cell::RefCell<
             Vec<(String, String, std::path::PathBuf, std::path::PathBuf)>,
         >,
-        mut run_mail: M,
-    ) -> i32
-    where
-        M: FnMut(&[String]) -> (i32, String, String),
-    {
+    ) -> i32 {
         claude_live_route_with(
             entry,
             "parked-w",
             "parked-w",
             "/tmp/x",
             message,
-            message_already_queued,
             plan,
             false,
             home,
@@ -2671,7 +2603,7 @@ mod tests {
                     .push(config_dir.map(Path::to_path_buf));
                 let rows = state
                     .map(|value| {
-                        vec![crate::claude_roster::ClaudeAgentsRow::new(
+                        vec![crate::claude_roster::ClaudeAgentRow::new(
                             "abcd1234",
                             Some(value),
                         )]
@@ -2688,33 +2620,6 @@ mod tests {
                 ));
                 Ok(())
             },
-            run_mail,
-        )
-    }
-
-    fn call_live_claude_route(
-        home: &AgentsHome,
-        entry: &Value,
-        state: Option<&str>,
-        message: Option<&str>,
-        plan: Option<&crate::reentry::ReentryPlan>,
-        claims_root: &Path,
-        read_roots: &std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
-        deliveries: &std::cell::RefCell<
-            Vec<(String, String, std::path::PathBuf, std::path::PathBuf)>,
-        >,
-    ) -> i32 {
-        call_live_claude_route_with_mail(
-            home,
-            entry,
-            state,
-            message,
-            false,
-            plan,
-            claims_root,
-            read_roots,
-            deliveries,
-            |argv| panic!("unexpected Working-mail call: {argv:?}"),
         )
     }
 
@@ -2756,125 +2661,28 @@ mod tests {
     }
 
     #[test]
-    fn a_working_or_busy_row_delivers_through_the_mail_lane() {
-        let _guard = crate::path_test_guard();
-        for state in ["working", "busy"] {
-            let (_temp, home) = parked_home("working-mail");
-            let claims = tempfile::tempdir().unwrap();
-            let entry = parked_entry();
-            let roots = std::cell::RefCell::new(Vec::new());
-            let deliveries = std::cell::RefCell::new(Vec::new());
-            let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
-            let code = call_live_claude_route_with_mail(
-                &home,
-                &entry,
-                Some(state),
-                Some("go now"),
-                false,
-                None,
-                claims.path(),
-                &roots,
-                &deliveries,
-                |argv| {
-                    calls.borrow_mut().push(argv.to_vec());
-                    (0, "msg-1 delivered (hosted)\n".to_string(), String::new())
-                },
-            );
-            assert_eq!(code, 0, "state {state}");
-            assert!(deliveries.borrow().is_empty());
-            assert_eq!(
-                calls.borrow().as_slice(),
-                &[vec![
-                    "fno".to_string(),
-                    "agents".to_string(),
-                    "mail".to_string(),
-                    "send".to_string(),
-                    "parked-w".to_string(),
-                    "--body".to_string(),
-                    "go now".to_string(),
-                ]]
-            );
-        }
-    }
-
-    #[test]
-    fn a_queued_receipt_exits_16_so_nonzero_means_not_delivered_live() {
-        let _guard = crate::path_test_guard();
-        let (_temp, home) = parked_home("working-mail-queued");
-        let claims = tempfile::tempdir().unwrap();
-        let entry = parked_entry();
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-        let calls = std::cell::Cell::new(0u32);
-
-        let code = call_live_claude_route_with_mail(
-            &home,
-            &entry,
-            Some("working"),
-            Some("go"),
-            false,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-            |_argv| {
-                calls.set(calls.get() + 1);
-                (
-                    0,
-                    "msg-1 queued (durable) [live-miss]\n".to_string(),
-                    String::new(),
-                )
-            },
-        );
-
-        assert_eq!(code, 16);
-        assert_eq!(calls.get(), 1);
-        assert!(deliveries.borrow().is_empty());
-    }
-
-    #[test]
-    fn a_durably_queued_working_message_is_not_sent_twice() {
-        let _guard = crate::path_test_guard();
-        let (_temp, home) = parked_home("working-mail-no-duplicate");
-        let claims = tempfile::tempdir().unwrap();
-        let entry = parked_entry();
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-        let calls = std::cell::Cell::new(0u32);
-
-        let code = call_live_claude_route_with_mail(
-            &home,
-            &entry,
-            Some("working"),
-            Some("go"),
-            true,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-            |_argv| {
-                calls.set(calls.get() + 1);
-                (0, String::new(), String::new())
-            },
-        );
-
-        assert_eq!(code, 16);
-        assert_eq!(
-            calls.get(),
-            0,
-            "the original durable mail is already queued"
-        );
-        assert!(deliveries.borrow().is_empty());
-    }
-
-    #[test]
     fn live_claude_working_and_done_rows_are_noops_or_refuse_a_message() {
         let _guard = crate::path_test_guard();
         let (_temp, home) = parked_home("live-claude-skip");
         let claims = tempfile::tempdir().unwrap();
         let entry = parked_entry();
 
-        for state in ["working", "busy"] {
+        for state in ["working", "done"] {
+            let roots = std::cell::RefCell::new(Vec::new());
+            let deliveries = std::cell::RefCell::new(Vec::new());
+            let code = call_live_claude_route(
+                &home,
+                &entry,
+                Some(state),
+                Some("hello"),
+                None,
+                claims.path(),
+                &roots,
+                &deliveries,
+            );
+            assert_eq!(code, 16, "{state} must refuse an undelivered message");
+            assert!(deliveries.borrow().is_empty());
+
             let roots = std::cell::RefCell::new(Vec::new());
             let deliveries = std::cell::RefCell::new(Vec::new());
             let code = call_live_claude_route(
@@ -2890,36 +2698,6 @@ mod tests {
             assert_eq!(code, 0, "{state} without a message is a no-op");
             assert!(deliveries.borrow().is_empty());
         }
-
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-        let code = call_live_claude_route(
-            &home,
-            &entry,
-            Some("done"),
-            Some("hello"),
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-        );
-        assert_eq!(code, 16, "done must refuse an undelivered message");
-        assert!(deliveries.borrow().is_empty());
-
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-        let code = call_live_claude_route(
-            &home,
-            &entry,
-            Some("done"),
-            None,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-        );
-        assert_eq!(code, 0);
-        assert!(deliveries.borrow().is_empty());
     }
 
     #[test]
@@ -3024,88 +2802,5 @@ mod tests {
         );
         assert_eq!(result, 7);
         assert_eq!(calls.into_inner(), vec!["guard", "relaunch"]);
-    }
-
-    #[test]
-    fn a_refusing_mail_send_returns_its_own_code() {
-        let _guard = crate::path_test_guard();
-        let (_temp, home) = parked_home("working-mail-refused");
-        let claims = tempfile::tempdir().unwrap();
-        let entry = parked_entry();
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-
-        let code = call_live_claude_route_with_mail(
-            &home,
-            &entry,
-            Some("working"),
-            Some("go"),
-            false,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-            |_argv| (2, String::new(), "error: over budget".to_string()),
-        );
-
-        assert_eq!(code, 2);
-    }
-
-    #[test]
-    fn live_claude_idle_without_message_uses_the_native_wake() {
-        let _guard = crate::path_test_guard();
-        let (_temp, home) = parked_home("live-claude-default-wake");
-        let claims = tempfile::tempdir().unwrap();
-        let entry = parked_entry();
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-
-        let code = call_live_claude_route(
-            &home,
-            &entry,
-            Some("idle"),
-            None,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-        );
-
-        assert_eq!(code, 0);
-        assert_eq!(deliveries.borrow().len(), 1);
-        assert!(deliveries.borrow()[0].1.contains(RESUME_WAKE_MESSAGE));
-    }
-
-    #[test]
-    fn durable_mail_wake_does_not_forward_the_queued_message() {
-        let _guard = crate::path_test_guard();
-        let (_temp, home) = parked_home("live-claude-queued-wake");
-        let claims = tempfile::tempdir().unwrap();
-        let entry = parked_entry();
-        let roots = std::cell::RefCell::new(Vec::new());
-        let deliveries = std::cell::RefCell::new(Vec::new());
-        let calls = std::cell::Cell::new(0u32);
-
-        let code = call_live_claude_route_with_mail(
-            &home,
-            &entry,
-            Some("idle"),
-            Some("go"),
-            true,
-            None,
-            claims.path(),
-            &roots,
-            &deliveries,
-            |_argv| {
-                calls.set(calls.get() + 1);
-                (0, String::new(), String::new())
-            },
-        );
-
-        assert_eq!(code, 0);
-        assert_eq!(calls.get(), 0);
-        assert_eq!(deliveries.borrow().len(), 1);
-        assert!(deliveries.borrow()[0].1.contains(RESUME_WAKE_MESSAGE));
-        assert!(!deliveries.borrow()[0].1.contains("go"));
     }
 }
