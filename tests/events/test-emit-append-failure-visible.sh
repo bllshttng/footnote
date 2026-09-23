@@ -200,6 +200,25 @@ assert_eq "guard_mark continues after a failed append" "0" "$rc"
 assert_has "the guard row names its label" "guard_mark" "$(cat "$stderr_file")"
 assert_has "the guard row carries the store reason" "store refused" "$(cat "$stderr_file")"
 
+# --- AC9: a missing jq is its own reported loss, not a bad payload ------------
+
+stderr_file="$tmp/ac9.err"
+FNO_BIN="$tmp/stub/accepting" EVENTS_FILE="$tmp/j/events.jsonl" \
+    bash -c '
+        jq() { return 127; }
+        source "$1" >/dev/null 2>&1 || exit 1
+        emit_event src t "{}"
+        printf "emit_event=%s\n" "$?"
+        emit_event_raw t "{}"
+        printf "emit_event_raw=%s\n" "$?"
+    ' _ "$EVENTS_LIB" >"$tmp/ac9.out" 2>"$stderr_file"
+assert_eq "a missing jq is a rc-1 loss" \
+    "emit_event=1
+emit_event_raw=1" "$(cat "$tmp/ac9.out")"
+assert_has "emit_event says jq is missing" "jq not found" "$(cat "$stderr_file")"
+assert_eq "a missing jq never reads as a bad payload" "0" \
+    "$(grep -c "not valid JSON" "$stderr_file" 2>/dev/null || true)"
+
 if (( fail )); then
     echo "test-emit-append-failure-visible: FAIL"
     exit 1

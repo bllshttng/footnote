@@ -215,8 +215,8 @@ _append_bounded_event() {
 # emit_event SOURCE TYPE [DATA]
 #
 # rc=0  emitted (row committed through the store)
-# rc=1  lost: the payload was not valid JSON, or the store refused; stderr
-#       names the label, the journal and the reason
+# rc=1  lost: the payload was rejected, jq was unavailable, or the store
+#       refused; stderr names the label, the journal and the reason
 # rc=3  skipped: the journal's `.fno/` does not exist, so this repo never
 #       opted in. Silent, as in emit_polling_external_review.
 emit_event() {
@@ -227,17 +227,22 @@ emit_event() {
     [[ -z "$data" ]] && data='{}'
 
     # Use jq for safe JSON construction (handles special chars)
-    local event
+    local event jrc=0
     event=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg src "$source" \
         --arg type "$type" \
         --argjson data "$data" \
-        '{ts: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || {
+        '{ts: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || jrc=$?
+    if (( jrc == 127 )); then
+        printf '%s: jq not found; event not stored\n' emit_event >&2
+        return 1
+    fi
+    if (( jrc != 0 )); then
         printf '%s: payload for %s is not valid JSON; event not stored\n' \
             emit_event "$type" >&2
         return 1
-    }
+    fi
     local append_rc=0
     _append_bounded_event emit_event "$event" "$EVENTS_FILE" || append_rc=$?
     return "$append_rc"
@@ -263,17 +268,22 @@ emit_event_raw() {
     local source="${3:-${EMIT_SOURCE_ID:-target}}"
     [[ -z "$json" ]] && json='{}'
     local events_path="${EVENTS_FILE:-.fno/events.jsonl}"
-    local event
+    local event jrc=0
     event=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg type "$type" \
         --arg source "$source" \
         --argjson data "$json" \
-        '{ts: $ts, type: $type, source: $source, data: $data}' 2>/dev/null) || {
+        '{ts: $ts, type: $type, source: $source, data: $data}' 2>/dev/null) || jrc=$?
+    if (( jrc == 127 )); then
+        printf '%s: jq not found; event not stored\n' emit_event_raw >&2
+        return 1
+    fi
+    if (( jrc != 0 )); then
         printf '%s: payload for %s is not valid JSON; event not stored\n' \
             emit_event_raw "$type" >&2
         return 1
-    }
+    fi
     # Same rc contract as emit_event: 0 stored, 3 skipped on purpose, 1 lost
     # with the reason already on stderr from the root.
     local append_rc=0
