@@ -979,6 +979,14 @@ def resume_logic(
                 f"smart resume path. Unset FNO_AGENTS_RUNTIME=python to use it.\n"
             ),
         )
+    # This runtime cannot pin a claude resume's model or route, so an exact
+    # predecessor id refuses rather than reopen it on the account default.
+    if harness == "claude" and exact:
+        return ResumeResult(exit_code=13, stderr=(
+            f"fno agents resume: {session_id} is a predecessor of claude row "
+            f"{entry.name!r}, and this runtime cannot restore its model or route. "
+            f"Seed a new session from it with `fno agents spawn --resume {session_id}`, "
+            "or resume the row by name.\n"))
 
     # Check harness support BEFORE session_id so an unknown harness
     # surfaces the right error ("not supported") rather than a
@@ -988,15 +996,7 @@ def resume_logic(
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
     from fno.agents.harness_map import DispatchResolveError, capabilities
 
-    # Exact-historical resume switches the claude lane from ATTACH (which
-    # follows the row's live session by transport key) to RESUME with the
-    # full id the caller actually named - attach can never reopen a retired
-    # session, so honoring the exact match there would silently lie.
-    form_lane = (
-        "interactive_resume"
-        if (exact or harness != "claude")
-        else "interactive_attach"
-    )
+    form_lane = "interactive_attach" if harness == "claude" else "interactive_resume"
     is_opencode_serve = harness == "opencode" and getattr(entry, "substrate", None) == "thread"
     argv: Optional[list[str]] = None
     if is_opencode_serve:
@@ -1026,7 +1026,7 @@ def resume_logic(
             ),
         )
 
-    if harness == "claude" and not exact:
+    if harness == "claude":
         argv = _build_attach_argv(getattr(entry, "short_id", "") or "")
     elif not is_opencode_serve:
         argv = _build_resume_argv(harness or "?", session_id, cwd)
