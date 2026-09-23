@@ -198,7 +198,7 @@ fn court_payload_from(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Val
         let stderr = String::from_utf8_lossy(stderr);
         return Err(format!(
             "the court read failed: {}",
-            stderr.trim().chars().take(120).collect::<String>()
+            crate::king_checkin::stderr_cause(&stderr)
         ));
     }
     serde_json::from_slice(stdout).map_err(|e| format!("the court payload did not parse: {e}"))
@@ -361,6 +361,17 @@ mod tests {
         assert!(err.contains("the court read failed"), "{err}");
         let err = court_payload_from(true, b"not json", b"").unwrap_err();
         assert!(err.contains("did not parse"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_court_read_names_the_last_non_config_line() {
+        let err = court_payload_from(
+            false,
+            b"",
+            b"fno config: x is not modeled\nError: court store locked",
+        )
+        .unwrap_err();
+        assert_eq!(err, "the court read failed: Error: court store locked");
     }
 
     #[test]
