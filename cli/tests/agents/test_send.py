@@ -1204,6 +1204,7 @@ def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
 
     assert result.delivery == "durable"
     assert attempts == []
+    assert result.reason == f"transcript-{state}"
 
 
 @pytest.mark.parametrize("state", ["done", "stalled"])
@@ -1267,6 +1268,34 @@ def test_dispatch_send_idle_claude_thread_roster_miss_queues_durable(
         canonical_handle("abcd1234-1111-7222-8333-444455556666")
     )
     assert len(threads) == 1
+
+
+def test_cmd_send_transcript_veto_receipt_names_the_reading(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP (CLI): a skipped live lane prints transcript-<state>, never a
+    bare live-miss."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer(mux={"session": "main", "pane_id": 11})
+    from fno.agents import dispatch as dispatch_mod
+    from fno.cli import app
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "stalled"
+    )
+    attempts: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a)
+    )
+
+    res = runner.invoke(
+        app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"]
+    )
+
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert attempts == []
+    assert "[transcript-stalled, transcript" in res.stdout, f"stdout: {res.stdout!r}"
+    assert "live-miss" not in res.stdout, f"stdout: {res.stdout!r}"
 
 
 def test_dispatch_send_unknown_family1_attempts_confirmable_transport(

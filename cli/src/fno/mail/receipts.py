@@ -102,7 +102,7 @@ def demotion_receipt(
     token = durable_leg_story(reason)
     if token is None:
         token = reason or "live-miss"
-        if token == "live-miss":
+        if token == "live-miss" or token.startswith("transcript-"):
             age_of = age_target if age_target is not None else target
             if age_of is not None:
                 token += _live_miss_age_suffix(age_of)

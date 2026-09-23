@@ -7957,12 +7957,10 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
-                # the row's own policy names the durable queue's cause
-                # even when no live rung was attemptable (an idle registered
-                # leader), so the receipt never reads as a live-miss.
-                _bus_only = (
-                    _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
-                )
+                # A skipped live lane names the reading that vetoed it. Bus-only outranks both.
+                _bus_only = _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
+                if not family1_attemptable:
+                    live_miss_reason = f"transcript-{family1_state}"
                 if family1_attemptable:
                     live_attempted = True
                     _live_delivered = _deliver_live(
