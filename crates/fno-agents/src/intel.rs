@@ -339,7 +339,7 @@ pub(crate) fn bus_log_path(fno_dir: &Path) -> PathBuf {
     fno_dir.join("bus").join("messages.jsonl")
 }
 
-fn ts_secs(ts: &str) -> Option<u64> {
+pub(crate) fn ts_secs(ts: &str) -> Option<u64> {
     crate::state::rfc3339_like_to_secs(ts).or_else(|| {
         ts.get(..19)
             .and_then(|s| crate::state::rfc3339_like_to_secs(&format!("{s}Z")))

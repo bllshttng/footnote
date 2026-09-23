@@ -132,9 +132,10 @@ pub(crate) fn activity_totals(rows: &[SessionRow]) -> Value {
 }
 
 fn turn_epoch(raw: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|dt| dt.timestamp())
+    // One stamp parser for every series: the fold's ts_secs, so a naive
+    // stamp counts in hours and daily exactly where it counts in response
+    // time.
+    crate::intel::ts_secs(raw).map(|s| s as i64)
 }
 
 /// The local hour of every witnessed operator turn, computed fresh each run
