@@ -75,6 +75,16 @@ fn screen_postcondition_matches(before: &str, after: &str, expected: &Regex) -> 
         && super::pane_submit::positive_post_submit_marker(before, after)
 }
 
+fn empty_composer_marker_matches(screen: &str, expected: &Regex) -> bool {
+    let mut markers = screen
+        .lines()
+        .filter(|line| !line.trim().is_empty() && expected.is_match(line));
+    let Some(marker) = markers.next() else {
+        return false;
+    };
+    markers.next().is_none() && !expected.is_match(&format!("{marker}draft"))
+}
+
 fn empty_composer_pattern(raw: &str) -> Result<Regex, String> {
     if !raw.contains('^') || !raw.contains('$') {
         return Err("--empty-composer must be an anchored line regex".into());
@@ -902,7 +912,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             .expect("screen proof validates its empty-composer regex before submission"),
     )
     .expect("screen proof validated its empty-composer regex before submission");
-    if !empty_composer.is_match(&before) {
+    if !empty_composer_marker_matches(&before, &empty_composer) {
         let mut receipt = reservation.clone();
         receipt.status = CommandStatus::Refused.word().into();
         receipt.before_digest = digest(&before);
@@ -1251,7 +1261,13 @@ mod tests {
 
     #[test]
     fn empty_composer_proof_requires_a_specific_anchored_marker() {
-        assert!(empty_composer_pattern("(?m)^❯\\s*$").is_ok());
+        let prompt = empty_composer_pattern("(?m)^❯\\s*$").unwrap();
+        assert!(empty_composer_marker_matches("status\n❯\n", &prompt));
+        assert!(!empty_composer_marker_matches(
+            "status\n❯ drafted text\n",
+            &prompt
+        ));
+        assert!(!empty_composer_marker_matches("status\n", &prompt));
         assert!(empty_composer_pattern(".+").is_err());
         assert!(empty_composer_pattern("(?m)^.*$").is_err());
     }
