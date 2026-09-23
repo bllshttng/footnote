@@ -7721,16 +7721,14 @@ pub(crate) fn decide_with_payload(
     parsed: &LoopCheckArgs,
     hook_input: Option<&str>,
 ) -> (i32, String) {
-    // Publish the fire bound and the king drain reserve before any read.
-    let reserve_ms = if parsed.driver == "king" {
-        stopgate_drain_reserve_ms()
-    } else {
-        0
-    };
+    // Publish the fire bound before any read. The drain reserve is NOT armed
+    // here: it arms in `king_decide` (`stopgate_hold_drain_reserve`), the one
+    // place both king routes converge, so the route into the king path, not
+    // the `--driver` string on the fire, decides who pays for the drain.
     stopgate_stamp_fire(
         parsed.read_timeout_ms.unwrap_or(0),
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
-        reserve_ms,
+        0,
     );
     if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
         return (0, paused_output(&parsed.driver, &message));
@@ -9677,9 +9675,9 @@ fn run_bounded(
 mod read_bounds;
 
 pub(crate) use read_bounds::{
-    clamp_to_fire_deadline, drain_reserve_half_spent, stopgate_drain_reserve_ms,
-    stopgate_drain_timeout, stopgate_fire_remaining_ms, stopgate_read_timeout, stopgate_stamp_fire,
-    STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
+    clamp_to_fire_deadline, drain_reserve_half_spent, stopgate_drain_timeout,
+    stopgate_fire_remaining_ms, stopgate_hold_drain_reserve, stopgate_read_timeout,
+    stopgate_stamp_fire, STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a

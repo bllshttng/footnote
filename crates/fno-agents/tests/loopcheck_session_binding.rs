@@ -309,6 +309,49 @@ fn crowned_row_without_node_routes_to_the_king_path() {
 }
 
 #[test]
+fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
+    // The Crown route runs the king's own reads under a fire stamped
+    // driver=target. The drain reserve now arms on the shared king entry
+    // (not the driver string), and the drain answers through a scripted
+    // fno-bin after a real sleep - it is never the 250ms floor that made
+    // this route's floor kills look like load flakes.
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    home.seed_registry(&[row_json_crowned("opencode", "ses_king", cwd)]);
+    // A king manifest with a scope: the board reads in-process, then the
+    // drain read shells to the scripted binary.
+    let king_md = cwd.join("king.md");
+    fs::write(
+        &king_md,
+        "---\nfno_id: k-2440\ncreated_at: 2026-09-18T00:00:00Z\nscope: x-2440\n---\n",
+    )
+    .unwrap();
+    // The scripted drain sleeps 400ms, then answers: a bound at the old
+    // 250ms floor would have killed it.
+    let stub = cwd.join("fno-stub.sh");
+    fs::write(&stub, "#!/bin/sh\nsleep 0.4\necho '{\"undelivered\": 2}'\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("x")).unwrap();
+    let mut args = base_args(&king_md, &transcript_path, cwd);
+    args.push("--fno-bin".into());
+    args.push(stub.to_string_lossy().into_owned());
+    let (code, out) = run_loop_check_capture(&with_binding(args, "ses_king"));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(code, 0);
+    assert_ne!(v["decision"], "refuse");
+    let msg = v["message"].as_str().unwrap();
+    assert!(
+        msg.contains("2 driven rows undelivered"),
+        "expected the drain's own verdict through the Crown route, got: {out}"
+    );
+}
+
+#[test]
 fn flags_absent_gate_never_runs_and_engine_is_unchanged() {
     let home = HomeGuard::new();
     let cwd_dir = TempDir::new().unwrap();

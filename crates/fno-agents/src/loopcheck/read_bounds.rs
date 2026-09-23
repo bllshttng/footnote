@@ -57,9 +57,16 @@ thread_local! {
         const { std::cell::RefCell::new((0, None, 0)) };
 }
 
-/// The reserve a king fire holds back, in ms, for the deciding drain read.
-pub(crate) fn stopgate_drain_reserve_ms() -> u64 {
-    STOPGATE_DRAIN_RESERVE.as_millis() as u64
+/// Re-arm the drain reserve on a fire that reached `king_decide` stamped with
+/// reserve 0. The Crown route (a bound harness session whose row is crowned)
+/// enters the king path under a fire the `--driver` string called target, and
+/// the entry stamp is driver-blind now precisely so the route, not the
+/// string, decides. Mutates the already-stamped fire; override and deadline
+/// stay.
+pub(crate) fn stopgate_hold_drain_reserve() {
+    STOPGATE_READS.with(|cell| {
+        cell.borrow_mut().2 = STOPGATE_DRAIN_RESERVE.as_millis() as u64;
+    });
 }
 
 /// Stamp this fire's read-bound override, budget deadline, and drain reserve
@@ -169,6 +176,32 @@ pub(crate) fn clamp_to_fire_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holding_the_reserve_on_a_reserve_zero_fire_arms_the_drain_slice() {
+        // AC3: the entry stamp is reserve-blind (0) the way every fire is
+        // stamped now; the hold on `king_decide` arms the drain slice, so a
+        // Crown-route fire gets exactly what a native king fire always had.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), 0);
+        });
+        stopgate_hold_drain_reserve();
+        // Pre-drain reads clamp to remaining-minus-reserve (~24s left).
+        let pre_drain = stopgate_read_timeout();
+        assert!(
+            pre_drain <= std::time::Duration::from_secs(24)
+                && pre_drain >= std::time::Duration::from_secs(23),
+            "{pre_drain:?}"
+        );
+        // The drain reads the full remaining (~40s), never the floor.
+        let reserved = stopgate_drain_timeout();
+        assert!(
+            reserved <= std::time::Duration::from_secs(40)
+                && reserved >= std::time::Duration::from_secs(39),
+            "{reserved:?}"
+        );
+    }
 
     #[test]
     fn the_drain_reserve_holds_pre_drain_reads_back_and_spares_the_drain() {
