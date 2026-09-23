@@ -1074,8 +1074,11 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
     let pid = daemon.id();
 
-    // Wait for the positive marker, not for silence.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Wait for the positive marker, not for silence. 60s, not 20s: the daemon
+    // needs 3s of true idleness, and a loaded machine (the 20-trial stress
+    // run) has been measured red-lining a 20s bound while the daemon behaved;
+    // the bound exists to prove the exit happens, never to time its lateness.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let idle_fired = || {
         last_event_of(&home, "daemon_shutting_down")
             .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
