@@ -461,8 +461,12 @@ pub(crate) fn load_facets(
     facets_dir: &std::path::Path,
     sampled: &[FoldRow],
 ) -> (HashMap<String, Facet>, Vec<Value>) {
-    let mut judged = HashMap::new();
-    let mut unjudged = Vec::new();
+    // One verdict per session: a resumed codex thread leaves several rollout
+    // rows under one id, and a session judged through any one of them is
+    // judged, never also stranded.
+    let mut judged: HashMap<String, Facet> = HashMap::new();
+    let mut reasons: HashMap<String, String> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
     for row in sampled {
         let path = facets_dir.join(format!("{}.json", row.session));
         let reason = match std::fs::read_to_string(&path) {
@@ -470,17 +474,24 @@ pub(crate) fn load_facets(
             Ok(raw) => match serde_json::from_str::<Facet>(&raw) {
                 Err(err) => format!("invalid: {err}"),
                 Ok(facet) => {
-                    if facet.key.mtime != row.mtime || facet.key.size != row.size {
-                        "stale key".to_string()
-                    } else {
+                    if facet.key.mtime == row.mtime && facet.key.size == row.size {
                         judged.insert(row.session.clone(), facet);
                         continue;
                     }
+                    "stale key".to_string()
                 }
             },
         };
-        unjudged.push(json!({"session": row.session, "reason": reason}));
+        if !reasons.contains_key(&row.session) {
+            order.push(row.session.clone());
+        }
+        reasons.entry(row.session.clone()).or_insert(reason);
     }
+    let unjudged = order
+        .into_iter()
+        .filter(|session| !judged.contains_key(session))
+        .map(|session| json!({"session": session, "reason": reasons[&session]}))
+        .collect();
     (judged, unjudged)
 }
 
@@ -994,6 +1005,22 @@ mod tests {
         assert!(bad["reason"].as_str().unwrap().starts_with("invalid:"));
         assert!(dir.join("stale.json").exists());
         assert!(dir.join("bad.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_judged_through_one_rollout_row_is_never_also_stranded() {
+        let dir = std::env::temp_dir().join(format!("fno-ins-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_facet(&dir, "resumed", 100, 200, "tool_failure");
+        let mut stale = fold_row("resumed");
+        stale.mtime = 999;
+        let mut fresh = fold_row("resumed");
+        fresh.mtime = 100;
+        let (judged, unjudged) = load_facets(&dir, &[stale, fresh]);
+        assert_eq!(judged.len(), 1);
+        assert!(unjudged.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
