@@ -31,6 +31,8 @@ on:
       - docs/harnesses/capability-matrix.md
       # The cargo job reads its generated-copy path list from this manifest.
       - generated-artifacts.tsv
+      # The cargo job compiles this registry into the supervisor classification test.
+      - docs/env-vars.md
       # The cargo job runs the gate that reads this boundary inventory.
       - docs/architecture/product-boundaries.md
       - scripts/**

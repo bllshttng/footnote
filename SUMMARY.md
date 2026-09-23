@@ -1,23 +1,25 @@
-# Summary: a claude reap receipt pins model or route
+# Summary: one guarded Claude supervisor birth path
 
 ## What landed
 
-- `crates/fno-agents/src/receipt.rs`: a claude receipt's resume line now asks resume_pin (`claude_resume_recipe`). It pins `--model`/`--effort` from the row. When a non-Anthropic route served the row, the line names `fno agents spawn --resume <sid> -P <provider> -m <model>` instead. The claude `resume` string is shell-quoted. `receipt_file_name` was extracted. `decide_reap_receipt` answers the spawn-axes `reap_receipt` field.
-- `crates/fno-agents/src/resume_receipt.rs`: the preserved-session hint prints the receipt's own rendered line (`resume:`). When the line is the route door, the hint adds a new-session note.
-- `crates/fno-agents/src/spawn_axes.rs`: the `reap_receipt` field routes to `decide_reap_receipt` (same field-on-a-verb shape as `resume_pin`).
-- `cli/src/fno/agents/registry.py`: `_stage_removal_receipt` asks the Rust builder and writes the answered file (14 added lines).
-- `cli/src/fno/agents/resume_cli.py`: the claude exact-predecessor lane refuses with exit 13 and names the spawn door (10 added lines).
-- Docs: `retirement-receipts.md` gained the recipe paragraph and the Python door row. `dual-implementation-inventory.md` marks the removal-receipt-writers row builder-retired.
+- `claude_supervisor.rs` refuses real births for temporary config roots and hermetic runs. Fixture births remain allowed.
+- Python `bg_create` crosses the fenced Rust birth-exec path. It preserves the client environment.
+- Rust owns live and parked Claude resume delivery. Account-pinned routes read roster, control key and transcript from the plan's config root.
+- Python wake and dead attach paths are removed. Python runtime refuses Claude resume.
+- The env registry drives a compile-time supervisor classification test. This head has 163 `FNO_` rows: 34 kept, 118 held and 11 `FNO_TEST_` exemptions.
+- `FNO_INBOX_ROOT` remains held. Its documented purpose is a test override.
+- The CI path filter now includes `docs/env-vars.md`; the registry check therefore runs when its compile-time fixture changes.
 
-## Deviation from the plan
+## Plan correction
 
-The plan's codex expectation ("keeps `codex resume <sid> --remote unix://` in both fields") assumed no pre_exec composition. The codex capability form composes a `sh -c '<pre>; exec …'` wrapper, so per-token shlex quoting re-quotes an already-quoted script and corrupts it. Fix: quoting applies to the claude branch only. Non-claude harnesses keep the raw `argv.join(" ")`.
+`FNO_WAKE_MSG` appears in the measured historical leak but has no reader after the Python wake path is removed. It stays poison through the default `FNO_` rule, while the registry-backed held list contains only names with current readers. The linked plan now tests that distinction.
+
+The keep-list plan snapshot counted 161 rows; current `origin/main` had 162 before this branch added its test-only registry row. This head counts 163.
 
 ## Verification
 
-- `cargo test --lib` filters `receipt`, `resume_receipt`, `gc_receipts`, `spawn_axes`: green. `the_live_eighteen_split_fifteen_and_three` passes in isolation. Its one broad-filter failure is the documented lock-free env race in `paths.rs`, not this diff.
-- `--test retirement_e2e`: 9 passed.
-- `cargo fmt --check`: clean. `clippy --all-targets`: zero findings in the touched files. The 690 crate-wide findings are pre-existing under local clippy 1.94, and CI's pinned toolchain arbitrates.
-- Python: `test_registry.py` + `test_lineage_resolution.py` + `test_agents_history.py`: 121 passed. `check-python-static.sh`: clean.
-- `check-file-budget.sh`: cli/src/fno +24 against the 30 budget and the 26 grant cap. No over-budget file grew. `check-no-internal-refs.sh`: clean.
-- Live binary probe with planted rows: the zai row prints `fno agents spawn --resume <sid> -P zai -m 'glm-5.3-flash[1m]'` with `removal_trigger: session`. The anthropic row prints `claude --resume <sid> --model claude-opus-5`.
+- Python refusal target: 1 passed, 25 deselected.
+- `python3 scripts/ci/check_env_registry.py`: 244 names, all rows agree; `check-python-static.sh`: all checks passed.
+- Rust formatting, targeted Python Ruff/`py_compile`, `git diff --check`, and `check-no-internal-refs.sh`: passed.
+- The focused Rust classifier first exposed the stale `FNO_WAKE_MSG` plan assertion; its corrected rerun passed.
+- The stale-binary Python target waited 20m25s and was canceled before argv started; it has no local source verdict. CI will gate that path. No whole-suite local run was started.

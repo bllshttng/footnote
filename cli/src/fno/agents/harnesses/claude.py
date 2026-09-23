@@ -724,10 +724,13 @@ def bg_create(
     # here and demoted to durable, blaming a spawn failure that never happened.
     spawn_env.update(_seed_provenance_env(message, node=os.environ.get("FNO_NODE")))
 
+    from fno.rust_binary import resolve_binary
+
+    spawn_argv = [str(resolve_binary() or "fno-agents"), "claude-birth-exec", "--", *argv]
     start = time.monotonic()
     try:
         result = _subprocess_run(
-            argv,
+            spawn_argv,
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -745,11 +748,9 @@ def bg_create(
             stderr=f"claude --bg timed out after {exc.timeout}s",
         ) from exc
     except FileNotFoundError as exc:
-        # claude went missing between the PATH check and exec. Rare race
-        # (user uninstalled claude mid-flight) but still possible.
         raise ProviderSubprocessError(
             exit_code=127,
-            stderr=f"claude CLI not found: {exc}",
+            stderr=f"fno-agents or claude CLI not found: {exc}. Run `fno doctor update`.",
         ) from exc
     duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -758,6 +759,7 @@ def bg_create(
     exit_code = result.returncode
 
     if exit_code != 0:
+        stderr += " Run `fno doctor update`." if "unknown verb: claude-birth-exec" in stderr else ""
         raise ProviderSubprocessError(exit_code=exit_code, stderr=stderr)
 
     short_id = parse_short_id(stdout)
@@ -938,21 +940,9 @@ _AGENTS_JSON_TIMEOUT_DEFAULT = 3.0
 # through unchanged so consumers that already adapted aren't blocked on us.
 KNOWN_LIVE_STATUSES = frozenset({"Working", "Needs input", "Idle", "Done"})
 
-# The "not blocked" subset of KNOWN_LIVE_STATUSES -- every status except
-# "Needs input", lowercased for case-insensitive callers. Single source for
-# resume_cli.py's wake-skip check and read.py's live_status fill-in gate,
-# which used to each hand-enumerate this same subset and had already drifted
-# out of sync with each other by the time review caught it.
 NOT_BLOCKED_STATUSES_LOWER = frozenset(
     s.lower() for s in KNOWN_LIVE_STATUSES if s != "Needs input"
 )
-
-# The WAKE-skip subset, deliberately narrower than NOT_BLOCKED_STATUSES_LOWER.
-# The risk that set guards is injecting keystrokes MID-TURN, and that risk is
-# Working's alone. Idle is between turns: the one state the wake lane exists to
-# move, and the state a silent session sits in. Done has no process to reach.
-# Kept separate because read.py's fill-in gate still needs the idle/done pair.
-WAKE_SKIP_STATUSES_LOWER = frozenset({"working", "done"})
 
 # The INPUT vocabulary: every spelling observed from a real binary, mapped onto
 # the output set. Widening the output set instead (accepting "blocked" as its
@@ -1488,53 +1478,6 @@ def claude_stop(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
     return (result.returncode, result.stderr or "")
 
 
-def claude_attach(
-    short_id: str,
-    *,
-    env: Optional[dict[str, str]] = None,
-    settings_path: Optional[str] = None,
-    scrub_vars: Optional[Sequence[str]] = None,
-) -> int:
-    """Run ``claude attach <short_id>`` inheriting parent stdio.
-
-    Returns claude's exit code. Output is NOT captured: the claude TUI
-    takes over stdin/stdout/stderr until the operator detaches. No
-    timeout is applied because attach is an interactive verb whose
-    duration is operator-driven, not bounded by fno.
-
-    : ``env`` is the row's recorded ACCOUNT binding (a
-    ``CLAUDE_CONFIG_DIR`` overlay) and ``settings_path`` the validated
-    route-settings file; a fresh claude process re-resolves its namespace
-    from ambient env, so the recorded binding must ride the child or the
-    attach lands in whatever namespace the caller happened to sit in.
-    ``scrub_vars`` are cleared from the child env before the overlay is
-    applied: claude prefers an env credential over a settings file, so an
-    ambient credential would silently override the binding. All three
-    default to None/off, which reproduces the historical bare invocation
-    for a proven default row byte-for-byte.
-
-    Raises:
-        FileNotFoundError: claude not on PATH (caller maps to exit 14).
-    """
-    argv = ["claude", "attach", short_id]
-    if settings_path:
-        argv += ["--settings", settings_path]
-    run_kwargs: dict[str, Any] = {}
-    if env or scrub_vars:
-        child_env = dict(os.environ)
-        for var in scrub_vars or ():
-            child_env.pop(var, None)
-        child_env.pop("CLAUDE_CONFIG_DIR", None)
-        if env:
-            child_env.update(env)
-        # The same identity-scrub floor every adapter's child env crosses: the
-        # attach client resolves its target from the jobId argument, never from
-        # an ambient session marker this shell happens to carry.
-        from fno.setup.github_cli import worker_environment
-
-        run_kwargs["env"] = worker_environment(child_env)
-    result = _subprocess_run(argv, **run_kwargs)
-    return result.returncode
 
 
 def claude_logs_reachable(short_id: str, *, timeout: float = 10.0) -> bool:
