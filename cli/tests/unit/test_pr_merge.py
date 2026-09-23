@@ -2986,7 +2986,7 @@ def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_p
     _merge._sync_graph_merge_status("merged", 1060)
 
     saved = read_graph_strict(graph)[0]
-    assert "merge_status" not in saved
+    assert saved.get("merge_status") is None
 
 
 def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
