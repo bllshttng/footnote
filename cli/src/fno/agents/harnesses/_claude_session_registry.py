@@ -26,9 +26,10 @@ rather than touching ``harnesses.claude``:
   from rows whose ``state`` is in the terminal-or-needs-input set when
   ``output.result`` is missing.
 
-All paths derive from :func:`pathlib.Path.home`, so tests can pin
-``HOME`` via :func:`monkeypatch.setenv` and avoid touching real claude
-state.
+All paths derive from :func:`_claude_roots` (HOME's root, an ambient
+``CLAUDE_CONFIG_DIR``, each claude account's ``config_dir``), so tests
+can pin ``HOME`` and ``FNO_CONFIG`` via :func:`monkeypatch.setenv` and
+avoid touching real claude state.
 
 This module is read-only: a future schema drift in claude is detected
 either by ``locate_session`` returning ``None`` (jobId moved or kind
@@ -90,14 +91,34 @@ class StateSnapshot:
     intent: Optional[str] = None
 
 
-def _sessions_dir() -> Path:
-    """Return ``~/.claude/sessions`` resolved against the current HOME."""
-    return Path.home() / ".claude" / "sessions"
+def _claude_roots() -> list[Path]:
+    """Every claude config root: HOME's, an ambient CLAUDE_CONFIG_DIR, each claude account's config_dir."""
+    roots = [Path.home() / ".claude"]
+    ambient = os.environ.get("CLAUDE_CONFIG_DIR")
+    if ambient:
+        roots.append(Path(ambient))
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        roots += [
+            Path(r.config_dir)
+            for r in load_providers().records
+            if r.harness == "claude" and r.config_dir
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable config leaves the ambient roots
+        pass
+    return roots
+
+
+def session_dirs() -> list[Path]:
+    """Every root's ``sessions`` dir, read once even when a root symlinks it onto another."""
+    return list(dict.fromkeys((root / "sessions").resolve() for root in _claude_roots()))
 
 
 def _jobs_dir_for(short_id: str) -> Path:
-    """Return ``~/.claude/jobs/<short-id>`` resolved against the current HOME."""
-    return Path.home() / ".claude" / "jobs" / short_id
+    """``jobs/<short-id>`` under the first root that has it, else HOME's."""
+    dirs = [root / "jobs" / short_id for root in _claude_roots()]
+    return next((d for d in dirs if d.is_dir()), dirs[0])
 
 
 def _daemon_dir() -> Path:
@@ -204,10 +225,6 @@ def locate_session(short_id: str) -> Optional[SessionLocator]:
     JSON files in ``sessions/`` are skipped silently — a single junk
     file should not deny lookup of healthy entries.
     """
-    sessions = _sessions_dir()
-    if not sessions.exists():
-        return None
-
     # Two-pass: collect all bg matches first, then prefer one with a
     # non-null socket. A supervisor respawn (claude auto-update, Domain
     # Pitfall 11) can leave the dead pid's session file behind with
@@ -215,7 +232,7 @@ def locate_session(short_id: str) -> Optional[SessionLocator]:
     # sharing the same jobId — returning None on the first hit would
     # orphan the user even though the live session is reachable.
     null_socket_seen = False
-    for entry_path in sorted(sessions.glob("*.json")):
+    for entry_path in (p for d in session_dirs() for p in sorted(d.glob("*.json"))):
         try:
             raw = json.loads(entry_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
@@ -272,12 +289,8 @@ def resolve_session_uuid(short_id: str) -> Optional[str]:
     Returns ``None`` when no matching bg session file carries a non-empty
     ``sessionId``, or when ``~/.claude/sessions`` does not exist.
     """
-    sessions = _sessions_dir()
-    if not sessions.exists():
-        return None
-
     fallback: Optional[str] = None
-    for entry_path in sorted(sessions.glob("*.json")):
+    for entry_path in (p for d in session_dirs() for p in sorted(d.glob("*.json"))):
         try:
             raw = json.loads(entry_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
