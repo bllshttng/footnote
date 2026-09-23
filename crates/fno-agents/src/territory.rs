@@ -1267,10 +1267,11 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
-    let holders: HashMap<String, String> = live_crowns(registry_path)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| (c.scope, c.holder))
+    // One registry parse feeds holders and the owner rule alike.
+    let crowns = live_crowns(registry_path).unwrap_or_default();
+    let holders: HashMap<String, String> = crowns
+        .iter()
+        .map(|c| (c.scope.clone(), c.holder.clone()))
         .collect();
     let entries = graph_entries(config_cwd).unwrap_or_default();
     let live = crate::spawn_gate::live_rows(registry_path, &mut Vec::new());
@@ -1281,11 +1282,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     // it - the deepest crown holding it, the same rule `node_owners` gives
     // the spawn gate and the court - so a worker can never cost two
     // territories at once. An unowned node stays loose.
-    let (owners, _) = node_owners(
-        &live_crowns(registry_path).unwrap_or_default(),
-        &entries,
-        &project_map(config_cwd),
-    );
+    let (owners, _) = node_owners(&crowns, &entries, &project_map(config_cwd));
 
     let memberships: Vec<(&Territory, Result<(String, HashSet<String>), String>)> = territories
         .iter()
