@@ -47,6 +47,7 @@ from fno.adapters.providers.model import ProviderRecord
 # macOS Keychain item claude reads (mirrors usage.py._CLAUDE_KEYCHAIN_SERVICE).
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
+_VAULT_TIMEOUT_S = 15
 _CODEX_LOGIN_TIMEOUT_S = 5
 _CODEX_AUTH_ENV_VARS = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY")
 
@@ -154,11 +155,16 @@ def _vault(action: str, *args: str) -> dict:
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         raise ManagedStoreError("fno-agents binary not found; run fno doctor update --rust")
-    proc = subprocess.run(
-        [str(binary), "provider-cap", "vault", action, "--store", str(store_root()),
-         "--lock-held", "--json", *args],
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [str(binary), "provider-cap", "vault", action, "--store", str(store_root()),
+             "--lock-held", "--json", *args],
+            capture_output=True, text=True, timeout=_VAULT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ManagedStoreError(
+            f"fno-agents vault {action} timed out after {_VAULT_TIMEOUT_S}s"
+        ) from exc
     try:
         receipt = json.loads(proc.stdout)
     except (TypeError, ValueError) as exc:

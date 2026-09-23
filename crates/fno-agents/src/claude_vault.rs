@@ -6,10 +6,10 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -17,6 +17,7 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const PROFILE_BETA: &str = "oauth-2025-04-20";
 const FRESH_WINDOW_MS: i64 = 5 * 60 * 1000;
 const SECURITY_ITEM_NOT_FOUND: i32 = 44;
+const SECURITY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Principal {
@@ -53,17 +54,39 @@ impl External for SystemExternal {
         let account = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "user".to_string());
-        let output = Command::new("security")
+        let mut child = Command::new("security")
             .args(["find-generic-password", "-s", service, "-a", &account, "-w"])
-            .output()
+            .stdout(Stdio::piped())
+            .spawn()
             .map_err(|_| ExternalFailure::Unavailable)?;
-        if output.status.code() == Some(SECURITY_ITEM_NOT_FOUND) {
+        let deadline = Instant::now() + SECURITY_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ExternalFailure::Unavailable);
+                }
+            }
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .ok_or(ExternalFailure::Unavailable)?
+            .read_to_string(&mut stdout)
+            .map_err(|_| ExternalFailure::Unavailable)?;
+        if status.code() == Some(SECURITY_ITEM_NOT_FOUND) {
             return Ok(None);
         }
-        if !output.status.success() {
+        if !status.success() {
             return Err(ExternalFailure::Unavailable);
         }
-        let blob = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let blob = stdout.trim().to_string();
         Ok(has_credential(&blob).then_some(blob))
     }
 
