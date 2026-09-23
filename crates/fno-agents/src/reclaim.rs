@@ -111,6 +111,10 @@ fn tagged_crate_targets(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+fn fno_plugin_dir(root: &Path) -> PathBuf {
+    root.join("fno")
+}
+
 fn plugin_cache_copies() -> Vec<PathBuf> {
     // Cargo output and worktrees copied into harness plugin caches. The
     // plugin runs from these copies, but nothing reads a cargo target or a
@@ -126,7 +130,7 @@ fn plugin_cache_copies() -> Vec<PathBuf> {
             continue;
         };
         for harness in harnesses.flatten() {
-            let Ok(checkouts) = std::fs::read_dir(harness.path().join("fno")) else {
+            let Ok(checkouts) = std::fs::read_dir(fno_plugin_dir(&harness.path())) else {
                 continue;
             };
             for checkout in checkouts.flatten() {
@@ -189,7 +193,7 @@ fn codex_cache_quarantines() -> (Lane, Option<std::fs::File>) {
         return (lane, None);
     }
 
-    let live_cache = home.join("plugins/cache").join(&marketplace).join("fno");
+    let live_cache = fno_plugin_dir(&home.join("plugins/cache").join(&marketplace));
     if !live_cache.is_dir() {
         lane.note = format!("kept: live cache {} not found", live_cache.display());
         return (lane, None);
@@ -248,7 +252,7 @@ fn codex_cache_quarantines() -> (Lane, Option<std::fs::File>) {
         {
             continue;
         }
-        if !path.join("fno").is_dir() {
+        if !fno_plugin_dir(&path).is_dir() {
             continue;
         }
         let Ok(candidate) = path.canonicalize() else {
