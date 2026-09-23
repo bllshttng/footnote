@@ -1602,6 +1602,18 @@ mod tests {
             .success());
         assert!(Command::new("git")
             .current_dir(root)
+            .args(["config", "user.email", "fno-test@example.invalid"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args(["config", "user.name", "fno test"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(root)
             .args(["add", "crates/fake/Cargo.toml"])
             .status()
             .unwrap()
