@@ -112,23 +112,36 @@ fn run_action(
     }
     let session_id = session_id.to_string();
     let cwd = cwd.to_path_buf();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("Codex provider goal runtime unavailable: {error}"))?;
-    runtime.block_on(async move {
-        let mut thread = CodexThread::resume(
-            cwd,
-            &session_id,
-            None,
-            &crate::codex_posture::CodexPosture::bounded(),
-            None,
-            None,
-        )
-        .await
-        .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
-        apply_action(&mut thread, &session_id, action).await
-    })
+    run_on_provider_thread(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("Codex provider goal runtime unavailable: {error}"))?;
+        runtime.block_on(async move {
+            let mut thread = CodexThread::resume(
+                cwd,
+                &session_id,
+                None,
+                &crate::codex_posture::CodexPosture::bounded(),
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+            apply_action(&mut thread, &session_id, action).await
+        })
+    })?
+}
+
+fn run_on_provider_thread<T: Send + 'static>(
+    action: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    std::thread::Builder::new()
+        .name("codex-provider-goal".to_string())
+        .spawn(action)
+        .map_err(|error| format!("Codex provider goal thread unavailable: {error}"))?
+        .join()
+        .map_err(|_| "Codex provider goal thread panicked".to_string())
 }
 
 async fn apply_action(
@@ -410,6 +423,24 @@ fn goal_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_runtime_runs_on_a_fresh_thread_inside_an_ambient_runtime() {
+        let ambient = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("ambient runtime builds");
+        let result = ambient.block_on(async {
+            run_on_provider_thread(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("provider runtime builds")
+                    .block_on(async { 17 })
+            })
+        });
+        assert_eq!(result, Ok(17));
+    }
 
     #[test]
     fn provider_goal_receipt_keeps_exact_scope_and_owner() {
