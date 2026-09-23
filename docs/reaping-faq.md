@@ -14,15 +14,15 @@ Not for: the worktree removal contract (which trees prune on merge and which nev
 
 ## Read the answer
 
-Every report line has three parts: the verb, the row handle, and the reason in parentheses.
+Every report line has four parts: the verb, the row handle, the class in brackets, and the reason in parentheses.
 
 ```
-kept fb6399d5 (not a spawn row: origin adopted)
+kept fb6399d5 [unmarked] (not a spawn row: origin adopted)
 ```
 
 The verb names the verdict. `kept` means the sweep declined this pass. `held` means the rehearsal declined to promise an action. `would retire` is the dry-run remove verdict, and `retired` is the real one.
 
-The first report line carries the counts. The last lines carry the dry-run marker and the mux sweep line. A retire line names its basis, for example `every named node done`, with the witnesses that agreed.
+The first report lines carry the counts and the `fleet`, `unmarked`, `owned`, and `contested` class totals. The last lines carry the dry-run marker and the mux sweep line. A retire line names its basis, for example `every named node done`, with the witnesses that agreed.
 
 Every daemon tick with held rows also writes one journal row you can read without the verb. The row carries one entry per held handle, with its reason, detail, age, and escalation flag. Read it with:
 
@@ -63,7 +63,7 @@ The manual verb and the registry arm run the same sweep body (`client.rs` `run_r
 
 The merge-request arm is a different program (`merge_reap.rs` `consume_merge_cleanup_requests`). It loops only over pending merge cleanup requests. With no pending request it does nothing. Its skip reasons are `no_requests`, `all_in_grace`, and `held`, and its detail line carries the held count beside the request count. So its `acted=0 skip=held` line says nothing about the registry sweep.
 
-A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. The daemon's retire arm schedules it after the registry sweep at the configured `agents.reap.roster_scope`, with `dry_run` false. The manual verb stays a dry run by default, and `--apply` acts (`client.rs` `run_roster_reap`). The scheduled pass retires only on an ownership marker. The marker is a `sessions[]` row fno wrote, or a reap receipt an earlier retirement staged. Weak provenance, a name pattern or a transcript mention, keeps.
+A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. The daemon's retire arm schedules it after the registry sweep at the configured `agents.reap.roster_scope`, with `dry_run` false. The manual verb stays a dry run by default, and `--apply` acts (`client.rs` `run_roster_reap`). The scheduled pass retires only on an ownership marker. The marker is a `sessions[]` row fno wrote, a recorded territory blueprinter name, or a reap receipt an earlier retirement staged. Weak provenance, a name pattern or a transcript mention, keeps.
 
 ## Neighbors that remove no session
 
