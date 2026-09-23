@@ -256,7 +256,14 @@ fn run_owned(
         );
     }
 
-    match arbitrate_continuation(driver, fire, &manifest) {
+    let codex_owner = fire.harness.as_deref() == Some("codex")
+        || first_raw_field(&manifest, &["harness"]).as_deref() == Some("codex");
+    let arbitration = if codex_owner {
+        arbitrate_codex_continuation(driver, fire, &manifest)
+    } else {
+        arbitrate_continuation(driver, fire, &manifest)
+    };
+    match arbitration {
         GoalArbitration::Delegated => {
             emit_stop_decision(
                 hook_cwd,
@@ -913,6 +920,85 @@ fn arbitrate_continuation(driver: &str, fire: &Fire, manifest: &str) -> GoalArbi
         Ok(goal) => goal,
         Err(reason) => return GoalArbitration::Refusal(reason),
     };
+    arbitrate_goal_truth(driver, manifest, goal)
+}
+
+fn arbitrate_codex_continuation(driver: &str, fire: &Fire, manifest: &str) -> GoalArbitration {
+    if driver != "king" {
+        return GoalArbitration::None;
+    }
+    let live = crate::reign_goal::read_codex_goal_for_stop(&fire.session_id).map(|goal| goal);
+    arbitrate_codex_continuation_from_reading(driver, fire, manifest, live)
+}
+
+fn arbitrate_codex_continuation_from_reading(
+    driver: &str,
+    fire: &Fire,
+    manifest: &str,
+    live: Result<Option<crate::codex_thread::NativeGoal>, String>,
+) -> GoalArbitration {
+    if driver != "king" {
+        return GoalArbitration::None;
+    }
+    let Some(expected_session) = first_raw_field(manifest, &["harness_session_id"]) else {
+        return GoalArbitration::Refusal(
+            "Codex Stop manifest has no exact harness session id".into(),
+        );
+    };
+    if expected_session != fire.session_id {
+        return GoalArbitration::Refusal(format!(
+            "Codex Stop session mismatch: expected {expected_session:?}, got {:?}",
+            fire.session_id
+        ));
+    }
+    let live = match live {
+        Ok(Some(goal)) => goal,
+        Ok(None) => return GoalArbitration::None,
+        Err(reason) => {
+            return GoalArbitration::Refusal(format!("Codex provider goal unreadable: {reason}"))
+        }
+    };
+    if live.thread_id != fire.session_id {
+        return GoalArbitration::Refusal(format!(
+            "Codex provider goal thread mismatch: expected {:?}, got {:?}",
+            fire.session_id, live.thread_id
+        ));
+    }
+    let Some(owner) = expected_continuation_owner(driver, manifest) else {
+        return GoalArbitration::Refusal(
+            "active Codex goal owner is not defined by the manifest".into(),
+        );
+    };
+    let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
+        return GoalArbitration::Refusal("active Codex goal has no crown scope".into());
+    };
+    let expected_objective = crate::codex_thread::reign_objective(&scope);
+    if live.objective != expected_objective {
+        return GoalArbitration::Refusal(format!(
+            "conflicting goal truth: expected objective {expected_objective:?}, got {:?}",
+            live.objective
+        ));
+    }
+    let status = match live.status {
+        crate::codex_thread::GoalStatus::Active => "active",
+        crate::codex_thread::GoalStatus::Paused => "paused",
+        crate::codex_thread::GoalStatus::Blocked => "blocked",
+        crate::codex_thread::GoalStatus::UsageLimited => "usageLimited",
+        crate::codex_thread::GoalStatus::BudgetLimited => "budgetLimited",
+        crate::codex_thread::GoalStatus::Completed => "completed",
+    };
+    arbitrate_goal_truth(
+        driver,
+        manifest,
+        Some(GoalTruth {
+            objective: live.objective,
+            status: status.to_string(),
+            continuation_owner: owner,
+        }),
+    )
+}
+
+fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -> GoalArbitration {
     let Some(goal) = goal else {
         return GoalArbitration::None;
     };
@@ -922,14 +1008,7 @@ fn arbitrate_continuation(driver: &str, fire: &Fire, manifest: &str) -> GoalArbi
     if goal.continuation_owner.is_empty() {
         return GoalArbitration::Refusal("active goal truth is missing continuation owner".into());
     }
-    let scope = first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default();
-    let node_id = first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default();
-    let expected_owner =
-        first_raw_field(manifest, &["continuation_owner"]).or_else(|| match driver {
-            "king" if !scope.is_empty() => Some(format!("king:{scope}")),
-            "target" if !node_id.is_empty() => Some(format!("target:{node_id}")),
-            _ => None,
-        });
+    let expected_owner = expected_continuation_owner(driver, manifest);
     let Some(expected_owner) = expected_owner else {
         return GoalArbitration::Refusal(
             "active goal truth cannot be verified: manifest scope/node is missing".into(),
@@ -951,6 +1030,19 @@ fn arbitrate_continuation(driver: &str, fire: &Fire, manifest: &str) -> GoalArbi
         }
     }
     GoalArbitration::Delegated
+}
+
+fn expected_continuation_owner(driver: &str, manifest: &str) -> Option<String> {
+    if let Some(owner) = first_raw_field(manifest, &["continuation_owner"]) {
+        return Some(owner);
+    }
+    let scope = first_raw_field(manifest, &["scope", "crown_scope"]).unwrap_or_default();
+    let node_id = first_raw_field(manifest, &["node_id", "fno_id"]).unwrap_or_default();
+    match driver {
+        "king" if !scope.is_empty() => Some(format!("king:{scope}")),
+        "target" if !node_id.is_empty() => Some(format!("target:{node_id}")),
+        _ => None,
+    }
 }
 
 fn emit_stop_decision(
@@ -1626,6 +1718,75 @@ mod tests {
             arbitrate_continuation("target", &fire, manifest),
             GoalArbitration::Delegated
         );
+    }
+
+    #[test]
+    fn codex_stop_uses_live_goal_and_ignores_stale_cached_goal_truth() {
+        let fire = collect_fire(
+            "session-full",
+            "/tmp/rollout-session-full.jsonl",
+            None,
+            "turn-42".to_string(),
+            None,
+        );
+        let manifest =
+            "scope: scope-a\nfno_id: scope-a\nharness_session_id: session-full\nharness: codex\n";
+        let active = crate::codex_thread::NativeGoal {
+            thread_id: "session-full".to_string(),
+            objective: "$fno:reign scope-a".to_string(),
+            status: crate::codex_thread::GoalStatus::Active,
+        };
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::Delegated
+        );
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading("king", &fire, manifest, Ok(None)),
+            GoalArbitration::None
+        );
+        let mut wrong_thread = active.clone();
+        wrong_thread.thread_id = "other-thread".to_string();
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Ok(Some(wrong_thread))
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("thread mismatch")
+        ));
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading(
+                "target",
+                &fire,
+                manifest,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::None
+        );
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Err("timeout".to_string())
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("provider goal unreadable")
+        ));
+
+        let stale_manifest = format!(
+            "{manifest}goal_objective: {}\ngoal_status: active\ngoal_owner: king:scope-a\n",
+            active.objective
+        );
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading("king", &fire, &stale_manifest, Ok(None)),
+            GoalArbitration::None
+        ));
     }
 
     #[test]

@@ -2022,6 +2022,10 @@ mod tests {
             result,
             Err(ReviewStartError::Reason(CODEX_NATIVE_COMMAND_REFUSAL))
         );
+        assert_eq!(
+            codex_native_command_refusal("/goal status"),
+            Ok(Some(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
     }
 
     #[test]

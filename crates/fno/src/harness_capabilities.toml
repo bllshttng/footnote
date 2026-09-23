@@ -203,7 +203,7 @@ command_surface = "codex-skill"
 # spawn or dispatch reaches the TUI verb instead of a footnote skill that does
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
-native_verbs = ["/review", "/code-review", "/model", "/status", "/compact"]
+native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
 # The subset the shared app-server daemon maps to its review/start RPC. Every
 # other native verb has no prompt line on a daemon thread, and the mail lane
 # refuses it by name.

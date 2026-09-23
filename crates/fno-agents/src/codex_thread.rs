@@ -156,19 +156,23 @@ pub struct TurnResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub enum GoalStatus {
     Active,
     Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    #[serde(rename = "complete")]
     Completed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeGoal {
+    pub thread_id: String,
     pub objective: String,
     pub status: GoalStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +263,43 @@ pub fn thread_compact_start_request_json(id: u64, thread_id: &str) -> String {
     .to_string()
 }
 
+enum CompactionLifecycle {
+    Started(String),
+    Completed(String, Value),
+}
+
+fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<CompactionLifecycle> {
+    let method = value.get("method").and_then(Value::as_str)?;
+    if !matches!(method, "item/started" | "item/completed") {
+        return None;
+    }
+    let params = value.get("params").unwrap_or(value);
+    if params
+        .get("threadId")
+        .or_else(|| value.get("threadId"))
+        .and_then(Value::as_str)
+        != Some(thread_id)
+    {
+        return None;
+    }
+    let item = params.get("item").or_else(|| value.get("item"))?;
+    if item.get("type").and_then(Value::as_str) != Some("contextCompaction") {
+        return None;
+    }
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
+    match method {
+        "item/started" => Some(CompactionLifecycle::Started(item_id)),
+        "item/completed" if item.get("status").and_then(Value::as_str) == Some("completed") => {
+            Some(CompactionLifecycle::Completed(item_id, value.clone()))
+        }
+        _ => None,
+    }
+}
+
 /// Read the native goal for one exact full thread id.
 pub fn thread_goal_get_request_json(id: u64, thread_id: &str) -> String {
     json!({
@@ -277,28 +318,14 @@ pub fn thread_goal_set_request_json(
     objective: &str,
     status: &str,
 ) -> String {
-    thread_goal_set_request_json_with_owner(id, thread_id, objective, status, None)
-}
-
-pub fn thread_goal_set_request_json_with_owner(
-    id: u64,
-    thread_id: &str,
-    objective: &str,
-    status: &str,
-    continuation_owner: Option<&str>,
-) -> String {
-    let mut params = json!({
-        "threadId": thread_id,
-        "goal": objective,
-        "status": status,
-    });
-    if let Some(owner) = continuation_owner.filter(|owner| !owner.trim().is_empty()) {
-        params["continuationOwner"] = json!(owner);
-    }
     json!({
         "id": id,
         "method": "thread/goal/set",
-        "params": params,
+        "params": {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": status,
+        },
     })
     .to_string()
 }
@@ -327,6 +354,13 @@ pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDrive
     let object = goal.as_object().ok_or_else(|| {
         ThreadDriverError::Protocol("thread/goal response carried a non-object goal".into())
     })?;
+    let thread_id = object
+        .get("threadId")
+        .or_else(|| object.get("thread_id"))
+        .and_then(Value::as_str)
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no thread id".into()))?
+        .to_string();
     let objective = object
         .get("objective")
         .or_else(|| object.get("goal"))
@@ -337,28 +371,24 @@ pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDrive
     let status = match object
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or("active")
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no status".into()))?
     {
         "active" => GoalStatus::Active,
         "paused" => GoalStatus::Paused,
-        "completed" | "done" => GoalStatus::Completed,
+        "blocked" => GoalStatus::Blocked,
+        "usageLimited" | "usage_limited" => GoalStatus::UsageLimited,
+        "budgetLimited" | "budget_limited" => GoalStatus::BudgetLimited,
+        "complete" | "completed" | "done" => GoalStatus::Completed,
         other => {
             return Err(ThreadDriverError::Protocol(format!(
                 "thread/goal response has unknown status {other:?}"
             )))
         }
     };
-    let continuation_owner = object
-        .get("continuationOwner")
-        .or_else(|| object.get("continuation_owner"))
-        .or_else(|| object.get("owner"))
-        .and_then(Value::as_str)
-        .filter(|owner| !owner.trim().is_empty())
-        .map(str::to_string);
     Ok(Some(NativeGoal {
+        thread_id,
         objective,
         status,
-        continuation_owner,
     }))
 }
 
@@ -369,10 +399,16 @@ pub fn ensure_reign_goal(
 ) -> Result<GoalStatus, ThreadDriverError> {
     let expected = reign_objective(scope);
     if let Some(goal) = current {
-        if goal.status == GoalStatus::Active && goal.objective != expected {
+        if goal.objective != expected {
             return Err(ThreadDriverError::Protocol(format!(
-                "refusing active native goal {:?}; expected {:?}; continuation owner {}",
+                "refusing native goal {:?}; expected {:?}; continuation owner {}",
                 goal.objective, expected, continuation_owner
+            )));
+        }
+        if !matches!(goal.status, GoalStatus::Active | GoalStatus::Paused) {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
             )));
         }
     }
@@ -1246,15 +1282,50 @@ impl CodexThread {
     pub async fn compact(&mut self) -> Result<Value, ThreadDriverError> {
         let id = self.next_id;
         self.next_id += 1;
-        let receipt = self
-            .request_value(id, thread_compact_start_request_json(id, &self.thread_id))
-            .await
-            .and_then(provider_response)?;
-        crate::context_window::verify_compaction_receipt(&receipt, &self.thread_id).map_err(
-            |error| {
-                ThreadDriverError::Protocol(format!("unverified compaction receipt: {error:?}"))
-            },
-        )
+        let id_value = Value::from(id);
+        self.write_frame(&thread_compact_start_request_json(id, &self.thread_id))
+            .await?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let mut acknowledged = false;
+        let mut started_items = Vec::new();
+        let mut completed_items = HashMap::new();
+        loop {
+            if acknowledged {
+                if let Some(receipt) = started_items
+                    .iter()
+                    .find_map(|item_id| completed_items.remove(item_id))
+                {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let value = self.read_value(remaining).await?;
+            if value.get("id") == Some(&id_value) {
+                provider_response(value)?;
+                acknowledged = true;
+                continue;
+            }
+            match parse_compaction_lifecycle(&value, &self.thread_id) {
+                Some(CompactionLifecycle::Started(item_id)) => {
+                    started_items.push(item_id);
+                }
+                Some(CompactionLifecycle::Completed(item_id, receipt)) => {
+                    completed_items.insert(item_id, receipt);
+                }
+                None => park_frame(&mut self.pending, &mut self.completed_turns, value),
+            }
+        }
     }
 
     pub async fn goal_get(&mut self) -> Result<Value, ThreadDriverError> {
@@ -1287,21 +1358,119 @@ impl CodexThread {
 
     pub async fn goal_get_typed(&mut self) -> Result<Option<NativeGoal>, ThreadDriverError> {
         let value = self.goal_get().await?;
-        parse_goal_value(&value)
+        let goal = parse_goal_value(&value)?;
+        if goal
+            .as_ref()
+            .is_some_and(|goal| goal.thread_id != self.thread_id)
+        {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/get returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
+    }
+
+    /// Read one live provider goal without resuming or changing the thread.
+    /// Stop hooks use this short direct query to distinguish an active native
+    /// continuation from a missing or unreadable goal.
+    pub(crate) async fn read_goal_for_stop(
+        thread_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        if thread_id.trim().is_empty() || timeout.is_zero() {
+            return Err(ThreadDriverError::Protocol(
+                "Stop goal read needs an exact thread id and positive timeout".into(),
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        let socket = crate::codex_inject::codex_app_server_socket_path();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (mut sink, mut stream) =
+            tokio::time::timeout(remaining, crate::codex_inject::connect_app_server(&socket))
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?
+                .map_err(|error| {
+                    ThreadDriverError::Protocol(format!(
+                        "Codex goal connection unavailable: {error}"
+                    ))
+                })?;
+        let id = Value::from(1);
+        let request = thread_goal_get_request_json(1, thread_id);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::timeout(remaining, sink.send(Message::Text(request.into())))
+            .await
+            .map_err(|_| ThreadDriverError::Timeout)?
+            .map_err(|error| {
+                ThreadDriverError::Protocol(format!("Codex goal request write failed: {error}"))
+            })?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let frame = tokio::time::timeout(remaining, stream.next())
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?;
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    let value: Value = serde_json::from_str(text.trim()).map_err(|_| {
+                        ThreadDriverError::Protocol("Codex goal response is not JSON".into())
+                    })?;
+                    if value.get("id") != Some(&id) {
+                        continue;
+                    }
+                    let value = provider_response(value)?;
+                    if let Some(goal) = value
+                        .pointer("/result/goal")
+                        .or_else(|| value.get("goal"))
+                        .filter(|goal| !goal.is_null())
+                    {
+                        let returned_thread = goal
+                            .get("threadId")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                ThreadDriverError::Protocol(
+                                    "Codex goal response has no thread id".into(),
+                                )
+                            })?;
+                        if returned_thread != thread_id {
+                            return Err(ThreadDriverError::Protocol(format!(
+                                "Codex goal response returned {returned_thread}, expected {thread_id}"
+                            )));
+                        }
+                    }
+                    return parse_goal_value(&value);
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => {
+                    return Err(ThreadDriverError::Protocol(format!(
+                        "Codex goal response read failed: {error}"
+                    )))
+                }
+                None => {
+                    return Err(ThreadDriverError::Protocol(
+                        "Codex app-server closed before the goal response".into(),
+                    ))
+                }
+            }
+        }
     }
 
     pub async fn goal_set_typed(
         &mut self,
         objective: &str,
         status: GoalStatus,
-        continuation_owner: Option<&str>,
     ) -> Result<NativeGoal, ThreadDriverError> {
         let status_wire = match status {
             GoalStatus::Active => "active",
             GoalStatus::Paused => "paused",
-            GoalStatus::Completed => "completed",
+            GoalStatus::Blocked => "blocked",
+            GoalStatus::UsageLimited => "usageLimited",
+            GoalStatus::BudgetLimited => "budgetLimited",
+            GoalStatus::Completed => "complete",
         };
-        if objective.trim().is_empty() || matches!(status, GoalStatus::Completed) {
+        if objective.trim().is_empty() || !matches!(status, GoalStatus::Active | GoalStatus::Paused)
+        {
             return Err(ThreadDriverError::Protocol(
                 "typed goal set needs a non-empty active or paused objective".into(),
             ));
@@ -1311,19 +1480,19 @@ impl CodexThread {
         let value = self
             .request_value(
                 id,
-                thread_goal_set_request_json_with_owner(
-                    id,
-                    &self.thread_id,
-                    objective,
-                    status_wire,
-                    continuation_owner,
-                ),
+                thread_goal_set_request_json(id, &self.thread_id, objective, status_wire),
             )
             .await
             .and_then(provider_response)?;
-        parse_goal_value(&value)?.ok_or_else(|| {
+        let goal = parse_goal_value(&value)?.ok_or_else(|| {
             ThreadDriverError::Protocol("thread/goal/set returned no typed goal".into())
-        })
+        })?;
+        if goal.thread_id != self.thread_id {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/set returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
     }
 
     pub async fn ensure_reign_goal_typed(
@@ -1336,10 +1505,14 @@ impl CodexThread {
         let objective = reign_objective(scope);
         match current {
             Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
-            _ => {
-                self.goal_set_typed(&objective, GoalStatus::Active, Some(continuation_owner))
-                    .await
+            Some(goal) if goal.status == GoalStatus::Paused => {
+                self.goal_set_typed(&objective, GoalStatus::Active).await
             }
+            Some(goal) => Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
+            ))),
+            None => self.goal_set_typed(&objective, GoalStatus::Active).await,
         }
     }
 
@@ -2326,6 +2499,44 @@ mod tests {
     }
 
     #[test]
+    fn compaction_lifecycle_parser_reads_thread_and_item_identity() {
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-a",
+                "item": { "id": "compact-1", "type": "contextCompaction", "status": "inProgress" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&started, "thread-a"),
+            Some(CompactionLifecycle::Started(item_id)) if item_id == "compact-1"
+        ));
+        let completed = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "item": { "id": "compact-1", "type": "contextCompaction", "status": "completed" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&completed, "thread-a"),
+            Some(CompactionLifecycle::Completed(item_id, _)) if item_id == "compact-1"
+        ));
+        assert!(parse_compaction_lifecycle(&completed, "thread-b").is_none());
+        let completed_without_start = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "item": { "id": "compact-2", "type": "contextCompaction", "status": "completed" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&completed_without_start, "thread-a"),
+            Some(CompactionLifecycle::Completed(item_id, _)) if item_id == "compact-2"
+        ));
+    }
+
+    #[test]
     fn control_resume_does_not_override_existing_thread_policy() {
         let value: Value = serde_json::from_str(&thread_resume_control_request_json(
             7,
@@ -2364,7 +2575,46 @@ mod tests {
         .unwrap();
         assert_eq!(goal["method"], "thread/goal/set");
         assert_eq!(goal["params"]["status"], "active");
-        assert_eq!(goal["params"]["goal"], "$fno:reign x-0000");
+        assert_eq!(goal["params"]["objective"], "$fno:reign x-0000");
+        assert!(goal["params"].get("continuationOwner").is_none());
+    }
+
+    #[test]
+    fn native_goal_parser_requires_positive_status_and_keeps_provider_limits() {
+        let goal = parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000",
+                "status": "budgetLimited"
+            }}
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(goal.thread_id, "thread-full");
+        assert_eq!(goal.status, GoalStatus::BudgetLimited);
+
+        assert!(parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000"
+            }}
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn ensure_goal_never_reopens_a_provider_limited_or_completed_goal() {
+        let limited = NativeGoal {
+            thread_id: "thread-full".into(),
+            objective: "$fno:reign x-0000".into(),
+            status: GoalStatus::BudgetLimited,
+        };
+        assert!(ensure_reign_goal(Some(&limited), "x-0000", "king:x-0000").is_err());
+        let completed = NativeGoal {
+            status: GoalStatus::Completed,
+            ..limited
+        };
+        assert!(ensure_reign_goal(Some(&completed), "x-0000", "king:x-0000").is_err());
     }
 
     #[test]

@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +148,7 @@ fn leg_json(leg: &ReadinessLeg) -> Value {
 const READINESS_EVENT_TYPES: &[&str] = &["context_snapshot", "stop_decision"];
 const CODEX_PLUGIN_ID: &str = "fno@footnote";
 const CODEX_PLUGIN_REPAIR: &str = "fno config plugin install codex";
+const CODEX_PLUGIN_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn codex_machine_leg_from_plugin_list(raw: &str) -> ReadinessLeg {
     let value: Value = match serde_json::from_str(raw) {
@@ -184,13 +187,40 @@ fn codex_machine_leg() -> ReadinessLeg {
     let Some(binary) = crate::codex_daemon_readiness::codex_cli_path() else {
         return ReadinessLeg::unreadable("codex CLI is not available for plugin readiness");
     };
-    let output = match Command::new(binary)
+    let mut child = match Command::new(binary)
         .args(["plugin", "list", "--json"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(output) => output,
+        Ok(child) => child,
         Err(error) => {
             return ReadinessLeg::unreadable(format!("codex plugin list failed: {error}"))
+        }
+    };
+    let deadline = Instant::now() + CODEX_PLUGIN_LIST_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ReadinessLeg::unreadable("codex plugin list timed out after 5s");
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ReadinessLeg::unreadable(format!("codex plugin list wait failed: {error}"));
+            }
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => {
+            return ReadinessLeg::unreadable(format!(
+                "codex plugin list output unreadable: {error}"
+            ))
         }
     };
     if !output.status.success() {

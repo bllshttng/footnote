@@ -5,6 +5,8 @@ use crate::king_termination::KingManifest;
 use serde_json::{json, Value};
 use std::path::Path;
 
+const STOP_GOAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Clone)]
 enum GoalAction {
     Ensure {
@@ -32,7 +34,6 @@ pub(crate) fn ensure(session_id: &str, scope: &str, cwd: &Path) -> Result<Value,
     let owner = format!("king:{scope}");
     run_action(
         session_id,
-        scope,
         cwd,
         GoalAction::Ensure {
             scope: scope.to_string(),
@@ -44,18 +45,13 @@ pub(crate) fn ensure(session_id: &str, scope: &str, cwd: &Path) -> Result<Value,
 /// Pause a matching active goal only after the king loop proved a quiet park.
 pub(crate) fn pause_codex_reign_goal(manifest: &KingManifest, cwd: &Path) -> Result<Value, String> {
     let (session_id, scope, owner) = manifest_identity(manifest)?;
-    run_action(&session_id, &scope, cwd, GoalAction::Pause { scope, owner })
+    run_action(&session_id, cwd, GoalAction::Pause { scope, owner })
 }
 
 /// Resume only the paused goal that belongs to this exact crown and session.
 pub(crate) fn resume(manifest: &KingManifest, cwd: &Path) -> Result<Value, String> {
     let (session_id, scope, owner) = manifest_identity(manifest)?;
-    run_action(
-        &session_id,
-        &scope,
-        cwd,
-        GoalAction::Resume { scope, owner },
-    )
+    run_action(&session_id, cwd, GoalAction::Resume { scope, owner })
 }
 
 pub(crate) fn pause_reign_goal_receipt(
@@ -101,12 +97,7 @@ fn manifest_identity(manifest: &KingManifest) -> Result<(String, String, String)
     ))
 }
 
-fn run_action(
-    session_id: &str,
-    scope: &str,
-    cwd: &Path,
-    action: GoalAction,
-) -> Result<Value, String> {
+fn run_action(session_id: &str, cwd: &Path, action: GoalAction) -> Result<Value, String> {
     if session_id.trim().is_empty() {
         return Err("Codex provider action is missing an exact session id".to_string());
     }
@@ -137,6 +128,25 @@ fn run_on_provider_thread<T: Send + 'static>(
         .map_err(|_| "Codex provider goal thread panicked".to_string())
 }
 
+pub(crate) fn read_codex_goal_for_stop(session_id: &str) -> Result<Option<NativeGoal>, String> {
+    if session_id.trim().is_empty() {
+        return Err("Codex Stop goal read has no exact session id".to_string());
+    }
+    let session_id = session_id.to_string();
+    run_on_provider_thread(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("Codex Stop goal runtime unavailable: {error}"))?;
+        runtime
+            .block_on(CodexThread::read_goal_for_stop(
+                &session_id,
+                STOP_GOAL_READ_TIMEOUT,
+            ))
+            .map_err(|error| error.to_string())
+    })?
+}
+
 async fn apply_action(
     thread: &mut CodexThread,
     session_id: &str,
@@ -149,7 +159,7 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal ensure refused: {error}"))?;
             let expected = crate::codex_thread::reign_objective(&scope);
-            verify_goal(&goal, &expected, GoalStatus::Active, &owner, "ensure")?;
+            verify_goal(&goal, &expected, GoalStatus::Active, "ensure")?;
             goal_receipt(session_id, &scope, &owner, &goal)
         }
         GoalAction::Pause { scope, owner } => {
@@ -159,16 +169,12 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
                 .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
-            verify_goal(&current, &expected, GoalStatus::Active, &owner, "pause")?;
+            verify_goal(&current, &expected, GoalStatus::Active, "pause")?;
             let paused = thread
-                .goal_set_typed(
-                    &current.objective,
-                    GoalStatus::Paused,
-                    current.continuation_owner.as_deref(),
-                )
+                .goal_set_typed(&current.objective, GoalStatus::Paused)
                 .await
                 .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
-            verify_goal(&paused, &expected, GoalStatus::Paused, &owner, "pause")?;
+            verify_goal(&paused, &expected, GoalStatus::Paused, "pause")?;
             goal_receipt(session_id, &scope, &owner, &paused)
         }
         GoalAction::Resume { scope, owner } => {
@@ -178,16 +184,12 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
                 .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
-            verify_goal(&current, &expected, GoalStatus::Paused, &owner, "resume")?;
+            verify_goal(&current, &expected, GoalStatus::Paused, "resume")?;
             let active = thread
-                .goal_set_typed(
-                    &current.objective,
-                    GoalStatus::Active,
-                    current.continuation_owner.as_deref(),
-                )
+                .goal_set_typed(&current.objective, GoalStatus::Active)
                 .await
                 .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
-            verify_goal(&active, &expected, GoalStatus::Active, &owner, "resume")?;
+            verify_goal(&active, &expected, GoalStatus::Active, "resume")?;
             goal_receipt(session_id, &scope, &owner, &active)
         }
         GoalAction::Provider {
@@ -232,6 +234,7 @@ async fn provider_action(
                     goal.status
                 ));
             }
+            let owner = continuation_owner_for_goal(&goal.objective, scope, session_id)?;
             Ok(json!({
                 "verified": true,
                 "action": "goal_get",
@@ -239,7 +242,7 @@ async fn provider_action(
                 "thread_id": session_id,
                 "status": "active",
                 "objective": goal.objective,
-                "continuation_owner": goal.continuation_owner,
+                "continuation_owner": owner,
             }))
         }
         "thread/goal/set" => {
@@ -256,22 +259,22 @@ async fn provider_action(
                     ));
                 }
                 Some(current) if current.status == GoalStatus::Active => {
-                    verify_goal(&current, objective, GoalStatus::Active, &owner, "goal-set")?;
+                    verify_goal(&current, objective, GoalStatus::Active, "goal-set")?;
                     current
                 }
                 Some(current) => {
-                    verify_goal(&current, objective, GoalStatus::Paused, &owner, "goal-set")?;
+                    verify_goal(&current, objective, GoalStatus::Paused, "goal-set")?;
                     thread
-                        .goal_set_typed(objective, GoalStatus::Active, Some(&owner))
+                        .goal_set_typed(objective, GoalStatus::Active)
                         .await
                         .map_err(|error| format!("Codex provider goal set refused: {error}"))?
                 }
                 None => thread
-                    .goal_set_typed(objective, GoalStatus::Active, Some(&owner))
+                    .goal_set_typed(objective, GoalStatus::Active)
                     .await
                     .map_err(|error| format!("Codex provider goal set refused: {error}"))?,
             };
-            verify_goal(&goal, objective, GoalStatus::Active, &owner, "goal-set")?;
+            verify_goal(&goal, objective, GoalStatus::Active, "goal-set")?;
             Ok(json!({
                 "verified": true,
                 "action": "goal_set",
@@ -303,19 +306,38 @@ fn goal_set_contract(
     ) {
         return Err("Codex goal clear/complete is not exposed by the provider lane".into());
     }
-    let owner = if !scope.trim().is_empty() {
-        format!("king:{}", scope.trim())
-    } else if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
-        format!("king:{}", reign_scope.trim())
-    } else {
-        format!("target:{session_id}")
-    };
-    if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
-        if !scope.trim().is_empty() && scope.trim() != reign_scope.trim() {
-            return Err("Codex reign goal scope does not match the selected crown".into());
-        }
-    }
+    let owner = continuation_owner_for_goal(objective, scope, session_id)?;
     Ok((objective.to_string(), owner))
+}
+
+fn continuation_owner_for_goal(
+    objective: &str,
+    scope: &str,
+    session_id: &str,
+) -> Result<String, String> {
+    // Codex persists thread id, objective, and status only; Footnote derives
+    // its owner from the selected crown scope or exact target session.
+    if !scope.trim().is_empty() {
+        let expected = crate::codex_thread::reign_objective(scope);
+        if objective != expected.as_str() {
+            return Err(format!(
+                "Codex crowned goal objective does not match scope {:?}",
+                scope.trim()
+            ));
+        }
+        return Ok(format!("king:{}", scope.trim()));
+    }
+    if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
+        let reign_scope = reign_scope.trim();
+        if reign_scope.is_empty() {
+            return Err("Codex reign goal objective has no scope".into());
+        }
+        return Ok(format!("king:{reign_scope}"));
+    }
+    if session_id.trim().is_empty() {
+        return Err("Codex provider goal has no exact session id".into());
+    }
+    Ok(format!("target:{session_id}"))
 }
 
 pub(crate) fn run_provider_command(args: &[String]) -> i32 {
@@ -330,7 +352,6 @@ pub(crate) fn run_provider_command(args: &[String]) -> i32 {
     }
     match run_action(
         &session_id,
-        &scope,
         Path::new(&cwd),
         GoalAction::Provider {
             method,
@@ -360,7 +381,6 @@ fn verify_goal(
     goal: &NativeGoal,
     expected_objective: &str,
     expected_status: GoalStatus,
-    expected_owner: &str,
     action: &str,
 ) -> Result<(), String> {
     if goal.objective != expected_objective {
@@ -375,12 +395,6 @@ fn verify_goal(
             goal.status
         ));
     }
-    if goal.continuation_owner.as_deref() != Some(expected_owner) {
-        return Err(format!(
-            "Codex provider goal {action} refused: owner does not match reign: {:?}",
-            goal.continuation_owner
-        ));
-    }
     Ok(())
 }
 
@@ -390,18 +404,23 @@ fn goal_receipt(
     owner: &str,
     goal: &NativeGoal,
 ) -> Result<Value, String> {
+    let expected_owner = continuation_owner_for_goal(&goal.objective, scope, session_id)?;
     if session_id.trim().is_empty()
         || scope.trim().is_empty()
         || owner.trim().is_empty()
+        || goal.thread_id != session_id
         || goal.objective.trim().is_empty()
-        || goal.continuation_owner.as_deref() != Some(owner)
+        || expected_owner.as_str() != owner
     {
         return Err("provider goal receipt is missing identity".to_string());
     }
     let status = match goal.status {
         GoalStatus::Active => "active",
         GoalStatus::Paused => "paused",
-        GoalStatus::Completed => "completed",
+        GoalStatus::Blocked => "blocked",
+        GoalStatus::UsageLimited => "usageLimited",
+        GoalStatus::BudgetLimited => "budgetLimited",
+        GoalStatus::Completed => "complete",
     };
     Ok(json!({
         "provider": "codex",
@@ -438,9 +457,9 @@ mod tests {
     #[test]
     fn provider_goal_receipt_keeps_exact_scope_and_owner() {
         let goal = NativeGoal {
+            thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Paused,
-            continuation_owner: Some("king:x-aaaa".to_string()),
         };
         let receipt = goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).unwrap();
         assert_eq!(receipt["provider"], "codex");
@@ -454,9 +473,9 @@ mod tests {
     #[test]
     fn goal_receipt_refuses_a_different_continuation_owner() {
         let goal = NativeGoal {
+            thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Active,
-            continuation_owner: Some("king:x-bbbb".to_string()),
         };
         assert!(goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).is_err());
     }
@@ -474,26 +493,12 @@ mod tests {
     #[test]
     fn resume_requires_the_exact_paused_reign_goal() {
         let goal = NativeGoal {
+            thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Paused,
-            continuation_owner: Some("king:x-aaaa".to_string()),
         };
-        assert!(verify_goal(
-            &goal,
-            "$fno:reign x-aaaa",
-            GoalStatus::Paused,
-            "king:x-aaaa",
-            "resume"
-        )
-        .is_ok());
-        assert!(verify_goal(
-            &goal,
-            "$fno:reign x-bbbb",
-            GoalStatus::Paused,
-            "king:x-aaaa",
-            "resume"
-        )
-        .is_err());
+        assert!(verify_goal(&goal, "$fno:reign x-aaaa", GoalStatus::Paused, "resume").is_ok());
+        assert!(verify_goal(&goal, "$fno:reign x-bbbb", GoalStatus::Paused, "resume").is_err());
     }
 
     #[test]
