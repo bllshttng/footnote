@@ -43,7 +43,6 @@ pub const SCHEMA_VERSION: &str = "3";
 /// owner's file fails naming file and line.
 pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("nodes", "backlog/nodes.rs"),
-    ("node_claims", "backlog/nodes.rs"),
     ("node_dispatch", "backlog/nodes.rs"),
     ("node_provenance", "backlog/nodes.rs"),
     ("supersessions", "backlog/nodes.rs"),
@@ -1608,6 +1607,36 @@ mod tests {
         assert!(!database_path(&graph).exists());
     }
 
+    #[test]
+    fn node_claim_lockfiles_replace_the_claim_mirror_table() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE node_claims (
+                    node_id TEXT PRIMARY KEY,
+                    locked_by TEXT,
+                    harness TEXT,
+                    harness_session TEXT,
+                    locked_at TEXT
+                );",
+            )
+            .unwrap();
+
+        nodes::ensure_table(&connection).unwrap();
+
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0, "the stale claim mirror table is removed");
+        assert!(TABLE_OWNERS
+            .iter()
+            .all(|(table, _)| *table != "node_claims"));
+    }
+
     fn sample_report(divergent: usize, ids: Vec<String>) -> ParityReport {
         ParityReport {
             rows: 2,
@@ -1973,7 +2002,6 @@ mod tests {
         // The mirrors cascade with the node row; a pragma-less connection
         // would strand these as orphans.
         for table in [
-            "node_claims",
             "node_dispatch",
             "node_provenance",
             "supersessions",

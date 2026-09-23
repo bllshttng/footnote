@@ -2567,7 +2567,13 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_json_leg(path, false, true)?,
+        crate::backlog::Backend::Json => {
+            let mut rows = read_json_leg(path, false, true)?;
+            crate::backlog::nodes::project_claims(&mut rows)
+                .map_err(StoreError::ClaimsUnavailable)?;
+            normalize_lock_fields(&mut rows);
+            rows
+        }
     };
     apply_defaults(&mut rows, false);
     Ok(rows)

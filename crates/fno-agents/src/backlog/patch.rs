@@ -189,7 +189,9 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
     ),
     (
         "session_id",
-        Policy::Derived("mirror of locked_by; use --locked-by"),
+        Policy::Derived(
+            "mirror of the node:<id> claim; use fno agents claim acquire|release node:<id>",
+        ),
     ),
     (
         "dep",
@@ -219,13 +221,30 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
     ("origin_evidence", Policy::Derived(BIRTH_RECORD)),
     ("think_session_id", Policy::Derived(BIRTH_RECORD)),
     ("think_output_path", Policy::Derived(BIRTH_RECORD)),
-    ("locked_by", Policy::Owned("--locked-by")),
-    ("locked_by_harness", Policy::Owned("--locked-by-harness")),
+    (
+        "locked_by",
+        Policy::Derived(
+            "projection of the node:<id> claim; use fno agents claim acquire|release node:<id>",
+        ),
+    ),
+    (
+        "locked_by_harness",
+        Policy::Derived(
+            "projection of the node:<id> claim; use fno agents claim acquire|release node:<id>",
+        ),
+    ),
     (
         "locked_by_harness_session",
-        Policy::Owned("--locked-by-harness-session"),
+        Policy::Derived(
+            "projection of the node:<id> claim; use fno agents claim acquire|release node:<id>",
+        ),
     ),
-    ("locked_at", Policy::Owned("--locked-by")),
+    (
+        "locked_at",
+        Policy::Derived(
+            "projection of the node:<id> claim; use fno agents claim acquire|release node:<id>",
+        ),
+    ),
     (
         "completed_at",
         Policy::Owned("fno backlog done, or fno backlog reopen to leave done"),
@@ -445,7 +464,7 @@ fn holding_fact(entry: &Value, id: &str) -> Option<String> {
     }
     if truthy("locked_by") {
         return Some(format!(
-            "locked_by holds. Supply it with: fno backlog update {id} --locked-by null"
+            "locked_by holds (a node:{id} claim). Release it with: fno agents claim release node:{id} --holder <holder>"
         ));
     }
     let open_do = entry
@@ -1466,6 +1485,24 @@ mod tests {
         for name in seen {
             assert!(union.contains(name), "policy for unknown field {name}");
         }
+    }
+
+    #[test]
+    fn claim_fields_are_derived_from_the_node_claim_lockfile() {
+        let reason =
+            "projection of the node:<id> claim; use fno agents claim acquire|release node:<id>";
+        for field in [
+            "locked_by",
+            "locked_by_harness",
+            "locked_by_harness_session",
+            "locked_at",
+        ] {
+            assert!(matches!(policy_for(field), Some(Policy::Derived(actual)) if actual == reason));
+        }
+        assert_eq!(
+            holding_fact(&json!({ "locked_by": "s1" }), "x-t1").as_deref(),
+            Some("locked_by holds (a node:x-t1 claim). Release it with: fno agents claim release node:x-t1 --holder <holder>")
+        );
     }
 
     // AC7-HP (door half)
