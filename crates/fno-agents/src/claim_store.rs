@@ -69,6 +69,7 @@ pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Val
     })
 }
 
+#[cfg(test)]
 fn reap_one(path: &Path, expected: &ClaimRecord) -> Result<bool, String> {
     reap_one_with_session_witness(path, expected, None)
 }

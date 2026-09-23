@@ -12,7 +12,9 @@
 use serde_json::Value;
 #[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// `fno-agents claim <acquire|release|status|list> <key> [flags]` — a thin front
 /// over [`crate::claims`], the native lockfile-protocol implementation.

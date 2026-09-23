@@ -1396,8 +1396,6 @@ fn decide_gate(
         // overrunning its team, so the per-territory cap stays enforced
         // here - the one axis --force does not excuse.
         if let Some(node) = admitted_node.as_deref() {
-            let mut warnings = Vec::new();
-            let live = live_rows(registry_path, &mut warnings);
             if let Err(receipt) = check_territory_cap(
                 config_cwd,
                 registry_path,

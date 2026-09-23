@@ -2418,6 +2418,7 @@ enum RecoverResult {
 /// permanently: archive-by-rename and exclusive-create both arbitrate a winner
 /// on their own, so the mutex is a spurious-retry guard, not the correctness
 /// boundary.
+#[cfg(test)]
 fn recover_stale(
     path: &Path,
     key: &str,
