@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn wrapped_scalar_names_the_key_and_the_rule() {
-        let wrapped = "---\nnode: x-1234\nkill_criteria: kill any lint whose false-positive rate exceeds its catch\n  rate in the first month\nstatus: in_review\n---\n\n# body\n";
+        let wrapped = "---\nnode: x-node\nkill_criteria: kill any lint whose false-positive rate exceeds its catch\n  rate in the first month\nstatus: in_review\n---\n\n# body\n";
         let err = parse_frontmatter(wrapped).unwrap_err();
         assert!(
             err.contains("kill_criteria"),
@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn single_line_scalar_of_the_same_value_parses() {
-        let doc = "---\nnode: x-1234\nkill_criteria: kill any lint whose false-positive rate exceeds its catch rate in the first month\nstatus: in_review\n---\n\n# body\n";
+        let doc = "---\nnode: x-node\nkill_criteria: kill any lint whose false-positive rate exceeds its catch rate in the first month\nstatus: in_review\n---\n\n# body\n";
         let parsed = parse_frontmatter(doc).unwrap();
         assert!(get_str(&parsed.fields, "kill_criteria").ends_with("in the first month"));
         assert_eq!(get_str(&parsed.fields, "status"), "in_review");
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn comment_between_key_and_continuation_names_no_key() {
-        let doc = "---\nstatus: in_review\n# Optional: depends_on:\n  - x-1234\n---\n\n# body\n";
+        let doc = "---\nstatus: in_review\n# Optional: depends_on:\n  - x-node\n---\n\n# body\n";
         let err = parse_frontmatter(doc).unwrap_err();
         assert!(err.contains("must be single-line"));
         assert!(!err.contains("status"), "blamed the wrong key: {err}");

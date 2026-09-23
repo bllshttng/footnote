@@ -1042,11 +1042,11 @@ mod tests {
         let plan = write_plan(&dir, "plan.md", &PLAN.replace("size: M", "size: S"));
         assert!(direct(
             &plan,
-            json!({"size": "M", "parent": "x-fd7f", "parent_slug": "epic-slug"})
+            json!({"size": "M", "parent": "x-parent", "parent_slug": "epic-slug"})
         ));
         let f = fields_of(&plan);
         assert_eq!(s(&f, "size"), "M");
-        assert_eq!(s(&f, "parent"), "x-fd7f");
+        assert_eq!(s(&f, "parent"), "x-parent");
         assert_eq!(s(&f, "parent_slug"), "epic-slug");
     }
 
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn finalized_plan_stays_valid_and_ready() {
         let dir = tmp_dir("finalized");
-        let text = "---\nnode: x-abcd\nstatus: ready\ncreated: 2026-07-08\ndifficulty: medium\nsize: M\ntype: feature\ndone_probes:\n  - fno x --json | grep -oE 'scope: [a-z]+'\n---\n\n# A plan\n\nbody text\n";
+        let text = "---\nnode: x-node\nstatus: ready\ncreated: 2026-07-08\ndifficulty: medium\nsize: M\ntype: feature\ndone_probes:\n  - fno x --json | grep -oE 'scope: [a-z]+'\n---\n\n# A plan\n\nbody text\n";
         let plan = write_plan(&dir, "plan.md", text);
         assert!(direct(
             &plan,

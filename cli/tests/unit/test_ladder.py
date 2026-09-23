@@ -261,12 +261,12 @@ def _project_is_noop(tmp_path, monkeypatch, node) -> bool:
     True when the round trip rewrote nothing."""
     import json as _json
 
-    import fno.paths as paths
+    import fno.graph.store as gs
     from fno.plan._project import project_graph_nodes
 
     g = tmp_path / "graph.json"
     g.write_text(_json.dumps({"entries": [node]}))
-    monkeypatch.setattr(paths, "graph_json", lambda: g)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
     return project_graph_nodes([node], [node["id"]]) == 0
 
 

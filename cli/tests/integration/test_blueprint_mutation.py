@@ -343,7 +343,6 @@ class TestProjectableFrontmatter:
         'plan projection skipped' warning on stderr."""
         import json as _json
 
-        import fno.paths as paths
         from fno.plan._project import project_graph_nodes
 
         doc = self._mutate(tmp_path)
@@ -366,7 +365,9 @@ class TestProjectableFrontmatter:
                 }
             )
         )
-        monkeypatch.setattr(paths, "graph_json", lambda: g)
+        import fno.graph.store as gs
+
+        monkeypatch.setattr(gs, "GRAPH_JSON", g)
         rewritten = project_graph_nodes([{"id": "x-test"}], ["x-test"])
         captured = capsys.readouterr()
         assert "plan projection skipped" not in captured.err

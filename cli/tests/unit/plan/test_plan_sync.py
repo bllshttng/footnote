@@ -44,8 +44,10 @@ def env(tmp_path, monkeypatch):
     the sync command and its watermark both resolve under tmp_path."""
     g = tmp_path / "graph.json"
     g.write_text('{"entries": []}\n')
+    import fno.graph.store as gs
     import fno.paths as paths
     monkeypatch.setattr(paths, "graph_json", lambda: g)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
     return tmp_path, g
 
 
@@ -134,8 +136,7 @@ def test_all_bypasses_watermark(env):
     res = runner.invoke(app, ["do", "plan", "sync", "--all"])  # graph unchanged, but --all
     assert res.exit_code == 0, res.output
     assert "1 docs repainted" in res.output
-    _, fields, _ = read_plan_file(d)
-    assert fields["priority"] == "p1"
+    assert _fields(d)["priority"] == "p1"
 
 
 def test_graph_unreadable_degrades(env, monkeypatch):
