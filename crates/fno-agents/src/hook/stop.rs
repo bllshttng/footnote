@@ -1021,6 +1021,11 @@ fn arbitrate_goal_truth(driver: &str, manifest: &str, goal: Option<GoalTruth>) -
         ));
     }
     if driver == "king" {
+        let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
+            return GoalArbitration::Refusal(
+                "active goal truth cannot be verified: manifest scope is missing".into(),
+            );
+        };
         let expected = crate::codex_thread::reign_objective(&scope);
         if goal.objective != expected {
             return GoalArbitration::Refusal(format!(

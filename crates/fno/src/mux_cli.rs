@@ -36,7 +36,7 @@ mod pane_submit;
 mod restore;
 
 pub use self::harness_command::command;
-use self::pane_submit::{pane_text, positive_post_submit_marker, send_pane_bytes, submit_pane};
+use self::pane_submit::{pane_text, send_pane_bytes, submit_pane};
 use self::restore::workspace_restore;
 
 use std::ffi::OsString;

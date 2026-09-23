@@ -342,13 +342,7 @@ pub fn run(args: &[String]) -> i32 {
         .unwrap_or_default();
     let owner = flag(args, "--continuation-owner")
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if scope.trim().is_empty() {
-                format!("target:{harness}")
-            } else {
-                format!("king:{scope}")
-            }
-        });
+        .unwrap_or_else(|| continuation_owner(&scope, &session));
 
     let ensure_goal = args.iter().any(|arg| arg == "--ensure-goal");
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -386,6 +380,16 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .cloned()
+}
+
+fn continuation_owner(scope: &str, session: &str) -> String {
+    if !scope.trim().is_empty() {
+        format!("king:{}", scope.trim())
+    } else if !session.trim().is_empty() {
+        format!("target:{}", session.trim())
+    } else {
+        String::new()
+    }
 }
 
 fn lifecycle_leg(harness: &str, command: &str) -> ReadinessLeg {
@@ -474,6 +478,19 @@ mod tests {
         let refusal = admit(snapshot).unwrap_err();
         assert!(refusal.contains("machine"));
         assert!(refusal.contains("probe failed"));
+    }
+
+    #[test]
+    fn target_continuation_owner_uses_the_exact_session_id() {
+        assert_eq!(
+            continuation_owner("", "thread-full-id"),
+            "target:thread-full-id"
+        );
+        assert_eq!(
+            continuation_owner("scope-a", "thread-full-id"),
+            "king:scope-a"
+        );
+        assert!(continuation_owner("", "").is_empty());
     }
 
     #[test]

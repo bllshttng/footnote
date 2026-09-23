@@ -73,6 +73,30 @@ def test_probe_uses_the_rust_receipt_before_the_transcript_fallback(monkeypatch,
     ]
 
 
+def test_astra_probe_refuses_static_fallback_without_session_window_facts(monkeypatch, tmp_path):
+    transcript = tmp_path / "astra.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "gpt-6-astra",
+                    "usage": {
+                        "input_tokens": 1000,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", lambda *a, **k: ("window unreadable", None))
+
+    assert probe_context(transcript_path=transcript) is None
+
+
 def test_probe_round_half_up_percent(tmp_path):
     transcript = tmp_path / "t.jsonl"
     # 307_850 / 1_000_000 -> 30.785% rounds to 31 (half-up via window//2).

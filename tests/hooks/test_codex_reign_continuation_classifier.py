@@ -25,7 +25,7 @@ def load_diagnostic():
 
 def verified_receipt() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "versions": {"codex": "codex-cli 0.155.1", "fno": "0.3.2", "fno_agents": "0.3.2"},
         "session": {

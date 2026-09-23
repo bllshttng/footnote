@@ -167,8 +167,16 @@ async fn apply_action(
             let current = thread
                 .goal_get_typed()
                 .await
-                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
-                .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+            let Some(current) = current else {
+                return Ok(json!({
+                    "provider": "codex",
+                    "thread_id": session_id,
+                    "scope": scope,
+                    "status": "absent",
+                    "continuation_owner": owner,
+                }));
+            };
             verify_goal(&current, &expected, GoalStatus::Active, "pause")?;
             let paused = thread
                 .goal_set_typed(&current.objective, GoalStatus::Paused)

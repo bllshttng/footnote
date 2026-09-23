@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
 import re
@@ -26,6 +25,7 @@ from typing import Any
 
 DEFAULT_ROOT = Path("/private/tmp/fno-continuation-proof")
 RECEIPT_PREFIX = "codex_reign_continuation_"
+RECEIPT_SCHEMA_VERSION = 2
 FAILURE_CLASSES = {
     "plugin-missing",
     "machine-installed-session-refresh-unverified",
@@ -76,6 +76,8 @@ def _nested(data: dict[str, Any], *keys: str) -> Any:
 
 def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     """Return one positive verdict or exactly one named failed reader."""
+    if receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        return _failure("malformed-output", "receipt.schema_version")
     failure = receipt.get("failure")
     if isinstance(failure, dict) and failure.get("class") in FAILURE_CLASSES:
         reader = failure.get("reader")
@@ -200,10 +202,6 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
-
-
 def _receipt_dir(root: Path) -> Path:
     path = root / "receipts"
     path.mkdir(parents=True, exist_ok=True)
@@ -278,11 +276,11 @@ def _run_journey(root: Path) -> Path:
     if not fno_agents:
         raise RuntimeError("external dependency missing: fno-agents is not available")
 
-    codex_version = _version(codex, env, repo)
-    agents_version = _version(fno_agents, env, repo)
+    _version(codex, env, repo)
+    _version(fno_agents, env, repo)
     native_root = Path(__file__).resolve().parents[2] / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
     if native_root.is_file():
-        agents_version = _version(str(native_root), env, repo)
+        _version(str(native_root), env, repo)
 
     repo_root = Path(__file__).resolve().parents[2]
     marketplace = _run(
@@ -348,90 +346,39 @@ def _run_journey(root: Path) -> Path:
                     event_rows.append(row)
         except OSError:
             continue
-    event_text = "\n".join(json.dumps(row, sort_keys=True) for row in event_rows)
-    required_markers = {
-        "stop_decision": "actionable-block",
-        "goal_delegation": "delegated-to-goal",
-        "quiet_park": "quiet-undelivered",
-        "wake": "wake_result",
-        "compaction": "contextCompaction",
-        "resume": "context_snapshot",
-        "daemon_replacement": "private-daemon-replacement",
-    }
-    missing_markers = [name for name, marker in required_markers.items() if marker not in event_text]
-    if missing_markers:
+    stop_events = []
+    for row in event_rows:
+        data = row.get("data")
+        if not isinstance(data, dict):
+            continue
+        if (
+            row.get("type") == "stop_decision"
+            and data.get("session_id") == thread_id
+            and data.get("turn_id") == turn_id
+            and data.get("decision") == "block"
+            and data.get("class") == "actionable-block"
+            and isinstance(data.get("correlation_id"), str)
+        ):
+            stop_events.append(row)
+    if len(stop_events) != 1:
         raise RuntimeError(
-            "parser-rejected: private event evidence is missing " + ", ".join(missing_markers)
+            "parser-rejected: no unique actionable Stop receipt matched the exact thread and turn"
         )
-    correlation_match = re.search(r'"correlation_id"\s*:\s*"([^"]+)"', event_text)
-    if correlation_match is None:
-        raise RuntimeError("malformed-output: private Stop evidence has no correlation_id")
-    correlation_id = correlation_match.group(1)
+    stamp = stop_events[0].get("ts") or stop_events[0].get("created_at")
+    if not isinstance(stamp, str):
+        raise RuntimeError("malformed-output: exact Stop receipt has no timestamp")
+    try:
+        stop_at = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError as error:
+        raise RuntimeError("malformed-output: exact Stop receipt timestamp is invalid") from error
+    if nonce.stat().st_mtime <= stop_at:
+        raise RuntimeError("parser-rejected: useful nonce action did not follow the exact Stop block")
 
-    action_hash = "sha256:" + hashlib.sha256(nonce.read_bytes()).hexdigest()
-    receipt = {
-        "schema_version": 1,
-        "created_at": _now(),
-        "versions": {"codex": codex_version, "fno": "0.3.2", "fno_agents": agents_version},
-        "session": {"id": thread_id, "harness": "codex", "turn_ids": [turn_id], "identity_constant": True},
-        "correlation_id": correlation_id,
-        "continuation_owner": "stop",
-        "action_hash": action_hash,
-        "user_message_count": user_messages,
-        "command_requests": [],
-        "window": {
-            "requested": 1_000_000,
-            "default": 272_000,
-            "max": 872_000,
-            "percent": 0.95,
-            "effective": 828_400,
-            "source": "explicit-per-thread",
-            "no_request_control_effective": 258_400,
-            "cost_policy": "272K",
-        },
-        "goal": {
-            "before": {"status": "absent", "objective": None, "usage": 0},
-            "after": {"status": "active", "objective": "$fno:reign disposable", "usage": 1, "thread_id": thread_id},
-            "paused": {"status": "paused", "objective": "$fno:reign disposable", "usage": 1},
-            "resumed": {"status": "active", "objective": "$fno:reign disposable", "usage": 1},
-        },
-        "stop": {
-            "independent": {
-                "decision": "block",
-                "class": "actionable-block",
-                "correlation_id": correlation_id,
-                "goal_before": "absent",
-                "useful_action_after_block": True,
-                "action_order": ["stop-block", "nonce-write"],
-            },
-            "delegated": {"decision": "allow", "class": "delegated-to-goal", "continuation_owner": "goal", "block_count": 0, "useful_action": True},
-        },
-        "proof": {
-            "mail_count": 0,
-            "queue_count": 0,
-            "manual_submit_count": 0,
-            "native_goal_initially_absent": True,
-            "independent_stop": True,
-            "goal_delegation": True,
-            "useful_nonce_action": True,
-            "user_message_count": user_messages,
-            "quiet_park": {"park_count": 1, "stop_samples_during_hold": 0, "park_interval_seconds": 0.25, "wake_result": "resumed"},
-            "repeats": [
-                {"boundary": "compaction", "status": "verified", "same_session": True, "useful_action": True},
-                {"boundary": "resume", "status": "verified", "same_session": True, "useful_action": True},
-                {"boundary": "private-daemon-replacement", "status": "verified", "same_session": True, "useful_action": True},
-            ],
-        },
-        "status": "verified",
-    }
-    verdict = classify_receipt(receipt)
-    if not verdict["ok"]:
-        raise RuntimeError(f"{verdict['class']}: {verdict['failed_reader']}")
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = _receipt_dir(root) / f"{RECEIPT_PREFIX}{stamp}.json"
-    path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    print(f"codex_reign_continuation_receipt {path}")
-    return path
+    raise RuntimeError(
+        "parser-rejected: the journey measured one independent Stop and nonce action, "
+        "but did not collect native goal, effective-window, quiet-park, wake, and "
+        "repeated compaction/resume receipts; no verified receipt was written"
+    )
 
 
 def _receipt_age_hours(path: Path, now: float | None = None) -> float | None:

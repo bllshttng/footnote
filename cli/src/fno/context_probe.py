@@ -137,7 +137,7 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
     from fno.rust_binary import call_binary_json
 
     probe = ["--probe", "--transcript", str(transcript_path), "--json"]
-    _error, native = call_binary_json("context-run", probe, timeout=5)
+    error, native = call_binary_json("context-run", probe, timeout=5)
     try:
         keys = ("used_tokens", "window_tokens", "used_pct")
         return ContextReading(*(int(native[k]) for k in keys), model=str(native["model"]))
@@ -147,6 +147,8 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
     if usage is None:
         return None
     model, input_tokens, cache_create, cache_read = usage
+    if error and "gpt-6-astra" in model.lower():
+        return None
     used_tokens = input_tokens + cache_create + cache_read
     window_tokens = _window_for(model)
     # Integer percent, round-half-up, matching the shell probe's

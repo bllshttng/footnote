@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 pub const ASTRA_PREPARATION_PERCENT: u64 = 20;
 pub const ASTRA_ACTION_PERCENT: u64 = 25;
 pub const ASTRA_ACTION_TOKENS: u64 = 250_000;
+const ASTRA_DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
+const ASTRA_MAX_CONTEXT_WINDOW: u64 = 872_000;
+const ASTRA_EFFECTIVE_PERCENT: u64 = 95;
+const TAIL_BYTES: u64 = 256 * 1024;
+const EXPANDED_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextWindowReceipt {
@@ -22,30 +29,22 @@ pub struct ContextWindowRequest {
 }
 
 impl ContextWindowRequest {
-    pub fn from_config(config: Option<&serde_json::Map<String, Value>>) -> Option<Self> {
-        let config = config?;
-        let request = Self {
-            model_context_window: config.get("model_context_window").and_then(Value::as_u64),
-            effective_context_window_percent: config
-                .get("effective_context_window_percent")
-                .and_then(Value::as_u64),
+    pub fn from_config(
+        config: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<Option<Self>, ContextWindowError> {
+        let Some(config) = config else {
+            return Ok(None);
         };
-        (request.model_context_window.is_some()
+        let request = Self {
+            model_context_window: configured_u64(config, "model_context_window")?,
+            effective_context_window_percent: configured_u64(
+                config,
+                "effective_context_window_percent",
+            )?,
+        };
+        Ok((request.model_context_window.is_some()
             || request.effective_context_window_percent.is_some())
-        .then_some(request)
-    }
-
-    pub fn merge_into(&self, config: &mut serde_json::Map<String, Value>) {
-        if let Some(window) = self.model_context_window {
-            config
-                .entry("model_context_window")
-                .or_insert_with(|| Value::from(window));
-        }
-        if let Some(percent) = self.effective_context_window_percent {
-            config
-                .entry("effective_context_window_percent")
-                .or_insert_with(|| Value::from(percent));
-        }
+        .then_some(request))
     }
 }
 
@@ -133,6 +132,56 @@ pub fn window_for_model(model: &str) -> u64 {
     }
 }
 
+pub fn effective_window_for_model(
+    model: &str,
+    session_id: &str,
+) -> Result<u64, ContextWindowError> {
+    if !is_astra_model(model) {
+        return Ok(window_for_model(model));
+    }
+    if session_id.trim().is_empty() {
+        return Err(ContextWindowError::Missing("exact Codex session id"));
+    }
+    let home = crate::paths::AgentsHome::from_env_opt()
+        .ok_or(ContextWindowError::Missing("declared Codex registry root"))?;
+    let registry = crate::state::load_registry(&home.registry_json())
+        .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
+    let entry = registry
+        .find_by_session("codex", session_id)
+        .ok_or(ContextWindowError::Missing("Codex session registry row"))?;
+    let carry = crate::codex_thread::parse_harness_args(&entry.harness_args)
+        .map_err(ContextWindowError::Unreadable)?;
+    let request =
+        ContextWindowRequest::from_config(Some(&carry.config))?.unwrap_or(ContextWindowRequest {
+            model_context_window: None,
+            effective_context_window_percent: None,
+        });
+    let configured = request
+        .model_context_window
+        .unwrap_or(ASTRA_DEFAULT_CONTEXT_WINDOW);
+    let percent = request
+        .effective_context_window_percent
+        .unwrap_or(ASTRA_EFFECTIVE_PERCENT);
+    effective_window(&ContextWindowReceipt {
+        model: model.to_string(),
+        context_window: Some(configured),
+        max_context_window: Some(ASTRA_MAX_CONTEXT_WINDOW),
+        effective_context_window_percent: Some(percent),
+    })
+}
+
+fn configured_u64(
+    config: &serde_json::Map<String, Value>,
+    key: &'static str,
+) -> Result<Option<u64>, ContextWindowError> {
+    match config.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or(ContextWindowError::Invalid(
+            "Codex context setting is not an unsigned integer",
+        )),
+    }
+}
+
 pub fn is_astra_model(model: &str) -> bool {
     model.to_ascii_lowercase().contains("gpt-6-astra")
 }
@@ -172,17 +221,41 @@ pub fn parse_usage_record(record: &Value) -> Option<ContextUsage> {
 }
 
 pub fn read_last_usage(path: &Path) -> Result<Option<ContextUsage>, ContextWindowError> {
-    let bytes =
-        std::fs::read(path).map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
-    for line in bytes.rsplit(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
+    let mut file =
+        File::open(path).map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
+    let size = file
+        .metadata()
+        .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?
+        .len();
+    for limit in [Some(TAIL_BYTES), Some(EXPANDED_TAIL_BYTES), None] {
+        let start = limit.map_or(0, |limit| size.saturating_sub(limit));
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(size.saturating_sub(start))
+            .read_to_end(&mut bytes)
+            .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
+        if start > 0 {
+            if let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') {
+                bytes.drain(..=first_newline);
+            } else {
+                bytes.clear();
+            }
         }
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        if let Some(usage) = parse_usage_record(&record) {
-            return Ok(Some(usage));
+        for line in bytes.rsplit(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            if let Some(usage) = parse_usage_record(&record) {
+                return Ok(Some(usage));
+            }
+        }
+        if limit.map_or(true, |limit| size <= limit) {
+            break;
         }
     }
     Ok(None)
@@ -281,13 +354,71 @@ mod tests {
     }
 
     #[test]
+    fn last_usage_reader_finds_a_recent_record_without_loading_old_transcript_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "fno-context-probe-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&vec![b'x'; EXPANDED_TAIL_BYTES as usize + 100])
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(
+            br#"{"type":"assistant","message":{"model":"gpt-6-astra","usage":{"input_tokens":17,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}}"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let usage = super::read_last_usage(&path).unwrap().unwrap();
+        assert_eq!(usage.model, "gpt-6-astra");
+        assert_eq!(usage.used_tokens(), Some(22));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn ac3_resume_explicit_context_request_round_trips_into_config() {
         let mut config = serde_json::Map::new();
         config.insert("model_context_window".into(), 800_000.into());
-        let request = super::ContextWindowRequest::from_config(Some(&config)).unwrap();
-        let mut resumed = serde_json::Map::new();
-        request.merge_into(&mut resumed);
-        assert_eq!(resumed, config);
+        let request = super::ContextWindowRequest::from_config(Some(&config))
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.model_context_window, Some(800_000));
+        assert_eq!(request.effective_context_window_percent, None);
+    }
+
+    #[test]
+    fn astra_effective_window_uses_the_registry_request_or_default() {
+        let explicit = serde_json::json!({
+            "model_context_window": 1_000_000,
+            "effective_context_window_percent": 95
+        });
+        let explicit: serde_json::Map<String, Value> = serde_json::from_value(explicit).unwrap();
+        let request = super::ContextWindowRequest::from_config(Some(&explicit)).unwrap();
+        let configured = request.model_context_window.unwrap();
+        assert_eq!(
+            super::effective_window(&ContextWindowReceipt {
+                model: "gpt-6-astra".into(),
+                context_window: Some(configured),
+                max_context_window: Some(ASTRA_MAX_CONTEXT_WINDOW),
+                effective_context_window_percent: Some(95),
+            })
+            .unwrap(),
+            828_400
+        );
+        assert_eq!(
+            super::effective_window(&ContextWindowReceipt {
+                model: "gpt-6-astra".into(),
+                context_window: Some(ASTRA_DEFAULT_CONTEXT_WINDOW),
+                max_context_window: Some(ASTRA_MAX_CONTEXT_WINDOW),
+                effective_context_window_percent: Some(ASTRA_EFFECTIVE_PERCENT),
+            })
+            .unwrap(),
+            258_400
+        );
     }
 
     #[test]

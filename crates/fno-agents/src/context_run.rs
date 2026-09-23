@@ -168,11 +168,21 @@ fn run_effective_window(args: &[String]) -> i32 {
 
 fn run_context_probe(args: &[String]) -> i32 {
     let mut transcript = None;
+    let mut session = std::env::var("CODEX_THREAD_ID")
+        .or_else(|_| std::env::var("FNO_HARNESS_SESSION_ID"))
+        .unwrap_or_default();
     let mut json_output = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--transcript" => transcript = rest.next().map(String::as_str),
+            "--session" => {
+                session = rest
+                    .next()
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            }
             "--json" => json_output = true,
             other => {
                 eprintln!("context-run --probe: unknown argument `{other}`");
@@ -192,7 +202,14 @@ fn run_context_probe(args: &[String]) -> i32 {
         Some(tokens) => tokens,
         None => return 3,
     };
-    let window_tokens = crate::context_window::window_for_model(&usage.model);
+    let window_tokens =
+        match crate::context_window::effective_window_for_model(&usage.model, &session) {
+            Ok(window) => window,
+            Err(error) => {
+                eprintln!("context-run --probe: effective context window unreadable: {error:?}");
+                return 3;
+            }
+        };
     let used_pct =
         ((used_tokens as u128 * 100 + (window_tokens as u128 / 2)) / window_tokens as u128) as u64;
     let band = crate::context_window::compaction_band(&usage.model, used_tokens, window_tokens);

@@ -4,12 +4,15 @@ use super::*;
 use crate::cli_args::MuxCommandArgs;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RECEIPT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+const RECEIPT_RESERVED_DETAIL: &str =
+    "request reserved before submission; a retry must not submit it again";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProofKind {
@@ -64,6 +67,12 @@ fn classify_postcondition(submitted: bool, proof: Result<bool, String>) -> Comma
         Ok(true) => CommandStatus::Verified,
         Ok(false) | Err(_) => CommandStatus::Unknown,
     }
+}
+
+fn screen_postcondition_matches(before: &str, after: &str, expected: &Regex) -> bool {
+    !expected.is_match(before)
+        && expected.is_match(after)
+        && super::pane_submit::positive_post_submit_marker(before, after)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,8 +131,21 @@ fn load_receipt(request_id: &str) -> Result<Option<CommandReceipt>, String> {
 
 fn write_receipt(receipt: &CommandReceipt) -> Result<(), String> {
     let path = receipt_path(&receipt.request_id)?;
-    if path.exists() {
-        return Ok(());
+    let existing = load_receipt(&receipt.request_id)?;
+    let Some(existing) = existing else {
+        return Err("command receipt was not reserved before submission".into());
+    };
+    if existing.detail != RECEIPT_RESERVED_DETAIL
+        || existing.status != CommandStatus::Unknown.word()
+        || existing.selector != receipt.selector
+        || existing.session_id != receipt.session_id
+        || existing.harness != receipt.harness
+        || existing.transport != receipt.transport
+        || existing.expected_identity != receipt.expected_identity
+        || existing.command != receipt.command
+        || existing.proof != receipt.proof
+    {
+        return Err("command receipt reservation does not match the submitted action".into());
     }
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let body = serde_json::to_vec_pretty(receipt).map_err(|e| format!("encode receipt: {e}"))?;
@@ -136,6 +158,35 @@ fn write_receipt(receipt: &CommandReceipt) -> Result<(), String> {
             Ok(())
         }
         Err(e) => Err(format!("commit command receipt: {e}")),
+    }
+}
+
+fn reserve_receipt(receipt: &CommandReceipt) -> Result<bool, String> {
+    let path = receipt_path(&receipt.request_id)?;
+    reserve_receipt_at(&path, receipt)
+}
+
+fn reserve_receipt_at(path: &std::path::Path, receipt: &CommandReceipt) -> Result<bool, String> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(format!("cannot reserve command receipt: {error}")),
+    };
+    let body = serde_json::to_vec_pretty(receipt)
+        .map_err(|error| format!("encode command receipt reservation: {error}"))?;
+    if let Err(error) = file.write_all(&body).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(format!("write command receipt reservation: {error}"));
+    }
+    Ok(true)
+}
+
+fn command_status_exit_code(status: &str) -> i32 {
+    match status {
+        "verified" => EXIT_OK,
+        "unknown" => EXIT_CONTROL_UNANSWERED,
+        _ => EXIT_ERROR,
     }
 }
 
@@ -371,7 +422,6 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     }
-    let _timeout = Duration::from_secs(args.timeout_seconds);
     let request_id = args.request_id.clone().unwrap_or_else(|| {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -396,11 +446,7 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
                 return EXIT_ERROR;
             }
             print_receipt(&receipt);
-            return if receipt.status == "verified" {
-                EXIT_OK
-            } else {
-                EXIT_ERROR
-            };
+            return command_status_exit_code(&receipt.status);
         }
         Ok(None) => {}
         Err(error) => {
@@ -436,6 +482,67 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
         }
         eprintln!("fno mux command: boundary scheduling is not available on this controller");
         return EXIT_ERROR;
+    }
+    if recipe.is_none() && proof != ProofKind::Screen {
+        eprintln!(
+            "fno mux command: {:?} proof requires a declared provider action",
+            proof.word()
+        );
+        return EXIT_USAGE;
+    }
+    if recipe.is_none() && row.mux.is_none() {
+        eprintln!("fno mux command: paneless row has no declared provider action");
+        return EXIT_ERROR;
+    }
+    let transport = recipe
+        .as_ref()
+        .map(|(transport, _, _)| transport.as_str())
+        .unwrap_or("pane");
+    let reservation = CommandReceipt {
+        request_id: request_id.clone(),
+        selector: args.selector.clone(),
+        session_id: session_id.clone(),
+        harness: harness.clone(),
+        transport: transport.to_string(),
+        expected_identity: session_id.clone(),
+        command: args.text.clone(),
+        proof: proof.word().into(),
+        status: CommandStatus::Unknown.word().into(),
+        before_digest: String::new(),
+        after_digest: String::new(),
+        detail: RECEIPT_RESERVED_DETAIL.into(),
+    };
+    match reserve_receipt(&reservation) {
+        Ok(true) => {}
+        Ok(false) => match load_receipt(&request_id) {
+            Ok(Some(receipt))
+                if receipt.selector == args.selector
+                    && receipt.command == args.text
+                    && receipt.proof == proof.word()
+                    && receipt.session_id == session_id =>
+            {
+                print_receipt(&receipt);
+                return command_status_exit_code(&receipt.status);
+            }
+            Ok(Some(_)) => {
+                eprintln!(
+                        "fno mux command: request id {request_id:?} already belongs to a different action"
+                    );
+                return EXIT_ERROR;
+            }
+            Ok(None) => {
+                eprintln!("fno mux command: request id {request_id:?} is already reserved");
+                return EXIT_CONTROL_UNANSWERED;
+            }
+            Err(error) => {
+                eprintln!("fno mux command: {error}");
+                return EXIT_CONTROL_UNANSWERED;
+            }
+        },
+        Err(error) => {
+            eprintln!("fno mux command: {error}");
+            return EXIT_ERROR;
+        }
     }
     if let Some((transport, method, expected_proof)) = recipe.as_ref() {
         let scope = row.crown_scope.as_deref();
@@ -487,12 +594,12 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
             EXIT_CONTROL_UNANSWERED
         };
     }
-    let (transport, detail) = match (recipe, row.mux.clone()) {
-        (None, None) => {
+    match row.mux.clone() {
+        None => {
             eprintln!("fno mux command: paneless row has no declared provider action");
             return EXIT_ERROR;
         }
-        (None, Some((session, pane))) => {
+        Some((session, pane)) => {
             let sock = match proto::socket_path(&session) {
                 Ok(path) => path,
                 Err(error) => {
@@ -562,40 +669,34 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
                 print_receipt(&receipt);
                 return EXIT_CONTROL_UNANSWERED;
             }
-            let after = match pane_text(&sock, &session, pane) {
-                Ok(text) => text,
-                Err(error) => {
-                    let receipt = CommandReceipt {
-                        request_id,
-                        selector: args.selector,
-                        session_id,
-                        harness,
-                        transport: "pane".into(),
-                        expected_identity: expected_identity.clone(),
-                        command: args.text,
-                        proof: proof.word().into(),
-                        status: CommandStatus::Unknown.word().into(),
-                        before_digest: digest(&before),
-                        after_digest: String::new(),
-                        detail: format!("post-submit read failed: {error}"),
-                    };
-                    let _ = write_receipt(&receipt);
-                    print_receipt(&receipt);
-                    return EXIT_CONTROL_UNANSWERED;
-                }
-            };
-            let verified = args
+            let expected = args
                 .expect
                 .as_deref()
-                .map(|pattern| Regex::new(pattern).map(|re| re.is_match(&after)))
-                .transpose()
-                .unwrap_or(Some(false))
-                .unwrap_or(false);
-            let status = if proof == ProofKind::Screen {
-                classify_postcondition(true, Ok(verified))
-            } else {
-                CommandStatus::Verified
-            };
+                .and_then(|pattern| Regex::new(pattern).ok())
+                .expect("screen proof validates its expected regex before submission");
+            let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
+            let mut after = String::new();
+            let mut verified = false;
+            let mut last_read_error = None;
+            loop {
+                match pane_text(&sock, &session, pane) {
+                    Ok(text) => {
+                        verified = screen_postcondition_matches(&before, &text, &expected);
+                        after = text;
+                        last_read_error = None;
+                        if verified {
+                            break;
+                        }
+                    }
+                    Err(error) => last_read_error = Some(error.to_string()),
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100).min(remaining));
+            }
+            let status = classify_postcondition(true, Ok(verified));
             let receipt = CommandReceipt {
                 request_id,
                 selector: args.selector,
@@ -608,7 +709,16 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
                 status: status.word().into(),
                 before_digest: digest(&before),
                 after_digest: digest(&after),
-                detail: "identity-pinned pane postcondition observed".into(),
+                detail: if verified {
+                    "identity-pinned pane postcondition observed".into()
+                } else if let Some(error) = last_read_error {
+                    format!("screen postcondition unreadable before timeout: {error}")
+                } else {
+                    format!(
+                        "screen postcondition not observed within {}s",
+                        args.timeout_seconds
+                    )
+                },
             };
             if let Err(error) = write_receipt(&receipt) {
                 eprintln!("fno mux command: {error}");
@@ -621,27 +731,7 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
                 EXIT_CONTROL_UNANSWERED
             };
         }
-    };
-    let receipt = CommandReceipt {
-        request_id,
-        selector: args.selector,
-        session_id: session_id.clone(),
-        harness,
-        transport,
-        expected_identity: session_id,
-        command: args.text,
-        proof: proof.word().into(),
-        status: CommandStatus::Unknown.word().into(),
-        before_digest: String::new(),
-        after_digest: String::new(),
-        detail,
-    };
-    if let Err(error) = write_receipt(&receipt) {
-        eprintln!("fno mux command: {error}");
-        return EXIT_ERROR;
     }
-    print_receipt(&receipt);
-    EXIT_CONTROL_UNANSWERED
 }
 
 #[cfg(test)]
@@ -800,5 +890,53 @@ mod tests {
         );
         assert!(safe_request_id("request-1").is_ok());
         assert!(safe_request_id("../request-1").is_err());
+    }
+
+    #[test]
+    fn screen_proof_requires_a_new_post_submit_marker() {
+        let expected = Regex::new("contextCompaction").unwrap();
+        assert!(!screen_postcondition_matches(
+            "contextCompaction already shown",
+            "contextCompaction already shown",
+            &expected
+        ));
+        assert!(screen_postcondition_matches(
+            "idle",
+            "contextCompaction started",
+            &expected
+        ));
+    }
+
+    #[test]
+    fn command_request_reservation_is_exclusive_before_submission() {
+        let root = std::env::temp_dir().join(format!(
+            "fno-command-receipt-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("request.json");
+        let receipt = CommandReceipt {
+            request_id: "request-1".into(),
+            selector: "thread-full-id".into(),
+            session_id: "thread-full-id".into(),
+            harness: "codex".into(),
+            transport: "app-server".into(),
+            expected_identity: "thread-full-id".into(),
+            command: "/compact".into(),
+            proof: "compact".into(),
+            status: CommandStatus::Unknown.word().into(),
+            before_digest: String::new(),
+            after_digest: String::new(),
+            detail: RECEIPT_RESERVED_DETAIL.into(),
+        };
+        assert!(reserve_receipt_at(&path, &receipt).unwrap());
+        assert!(!reserve_receipt_at(&path, &receipt).unwrap());
+        let stored: CommandReceipt = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored.detail, RECEIPT_RESERVED_DETAIL);
+        fs::remove_dir_all(root).unwrap();
     }
 }

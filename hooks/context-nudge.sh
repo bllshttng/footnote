@@ -163,6 +163,7 @@ USED_PCT=""
 USED_TOKENS=""
 WINDOW_TOKENS=""
 COMPACTION_BAND=""
+COMPACTION_PREPARATION=0
 if command -v jq >/dev/null 2>&1 && command -v fno-agents >/dev/null 2>&1; then
     PROBE_OUT=$(with_timeout 5 fno-agents context-run --probe --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
 elif command -v jq >/dev/null 2>&1 && command -v fno >/dev/null 2>&1; then
@@ -392,6 +393,23 @@ compact_instruction() {
     fi
 }
 
+provider_compaction_instruction() {
+    local out=""
+    if command -v fno-agents >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
+        out=$(with_timeout 45 fno-agents loop command \
+            --session "$SESSION_ID" --cwd "$PWD" \
+            --method thread/compact/start --text /compact 2>/dev/null || true)
+    fi
+    if [[ -n "$out" ]] && printf '%s' "$out" | jq -e \
+        --arg session "$SESSION_ID" \
+        '.verified == true and .action == "compact" and .status == "completed" and .thread_id == $session' \
+        >/dev/null 2>&1; then
+        printf '%s' "Codex provider compaction completed for exact thread ${SESSION_ID}; verified receipt: ${out}"
+    else
+        printf '%s' "Codex provider compaction was not verified for exact thread ${SESSION_ID:-unknown}. Do not retry this action blindly; ask the operator to inspect provider state."
+    fi
+}
+
 # ── 6. Check (a): context pressure (EVERY session). Two branches: ─────────────
 #   quality  - large window (>= MIN_WINDOW) past the trigger (returns diminish)
 #   capacity - any window about to hit the absolute RESERVE floor (preamble-heavy
@@ -412,13 +430,24 @@ if [[ -n "$USED_PCT" && -n "$WINDOW_TOKENS" ]]; then
     if [[ "$COMPACTION_BAND" == "prepare" || "$COMPACTION_BAND" == "action" ]]; then
         FIRE_CTX=1
     fi
+    if [[ "$COMPACTION_BAND" == "prepare" ]]; then
+        COMPACTION_PREPARATION=1
+    fi
 fi
 if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     touch "$CTX_LATCH" 2>/dev/null || true
     # Measured ONCE per fire, inside the latch, and shared by both branches: both
     # ask for a compact and the answer does not depend on the crown. Outside the
     # latch this would probe on every Stop.
-    _compact_ask="$(compact_instruction)"
+    if [[ "${FNO_HARNESS:-}" == "codex" || -n "${CODEX_THREAD_ID:-}" ]]; then
+        if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
+            _compact_ask="Astra preparation band reached. Preserve volatile decisions and continue; the provider compact action waits for the action band."
+        else
+            _compact_ask="$(provider_compaction_instruction)"
+        fi
+    else
+        _compact_ask="$(compact_instruction)"
+    fi
     if [[ "$IS_KING" -eq 1 ]]; then
         emit_event "king_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
@@ -469,7 +498,11 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # says everything the king needs. The event above still records the stored
         # level: that is a snapshot for whoever migrates the rows, and no session
         # acts on it.
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to COMPACT AND KEEP RULING. ${_compact_ask} The PreCompact hook writes your crown, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_king_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
+        _compact_action="COMPACT AND KEEP RULING"
+        if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
+            _compact_action="PREPARE TO COMPACT AND KEEP RULING; do not compact until the action band"
+        fi
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to ${_compact_action}. ${_compact_ask} The PreCompact hook writes your crown, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_king_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
@@ -482,7 +515,11 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         if command -v fno >/dev/null 2>&1; then
             PLAN_PATH=$(with_timeout 3 fno do state show --type target --field plan_path 2>/dev/null | head -1 || true)
         fi
-        _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session compact trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now: your session id, mail handle, and claims all survive it. ${_compact_ask}"
+        if [[ "$COMPACTION_PREPARATION" -eq 1 ]]; then
+            _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). The Astra preparation band is active. Preserve volatile decisions and continue; the provider compact action waits for the action band. ${_compact_ask}"
+        else
+            _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session compact trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now: your session id, mail handle, and claims all survive it. ${_compact_ask}"
+        fi
         if [[ -n "$PLAN_PATH" ]]; then
             REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno backlog carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
         else
