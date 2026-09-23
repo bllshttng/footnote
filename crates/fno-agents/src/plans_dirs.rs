@@ -442,7 +442,15 @@ mod tests {
                 .join("plans")]
         );
 
-        // A probe that answers a relative line contributes nothing.
+        // A probe that answers a relative line contributes nothing. The stamp
+        // moves first, or the cache from phase 1 answers and no probe runs.
+        let path = fx.base.join("alpha").join(".fno").join("config.toml");
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o200);
+        fs::set_permissions(&path, perms).unwrap();
+        fs::write(&path, "plans_dir = \".fno/plans/\"\n").unwrap();
+        let now = std::time::SystemTime::now();
+        set_mtime(&path, now + std::time::Duration::from_secs(5));
         fs::write(
             fx.fake_bin().join("fno"),
             "#!/bin/sh\necho \"plans/20260101-x.md\"\n",
