@@ -125,7 +125,7 @@ reset_events() { rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db"; }
 # keys the row, so the fixture computes the same root the resolver makes,
 # with the same shim + env rather than re-deriving the slug here.
 space_kings() {  # space_kings <dir> - the kings dir of <dir>'s space
-  (cd "$SBX" && SBX="$1" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'import os; from pathlib import Path; from fno.paths import king_state_root; print(king_state_root(Path(os.environ["SBX"])) / "kings")')
+  (cd "$SBX" && SBX="$1" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'import os; from pathlib import Path; from fno.king.state import king_state_root; print(king_state_root(Path(os.environ["SBX"])) / "kings")')
 }
 KINGS_DIR="$(space_kings "$SBX")"
 mkdir -p "$KINGS_DIR"
