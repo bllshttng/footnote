@@ -195,8 +195,9 @@ def slot_switch_remedy(account: str) -> str:
     # `fno config accounts use` replaces this once stored copies are read back and refreshed.
     slot = Path.home() / ".claude"
     return (f"with no `/logout` first, sign in as {account} with `claude /login` (interactive"
-            f" sessions) and with `CLAUDE_CONFIG_DIR={slot} claude /login` (background sessions,"
-            f" which read '{_claude_scoped_service(slot)}'); blocked sessions recover on their next request")
+            f" sessions) and with `CLAUDE_CONFIG_DIR={slot} claude /login` (background"
+            f" sessions, which read '{_claude_scoped_service(slot)}'); blocked sessions"
+            f" recover on their next request")
 
 
 def _run_security(args: list[str]) -> subprocess.CompletedProcess:
