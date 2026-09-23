@@ -119,8 +119,7 @@ struct AgentVerbResult {
     unavailable: bool,
 }
 
-async fn run_agent_verb(verb: &str, name: &str) -> AgentVerbResult {
-    const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
+async fn run_agent_verb(verb: &str, name: &str, timeout: Duration) -> AgentVerbResult {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
@@ -128,7 +127,7 @@ async fn run_agent_verb(verb: &str, name: &str) -> AgentVerbResult {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
+    match tokio::time::timeout(timeout, fut).await {
         Err(_) => AgentVerbResult {
             ok: false,
             stdout: String::new(),
@@ -174,7 +173,48 @@ fn render_agent_verb(verb: &str, name: &str, r: &AgentVerbResult) -> String {
 }
 
 pub(super) async fn run_agent_action(verb: &str, name: &str) -> String {
-    render_agent_verb(verb, name, &run_agent_verb(verb, name).await)
+    render_agent_verb(
+        verb,
+        name,
+        &run_agent_verb(verb, name, Duration::from_secs(20)).await,
+    )
+}
+
+/// Shell the per-harness resume door, which owns the route and any race-time
+/// refusal. Its receipt is the useful notice; keep the longer bound for the
+/// claude background-resume confirmation poll.
+pub(super) async fn run_resume(name: &str) -> String {
+    let result = run_agent_verb("resume", name, Duration::from_secs(60)).await;
+    render_resume_notice(name, &result)
+}
+
+fn resume_output_line(output: &str, last: bool) -> Option<String> {
+    let mut lines = output.lines().filter_map(|line| {
+        let clean: String = line.chars().filter(|c| !c.is_control()).collect();
+        (!clean.trim().is_empty()).then_some(clean)
+    });
+    if last {
+        lines.last()
+    } else {
+        lines.next()
+    }
+}
+
+fn render_resume_notice(name: &str, result: &AgentVerbResult) -> String {
+    if result.timed_out {
+        return format!("resume {name}: timed out");
+    }
+    if result.unavailable {
+        return format!("resume {name}: unavailable");
+    }
+    if result.ok {
+        return resume_output_line(&result.stdout, true)
+            .or_else(|| resume_output_line(&result.stderr, true))
+            .unwrap_or_else(|| format!("resumed {name}"));
+    }
+    resume_output_line(&result.stderr, false)
+        .or_else(|| resume_output_line(&result.stdout, false))
+        .unwrap_or_else(|| format!("resume {name}: failed"))
 }
 
 /// The daemon's own last non-empty stdout line, for notices that quote the
@@ -193,7 +233,7 @@ fn daemon_verdict(stdout: &str) -> Option<&str> {
 /// The remove leg: rm alone. Since law d-81c6da7e the daemon's rm
 /// ends a live row's process itself, so the gesture never composes a stop.
 pub(super) async fn run_remove(name: &str) -> String {
-    let rm = run_agent_verb("rm", name).await;
+    let rm = run_agent_verb("rm", name, Duration::from_secs(20)).await;
     measure_remove_notice(name, &rm)
 }
 
@@ -695,6 +735,17 @@ mod tests {
         }
     }
 
+    fn resume_fixture(label: &str, body: &str) -> (std::path::PathBuf, PinnedAgentEnv) {
+        let tmp =
+            std::env::temp_dir().join(format!("fno-x-6acd-resume-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bin = tmp.join("fake-agents.sh");
+        write_fake_bin(&bin, body);
+        let env = PinnedAgentEnv::set(&bin, &tmp);
+        (tmp, env)
+    }
+
     #[tokio::test]
 
     async fn remove_press_shells_rm_alone() {
@@ -732,6 +783,96 @@ mod tests {
 
         assert_eq!(stop_calls, 0, "no stop call: {log}");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_success_shells_resume_and_shows_the_cli_receipt() {
+        // AC1-HP and AC2-HP: the mux resume gesture delegates once to the
+        // resume door and surfaces its codex receipt from stderr.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "receipt",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'delivered to t-x-e64a-luna over the codex daemon' >&2\n\
+             exit 0\n",
+        );
+
+        let notice = run_resume("t-x-e64a-luna").await;
+
+        assert_eq!(notice, "delivered to t-x-e64a-luna over the codex daemon");
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["resume t-x-e64a-luna"]);
+        assert!(
+            !log.contains("spawn"),
+            "resume never forks a new session: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_claude_uses_resume_without_spawning() {
+        // AC2-HP: claude uses the same-id resume door, never spawn --resume.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "claude",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'claude session resumed'\n\
+             exit 0\n",
+        );
+
+        let notice = run_resume("claude-worker").await;
+
+        assert_eq!(notice, "claude session resumed");
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["resume claude-worker"]);
+        assert!(
+            !log.contains("spawn"),
+            "resume never forks a new session: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_failure_shows_the_refusal_line_without_wrapping_it() {
+        // AC3-ERR: the door's refusal is the complete operator notice.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "refusal",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             printf ' worker became busy before resume \\n' >&2\n\
+             exit 13\n",
+        );
+
+        let notice = run_resume("raced-worker").await;
+
+        assert_eq!(notice, " worker became busy before resume ");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_timeout_uses_the_sixty_second_bound() {
+        // AC4-EDGE: resume waits longer than the ordinary lifecycle verbs,
+        // then reports its fixed timeout notice.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "timeout",
+            "#!/bin/bash\n\
+             sleep 80\n",
+        );
+        let started = std::time::Instant::now();
+
+        let notice = run_resume("slow-worker").await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(notice, "resume slow-worker: timed out");
+        assert!(
+            elapsed >= Duration::from_secs(55),
+            "timed out after {elapsed:?}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
