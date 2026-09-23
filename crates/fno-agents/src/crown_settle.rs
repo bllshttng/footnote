@@ -357,6 +357,14 @@ fn apply_with_projects(
                 .ok_or_else(|| "crown-settle: vacate entries need names".to_string())
         })
         .collect::<Result<HashSet<_>, _>>()?;
+    if outcome == "succeeded"
+        && occupancy
+            .holders
+            .iter()
+            .any(|holder| !planned_vacate.contains(holder.name.as_str()))
+    {
+        return Err("crown-settle: plan vacate omits a holder".to_string());
+    }
     let (outcome, vacate_rows) = if !occupancy.rivals.is_empty() {
         ("declined", Vec::new())
     } else if current == expected {
@@ -740,7 +748,10 @@ mod tests {
 
     #[test]
     fn apply_rejects_missing_caller_holder_ids_and_outcome() {
-        let rows = json!([]);
+        let rows = json!([{
+            "name": "king-a", "crown_scope": "epic-a", "status": "busy",
+            "harness_session_id": "sess-a",
+        }]);
         for (plan, key) in [
             (json!({"holder_ids": [], "outcome": "granted"}), "caller"),
             (
@@ -774,6 +785,14 @@ mod tests {
             (
                 json!({"caller": {"kind": "human"}, "holder_ids": [],
                        "outcome": "granted", "vacate": "bad"}),
+                "vacate",
+            ),
+            (
+                json!({
+                    "caller": {"kind": "human"},
+                    "holder_ids": [{"name": "king-a", "harness_session_id": "sess-a"}],
+                    "outcome": "succeeded", "vacate": [],
+                }),
                 "vacate",
             ),
         ] {
