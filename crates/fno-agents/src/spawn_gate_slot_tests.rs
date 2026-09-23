@@ -35,7 +35,7 @@ impl SuccessionFixture {
         let claims_root = dir.join("claims-root");
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        std::fs::create_dir_all(&claims_root).unwrap();
         std::fs::create_dir_all(&fnodir).unwrap();
         let config = fnodir.join("config.toml");
         std::fs::write(
