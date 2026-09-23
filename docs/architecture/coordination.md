@@ -32,13 +32,9 @@ target sessions would dispatch.
 
 One primitive, flat key namespace, atomic claim rows, append-only audit trail.
 
-### SQLite claim store
+### Lockfile claim store
 
-The native `fno-agents claim` verbs use the `claims` table in `graph.db` as
-their current store, with `node_claims` as its node-key view. An existing
-`.fno/claims` directory imports once when the store opens. The compatibility
-rollback is explicit: `fno-agents claim export-lockfiles --root <root>` writes
-the current rows back to lockfiles for an older reader.
+The lockfiles under the resolved claims root are the one store used by native `fno-agents claim` verbs and other readers. The open direction is recorded in operator question `q-5e30ff75`.
 
 ### Key namespace
 

@@ -135,12 +135,19 @@ fn park_session_claims(
     writer_pid: u32,
     daemon_pid: u32,
 ) -> Result<Vec<crate::convert::claim_repin::HeldClaim>, String> {
-    let rows = match crate::claim_store::list_db(None, false, None) {
-        Ok(rows) => rows,
-        // A claim store that cannot be read is not a claim that moved. Say
+    let records = match crate::claims::list(None, None, false) {
+        Ok(records) => records,
+        // A claims directory that cannot be read is not a claim that moved. Say
         // so rather than proceed as though there were none to carry.
-        Err(error) => return Err(format!("the claim store could not be read: {error}")),
+        Err(error) => return Err(format!("the claims lockfiles could not be read: {error}")),
     };
+    let rows = serde_json::json!({
+        "rows": records.iter().map(|record| serde_json::json!({
+            "key": &record.key,
+            "holder": &record.holder,
+            "pid": record.pid,
+        })).collect::<Vec<_>>(),
+    });
     let carried = crate::convert::claim_repin::claims_to_carry(&rows, writer_pid);
     match repin_failures(&carried, daemon_pid) {
         None => Ok(carried),
@@ -1033,4 +1040,94 @@ fn read_keepers() -> Vec<KeeperSighting> {
         return Vec::new();
     };
     KeeperSighting::from_json(&rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+
+    struct ClaimsRootRestore(Option<std::ffi::OsString>);
+
+    impl Drop for ClaimsRootRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+                None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+            }
+        }
+    }
+
+    fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = ClaimsRootRestore(std::env::var_os("FNO_CLAIMS_ROOT"));
+        std::env::set_var("FNO_CLAIMS_ROOT", root);
+        let result = f();
+        drop(restore);
+        result
+    }
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn park_session_claims_reads_and_repins_writer_lockfiles() {
+        let temp = tempfile::TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let database = rusqlite::Connection::open(temp.path().join("graph.db")).unwrap();
+            database
+                .execute_batch(
+                    "CREATE TABLE claim_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     INSERT INTO claim_meta (key, value) VALUES ('lockfiles_imported', '1');",
+                )
+                .unwrap();
+            drop(database);
+
+            let child = ChildGuard(
+                Command::new("sleep")
+                    .arg("60")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let writer_pid = child.0.id();
+            let keys = ["node:convert-lockfile-one", "session:convert-lockfile-two"];
+            for key in keys {
+                assert!(matches!(
+                    crate::claims::acquire(
+                        key,
+                        "target-session:convert-test",
+                        crate::claims::AcquireOpts {
+                            root: Some(temp.path().to_path_buf()),
+                            pid: Some(writer_pid),
+                            ..Default::default()
+                        }
+                    ),
+                    crate::claims::AcquireOutcome::Acquired(_)
+                ));
+            }
+
+            let carried = park_session_claims(writer_pid, std::process::id()).unwrap();
+            let mut carried_keys: Vec<_> = carried.iter().map(|claim| claim.key.as_str()).collect();
+            carried_keys.sort_unstable();
+            assert_eq!(
+                carried_keys,
+                keys.iter().copied().collect::<Vec<_>>().as_slice()
+            );
+            for key in keys {
+                let (_, record) = crate::claims::status(key, Some(temp.path()));
+                assert_eq!(record.unwrap().pid, Some(std::process::id() as i32));
+            }
+        });
+    }
 }
