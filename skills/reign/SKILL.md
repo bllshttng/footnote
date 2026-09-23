@@ -48,6 +48,8 @@ With `--once` the crown rules one wave and expires. Run Who runs this and On cro
 
 Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat and a shell watch; the watch runs with `claude --bg --exec`, so a quiet interval invokes no model. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md). None of the harnesses injects `/goal` or arms a Monitor.
 
+The old rule “On Claude, arm ONE monitor, not six” is retired; Claude now arms the loop and settled-PR watch.
+
 1. **Settled-PR watch, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch reads that event, the crown row whose `manifest_session` matches, and its `scope_nodes.nodes` rows marked `owned: true`. A matching node with a ready, blocker-free `fno do pr status <n>` mails the crown one wrapped merge-lever line and exits. A missing crown row, `unreadable_files`, or any failed probe mails `reign watch probe failed: <reading>` and exits 1. The watch lock makes a second launch print its live pid and exit 0. Other matches stay quiet until the next poll.
 
 The watch is a demand arm, not a second board reader. Mail, board, crown liveness, CI, capacity and the tenure verdict remain check-in readings. A red settle stays with the daemon nudge ladder, which names the failing checks.
