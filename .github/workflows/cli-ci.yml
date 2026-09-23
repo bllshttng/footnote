@@ -815,8 +815,13 @@ jobs:
     # harness imports through cli/.venv, blueprint_judge shells rg, and the
     # real-process tests spawn both built binaries. A lib red no longer
     # hides this shard: the two jobs run independently and the aggregator
-    # collects both verdicts.
-    timeout-minutes: 40
+    # collects both verdicts. Raised to 60 on 2026-09-23: the pre-split step
+    # alone ran 1963s with no failed test (PR 2427 and PR 2413 cancelled at
+    # the shared 40 cap), and the lane-queue work in 2413 adds 12
+    # real-process tests to this leg. The suite-size redesign is filed as
+    # demand on x-b7fa; this number names the measured cost, it does not
+    # fix the growth.
+    timeout-minutes: 60
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
 
