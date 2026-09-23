@@ -15,8 +15,8 @@
 #   - Edit is not. An Edit needs the file to already exist, so its location is
 #     history; refusing it would only block repairs to legacy plans.
 #
-# Two block conditions, both requiring the target to be OUTSIDE the resolved
-# plans dir:
+# Two block conditions, both requiring the target to be OUTSIDE every known
+# plans dir (the session's plus each registered project's - step 5):
 #   A. Write of a *.md whose LEADING frontmatter block is plan-shaped
 #      (`node:` + `slug:` + one of type/deliverable_type/status). Example
 #      frontmatter quoted inside a doc body never matches - only the leading
@@ -54,7 +54,7 @@ source "${_HOOK_DIR}/helpers/plans-dir.sh" 2>/dev/null || { _guard_mark plan-loc
 # guard would block a correct save (a missing containment test reads as "not
 # under the plans dir"), which contradicts the fail-open contract above. The
 # sibling guard carries the same check for the same reason.
-declare -F fno_plans_dir fno_physical_path fno_under_plans_dir >/dev/null 2>&1 \
+declare -F fno_plans_dir fno_physical_path fno_under_plans_dir fno_plans_dirs_all fno_under_any_plans_dir >/dev/null 2>&1 \
     || { _guard_mark plan-location-guard allow 2>/dev/null || true; printf '%s\n' '{}'; exit 0; }
 
 _approve() {
@@ -188,14 +188,16 @@ _has_plan_frontmatter() {
 }
 
 # ── 5. Verdict ────────────────────────────────────────────────────────────────
-# Resolve from the SESSION cwd, exactly as the sibling carve-out does.
-# `fno do plan path` is repo-anchored, so resolving from whatever cwd the
-# harness spawned this hook in names a DIFFERENT project's plans dir on a
-# worktree or multi-repo dispatch - which would deny a correct save while
-# naming the wrong directory as the right one. Sharing a resolver is not
-# enough; the two halves have to share the anchor too.
-PLANS_DIR="$(cd "$CWD" 2>/dev/null && fno_plans_dir 2>/dev/null || true)"
-[[ -n "$PLANS_DIR" ]] || _approve
+# Resolve from the SESSION cwd, exactly as the sibling carve-out does, and
+# accept a save under ANY known plans dir. A blueprint run anchored outside a
+# project still targets that project: a guard that refuses the project's own
+# plans dir from a foreign session sends the plan to the session's space,
+# outside git. So the accepted set is the session dir plus every registered
+# project's plans dir, and only a target outside ALL of them is refused.
+# Sharing a resolver is not enough; the two halves have to share the anchor
+# too.
+PLANS_DIRS="$(cd "$CWD" 2>/dev/null && fno_plans_dirs_all 2>/dev/null || true)"
+[[ -n "$PLANS_DIRS" ]] || _approve
 
 for t in "${TARGETS[@]}"; do
     [[ "$t" == *.md ]] || continue
@@ -203,22 +205,22 @@ for t in "${TARGETS[@]}"; do
 
     abs="$t"
     [[ "$abs" == /* ]] || abs="$CWD/$abs"
-    fno_under_plans_dir "$PLANS_DIR" "$abs" && continue
+    fno_under_any_plans_dir "$PLANS_DIRS" "$abs" && continue
 
     reason=""
-    # B: a plans-glob path outside the configured dir. Checked first because it
+    # B: a plans-glob path outside every known dir. Checked first because it
     # holds even for a plan whose frontmatter is not written yet.
     case "$t" in
         */plans/*)
-            reason="plan-location: \`$t\` is a plans path outside the configured plans dir ($PLANS_DIR)." ;;
+            reason="plan-location: \`$t\` is a plans path outside every known plans dir." ;;
     esac
     # A: plan-shaped frontmatter. Only a Write carries content to read.
     if [[ -z "$reason" && "$TOOL" == "Write" && "$t" == "$FILE_PATH" ]] && _has_plan_frontmatter; then
-        reason="plan-location: \`$t\` has plan frontmatter (node/slug) but is outside the configured plans dir ($PLANS_DIR)."
+        reason="plan-location: \`$t\` has plan frontmatter (node/slug) but is outside every known plans dir."
     fi
     [[ -n "$reason" ]] || continue
 
-    _block "$reason Resolve the save path with \`fno do plan path --slug \"<slug>\" [--node \"<node-id>\"]\` and write there - it joins the configured plans dir with the plans_filename template. Change the destination with \`fno config\` (plans_dir) or the plansDirectory setting, not by writing elsewhere."
+    _block "$reason Resolve the save path from the node's project root (\`fno backlog get <node>\` prints it as \`cwd\`), not this session's, then write there: \`cd <project-root> && fno do plan path --slug \"<slug>\" [--node \"<node-id>\"]\`. Change a project's destination with \`fno config\` (plans_dir) or the plansDirectory setting, not by writing elsewhere."
 done
 
 _approve
