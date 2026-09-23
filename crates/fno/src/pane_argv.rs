@@ -178,14 +178,21 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         // Retry briefly: a fresh child can sit in an exec window where procfs
-        // reads empty, and a busy runner stretches it.
+        // reads empty, and a busy runner stretches it. A loaded runner can
+        // also surface the FORK's image in the child slot: the first readable
+        // argv may still be the parent's, so a read is accepted only when
+        // argv[0] ends with `sleep`; anything else is recorded as `why` and
+        // the poll continues.
         let mut read = None;
         let mut why = String::new();
-        for _ in 0..20 {
+        for _ in 0..60 {
             match process_argv(child.id()) {
-                Some(argv) => {
+                Some(argv) if argv.first().is_some_and(|t| t.ends_with("sleep")) => {
                     read = Some(argv);
                     break;
+                }
+                Some(argv) => {
+                    why = format!("still the parent image: {argv:?}");
                 }
                 None => {
                     // Name the platform fact instead of guessing: is the
@@ -218,7 +225,7 @@ mod tests {
                 eprintln!("skipping child-probe leg: {why}; the platform hides cross-pid procfs");
                 return;
             }
-            panic!("child argv unreadable after 1s ({why})");
+            panic!("child argv unreadable after 3s ({why})");
         };
         assert!(
             read.first().is_some_and(|t| t.ends_with("sleep")) && read.contains(&"37".to_string()),

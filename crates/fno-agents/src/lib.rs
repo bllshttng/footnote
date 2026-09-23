@@ -611,6 +611,45 @@ pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
     value
 }
 
+/// Write `body` to `dir/name` as a 0755 executable and return the path.
+///
+/// A child /bin/sh writes the bytes, never this process. A write fd held
+/// here is copied into the child of any sibling test thread that forks in
+/// that window, and an exec of the stub then fails with ETXTBSY until that
+/// child execs. A temp name plus rename does not help: the copied fd follows
+/// the inode. The writer has exited before this returns.
+#[cfg(test)]
+pub(crate) fn write_exec_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.join(name);
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"cat > "$1.tmp.$$" && chmod 755 "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1""#,
+            "sh",
+        ])
+        .arg(&path)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn /bin/sh to write an exec stub");
+    // A writer that fails early (a missing dir) closes its stdin first, so
+    // this write can see a broken pipe. The exit status below names the
+    // real failure, so the write error is not the one to report.
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(body.as_bytes());
+    let status = child.wait().expect("wait for the stub writer");
+    assert!(
+        status.success(),
+        "could not write exec stub {}: {status}",
+        path.display()
+    );
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1080,74 @@ mod tests {
             return None;
         }
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    // AC1-HP / AC1-EDGE: the stub writer never holds the write fd in this
+    // process, so execs of its output survive sibling threads forking in a
+    // loop (darwin has no /bin/true, so the forking threads use
+    // /usr/bin/true). Each stub prints its own name and the exec asserts it.
+    #[test]
+    fn write_exec_stub_survives_sibling_forks() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut forkers = Vec::new();
+        for _ in 0..4 {
+            let stop = Arc::clone(&stop);
+            forkers.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::relaxed) {
+                    let _ = std::process::Command::new("/usr/bin/true").status();
+                }
+            }));
+        }
+        let mut writers = Vec::new();
+        for t in 0..4u32 {
+            let dir = dir.path().to_path_buf();
+            writers.push(std::thread::spawn(move || {
+                for i in 0..25u32 {
+                    let body = format!("#!/bin/sh\nprintf '%s' '{t}-{i}'\n");
+                    let stub = crate::write_exec_stub(&dir, &format!("s{t}-{i}"), &body);
+                    let out = std::process::Command::new(&stub)
+                        .output()
+                        .expect("exec stub");
+                    assert!(
+                        out.status.success(),
+                        "exec of {} failed: {out:?}",
+                        stub.display()
+                    );
+                    let mut text = String::new();
+                    std::io::Cursor::new(&out.stdout)
+                        .read_to_string(&mut text)
+                        .expect("stdout is utf-8");
+                    assert_eq!(text, format!("{t}-{i}"));
+                }
+            }));
+        }
+        for w in writers {
+            w.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::relaxed);
+        for f in forkers {
+            f.join().expect("forker thread");
+        }
+        let mode = std::fs::metadata(dir.path().join("s0-0"))
+            .expect("stub exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "stub mode must be 0755");
+    }
+
+    // AC1-ERR: a missing destination dir surfaces as the writer's exit
+    // status, naming the path.
+    #[test]
+    #[should_panic(expected = "could not write exec stub")]
+    fn write_exec_stub_refuses_a_missing_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = crate::write_exec_stub(&dir.path().join("absent"), "fno", "#!/bin/sh\n");
     }
 }
 
