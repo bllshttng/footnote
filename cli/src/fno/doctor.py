@@ -1109,12 +1109,16 @@ def _archive_id_collisions() -> dict[str, Any]:
     so this count grows on its own; it changes doctor's exit code rather than
     reporting quietly.
 
-    The archive is read via ``_read_json``, NOT ``read_graph``: the read path
+    The archive is read as a plain file, NOT ``read_graph``: the read path
     swallows corruption to an empty list, which would report 0 collisions and
-    exit green in exactly the state where the ids cannot be checked.
+    exit green in exactly the state where the ids cannot be checked. A plain
+    read also keeps the alarm off the store spawn path - the advisory file
+    must never gain a store, or a spawn failure reads as a clean zero.
     """
     try:
-        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+        import json as _json
+
+        from fno.graph.store import _apply_graph_defaults
         from fno.paths import graph_archive_json
         from fno.tracker.metadata import read_entries
 
@@ -1129,8 +1133,11 @@ def _archive_id_collisions() -> dict[str, Any]:
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         try:
-            archive_entries = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
+            document = _json.loads(archive_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                return {"count": 0, "ids": [], "unreadable": True}
+            archive_entries = _apply_graph_defaults(document.get("entries", []))
+        except (ValueError, UnicodeDecodeError, OSError):
             return {"count": 0, "ids": [], "unreadable": True}
         archive_ids = {
             nid for e in archive_entries
