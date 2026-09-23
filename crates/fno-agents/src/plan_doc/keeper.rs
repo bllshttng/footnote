@@ -62,8 +62,15 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
             let cached = cached_entries(state, false, false)?;
             // No root: a relative plan_path resolves against the caller's
             // canonical checkout, as the Python converger's lazy repo_root did.
+            // The git probe runs only when some plan_path is relative.
+            let any_relative = cached.iter().any(|n| {
+                n.get("plan_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|p| !p.is_empty() && !Path::new(p).is_absolute())
+            });
             let root = opt_str(params, "root").map(str::to_string).or_else(|| {
-                opt_str(params, "cwd").map(|cwd| {
+                let cwd = opt_str(params, "cwd").filter(|_| any_relative);
+                cwd.map(|cwd| {
                     crate::paths::canonical_repo_root(Path::new(cwd))
                         .unwrap_or_else(|| PathBuf::from(cwd))
                         .to_string_lossy()
