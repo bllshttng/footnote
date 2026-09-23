@@ -6,7 +6,7 @@
 
 use crate::attention::AttentionItem;
 use crate::attention_file::{
-    self, body_hash, close_page, parse_page, read_page_answer, render_index, render_page,
+    self, close_page, parse_page, read_page_answer, render_index, render_page, settle_key,
     DoneEntry, FileAnswer, IndexEntry, PageFront,
 };
 use crate::attention_route::{Router, Routing};
@@ -275,6 +275,7 @@ pub fn tick_pages(
                 kind: page.front.kind.clone(),
                 blocks: page.front.blocks.clone(),
                 king: page.front.king.clone(),
+                created: page.front.asked_at.clone(),
             });
         }
     }
@@ -288,6 +289,7 @@ pub fn tick_pages(
             kind: item.kind.clone(),
             blocks: item.blocks.clone(),
             king: routing.king.clone().unwrap_or_else(|| "none".to_string()),
+            created: item.created_at.clone(),
         });
     }
     let mut done_entries: Vec<DoneEntry> = done_pages
@@ -337,7 +339,7 @@ fn settle_page(
     tick: &mut SinkTick,
 ) {
     let id = page.front.question_id.clone();
-    let hash = body_hash(&page.text);
+    let hash = settle_key(&page.text);
     let entry = state.get(&id).cloned();
     match entry {
         None => {

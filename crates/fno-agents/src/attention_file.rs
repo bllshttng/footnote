@@ -59,10 +59,22 @@ pub struct PageFront {
     pub status: String,
     #[serde(default)]
     pub title: String,
+    /// The question as a Base column (the ask cell), the user's wording.
+    #[serde(default)]
+    pub ask: String,
+    /// The recommended option as a letter (a, b, c), a Base column.
+    #[serde(default)]
+    pub recommend: String,
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
     pub asked_at: String,
+    /// Base columns beside the routing facts; both carry the ask time at
+    /// render, and a vault plugin may stamp `updated` later.
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub updated: String,
     #[serde(default)]
     pub project: String,
     #[serde(default, rename = "harness_session_id")]
@@ -83,6 +95,9 @@ pub struct PageFront {
     pub crown: String,
     #[serde(default)]
     pub king: String,
+    /// The user's typed answer cell: a letter (a, b, c), a number, or words.
+    /// An empty value is present from render so the Base shows the cell, and
+    /// is never an answer (rule 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +106,16 @@ pub struct PageFront {
     pub recorded_by: Option<String>,
     #[serde(flatten)]
     pub extra: serde_yaml_ng::Mapping,
+}
+
+/// The Base column letter for option `n` (1 -> a, 2 -> b, ...).
+pub fn option_letter(n: u32) -> String {
+    let idx = n.wrapping_sub(1);
+    if idx < 26 {
+        ((b'a' + idx as u8) as char).to_string()
+    } else {
+        n.to_string()
+    }
 }
 
 /// The user's answer read out of one page.
@@ -151,8 +176,16 @@ pub fn render_page(item: &AttentionItem, routing: &Routing) -> String {
         kind: item.kind.clone(),
         status: "open".to_string(),
         title: escape_text(&title),
+        ask: escape_text(&title),
+        recommend: item
+            .recommendation
+            .as_ref()
+            .map(|r| option_letter(r.option))
+            .unwrap_or_default(),
         aliases: vec![escape_text(&title)],
         asked_at: item.created_at.clone(),
+        created: item.created_at.clone(),
+        updated: item.created_at.clone(),
         project: item.project.clone(),
         harness_session_id: fill_unknown(&harness_session_id),
         session_name: fill_unknown(&session_name),
@@ -163,11 +196,19 @@ pub fn render_page(item: &AttentionItem, routing: &Routing) -> String {
         epic: fill_none(routing.epic.as_ref()),
         crown: fill_none(routing.crown.as_ref()),
         king: fill_none(routing.king.as_ref()),
-        answer: None,
+        answer: Some(String::new()),
         answered_at: None,
         recorded_by: None,
         extra: serde_yaml_ng::Mapping::new(),
     };
+    // The Base's answer cell reads one column per option: `a`, `b`, `c`, ...
+    let mut front = front;
+    for option in &item.options {
+        front.extra.insert(
+            serde_yaml_ng::Value::String(option_letter(option.n)),
+            serde_yaml_ng::Value::String(escape_text(&option.text)),
+        );
+    }
     let front_yaml = serde_yaml_ng::to_string(&front).unwrap_or_default();
 
     let mut out = String::new();
@@ -310,6 +351,21 @@ pub fn body_hash(text: &str) -> u64 {
     hash
 }
 
+/// The settle key: the body hash mixed with the typed `answer` cell, so a
+/// Base edit restarts the settle window but a vault plugin's frontmatter
+/// stamp does not.
+pub fn settle_key(text: &str) -> u64 {
+    let cell = parse_page(text)
+        .and_then(|(front, _)| front.answer)
+        .unwrap_or_default();
+    let mut key = body_hash(text);
+    for byte in cell.as_bytes() {
+        key ^= u64::from(*byte).wrapping_mul(0x9e3779b97f4a7c15);
+        key = key.rotate_left(7);
+    }
+    key
+}
+
 /// One section of the body, as its trimmed lines after the `## <name>`
 /// heading and before the next heading.
 fn section<'a>(body: &'a str, name: &str) -> Option<Vec<&'a str>> {
@@ -329,13 +385,37 @@ fn section<'a>(body: &'a str, name: &str) -> Option<Vec<&'a str>> {
     None
 }
 
-/// The user's answer read out of one page. An unticked `- [ ]` line, option
-/// or not, is never an answer. Precedence: `Done`, then one tick, then words;
-/// two or more ticks record nothing.
+/// The user's answer read out of one page. The typed `answer` cell in the
+/// frontmatter reads first: a letter (a, b, c) or a number maps to its
+/// option, any other words read as the answer, and an empty cell is never an
+/// answer (rule 8). Then the body: an unticked `- [ ]` line, option or not,
+/// is never an answer. Precedence: cell, then `Done`, then one tick, then
+/// body words; two or more ticks record nothing.
 pub fn read_page_answer(text: &str) -> FileAnswer {
-    let Some((_, body)) = parse_page(text) else {
+    let Some((front, body)) = parse_page(text) else {
         return FileAnswer::None;
     };
+    if let Some(cell) = front
+        .answer
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        let lowered = cell.to_ascii_lowercase();
+        if lowered.len() == 1 {
+            let c = lowered.as_bytes()[0];
+            if c.is_ascii_lowercase() {
+                return FileAnswer::Option(u32::from(c - b'a' + 1));
+            }
+            if c.is_ascii_digit() {
+                return cell
+                    .parse::<u32>()
+                    .map(FileAnswer::Option)
+                    .unwrap_or(FileAnswer::Words(unescape_text(cell)));
+            }
+        }
+        return FileAnswer::Words(unescape_text(cell));
+    }
     let mut ticked: Vec<u32> = Vec::new();
     if let Some(lines) = section(&body, "Options") {
         for line in lines {
@@ -439,6 +519,8 @@ pub struct IndexEntry {
     pub kind: String,
     pub blocks: Vec<String>,
     pub king: String,
+    /// The page's ask time; the index sorts newest first.
+    pub created: String,
 }
 
 /// One closed row for the index.
@@ -464,6 +546,8 @@ fn index_line(entry: &IndexEntry) -> String {
 /// The generated index page: one wikilink per open page, then the 20 most
 /// recent closed pages.
 pub fn render_index(open: &[IndexEntry], done: &[DoneEntry]) -> String {
+    let mut open: Vec<&IndexEntry> = open.iter().collect();
+    open.sort_by(|a, b| b.created.cmp(&a.created));
     let mut out = String::new();
     out.push_str("---\nfno_generated: questions-index\n---\n");
     out.push_str("<!-- GENERATED by the fno attention arm - edits are overwritten. -->\n\n");
@@ -484,13 +568,44 @@ pub fn render_index(open: &[IndexEntry], done: &[DoneEntry]) -> String {
     out
 }
 
-/// The Obsidian Base over the questions folder. Bases has no board view type,
-/// so cards grouped by status stand in for one.
+/// The Obsidian Base over the questions folder, modeled on the plans.base
+/// shape. Bases has no board view type, so cards grouped by status stand in
+/// for one. Every view sorts newest ask first.
 pub const BASE: &str = r#"# GENERATED by the fno attention arm - edits are overwritten.
 filters:
   and:
     - file.hasProperty("question_id")
+formulas:
+  age_days: (now() - file.ctime).days.round(0)
+properties:
+  formula.age_days:
+    displayName: Age (d)
 views:
+  - type: table
+    name: Needs you
+    filters:
+      and:
+        - status == "open"
+    order:
+      - ask
+      - a
+      - b
+      - c
+      - recommend
+      - answer
+      - harness_session_id
+      - session_name
+      - node
+      - crown
+      - king
+      - harness
+      - model
+      - created
+      - updated
+      - formula.age_days
+    sort:
+      - property: asked_at
+        direction: DESC
   - type: table
     name: Open by king
     filters:
@@ -498,6 +613,9 @@ views:
         - status == "open"
     groupBy:
       property: king
+    sort:
+      - property: asked_at
+        direction: DESC
   - type: table
     name: Open by node
     filters:
@@ -505,10 +623,16 @@ views:
         - status == "open"
     groupBy:
       property: node
+    sort:
+      - property: asked_at
+        direction: DESC
   - type: cards
     name: Board
     groupBy:
       property: status
+    sort:
+      - property: asked_at
+        direction: DESC
 "#;
 
 pub fn has_conflict_markers(text: &str) -> bool {
@@ -619,7 +743,19 @@ mod tests {
         assert_eq!(front.epic, "x-aaaa");
         assert_eq!(front.crown, "none", "absent routing fact reads none");
         assert_eq!(front.king, "king-fno");
-        assert!(front.answer.is_none());
+        assert_eq!(front.answer.as_deref(), Some(""));
+        assert_eq!(front.ask, front.title);
+        assert_eq!(
+            front.recommend, "b",
+            "recommendation 2 renders as its letter"
+        );
+        for column in ["a", "b", "c"] {
+            assert!(
+                front.extra.contains_key(column),
+                "option column {column} present: {:?}",
+                front.extra
+            );
+        }
         assert!(body.contains("# Rule on the Python-tree law: which reading?"));
         assert!(
             body.contains("- [ ] 1. Yes, net zero needs no grant. Next: open the gate. Pro: fast")
@@ -751,14 +887,26 @@ mod tests {
 
     #[test]
     fn index_and_base_render() {
-        let open = vec![IndexEntry {
-            stem: "20260922-q-e5e5520b-rule-on-the-python-tree-x-bbbb".into(),
-            id: "q-e5e5520b".into(),
-            title: "Rule on the Python-tree law: which reading?".into(),
-            kind: "question".into(),
-            blocks: vec!["x-aaaa".into()],
-            king: "king-fno".into(),
-        }];
+        let open = vec![
+            IndexEntry {
+                stem: "20260922-q-e5e5520b-rule-on-the-python-tree-x-bbbb".into(),
+                id: "q-e5e5520b".into(),
+                title: "Rule on the Python-tree law: which reading?".into(),
+                kind: "question".into(),
+                blocks: vec!["x-aaaa".into()],
+                king: "king-fno".into(),
+                created: "2026-09-22T12:00:00Z".into(),
+            },
+            IndexEntry {
+                stem: "20260923-q-99999999-newer-page-x-bbbb".into(),
+                id: "q-99999999".into(),
+                title: "a newer page".into(),
+                kind: "question".into(),
+                blocks: vec![],
+                king: "none".into(),
+                created: "2026-09-23T09:00:00Z".into(),
+            },
+        ];
         let done = vec![DoneEntry {
             stem: "20260921-q-11111111-done-item-x-none".into(),
             id: "q-11111111".into(),
@@ -769,15 +917,84 @@ mod tests {
         }];
         let index = render_index(&open, &done);
         assert!(index.contains("fno_generated: questions-index"));
-        assert!(index.contains("## Open (1)"));
+        assert!(index.contains("## Open (2)"));
+        // Newest ask first.
+        let newer = index.find("q-99999999").unwrap();
+        let older = index.find("q-e5e5520b").unwrap();
+        assert!(newer < older, "the index lists newest first: {index}");
         assert!(index.contains(
             "- [[20260922-q-e5e5520b-rule-on-the-python-tree-x-bbbb|Rule on the Python-tree law: which reading?]] · question · blocks x-aaaa · king-fno"
         ));
         assert!(index.contains("- [[20260921-q-11111111-done-item-x-none|an older one]] · answered 2026-09-21 · narrow"));
         assert!(BASE.starts_with("# GENERATED by the fno attention arm"));
         assert!(BASE.contains("file.hasProperty(\"question_id\")"));
+        assert!(BASE.contains("name: Needs you"));
         assert!(BASE.contains("name: Open by king"));
         assert!(BASE.contains("name: Board"));
+        assert!(BASE.contains("age_days: (now() - file.ctime).days.round(0)"));
+        assert!(BASE.contains("displayName: Age (d)"));
+        for column in [
+            "ask",
+            "a",
+            "b",
+            "c",
+            "recommend",
+            "answer",
+            "harness_session_id",
+            "session_name",
+            "node",
+            "crown",
+            "king",
+            "harness",
+            "model",
+            "created",
+            "updated",
+        ] {
+            assert!(
+                BASE.contains(&format!("- {column}\n")),
+                "Needs you order names {column}: {BASE}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_typed_answer_cell_records_and_the_empty_cell_does_not() {
+        let page = render_page(&item(), &routing());
+        // The open page carries an empty answer cell; it is never an answer.
+        assert!(
+            page.contains("answer: ''"),
+            "cell present but empty: {page}"
+        );
+        assert_eq!(read_page_answer(&page), FileAnswer::None);
+        // A typed letter records its option.
+        let b = page.replacen("answer: ''", "answer: b", 1);
+        assert_eq!(read_page_answer(&b), FileAnswer::Option(2));
+        let c = page.replacen("answer: ''", "answer: C", 1);
+        assert_eq!(read_page_answer(&c), FileAnswer::Option(3));
+        // A typed number too.
+        let n = page.replacen("answer: ''", "answer: '1'", 1);
+        assert_eq!(read_page_answer(&n), FileAnswer::Option(1));
+        // Other words read as the answer.
+        let w = page.replacen("answer: ''", "answer: take the narrow reading", 1);
+        assert_eq!(
+            read_page_answer(&w),
+            FileAnswer::Words("take the narrow reading".into())
+        );
+        // A body tick still answers.
+        assert_eq!(
+            read_page_answer(&page.replacen("- [ ] 2.", "- [x] 2.", 1)),
+            FileAnswer::Option(2)
+        );
+        // Typing restarts the settle window; a frontmatter stamp does not.
+        let key0 = settle_key(&page);
+        let typed = page.replacen("answer: ''", "answer: b", 1);
+        assert_ne!(key0, settle_key(&typed));
+        let stamped = page.replacen(
+            "king: king-fno",
+            "king: king-fno\nupdated: 2026-09-23T10:00:00Z",
+            1,
+        );
+        assert_eq!(key0, settle_key(&stamped));
     }
 
     #[test]
