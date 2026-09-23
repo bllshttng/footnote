@@ -1,27 +1,35 @@
 ---
 name: intel
-description: Session-provenance report for the operator - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold, judges operator turns only, writes one vault report, feeds the S2 corrections writer. Use when the operator says session report, who typed, operator insights, or intel report.
+description: Session-provenance report for the operator - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold once, judges a sampled subset, clusters the summaries into categories with per-category metrics, and writes one vault report. Use when the operator says session report, who typed, operator insights, or intel report.
 ---
 
 # intel
 
-The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail, and computes the relay facets. No model runs there. This skill is the judgment layer: you read the fold's operator turns and write the narrative.
+The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail, counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions, samples idle substantive sessions, and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
 
 The one rule the whole report stands on: **operator turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
 
+The fold names its populations, and the report keeps them apart: every number says whether it rests on `scanned` sessions or on `judged` ones, and no line blends the two.
+
 ## Steps
 
-1. Run the fold:
+1. Run the fold once, save its JSON, and keep it: every report number and the categories post-process read this one file. Call shape:
 
    ```bash
-   fno-agents intel [--json] [--period 2w|1m|2m|3m|all] [--scope <project>[,<project>...]|all] [--harness claude,codex,opencode|all]
+   /fno:intel [--scope <project>[,<project>...]|all] [--harness claude,codex,opencode|all] [--period 2w|1m|2m|3m|all] [--sample N|all] [question]
    # or one node's story:
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. One worked example: `fno-agents intel --json --period 2w --project fno -H codex`. The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
+   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the operator question; with no question, use `What were the operator's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
 
-2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
+   ```bash
+   fno-agents intel --json --days 30 --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
+   ```
+
+   The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
+
+2. Judge the sampled sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Judge only rows with `sampled: true`; they are idle and substantive by construction. Judge only the turns a session row lists in `operator_turns`. Those are the witnessed turns. The `witness` receipt names the submits, the binds, and the sessions no submit row covers. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache. A matching facet that lacks the current question key gains only that one summary line:
 
    ```json
    {
@@ -31,17 +39,36 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
      "outcome": "shipped | blocked | abandoned | research",
      "satisfaction": "satisfied | mixed | frustrated",
      "friction": "<category>",
-     "corrections": ["verbatim operator correction", "..."]
+     "corrections": ["verbatim operator correction", "..."],
+     "summaries": {"<question key>": "one line, at most 30 words, that answers the question for this session"}
    }
    ```
 
    Friction categories (keep to this set so downstream scorers can key on it): `misunderstood_instruction`, `repeated_correction`, `wrong_assumption`, `missing_context`, `workflow_friction`, `tool_failure`.
 
-3. Write the report: `<vault>/fno/intel/<date>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md).
+3. Cluster the sampled sessions' summary lines into 3 to 8 categories that answer the question. Each category carries a name, a one-line description, and at most 5 optional subcategories. Every judged session goes into exactly one category; use `Other` for a session that fits none. Write `~/.fno/intel/runs/<date>-<question key>.json`, mode 0600, in this schema:
 
-4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
+   ```json
+   {"schema": 1, "question": "<text>", "question_key": "<8 hex>",
+    "categories": [{"name": "...", "description": "...", "sessions": ["<id>", "..."],
+      "subcategories": [{"name": "...", "description": "...", "sessions": ["<id>"]}]}]}
+   ```
 
-5. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
+   If that run file exists and its question key and session set match this sample, reuse it.
+
+4. Metrics: the post-process reads the run file and the saved fold JSON, reads no transcript, and prints the fold JSON with a categories block:
+
+   ```bash
+   fno-agents intel --categories <run file> --fold <saved fold JSON> > <vault>/fno/intel/<date>-<question key>.json
+   ```
+
+   On exit 2, fix the run file from the named reason and run it once more. If it fails again, keep the saved fold JSON as the report's `fold:` file and write the Categories section as `not written: <stderr line>`.
+
+5. Write the report: `<vault>/fno/intel/<date>-<question key>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md). Every number comes from the JSON named in the frontmatter `fold:` field.
+
+6. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
+
+7. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
 
    ```bash
    bash scripts/corrections-insights-tag.sh --insights-file <report>
@@ -49,7 +76,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
    The script is watermark-idempotent: a second run adds no rows.
 
-6. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
+8. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
 
 Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
 

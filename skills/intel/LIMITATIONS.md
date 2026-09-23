@@ -6,3 +6,8 @@
 - The relay delivered-check is a substring read over the session's transcript. A bus body that reaches the transcript through some channel other than this session's turn flow still reads as delivered.
 - Opencode is folded now. Its operator class is the same witness join as claude's. Sessions with a `parent_id` (subagent children) are excluded. When no store is readable, `skipped.opencode` carries the sqlite reason.
 - Facet files under `~/.fno/intel/facets/` are keyed by session id + mtime + size. A session whose transcript is rewritten in place at the same size defeats the key and is not re-judged.
+- Category shares rest on the sample, not the window: the Executive summary and Categories percentages speak for the `judged` population only.
+- A session still active at report time is idle-gated out of the sample and is judged on a later run.
+- Opencode rows carry no activity counters: their tokens, lines, tool errors, and languages read null, and `activity.unmeasured` names the harness.
+- Hours, response time, and the parallel measure are empty for history without witness coverage: witnessed operator turns are the only input, and sessions folded before the witness existed have none.
+- Line counts come from edit arguments, so a rejected edit still counts its lines, the same choice Claude's `/insights` makes.
