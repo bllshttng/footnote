@@ -297,7 +297,7 @@ Do not infer the verdict from exit code, non-empty prose, sentiment, or a hand-w
 
 Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them. P3 nits are optional - call them out, let the user choose.
 
-**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap the review phase is complete, hard findings included. The PR merges on green CI, open findings stay in the PR conversation, and nobody asks the operator. The live law is in `fno inbox decisions review-coverage`. If a gate still refuses at the cap, that is a gate defect: record it with `fno backlog encounter` and merge once it clears. Below the cap the gate can report IMPOSSIBLE. Then stop and report the blocking findings and the two remedies: a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates. The round budget bounds the fno review lane's rounds exactly as it bounds peer's, and a bare `/fno:review` is the default reviewer there. Cleanup-class material (style, dead code, naming) never buys a round in either lane. That material belongs to `/fno:review cleanup`, which applies or skips with no gate weight.
+The canonical round budget and termination rule is the [review-cap gate](../SKILL.md#review-cap-gate). The budget bounds peer's rounds exactly as it bounds the lane's. A bare `/fno:review` is the default reviewer there. Cleanup-class material belongs to `/fno:review cleanup` and never buys a round.
 
 ### 6. ATTEST (only with `--attest`) - the identity-free local gate
 
@@ -311,7 +311,7 @@ The consumer requires the exact terminal JSON record, counts the syntactically d
 A valid clean verdict with zero findings emits `review_attestation` for reviewer `peer` with verdict `pass` at the current HEAD.
 A valid blocked verdict, or any invalid output, emits `fail` when possible and exits non-zero, so the gate remains unmet and loop-check reports local work to do.
 
-After any fix commit the old attestation is stale by design. The next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). Once the configured rounds are spent, the review phase is complete: open findings stay in the PR conversation and the PR merges on green CI. The hold hook still refuses a further hunting round past the cap.
+After any fix commit, the next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). Once the configured rounds are spent, the review phase is complete: open findings stay in the PR conversation and the PR merges on green CI. On Claude the Skill-tool hook refuses a further hunting round past the cap; a request that meets no hook is not refused, so read the budget first.
 
 ### 7. POST (only with `--post`) - the legacy identity-backed gate
 
