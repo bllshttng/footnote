@@ -461,7 +461,7 @@ mod tests {
             let path = claims::claim_path(key, Some(temp.path())).unwrap();
             std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
 
-            let live = |_| claims::SessionLiveness::Live("test-session-live");
+            let live = |_: &claims::ClaimRecord| claims::SessionLiveness::Live("test-session-live");
             let live_witness: claims::SessionWitness<'_> = &live;
             let outcome = claims::acquire_with_session_witness(
                 key,
@@ -474,13 +474,13 @@ mod tests {
                 Some(live_witness),
             );
             assert!(
-                matches!(outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == old.holder),
+                matches!(&outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == &old.holder),
                 "live thread claim was stolen: {outcome:?}"
             );
 
             old.expires_at = Some(now + 60_000);
             std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
-            let absent = |_| claims::SessionLiveness::Absent;
+            let absent = |_: &claims::ClaimRecord| claims::SessionLiveness::Absent;
             let absent_witness: claims::SessionWitness<'_> = &absent;
             let outcome = claims::acquire_with_session_witness(
                 key,
@@ -519,7 +519,7 @@ mod tests {
             std::fs::write(&race_path, claims::serialize_claim(&raced_claim).unwrap()).unwrap();
 
             let observations = std::cell::Cell::new(0usize);
-            let becomes_live = |_| {
+            let becomes_live = |_: &claims::ClaimRecord| {
                 let count = observations.get();
                 observations.set(count + 1);
                 if count == 0 {
@@ -540,7 +540,7 @@ mod tests {
                 Some(witness),
             );
             assert!(
-                matches!(outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == raced_claim.holder),
+                matches!(&outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == &raced_claim.holder),
                 "newly live thread claim was stolen: {outcome:?}"
             );
             assert!(
@@ -578,7 +578,7 @@ mod tests {
             std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
 
             let observations = std::cell::Cell::new(0usize);
-            let becomes_live = |_| {
+            let becomes_live = |_: &claims::ClaimRecord| {
                 let count = observations.get();
                 observations.set(count + 1);
                 if count == 0 {

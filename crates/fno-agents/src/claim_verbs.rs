@@ -465,7 +465,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
         return 2;
     }
     match crate::claims::release_for_stopped_session(
-        &crate::claims_release_stopped::StoppedHolder {
+        &crate::claims::StoppedHolder {
             name,
             harness_session_id: session,
         },
