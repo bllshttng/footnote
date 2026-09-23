@@ -13,9 +13,6 @@ import typer
 # Allowlist, fail closed: suspect is still owned, corrupted is unreadable, and a state added later must refuse rather than pass a deny-list never updated.
 _REQUEUEABLE_CLAIM_STATES = ("free", "stale")
 
-_UNSET = object()
-
-
 def _graph_path():
     from fno.graph.cli import _graph_path as _cli_graph_path
 
@@ -61,7 +58,7 @@ def _invoking_claim_holder() -> Optional[str]:
 
 
 def _release_node_lockfile(node_id: str) -> str:
-    """Best-effort release of the ``node:<id>`` lockfile; never raises. Releases stale or own holders; keeps a LIVE foreign holder."""
+    """Release a stale or own node claim; keep foreign and unreadable claims."""
     try:
         from fno.claims.core import claim_status, release_claim
         from fno.claims.io import claims_root_for
@@ -77,123 +74,35 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "free":
             return "no lockfile"
         if state == "stale":
-            # Holder-verified, never a blind force-release: a new dispatcher may hold the lock between this stale snapshot and the unlink.
-            release_claim(key, holder=status.get("holder") or "", root=root)
-            return "released stale lockfile"
+            release_claim(key, holder=status.get("holder") or "", root=root, strict=True)
+            after = claim_status(key, root=root)
+            return "released stale lockfile" if after.get("state") == "free" else f"claim changed to {after.get('state')}"
         if state == "corrupted":
-            typer.echo(f"warning: lockfile {key} is corrupted; graph claim cleared but lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to repair.", err=True)
+            typer.echo(f"warning: lockfile {key} is corrupted and remains held. Use `fno agents claim release {key} --force -R <why>` to repair.", err=True)
             return "lockfile left (corrupted)"
 
         # live or suspect: only release when it is ours; a suspect claim (TTL-unexpired, dead pid) is still owned.
         holder = status.get("holder") or ""
         if holder == _invoking_claim_holder():
-            release_claim(key, holder=holder, root=root)
-            return "released own lockfile"
+            release_claim(key, holder=holder, root=root, strict=True)
+            after = claim_status(key, root=root)
+            return "released own lockfile" if after.get("state") == "free" else f"claim changed to {after.get('state')}"
 
-        typer.echo(f"warning: lockfile {key} held by LIVE holder {holder!r}; graph claim cleared but lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to override.", err=True)
+        typer.echo(f"warning: lockfile {key} held by LIVE holder {holder!r}; claim remains. Use `fno agents claim release {key} --force -R <why>` to override.", err=True)
         return "lockfile left (live foreign holder)"
-    except Exception as exc:  # never let a lockfile error mask the graph clear
+    except Exception as exc:
         return f"lockfile untouched ({exc})"
 
 
-def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Optional[str]:
-    """The shared graph clear: ``locked_by``/``locked_at`` -> None. Returns the resolved node id. ``expect_locked_by`` (requeue passes the value its first read saw) aborts when a claim landed between that read and this commit; the sentinel keeps unclaim's operator override unconditional."""
-    from fno.graph._intake import _find_node
-    from fno.graph.store import commit_rows_via_store
-
-    resolved_id: Optional[str] = None
-
-    def mutator(entries):
-        nonlocal resolved_id
-        node = _find_node(entries, task_id)
-        if node is None:
-            typer.echo(f"Error: graph node {task_id} not found", err=True)
-            raise typer.Exit(code=1)
-        resolved_id = node["id"]
-        if expect_locked_by is not _UNSET and node.get("locked_by") != expect_locked_by:
-            typer.echo(f"requeue: a claim landed on {resolved_id} between the read and this write (locked_by {node.get('locked_by')!r}); clear skipped, the claim is left intact.", err=True)
-            raise typer.Exit(code=3)
-        node["locked_by"] = None
-        node["locked_at"] = None
-        # session_id is the lock's mirror (_normalize_lock_fields keeps it
-        # equal to locked_by): leaving it set re-materializes the holder on
-        # the next write, so the release clears the whole lock family.
-        node["session_id"] = None
-        node["locked_by_harness"] = None
-        node["locked_by_harness_session"] = None
-        # The keeper cannot derive plan rungs; a released row returns to the
-        # state it was claimed from (ready, or idea for an undesigned plan).
-        if node.get("status") == "in_progress":
-            from fno.graph.ladder import Rung, plan_rung
-
-            node["status"] = "idea" if plan_rung(node) in (Rung.IDEA, Rung.NONE) else "ready"
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-    return resolved_id
-
-
 def _wedge_refusal(verb: str, node_id: str, open_do: int) -> None:
-    """The earned-success rule shared by unclaim and update: a lock clear that leaves the node in_progress did not return it to the queue."""
+    """The earned-success rule: a released claim with open do rows stays held."""
     plural = "s" if open_do != 1 else ""
     typer.echo(f"{verb}: {node_id} still reads in_progress after clearing the claim ({open_do} open do row{plural}). The claim was not what held it. Use: fno backlog requeue {node_id}", err=True)
     raise typer.Exit(code=3)
 
 
-def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: str = "") -> None:
-    """The post-commit read-back for ``update --locked-by``: the Updated
-    receipt answers "was the command accepted", never "is the value there",
-    and only the committed row can answer the second. Refuses the receipt
-    when the stored owner differs; a non-null stamp with no backing claim
-    lockfile warns (mirror-only state claim hygiene clears); a null release
-    that leaves an open do row wedged refuses, naming the settling verb.
-    """
-    from fno.claims.io import node_has_live_claim
-
-    node_id = stored_node.get("id") or fallback_id
-    expected_owner = None if locked_by == "null" else locked_by
-    stored_owner = stored_node.get("locked_by")
-    if stored_owner != expected_owner:
-        typer.echo(
-            f"error: {node_id} read back locked_by={stored_owner!r}, not "
-            f"{expected_owner!r}: the write did not persist. A concurrent "
-            "claim transition may have cleared it; re-check before trusting.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    if expected_owner is None:
-        # Earned-success rule, same as unclaim: a lock clear that left the
-        # node in_progress on its own open do rows did not return it to the
-        # queue, so the receipt refuses and names the verb that settles it.
-        # persisted_status when the caller read typed, raw status otherwise:
-        # derived `status` ignores open do rows and would miss the wedge.
-        stored_status = stored_node.get("persisted_status")
-        if stored_status is None:
-            stored_status = stored_node.get("status")
-        if stored_status == "in_progress":
-            from fno.graph.statuses import is_open_do_row
-
-            _wedge_refusal(
-                "update",
-                node_id,
-                sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
-            )
-        return
-    try:
-        has_claim = node_has_live_claim(f"node:{node_id}")
-    except Exception:  # noqa: BLE001 - the probe must not fail a write that landed
-        return
-    if not has_claim:
-        typer.echo(
-            f"warning: no live claim lockfile backs node:{node_id}; claim "
-            "hygiene (fno agents claim reap) clears locked_by without one. "
-            f"To hold the node: fno agents claim acquire node:{node_id}",
-            err=True,
-        )
-
-
 def _unclaim_node(task_id: str) -> None:
-    """Free a claimed node in one call: clear the graph claim (always) and best-effort-release the lockfile (stale or owned)."""
+    """Release a stale or own claim without writing a graph mirror."""
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.statuses import is_open_do_row
 
@@ -201,9 +110,11 @@ def _unclaim_node(task_id: str) -> None:
         typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
         raise typer.Exit(code=1)
 
-    resolved_id = _clear_locked_by(task_id)
-    node_id = resolved_id or task_id
+    node_id = task_id
     lock_note = _release_node_lockfile(node_id)
+    if lock_note not in ("no lockfile", "released stale lockfile", "released own lockfile"):
+        typer.echo(f"unclaim: {node_id} was not released ({lock_note}).", err=True)
+        raise typer.Exit(code=3)
 
     after = _read_node(node_id, _graph_path())
     if (after or {}).get("persisted_status") == "in_progress":
@@ -291,8 +202,15 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     for r in open_rows:
         reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
 
-    _clear_locked_by(node_id, expect_locked_by=row.get("locked_by"))
     _release_node_lockfile(node_id)
+    claim_after = claim_status(key, root=claims_root_for(key))
+    if claim_after.get("state") != "free":
+        typer.echo(
+            f"requeue: claim {key} changed to {claim_after.get('state')} "
+            "while settling; node was not returned to ready.",
+            err=True,
+        )
+        raise typer.Exit(code=3)
 
     after = _read_node(node_id, _graph_path())
     status_after = (after or {}).get("persisted_status")

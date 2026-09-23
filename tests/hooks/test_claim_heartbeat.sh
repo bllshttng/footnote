@@ -635,7 +635,7 @@ export STUB_BIND_RC=1 STUB_BIND_OUTPUT='{"outcome":"refused","refusal":"branch u
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
 bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
-manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 \
       && "$err" == *"branch unknown"* && "$err" == *"$manual"* ]]; then
   pass "T32 binder refusal retries once, then prints exact manual recovery"
@@ -683,7 +683,7 @@ started="$(date +%s)"
 err="$(printf '%s' "$payload" | FNO_PR_BIND_CREATED_TIMEOUT=1 CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
 elapsed=$(( $(date +%s) - started ))
 bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
-manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 && "$elapsed" -le 5 \
       && "$err" == *"timed out"* && "$err" == *"$manual"* ]]; then
   pass "T34 binder timeout retries once, stays bounded, and prints recovery"

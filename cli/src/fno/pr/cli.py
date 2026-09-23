@@ -1040,7 +1040,6 @@ def closure_trailer(
 @pr_app.command("bind-created", hidden=True)
 def bind_created(
     url: str = typer.Option(..., "--url", help="Created PR URL."),
-    owner: Optional[str] = typer.Option(None, "--owner", help="Best-known live owner."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Repository worktree."),
     node: Optional[str] = typer.Option(
         None,
@@ -1051,7 +1050,7 @@ def bind_created(
     """Bind a raw ``gh pr create`` result to its one real node."""
     from fno.pr.closure import bind_created_pr_from_branch
 
-    result = bind_created_pr_from_branch(url, owner=owner, cwd=repo or os.getcwd(), node_id=node)
+    result = bind_created_pr_from_branch(url, cwd=repo or os.getcwd(), node_id=node)
     if result.outcome == "bound":
         # The ship row follows the binding, not one particular verb. This used
         # to ride on `backlog update --pr-number`; when ship switched to this

@@ -8,7 +8,6 @@ is never touched.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -1723,7 +1722,7 @@ def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "still offered by ready" in result.stderr
-    assert "--locked-by <worker> --pr-number 777" in result.stderr
+    assert f"fno agents claim acquire node:{node_id}" in result.stderr
 
 
 def test_bare_pr_number_receipt_reads_non_ready_status_and_unknown_owner(
@@ -1745,116 +1744,13 @@ def test_bare_pr_number_receipt_reads_non_ready_status_and_unknown_owner(
     assert "not offered by ready" in result.output
 
 
-def test_owner_and_pr_receipt_reads_all_fields_from_stored_row(tmp_graph, monkeypatch):
-    import fno.graph._reconcile as rec
-
-    monkeypatch.setattr(
-        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}"
-    )
+def test_update_locked_by_refuses_and_names_claim_api(tmp_graph):
     node_id = json.loads(_invoke("backlog", "add", "Bound PR").output)["id"]
 
-    result = _invoke(
-        "backlog",
-        "update",
-        node_id,
-        "--locked-by",
-        "worker-7",
-        "--pr-number",
-        "779",
-    )
+    result = _invoke("backlog", "update", node_id, "--locked-by", "worker-7")
 
-    assert result.exit_code == 0, result.output
-    assert "status=in_review" in result.output
-    assert "pr=779" in result.output
-    assert "owner=worker-7" in result.output
-
-
-def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
-    old = "2020-01-01T00:00:00+00:00"
-    node_id = "ab-oldowner1"
-    tmp_graph.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": node_id,
-                        "title": "Long-running work",
-                        "status": "in_progress",
-                        "locked_by": "worker-old",
-                        "session_id": "worker-old",
-                        "locked_at": old,
-                        "plan_path": "plans/long-running.md",
-                        "created_at": old,
-                    }
-                ]
-            }
-        )
-    )
-
-    replaced = _invoke(
-        "backlog", "update", node_id, "--locked-by", "worker-replacement"
-    )
-    assert replaced.exit_code == 0, replaced.output
-    row = _read_graph(tmp_graph)[0]
-    assert row["status"] == "in_progress"
-    assert row["locked_by"] == "worker-replacement"
-    assert row["session_id"] == "worker-replacement"
-    assert row["locked_at"] != old
-    assert not row.get("ownership_defect")
-
-    cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
-    assert cleared.exit_code == 0, cleared.output
-    row = _read_graph(tmp_graph)[0]
-    assert row.get("locked_by") is None
-    assert row.get("session_id") is None
-    assert row.get("locked_at") is None
-    assert not row.get("ownership_defect")
-
-
-def test_update_locked_by_warns_when_no_claim_backs_the_mirror(tmp_graph, monkeypatch):
-    """A mirror stamped with no claim lockfile is hygiene bait. The caller
-    must be told at write time, never left to discover the clear."""
-    from fno.claims.core import claim_path
-
-    node_id = json.loads(_invoke("backlog", "add", "Unbacked mirror").output)["id"]
-    claims = tmp_graph.parent / "claims"
-    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: claims)
-
-    unbacked = _invoke("backlog", "update", node_id, "--locked-by", "probe-worker")
-    assert unbacked.exit_code == 0, unbacked.output
-    assert f"fno agents claim acquire node:{node_id}" in unbacked.stderr
-    row = _read_graph(tmp_graph)[0]
-    assert row["locked_by"] == "probe-worker"
-
-    lock = claim_path(f"node:{node_id}", root=claims)
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text("schema_version: 1\n")
-    backed = _invoke("backlog", "update", node_id, "--locked-by", "probe-worker")
-    assert backed.exit_code == 0, backed.output
-    assert "claim acquire" not in backed.stderr
-
-
-def test_update_locked_by_readback_failure_refuses_the_updated_receipt(
-    tmp_graph, monkeypatch
-):
-    """Updated answers 'was the command accepted', never 'is the value
-    there'. A stored row that lost the write must exit non-zero."""
-    node_id = json.loads(_invoke("backlog", "add", "Lost write").output)["id"]
-    from fno.graph.store import read_graph_strict
-
-    def stale_load(_path):
-        rows = read_graph_strict(_path)
-        rows[0]["locked_by"] = None
-        return rows
-
-    monkeypatch.setattr("fno.graph.load.load_graph", stale_load)
-
-    refused = runner.invoke(
-        app, ["backlog", "update", node_id, "--locked-by", "ghost-worker"]
-    )
-    assert refused.exit_code == 1
-    assert "did not persist" in refused.stderr
-    assert "ghost-worker" in refused.stderr
+    assert result.exit_code != 0, result.output
+    assert f"fno agents claim acquire node:{node_id}" in result.stderr
 
 
 def test_remove_pr_drops_entry_by_number(tmp_graph):
@@ -3062,6 +2958,31 @@ def test_next_selects_healthy_ready_node(tmp_graph):
     }])
     r = _invoke("backlog", "next", "--project", "fno")
     assert '"id": "ab-live"' in r.output
+
+
+def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkeypatch):
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    recent = _recent_iso(1)
+    plan = _write_plan(tmp_graph.parent, "claimed-next.md", "Claimed next")
+    node_id = "ab-next0001"
+    tmp_graph.write_text(json.dumps({"entries": [{
+        "id": node_id, "title": "Claimed next", "project": "fno",
+        "plan_path": str(plan), "created_at": recent, "priority": "p2",
+    }]}) + "\n")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "next-session")
+
+    result = _invoke("backlog", "next", "--project", "fno", "--claim", "next-session")
+
+    assert result.exit_code == 0, result.output
+    assert f'"id": "{node_id}"' in result.output
+    assert claim_status(f"node:{node_id}")["state"] == "live"
+    assert read_graph(tmp_graph)[0]["locked_by"] == "next-session"
+    raw = json.loads(tmp_graph.read_text())["entries"][0]
+    assert "locked_by" not in raw
+    assert "locked_at" not in raw
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

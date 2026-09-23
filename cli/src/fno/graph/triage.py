@@ -1301,6 +1301,13 @@ def cmd_apply(
             node = by_id.get(d["id"])
             if node is None:
                 continue
+            if node.get("locked_by"):
+                locked_errors_holder[0].append(
+                    f"{node['id']} has a node claim held by {node['locked_by']}; "
+                    f"release it with fno agents claim release node:{node['id']} "
+                    "--holder <holder> before triage defer"
+                )
+                continue
             # Clear completed_at so the deferred cascade can take effect.
             # Without this, deferring an already-done node would keep the
             # row pinned to status: done because of the `done > deferred`
@@ -1318,10 +1325,6 @@ def cmd_apply(
                 node["deferred_kind"] = resolved_kind
             else:
                 node.pop("deferred_kind", None)
-            # Clear the canonical lock field; _normalize_lock_fields re-syncs the
-            # session_id mirror and clears the harness stamp at serialize.
-            node["locked_by"] = None
-            node["locked_at"] = None
             applied["deferred"] += 1
         applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])
         return entries

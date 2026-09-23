@@ -245,6 +245,32 @@ def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     assert node.get("status") == "deferred"
 
 
+def test_triage_defer_keeps_a_live_claim_held(tmp_graph, tmp_path, monkeypatch):
+    from fno.claims.core import acquire_claim
+    from fno.graph.store import read_graph
+
+    node_id = _seed_with_plan(tmp_path, "Plan Triage Held")
+    claims_root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "triage-holder")
+    acquire_claim(
+        f"node:{node_id}", "target-session:triage-holder", root=claims_root
+    )
+
+    proposal = tmp_path / "held.json"
+    proposal.write_text(json.dumps({
+        "defer": [{"id": node_id, "reason": "needs revisit"}],
+    }))
+    result = runner.invoke(app, ["backlog", "triage", "apply", str(proposal)])
+
+    assert result.exit_code == 3, result.output
+    assert "node claim held by triage-holder" in result.output
+    node = read_graph(tmp_graph)[0]
+    assert node["locked_by"] == "triage-holder"
+    assert node["status"] == "in_progress"
+    assert node.get("deferred_at") is None
+
+
 def test_defer_rejects_blank_reason(tmp_graph, tmp_path):
     """``backlog defer ID --reason "   "`` is rejected at the CLI boundary.
 

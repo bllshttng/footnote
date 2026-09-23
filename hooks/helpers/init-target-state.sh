@@ -1585,10 +1585,8 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
-    # Does THIS session own the node? Set by `fno agents claim` below, the sole liveness
-    # authority. The TTL claim runs FIRST and the graph lock is stamped
-    # only on its success, so a legitimate STALE steal never leaves a dead prior
-    # owner on the node (the stale-locked-by-leak this reorder fixes).
+    # Does THIS session own the node? Set by `fno agents claim`, the sole
+    # liveness authority.
     _NODE_OWNED=0
 
     # fno agents claim acquire (global TTL lock; authoritative mutex)
@@ -1830,33 +1828,6 @@ PYEOF
       fi
     fi
 
-    # Graph lock stamp on claim success: unconditional (overwriting a stale prior
-    # owner is the point), retried once. Non-fatal - the TTL claim is
-    # authoritative and the graph field is display/routing metadata, so a
-    # contended or absent store must not abort init (AC9-FR).
-    if [[ "$_NODE_OWNED" -eq 1 ]]; then
-      _STAMP_LOG="$STATE_DIR/.init-claim.log"
-      # Harness stamp (US6): the holder's provider + harness-session UUID (the
-      # _HARNESS_SESSION computed once above), so an operator/peek can jump from a
-      # node straight to `claude -r <uuid>`.
-      # Unquoted expansion below (same pattern as $_PID_FLAGS): provider + UUID
-      # are single tokens, so word-splitting yields exactly the intended args. An
-      # empty provider omits the flag rather than passing a blank value.
-      _HARNESS_FLAGS=""
-      [[ -n "${PROVIDER:-}" ]] && _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
-      [[ -n "$_HARNESS_SESSION" ]] && _HARNESS_FLAGS="$_HARNESS_FLAGS --locked-by-harness-session $_HARNESS_SESSION"
-      # Unconditional `fno` is safe: every _NODE_OWNED=1 path ran inside command -v fno.
-      if fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
-         || fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
-        rm -f "$_STAMP_LOG"
-        echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
-      elif fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" 2>>"$_STAMP_LOG" >/dev/null; then
-        # Degraded but loud: a partial stamp must never pass for a clean one.
-        echo "target: WARNING: graph node $_NODE_ID stamped WITHOUT harness metadata (installed fno may predate the harness flags; try 'fno doctor --fix'; see $_STAMP_LOG)" >&2
-      else
-        echo "target: WARNING: graph locked_by stamp failed (non-fatal; TTL claim authoritative; see $_STAMP_LOG)" >&2
-      fi
-    fi
     # graph_node_id written exactly once: the node id when a claim layer won and
     # the node actually exists in the graph, else null (the modern claim is just
     # a lock and does not prove the backlog row exists).

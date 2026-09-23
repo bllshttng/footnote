@@ -92,7 +92,6 @@ CONTINUE_MESSAGE = "keep going"
 # held socket: the operator wants these off the view, not re-opened.
 CLOSE_MESSAGE = "mission complete but still open - run retro then /stop to close"
 FROM_NAME = "fno-recovery"
-REDISPATCH_PARTIAL = "partial"
 
 
 class _Outcome(str):
@@ -127,8 +126,8 @@ def _gave_up(reason: str) -> _Outcome:
 class _Failed(int):
     """A falsy ``_redispatch`` result that says which step missed.
 
-    ``_redispatch`` answers ``True`` / ``REDISPATCH_PARTIAL`` / falsy, and
-    every caller tests it with ``is True`` or a truth check. An ``int``
+    ``_redispatch`` answers ``True`` or falsy, and every caller tests it with
+    ``is True`` or a truth check. An ``int``
     subclass valued 0 keeps all of that exact: it is falsy, it equals
     ``False``, and it is never ``is True``. The reason rides along so the
     caller can name the branch instead of reporting a bare no.
@@ -835,30 +834,6 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
-def _clear_dead_owner(node: str, cwd: str) -> bool:
-    """Clear a stopped worker's graph pointer, surfacing any failed cleanup."""
-    import logging
-    import subprocess
-
-    try:
-        cleared = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
-             "--locked-by", "null"],
-            cwd=cwd, capture_output=True, timeout=30, check=False,
-        )
-        if cleared.returncode == 0:
-            return True
-        logging.getLogger(__name__).warning(
-            "recovery: could not clear dead owner for %s (exit %s)",
-            node, cleared.returncode,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logging.getLogger(__name__).warning(
-            "recovery: could not clear dead owner for %s: %s", node, exc,
-        )
-    return False
-
-
 def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None:
     """Best-effort: keep the predecessor name addressable on the successor row."""
     if not (new_name and old_name):
@@ -899,10 +874,7 @@ def _redispatch(
     Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
-    actually launched and its graph ownership was stamped. Returns
-    :data:`REDISPATCH_PARTIAL` when the worker launched but its ownership stamp
-    failed, so callers surface the incomplete transition without spawning a
-    second replacement.
+    actually launched. The child acquires its node claim during target init.
 
     With no ``flags``, the caller guarantees the new active provider's cli is
     ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
@@ -944,7 +916,6 @@ def _redispatch(
         # A stale/missing binary unmints this candidate; report it as the
         # candidate's failure, never crash the sweep.
         return _Failed("name-unmintable")
-    old_worker_stopped = False
     try:
         if name:
             # Kill the rate-limited worker. This does NOT free its node claim.
@@ -977,7 +948,6 @@ def _redispatch(
                     # then spawning would put two /target workers on one node. Bail to
                     # the nudge to preserve the at-most-one-worker invariant (codex P2).
                     return _Failed("stop-failed")
-            old_worker_stopped = True
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
@@ -989,8 +959,6 @@ def _redispatch(
         if rel.returncode != 0:
             # Claim still held → a spawn would refuse on it. Bail so the caller
             # nudges instead of reporting a respawn that cannot start.
-            if old_worker_stopped:
-                _clear_dead_owner(node, cwd)
             return _Failed("claim-held")
         # US3 managed auto-switch: materialize the swapped-to account into the
         # shared slot HERE - after the exhausted worker is stopped (so it no
@@ -1000,8 +968,6 @@ def _redispatch(
         # ANOTHER live session / store failure) aborts the respawn: free the lane
         # slot and bail to the nudge, same as a spawn failure.
         if pre_spawn is not None and not pre_spawn():
-            if old_worker_stopped:
-                _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
         # --provider claude: the swap already installed the new claude record as
@@ -1024,35 +990,14 @@ def _redispatch(
         )
         if proc.returncode != 0:
             # No replacement worker started: the node claim is already freed
-            # (above), so clear the stopped worker's graph pointer and free any
-            # dispatch-time lane slot or lane-fill keeps skipping the node as
-            # peer-owned until the slot TTL (G4).
-            if old_worker_stopped:
-                _clear_dead_owner(node, cwd)
+            # above. Free any dispatch-time lane slot so lane-fill can retry.
             _release_lane_slot(node, cwd)
             return False
-        try:
-            stamped = subprocess.run(
-                [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
-                 "--locked-by", agent],
-                cwd=cwd, capture_output=True, timeout=30, check=False,
-            )
-            stamp_ok = stamped.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            stamp_ok = False
-        if not stamp_ok:
-            # A worker exists, so this is not a spawn miss. Clear the corpse
-            # pointer when possible and return a distinct outcome; False would
-            # invite another failover spawn onto the same branch.
-            _clear_dead_owner(node, cwd)
-            return REDISPATCH_PARTIAL
         _alias_predecessor(agent, name)
         return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
-        if old_worker_stopped:
-            _clear_dead_owner(node, cwd)
         return False
 
 def _auto_switch_enabled(repo_root: Optional[str] = None) -> bool:

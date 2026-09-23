@@ -85,8 +85,8 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- self-inverse: the same verb reverses itself --
     Pair("backlog", "rank", "rank"),
     Pair("backlog", "update", "update"),
-    # requeue releases a dead worker's wedge (open do row + claim); update
-    # --locked-by re-locks the node, returning it to in_progress.
+    # requeue releases a dead worker's wedge (open do row + claim); target init
+    # acquires the next holder's lockfile.
     Pair("backlog", "requeue", "update"),
     # contain stamps contained_in + parent; its correction is update's
     # --parent null flag, which the contain epilog names verbatim.

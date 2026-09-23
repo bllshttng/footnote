@@ -1415,8 +1415,7 @@ def _fold_candidates(
     if ranked.degraded and ranked.warning:
         source = f"{source}; degraded: {ranked.warning}"
     # A live plan surface is an independent fold signal when the filing names
-    # one of the same files. The claim holder comes from the lockfile, not the
-    # graph snapshot's stale locked_by field.
+    # one of the same files. The claim holder comes from the lockfile projection.
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
@@ -3020,17 +3019,6 @@ def cmd_demand(
 def cmd_update(
     ctx: typer.Context,
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    locked_by: Optional[str] = typer.Option(
-        None, "--locked-by", help="Lock owner id ('null' to release)"
-    ),
-    locked_by_harness: Optional[str] = typer.Option(
-        None,
-        "--locked-by-harness",
-        help="Holder's harness/provider (claude|codex|gemini). 'null' clears.",
-    ),
-    locked_by_harness_session: Optional[str] = typer.Option(
-        None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."
-    ),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
     plan_path: Optional[str] = typer.Option(
         None, "--plan-path", help="Plan directory path. 'null' clears."
@@ -3202,6 +3190,19 @@ def cmd_update(
         ),
     ),
 ) -> None:
+    retired_claim_flags = {"by", "by-harness", "by-harness-session"}
+    if any(
+        arg.startswith("--locked-")
+        and arg.removeprefix("--locked-").split("=", 1)[0] in retired_claim_flags
+        for arg in (ctx.args or [])
+    ):
+        typer.echo(
+            "Error: node claim fields are derived from lockfiles. Use: "
+            f"fno agents claim acquire node:{task_id} --holder <holder>",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     # the patch door first; lifecycle.forward_update_door owns the rest.
     door_args = list(ctx.args or [])
     from fno.graph.lifecycle import DOOR_FLAGS, forward_update_door, refuse_stray_update_flags
@@ -3532,25 +3533,6 @@ def cmd_update(
                 current = [b for b in current if b not in remove_blockers]
                 node["blocked_by"] = current
 
-        if locked_by is not None:
-            session = locked_by if locked_by != "null" else None
-            # locked_by is canonical; session_id mirror is re-synced at serialize
-            # by _normalize_lock_fields. Clearing the lock also clears the US6
-            # harness stamp so an unclaim never leaves a stale holder identity.
-            node["locked_by"] = session
-            node["locked_at"] = datetime.now(timezone.utc).isoformat() if session else None
-            if session is None:
-                node["locked_by_harness"] = None
-                node["locked_by_harness_session"] = None
-        # Harness stamp (US6): the holder's provider + harness-session UUID,
-        # settable alongside the claim. 'null' clears; an explicit unclaim above
-        # already cleared both.
-        if locked_by_harness is not None:
-            node["locked_by_harness"] = None if locked_by_harness == "null" else locked_by_harness
-        if locked_by_harness_session is not None:
-            node["locked_by_harness_session"] = (
-                None if locked_by_harness_session == "null" else locked_by_harness_session
-            )
         if has_brief is not None:
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:
@@ -3830,15 +3812,11 @@ def cmd_update(
     _dispatch_overrides.emit(brief_warning_box[0])
 
     stored_node = confirm_updated_row(_graph_path(), resolved_id[0] or task_id)
-    if locked_by is not None:
-        from fno.backlog.requeue import verify_lock_stamp_receipt
-
-        verify_lock_stamp_receipt(stored_node, locked_by, task_id)
     if add_pr is not None and stored_node.get("status") == "ready":
         typer.echo(
             f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
-            f"bind ownership and the primary PR with --locked-by <worker> "
-            f"--pr-number {add_pr}",
+            f"hold it with fno agents claim acquire node:{stored_node.get('id', task_id)} "
+            f"--holder <holder>, then stamp the PR with --pr-number {add_pr}",
             err=True,
         )
     if pr_number is not None and not clearing_number:
@@ -3865,8 +3843,7 @@ def cmd_update(
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
     # so the node carries its recomputed status. Best-effort.
     if projected_node[0] and (
-        locked_by is not None
-        or priority is not None
+        priority is not None
         or project is not None
         or type_ is not None
         or difficulty is not None
@@ -3911,13 +3888,13 @@ def cmd_unclaim(
         ..., help="Node id to free (reverts claimed -> ready, releases the lockfile)"
     ),
 ) -> None:
-    """Free a claimed node in one call (graph claim + safe lockfile release)."""
+    """Release a stale or own node lockfile claim."""
     from fno.backlog.requeue import _unclaim_node
 
     _unclaim_node(task_id)
 
 
-@cli.command("requeue", hidden=True, epilog="Paired verbs: fno agents claim acquire node:<node> takes the lockfile; fno backlog update <node> --locked-by <worker> stamps the graph field.")
+@cli.command("requeue", hidden=True, epilog="Paired verb: fno agents claim status node:<node> reads the holder; requeue releases a gone holder's lockfile.")
 def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
@@ -4091,7 +4068,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import commit_rows_via_store, read_graph_strict
+    from fno.graph.store import read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -4151,9 +4128,8 @@ def cmd_next(
         The admission set, the narrowing cascade, and the ranking are the
         keeper verb's (backlog_ready::select); `next` takes rows[0] of the
         same answer its sibling verb serves, so the two surfaces cannot
-        drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock; `occupancy` rides IN so the
-        keeper never re-reads claims this command already has.
+        drift. `entries` and `occupancy` ride in so the keeper never re-reads
+        claims this command already has.
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
@@ -4284,62 +4260,30 @@ def cmd_next(
         return merged
 
     if claim:
-        if _external:
-            # External claims use the claims subsystem only: no graph
-            # mutation, and no claim pointer written into tracker or sidecar
-            # (the live holder lives in the claims dir). Contention falls
-            # through to the next ranked candidate rather than failing the
-            # whole selection.
-            from fno.claims.cli import _parse_ttl
-            from fno.claims.core import ClaimHeldByOther, acquire_claim
-            from fno.claims.io import claims_root_for
+        # One claim path for graph and external trackers. Contention falls
+        # through to the next ranked candidate; the graph never stores a copy.
+        from fno.claims.cli import _parse_ttl
+        from fno.claims.core import ClaimHeldByOther, acquire_claim
+        from fno.claims.io import claims_root_for
 
-            assert pre_entries is not None
-            occupied, observer = _prepare(pre_entries)
-            candidates = _with_observer(
-                _select(pre_entries, occupied), pre_entries, occupied, observer
-            )
-            for winner in candidates:
-                key = f"node:{winner['id']}"
-    # Rationale (14 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4593
-                try:
-                    acquire_claim(
-                        key,
-                        claim,
-                        ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
-                        root=claims_root_for(key),
-                    )
-                except ClaimHeldByOther:
-                    continue
-                result[0] = _dispatch_node_summary(winner)
-                break
-        else:
-
-            def mutator(entries):
-                occupied, observer = _prepare(entries)
-                candidates = _with_observer(
-                    _select(entries, occupied), entries, occupied, observer
+        entries = pre_entries if _external else _read_entries()
+        occupied, observer = _prepare(entries)
+        candidates = _with_observer(
+            _select(entries, occupied), entries, occupied, observer
+        )
+        for winner in candidates:
+            key = f"node:{winner['id']}"
+            try:
+                acquire_claim(
+                    key,
+                    claim,
+                    ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
+                    root=claims_root_for(key),
                 )
-                if candidates:
-                    winner = candidates[0]
-                    # Rows are serialized summaries, not graph references:
-                    # the lock must land on the graph entry itself or the
-                    # commit publishes nothing (the pre-port leg returned
-                    # graph references from _pick_ready, so this was
-                    # implicit).
-                    target = next(
-                        (e for e in entries if e.get("id") == winner["id"]), None
-                    )
-                    if target is None:
-                        raise RuntimeError(
-                            f"selected node vanished under the lock: {winner['id']}"
-                        )
-                    target["locked_by"] = claim
-                    target["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _dispatch_node_summary(target)
-                return entries
-
-            commit_rows_via_store(_graph_path(), mutator)
+            except ClaimHeldByOther:
+                continue
+            result[0] = _dispatch_node_summary(winner)
+            break
     else:
         if _external:
             assert pre_entries is not None
@@ -7309,8 +7253,6 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
     so the field keeps meaning "GitHub confirmed this". A ``--force`` close and
     a PR-less epic cascade leave it unset rather than assert a merge.
     """
-    node["locked_by"] = None
-    node["locked_at"] = None
     # Done dominates deferred per the cascade. Clear any deferred/queued state
     # so the row presents as cleanly done with no ghost fields.
     node["deferred_at"] = None
@@ -10860,11 +10802,8 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # Promote idea -> ready by clearing a stale idea lock; a node with a
-        # live work lock (locked_by set) keeps it.
-        # status is recomputed by recompute_statuses on the next read.
-        if entry.get("locked_by") is None:
-            entry["locked_at"] = None
+        # The plan link and claim lockfile determine the projected status and
+        # holder; intake does not write claim fields.
         break
     return es
 
@@ -11580,8 +11519,6 @@ def cmd_supersede(
         # replacer unresolvable on unsupersede, leaving a stale edge.
         canonical_new = new_node["id"]
         old_node["superseded_by"] = canonical_new
-        old_node["locked_by"] = None
-        old_node["locked_at"] = None
         old_node["supersession"] = {
             "successor": canonical_new,
             "cause": cleaned_cause,

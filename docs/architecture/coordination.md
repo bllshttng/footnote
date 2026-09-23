@@ -15,10 +15,7 @@ Not for: who dispatches work or where a worker runs. That is the spawn substrate
 Before this work, three partially-overlapping coordination mechanisms ran
 in parallel:
 
-- **Graph node `session_id`** (in `~/.fno/graph.json`): set by
-  `roadmap-tasks.py update --locked-by` to mark "this backlog node is
-  being worked on by session X." Authoritative for `fno backlog next`
-  filtering, but not visible to subsystems that did not load the graph.
+- **Graph node claim projection** (`locked_by`, harness, and session fields): read from the `node:<id>` lockfile for display and status; the graph row does not own or write claim state.
 - **Megawalk PID lock** (`pid` field in `megawalk-state.md`): a walker-singleton lock so two megawalk walkers in the same project could not both run. Used `os.kill(pid, 0)` for liveness; no PID-reuse detection. (Now replaced by the `walker:` claim.)
 - **Megawalk `in_flight_nodes`** array: per-walker tracking of which graph nodes the walker had dispatched. Filtered out at `_select_ready_nodes` to avoid double-dispatch within the same walker. (Now replaced by the `node:` claim filter in `fno backlog next`.)
 
@@ -30,7 +27,7 @@ target sessions would dispatch.
 
 ## Design
 
-One primitive, flat key namespace, atomic claim rows, append-only audit trail.
+One primitive, flat key namespace, atomic lockfiles, append-only audit trail.
 
 ### Lockfile claim store
 

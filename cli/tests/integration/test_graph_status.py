@@ -77,17 +77,23 @@ def test_idea_status_derived_from_no_plan_path(tmp_graph):
     )
 
 
-def test_idea_status_overridden_by_in_progress(tmp_graph):
-    """An idea-shaped node that gets claimed (session_id set) derives to in_progress."""
+def test_idea_status_overridden_by_lockfile_claim(tmp_graph, monkeypatch):
+    """An idea-shaped node with a live claim lockfile derives to in_progress."""
+    from fno.claims.core import acquire_claim
+    from fno.graph.store import read_graph
+
     add = _invoke("--json", "backlog", "add", "Claimed idea")
     node_id = json.loads(add.stdout)["id"]
+    claims_root = tmp_graph.parent / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-X")
+    acquire_claim(
+        f"node:{node_id}", "target-session:session-X", root=claims_root
+    )
 
-    r = _invoke("backlog", "update", node_id, "--locked-by", "session-X")
-    assert r.exit_code == 0, r.output
-
-    entries = _read_entries(tmp_graph)
+    entries = read_graph(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("session_id") == "session-X"
+    assert node.get("locked_by") == "session-X"
     assert node.get("status") == "in_progress", (
         f"in_progress beats idea; got {node.get('status')!r}"
     )
@@ -745,16 +751,24 @@ def test_backlog_idea_wave_appends_without_minting(tmp_graph):
     assert note["difficulty"] == "high"
 
 
-def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
+def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph, monkeypatch):
     """x-6a2c AC1-HP: the reported scenario - wave-of into an in_progress
     target carrying a live claim - lands the note (positive marker), exit 0."""
+    from fno.claims.core import acquire_claim
+    from fno.graph.store import read_graph
+
     add = _invoke("--json", "backlog", "add", "Running work")
     target_id = json.loads(add.stdout)["id"]
-    upd = _invoke(
-        "backlog", "update", target_id,
-        "--locked-by", "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
+    claims_root = tmp_graph.parent / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv(
+        "CLAUDE_CODE_SESSION_ID", "00847995-e0db-47c2-ab5b-24468ba1a4f5"
     )
-    assert upd.exit_code == 0, upd.output
+    acquire_claim(
+        f"node:{target_id}",
+        "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
+        root=claims_root,
+    )
 
     r = _invoke(
         "--json", "backlog", "idea", "Claimed finding",
@@ -767,7 +781,7 @@ def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
     assert receipt["outcome"] == "wave"
     assert receipt["minted_id"] is None
 
-    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
+    node = next(e for e in read_graph(tmp_graph) if e["id"] == target_id)
     assert node.get("status") == "in_progress", node.get("status")
     notes = node.get("progress_notes") or []
     assert notes and notes[-1]["kind"] == "wave"
@@ -833,7 +847,6 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
     target_id = json.loads(target.stdout)["id"]
-    _invoke("backlog", "update", target_id, "--locked-by", "null")
     _invoke("backlog", "done", target_id)
     r = _invoke(
         "--json", "backlog", "idea", "Late finding",

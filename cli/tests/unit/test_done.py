@@ -514,15 +514,22 @@ def test_rollup_empty_ledger_leaves_fields_null(tmp_graph, tmp_ledger, monkeypat
 
 
 def test_rollup_preserves_existing_session_id(tmp_graph, tmp_ledger, monkeypatch):
-    """Pre-existing session_id (e.g. set by --locked-by) is not overwritten."""
+    """The session id projected from the active claim survives rollup."""
+    from fno.claims.core import acquire_claim
+
     _seed(tmp_graph, [{
         "id": "ab-pre00001",
         "title": "T",
         "status": "ready",
         "domain": "code",
         "plan_path": "/p",
-        "session_id": "sticky-session",
     }])
+    claims_root = tmp_graph.parent / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sticky-session")
+    acquire_claim(
+        "node:ab-pre00001", "target-session:sticky-session", root=claims_root
+    )
     _seed_ledger(tmp_ledger, [{
         "plan_path": "/p",
         "sessions": ["would-overwrite"],

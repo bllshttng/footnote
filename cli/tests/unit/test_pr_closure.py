@@ -74,21 +74,20 @@ def test_ensure_closure_trailer_lets_a_dead_reader_stop_the_pr(monkeypatch):
         ensure_closure_trailer("Some summary.", "feature/x-49ec")
 
 
-def test_bind_created_pr_maps_one_real_branch_node_and_owner():
+def test_bind_created_pr_maps_one_real_branch_node_without_stamping_claim():
     entries = [_node(id="x-38e0"), _node(id="x-9999")]
 
     result = bind_created_pr(
         entries,
         head_ref="feature/x-38e0-live-node",
         pr_url="https://github.com/o/r/pull/1038",
-        owner="worker-session",
     )
 
     assert result.outcome == "bound"
     assert entries[0]["pr_number"] == 1038
     assert entries[0]["pr_url"] == "https://github.com/o/r/pull/1038"
-    assert entries[0]["locked_by"] == "worker-session"
-    assert entries[0]["session_id"] == "worker-session"
+    assert "locked_by" not in entries[0]
+    assert "session_id" not in entries[0]
 
 
 # --- resolve_branch_node_id (the --from-branch producer, x-5625) -----------
@@ -152,7 +151,6 @@ def test_bind_created_pr_is_idempotent():
     kwargs = {
         "head_ref": "feature/x-38e0-live-node",
         "pr_url": "https://github.com/o/r/pull/1038",
-        "owner": "worker-session",
     }
 
     first = bind_created_pr(entries, **kwargs)
@@ -173,7 +171,7 @@ def test_bind_created_pr_refuses_unknown_ambiguous_and_malformed_without_mutatio
         entries = [_node(id="x-38e0"), _node(id="x-9999")]
         snapshot = [dict(entry) for entry in entries]
 
-        result = bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url, owner="worker-session")
+        result = bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url)
 
         assert result.outcome == "refused"
         assert entries == snapshot

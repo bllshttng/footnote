@@ -682,7 +682,7 @@ def test_intake_with_frontmatter_claim_updates_idea_node(fixture_graph, tmp_path
     target = next(e for e in entries if e["id"] == "ab-1dea1234")
     assert target["plan_path"] == str(plan)
     assert target["title"] == "Backlog intake honors plan claims (final)"
-    # locked_at is reset to None as part of the idea -> ready promotion.
+    # No claim lockfile exists, so the projected lock timestamp stays null.
     assert target["locked_at"] is None
 
 
@@ -963,7 +963,9 @@ def test_intake_with_cli_claim_wins_over_frontmatter(fixture_graph, tmp_path, ca
     assert next(e for e in entries if e["id"] == "ab-1dea1234")["plan_path"] is None
 
 
-def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys):
+def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys, monkeypatch):
+    from fno.claims.core import acquire_claim
+
     graph_file = fixture_graph
     entries = _read_entries(graph_file)
     entries.append(
@@ -971,12 +973,16 @@ def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys):
             "ab-1e5e0001",
             title="Mid-flight feature",
             status="in_progress",
-            locked_by="other-session",
-            locked_at="2026-09-05T00:00:00+00:00",
         )
     )
     entries.append(_node("ab-b10cced1", title="Parked feature", status="blocked"))
     commit_rows_via_store(graph_file, lambda _e: entries)
+    claims_root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "other-session")
+    acquire_claim(
+        "node:ab-1e5e0001", "target-session:other-session", root=claims_root
+    )
 
     in_flight_dir = tmp_path / "in_flight"
     parked_dir = tmp_path / "parked"
@@ -991,10 +997,12 @@ def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys):
     _intake_impl(plan_paths=[str(in_flight_plan)])
     _intake_impl(plan_paths=[str(parked_plan)])
     capsys.readouterr()
-    by_id = {e["id"]: e for e in _read_entries(graph_file)}
+    from fno.graph.store import read_graph
+
+    by_id = {e["id"]: e for e in read_graph(graph_file)}
     assert by_id["ab-1e5e0001"]["plan_path"] == str(in_flight_plan)
     assert by_id["ab-1e5e0001"]["locked_by"] == "other-session"
-    assert by_id["ab-1e5e0001"]["locked_at"] == "2026-09-05T00:00:00+00:00"
+    assert by_id["ab-1e5e0001"]["locked_at"] is not None
     assert by_id["ab-b10cced1"]["plan_path"] == str(parked_plan)
 
 

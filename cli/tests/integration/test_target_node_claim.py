@@ -17,8 +17,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from tests._init_space import install_state_path_stub
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,18 +50,6 @@ if [[ "$1" == "do" && "$2" == "target" && "$3" == "resolve-owned-identity" ]]; t
     printf '%s\n' "$MOCK_ABI_OWNED_OUT"
   fi
   exit 0
-fi
-# The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
-# it as a bare success would hollow out the identity assertion. Delegate to the
-# real writer under the pinned python3; the shim exposes graph.cli directly, so
-# the leading `backlog` token is dropped.
-if [[ "$1" == "backlog" && "$2" == "update" ]]; then
-  # MOCK_ABI_STALE simulates an installed fno predating the harness flags.
-  if [[ -n "${MOCK_ABI_STALE:-}" && "$*" == *--locked-by-harness* ]]; then
-    echo "Error: No such option: --locked-by-harness" >&2
-    exit 2
-  fi
-  exec python3 "$MOCK_ABI_SHIM" "${@:2}"
 fi
 exit 0
 """
@@ -259,24 +245,29 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     assert f'target_claim_holder: "target-session:{thread_id}"' in state
 
 
-def test_stale_installed_fno_stamps_owner_only_and_says_so(tmp_path):
-    """An fno predating the harness flags must still stamp the owner - but must
-    NOT pass for a clean stamp, or the missing harness metadata goes silent."""
+def test_init_reads_owner_from_claim_without_graph_stamp(tmp_path, monkeypatch):
+    """AC11-HP: init acquires the lockfile and never stamps a second owner."""
     repo, home, log, env = _sandbox(tmp_path)
     env["MOCK_ABI_ACQUIRE_RC"] = "0"
-    env["MOCK_ABI_STALE"] = "1"
+    env["FNO_CLAIMS_ROOT"] = str(home)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(home))
 
     r = _run_init(repo, env)
-    # The store owns state; the json mirror can lag the last write.
     from fno.graph.store import read_graph_strict
 
     graph = read_graph_strict(home / ".fno" / "graph.json")[0]
+    log_text = log.read_text()
 
-    assert graph.get("locked_by"), f"owner must survive a stale fno: {graph}"
-    assert not graph.get("locked_by_harness"), \
-        "the stale fno rejected the harness flag; it must not appear stamped"
-    assert "WITHOUT harness metadata" in r.stderr, \
-        "degraded stamp must be announced, not silent: " + r.stderr[-600:]
+    assert r.returncode == 0, r.stderr
+    assert any(
+        "claim acquire" in line and NODE_ID in line for line in log_text.splitlines()
+    )
+    assert not any(
+        "backlog update" in line
+        for line in log_text.splitlines()
+    )
+    assert graph.get("locked_by") is None
+    assert graph.get("locked_at") is None
 
 
 def test_held_by_other_refuses(tmp_path):

@@ -264,7 +264,7 @@ pub struct Lifecycle {
     pub reopened_reason: Option<String>,
 }
 
-/// The node lock fields (one node_claims row).
+/// The node claim fields projected from its lockfile.
 #[derive(Clone, Debug, Default)]
 pub struct NodeClaim {
     pub locked_by: Option<String>,

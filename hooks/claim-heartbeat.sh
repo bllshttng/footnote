@@ -231,15 +231,8 @@ else:
     elif [[ "$_CREATED_PR_URL_COUNT" -ne 1 ]]; then
       echo "claim-heartbeat: gh pr create returned ambiguous PR URLs; binding skipped" >&2
     else
-      _BIND_OWNER="$CUR_CLAUDE_SID"
-      [[ "$IS_CODEX_HOOK" -eq 1 ]] && _BIND_OWNER="$CUR_CODEX_THREAD_ID"
-      if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
-        _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
-      fi
       _bind_args=(do pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
-      [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
       _BIND_MANUAL="fno do pr bind-created --url $_CREATED_PR_URLS --repo $CWD"
-      [[ -n "$_BIND_OWNER" ]] && _BIND_MANUAL="$_BIND_MANUAL --owner $_BIND_OWNER"
       _BIND_ATTEMPT=0
       _BIND_RC=1
       _BIND_OUTPUT=""
