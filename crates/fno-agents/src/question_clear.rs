@@ -498,7 +498,8 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
                     {
                         answer.exit_code = 1;
                         answer.lines.push(format!(
-                            "outstanding: nothing was written for {qid} (decision record failed: {error})"
+                            "outstanding: nothing was written for {qid} (decision record failed: {})",
+                            error.0
                         ));
                         break;
                     }
