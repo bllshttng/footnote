@@ -60,8 +60,8 @@ pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
 };
 pub(crate) use scope::{
-    autonomous_merge_enabled, blocked_child_grace_minutes, expand_home, graph_json_path,
-    home_dot_fno, operator_lane_path, parse_manifest, project_map,
+    autonomous_merge_enabled, blocked_child_grace_minutes, graph_json_path, home_dot_fno,
+    operator_lane_path, parse_manifest, project_map,
 };
 pub(crate) use stranded::{read_stranded_trees, stranded_candidates, STRANDED_GRACE_MINUTES};
 
