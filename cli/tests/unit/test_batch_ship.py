@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from fno.backlog import batch as B
+from fno.graph.store import read_graph_strict
 
 
 def _open(root: Path, domain: str = "code", **kw) -> dict:
@@ -70,7 +71,7 @@ def _member_node(nid: str) -> dict:
 
 
 def _read_graph(path: Path) -> list[dict]:
-    return json.loads(path.read_text())["entries"]
+    return read_graph_strict(path)
 
 
 def test_ship_no_open_batch_is_noop(tmp_path, graph):

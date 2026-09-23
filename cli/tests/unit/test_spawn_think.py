@@ -1047,9 +1047,9 @@ def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
     monkeypatch.setenv("FNO_THINK_SPAWN", "0")
     reached = []
     monkeypatch.setattr(st, "maybe_spawn_think", lambda *a, **k: reached.append(1))
-    # Any graph re-read would import read_graph; assert it is never called.
+    # Any graph re-read would import read_graph_strict; assert it is never called.
     import fno.graph.store as gs
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read"))
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read"))
     assert st.on_node_born(_node()) is None
     assert reached == []
 
@@ -1134,7 +1134,7 @@ def test_on_node_born_persisted_skips_reread(iso, monkeypatch):
 
     import fno.graph.store as gs
     reached: list = []
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read") or [])
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read") or [])
 
     st.on_node_born(_node(slug="durable-slug"), persisted=True)
 
@@ -1731,7 +1731,7 @@ def test_an_empty_session_is_not_stamped_over_the_node(monkeypatch, tmp_path):
         captured["out"] = mutator(entries)
 
     monkeypatch.setattr(
-        "fno.graph.store.locked_mutate_graph", fake_mutate, raising=False
+        "fno.graph.store.commit_rows_via_store", fake_mutate, raising=False
     )
     st._stamp_forward("x-1", "", None, output_path="/tmp/doc.md")
     if "out" in captured:

@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from fno.graph.statuses import VALID_STATUSES
-from fno.graph.types import Entry
+from fno.graph.types import Node as Entry
 
 
 # ---------------------------------------------------------------------------

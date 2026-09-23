@@ -248,10 +248,13 @@ def test_map_covers_current_surface_once():
     # take one row: 608 -> 610. This branch allocates `doctor intel`, the
     # doctor leaf over the binary's provenance fold (the binary-side action
     # stays unregistered under d-fe66560a and takes no row): 610 -> 611.
-    # This branch allocates `agents select-read`, the bounded selection read
+    # Main then allocates `agents select-read`, the bounded selection read
     # the auto-continue arm calls through call_binary_json (one corpus ref,
     # the architecture doc): 611 -> 612.
-    assert len(mapped) == 612, (
+    # The feed verb retired with the territory blueprinter (x-701c): 612 -> 611.
+    # The store flip then deletes the `backlog archive-dedupe-ids` action
+    # with the json leg it belonged to: 611 -> 610.
+    assert len(mapped) == 610, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

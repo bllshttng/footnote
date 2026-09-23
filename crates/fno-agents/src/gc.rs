@@ -2382,7 +2382,7 @@ mod tests {
         }
     }
 
-    /// The planning lane (AC3-HP): a blueprinter named on a node that reached
+    /// The planning lane (AC3-HP): a blueprint session named on a node that reached
     /// ready has FINISHED its assignment - the plan was written, the node
     /// moved on, and THIS session's own blueprint row carries `ended_at`.
     /// Quiet past the 1200 s planner grace (d-81c6da7e), not the 900 s

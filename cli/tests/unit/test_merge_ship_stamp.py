@@ -51,8 +51,8 @@ def _clear_env(monkeypatch):
 
 
 def _sessions(g: Path, node_id: str) -> list[dict]:
-    from fno.graph.store import read_graph
-    return next(e for e in read_graph(g) if e["id"] == node_id).get("sessions", [])
+    from fno.graph.store import read_graph_strict
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id).get("sessions", [])
 
 
 # --- fno do pr merge closes its own node (baked-in reconcile, no memory) ---------
@@ -154,8 +154,8 @@ def test_reconcile_backfills_pr_number_for_a_url_only_node(tmp_path, monkeypatch
     monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
     monkeypatch.setattr(M, "run", _stub_run([]))
     M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-recon001")
     assert node["pr_number"] == 777
     assert node["pr_url"] == url
 
@@ -175,8 +175,8 @@ def test_reconcile_does_not_clobber_existing_primary(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-multi01")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-multi01")
     assert node["pr_number"] == 100                 # primary untouched
     assert node["pr_url"] == f"{_FOOT}/100"         # url pair intact
     assert len(calls) == 1                          # still closed, scoped to the node
@@ -230,8 +230,8 @@ def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._on_confirmed_merge(556, str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-conf001")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-conf001")
     assert node.get("merge_status") == "merged"
     assert calls
     assert calls[0][-7:] == [
@@ -308,9 +308,9 @@ def test_reconcile_merged_pr_node_closes_via_seam_under_external(
     assert tracker.close_calls == ["ab-recon001"]
     assert calls == []  # the refused reconcile subprocess never fired
     # The backfill went to the sidecar, not the graph.
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-recon001")
     assert node.get("pr_number") != 777
     sc = json.loads((sc_dir / "ab-recon001.json").read_text())
     assert sc["pr_number"] == 777

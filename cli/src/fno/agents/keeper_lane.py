@@ -115,15 +115,11 @@ def store_backend_of(graph: Optional[Path]) -> str:
 
 
 def graph_read_source() -> str:
-    """The configured authoritative backend; failure reads json. The
-    legality arm reads BOTH sides, so a json rollback never reads as a
-    leak."""
-    try:
-        from fno.config import load_settings
+    """The backend the default graph actually reads through; an unanswered
+    store reads json, so a rollback leg never reads as a leak."""
+    from fno.graph.store import GRAPH_JSON, store_export_status
 
-        return str(load_settings().graph.read_source)
-    except Exception:  # noqa: BLE001 - config failure reads json (rollback)
-        return "json"
+    return str(store_export_status(GRAPH_JSON).get("backend") or "json")
 
 
 @dataclass(frozen=True)

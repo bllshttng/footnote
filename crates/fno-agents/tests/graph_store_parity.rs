@@ -238,6 +238,9 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                     .unwrap_or_else(|e| panic!("rust op {other}: {e}"));
                 mutate(entries, graph);
                 let shaped = match other {
+                    "append_progress_note" => {
+                        serde_json::json!([op_result.get("found"), op_result.get("plan_path")])
+                    }
                     "append_encounter" => serde_json::json!([
                         op_result.get("appended"),
                         op_result.get("error"),
@@ -447,6 +450,8 @@ fn characterization_reads_and_mutations_match_the_frozen_python_leg() {
         fixture_basic(),
         serde_json::json!([
             {"name": "set_field", "node_id": "ab-0001", "field": "priority", "value": "p0"},
+            {"name": "append_progress_note", "node_id": "ab-0001",
+             "note": {"ts": "2026-08-02T02:00:00Z", "text": "second note"}},
             {"name": "append_encounter", "node_id": "ab-0001",
              "record": {"ts": "2026-08-02T03:00:00Z", "session_id": "voter-1", "harness": "claude",
                         "evidence": "cost me a rebase"}},

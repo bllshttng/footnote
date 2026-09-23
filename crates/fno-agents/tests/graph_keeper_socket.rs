@@ -140,7 +140,7 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
         2,
         "op",
         json!({
-            "name": "append_wave_note",
+            "name": "append_progress_note",
             "params": {"node_id": "ab-missing", "note": {"ts": "t", "text": "x"}}
         }),
     ));
@@ -241,7 +241,7 @@ fn keeper_keeps_serving_after_its_client_hangs_up() {
         2,
         "op",
         json!({
-            "name": "append_wave_note",
+            "name": "append_progress_note",
             "params": {"node_id": "ab-missing", "note": {"ts": "t", "text": "x"}}
         }),
     ));
@@ -308,7 +308,7 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
         1,
         "op",
         json!({
-            "name": "append_wave_note",
+            "name": "append_progress_note",
             "params": {"node_id": "ab-x", "note": {"ts": "t", "text": "y"}}
         }),
     );
@@ -600,7 +600,7 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
         // queues on the write gate, and the gate hands over between ops
         // without a connect gap the Shutdown ladder could slip into.
         let req = json!({
-            "name": "append_wave_note",
+            "name": "append_progress_note",
             "params": {"node_id": "ab-x", "note": {"ts": "t", "text": "y"}}
         });
         let frame = {

@@ -48,7 +48,9 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 # -- find --
@@ -322,7 +324,7 @@ def test_ac1_hp_new_with_source_flags_populates_provenance(tmp_graph):
     assert e["source_project"] == "example-pipeline"
     assert e["source_inbox_msg"] == "msg-a4f1"
     # source_session_id not provided, should be None
-    assert e["source_session_id"] is None
+    assert e.get("source_session_id") is None
 
 
 def test_ac1_hp_new_with_source_session_id(tmp_graph):
@@ -359,6 +361,6 @@ def test_new_source_kind_defaults_to_organic(tmp_graph):
     assert result.exit_code == 0, result.output
     e = _read(tmp_graph)[0]
     assert e["source_kind"] == "organic"
-    assert e["source_project"] is None
-    assert e["source_session_id"] is None
-    assert e["source_inbox_msg"] is None
+    assert e.get("source_project") is None
+    assert e.get("source_session_id") is None
+    assert e.get("source_inbox_msg") is None

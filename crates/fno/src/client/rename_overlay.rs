@@ -3,7 +3,7 @@
 //! sideline registry row. Lives beside the test family (client/tests/
 //! rename_tests.rs) so client.rs keeps shrinking.
 
-use super::{TabId, View};
+use super::{DisplayRow, TabId, View};
 
 /// The entity a rename overlay is editing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,27 @@ pub(super) enum RenameTarget {
 }
 
 impl View {
+    /// Open the rename overlay for the renamable entity under the selector.
+    /// Resolve the row before mutating the view so the layout borrow ends first.
+    pub(super) fn rename_at_cursor(&mut self, cur: usize) {
+        let result = match self.display_rows().get(cur) {
+            Some(DisplayRow::Sel(row)) if row.tab.is_none() => {
+                Ok((RenameTarget::Squad(row.squad), String::new()))
+            }
+            Some(DisplayRow::Agent(agent)) if !agent.external => {
+                Ok((RenameTarget::Agent(agent.name.clone()), agent.name.clone()))
+            }
+            Some(DisplayRow::Agent(_)) => {
+                Err("an external row's name belongs to its claude session")
+            }
+            _ => Err("r renames a workspace or agent row"),
+        };
+        match result {
+            Ok((target, seed)) => self.open_rename_seeded(target, seed),
+            Err(message) => self.set_notice(message.into()),
+        }
+    }
+
     /// Open the rename overlay modally for `target`, clearing any other
     /// keyboard-opened overlay first. A lingering selector would swallow the
     /// name.

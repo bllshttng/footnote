@@ -17,13 +17,9 @@ one cannot be reached or spawned, every call raises
 :class:`StoreUnavailable` naming the keeper-lane state - an unreachable
 store is NEVER read as an empty graph (the absence-as-answer trap).
 
-The mutation cycle is a versioned transaction: ``begin`` returns the
-defaulted entries plus the file's content digest, the mutator runs
-client-side against that snapshot, and ``commit`` refuses to publish over a
-changed file, so an interleaved writer turns into a retry instead of a
-silent clobber. The claim-release hook, renders, and the active-backlog
-nudge run after the commit lands, exactly where the flock version ran them
-after the lock dropped.
+The mutation cycle is a versioned transaction: read one snapshot through
+the keeper, publish the row diff through ``commit_rows``, retry on a
+changed base. Post-publish hooks run where the flock version ran them.
 
 Read-failure taxonomy (unchanged): :class:`GraphCorruptError` (the soft
 read's parse failure, swallowed to [] by read_graph, exit 1 by the mutate
@@ -152,6 +148,15 @@ class StoreUnavailable(RuntimeError):
         self.state = state
         self.detail = detail
         super().__init__(f"graph store unavailable ({state}): {detail}")
+
+
+# The read failures a caller may treat as "the store could not be read".
+STORE_READ_ERRORS = (
+    GraphCorruptError,
+    GraphUnreadableError,
+    GraphMalformedRootError,
+    StoreUnavailable,
+)
 
 
 class WriteUnconfirmed(StoreUnavailable):
@@ -459,9 +464,9 @@ class _Keeper:
                 if isinstance(outcome, dict):
                     targets.append(outcome)
                 if any(target.get("entries_elided") for target in targets):
-                    entries = status_client.request(
-                        "read", {"strict": True, "keep_malformed": False}
-                    )["entries"]
+                    body = status_client.request("read_file", {})
+                    doc = json.loads(_base64.b64decode(body["bytes_b64"]))
+                    entries = doc.get("entries", []) if isinstance(doc, dict) else []
                     for target in targets:
                         if target.get("entries_elided"):
                             target["entries"] = copy.deepcopy(entries)
@@ -480,25 +485,13 @@ class _Keeper:
 
     # -- typed helpers -----------------------------------------------------
     # The keeper is single-graph (it binds to whatever --graph named), so
-    # read/read_file/begin carry no path; only read_archive does, because the
-    # archive is a DIFFERENT file than the one the keeper owns.
+    # read/read_file/begin carry no path.
 
     def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
-        del path  # single-graph keeper: the bound graph IS the target
-        try:
-            return self.request(
-                "read" if not strict else "read_strict",
-                {"strict": strict, "keep_malformed": keep_malformed},
-            )
-        except GraphCorruptError as exc:
-            if not strict:
-                raise
-            # Taxonomy, not wording: the strict read's contract is that EVERY
-            # parse failure is a GraphUnreadableError (cli.py catches that
-            # class to tell "graph unreadable" from "node absent"), while the
-            # soft path's parse failure is the swallower's GraphCorruptError.
-            # The keeper carries one kind for both; the client splits it.
-            raise GraphUnreadableError(str(exc)) from None
+        """The store's entries, defaults applied. strict/keep_malformed are
+        accepted-and-ignored: the typed store has one row shape."""
+        del path, strict, keep_malformed
+        return self.request("read", {})
 
     def read_file(self, path: Path) -> dict:
         del path
@@ -691,17 +684,6 @@ class _Conflict(Exception):
     """Internal: the commit's snapshot is stale; the tx loop retries."""
 
 
-_ROWS_FALLBACK_WARNED = False
-
-
-def _warn_rows_fallback(reason: str) -> None:
-    global _ROWS_FALLBACK_WARNED
-    if _ROWS_FALLBACK_WARNED:
-        return
-    _ROWS_FALLBACK_WARNED = True
-    print(f"Warning: commit_rows unavailable; using whole commit ({reason})", file=sys.stderr)
-
-
 def _row_index(entries: list[dict]) -> dict[str, dict] | None:
     indexed: dict[str, dict] = {}
     for row in entries:
@@ -724,44 +706,35 @@ def _row_diff(before: list[dict], after: list[dict]) -> tuple[list[dict], list[s
     return changed, removed
 
 
-def _graph_setting(name: str, default: str) -> str:
-    try:
-        from fno.config import load_settings
-
-        return str(getattr(load_settings().graph, name))
-    except Exception:
-        return default
+def _read_snapshot(client) -> tuple[str, list[dict], dict]:
+    """One gate-held read: entries, the commit token, and their row digests."""
+    snap = client.request("begin", {})
+    return snap["version"], snap.get("entries", []), snap.get("base_digests", {})
 
 
-def _graph_commit_mode() -> str:
-    return _graph_setting("commit_mode", "rows")
-
-
-def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],
-                     plan_rungs: dict, attempt: int) -> dict:
-    if _graph_commit_mode() == "rows":
-        diff = _row_diff(base_entries, entries)
-        if diff is not None:
-            changed, removed = diff
-            try:
-                return client.request("commit_rows", {
-                    "base_version": snap["version"],
-                    "base_plan_rungs": _plan_rung_map(base_entries),
-                    "changed": changed,
-                    "removed": removed,
-                    "plan_rungs": plan_rungs,
-                    "attempt": attempt,
-                })
-            except RuntimeError as exc:
-                marker = 'store error (invalid): unknown store method "commit_rows"'
-                if str(exc) != marker:
-                    raise
-                _warn_rows_fallback("running keeper predates commit_rows")
-        else:
-            _warn_rows_fallback("snapshot cannot be represented as row diff")
-    return client.request("commit", {
-        "version": snap["version"],
-        "entries": entries,
+def _commit_rows(client, base_version: str, base_digests: dict,
+                 base_entries: list[dict], entries: list[dict],
+                 plan_rungs: dict, attempt: int) -> dict:
+    """Publish the row diff; `_Conflict` on a version mismatch retries the tx."""
+    diff = _row_diff(base_entries, entries)
+    if diff is None:
+        raise WriteUnconfirmed(
+            STATE_UNCONFIRMED,
+            "the mutation's snapshot cannot be represented as a row diff; "
+            "read the graph before retrying",
+        )
+    changed, removed = diff
+    # Per-row digests from the begin snapshot; the keeper verifies them
+    # inside its write transaction. The rung maps ride along because repo
+    # law keeps plan-document reading on this side of the seam: without
+    # them the keeper keeps stored statuses instead of re-deriving.
+    touched = [row["id"] for row in changed] + removed
+    return client.request("commit_rows", {
+        "base_version": base_version,
+        "base_digests": {rid: base_digests[rid] for rid in touched if rid in base_digests},
+        "base_plan_rungs": _plan_rung_map(base_entries),
+        "changed": changed,
+        "removed": removed,
         "plan_rungs": plan_rungs,
         "attempt": attempt,
     })
@@ -1072,26 +1045,6 @@ def _read_json(path: Path) -> list[dict]:
     return entries
 
 
-def _write_json(entries: list[dict], path: Path) -> None:
-    """Raw atomic write of an entries file. ARCHIVE ONLY: the working graph's
-    write path is the keeper's publish pipeline, and hand-rolling one here is
-    exactly the two-write window the port retired. The archive store keeps
-    its own readers and lifetime (out of the port's scope), and its writers
-    keep this primitive."""
-    path = Path(path)
-    data = {"entries": entries}
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def _graph_lock_path(path: Path) -> Path:
     """The keeper's lockfile for a graph file: ``<canonical path>.lock``.
 
@@ -1132,15 +1085,11 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
 
 
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
-    """Failure-surfacing counterpart to :func:`read_graph`.
+    """The whole-graph read, defaults applied. Raises when the store cannot
+    be read cleanly, so "node absent" stays apart from "graph unreadable"."""
+    from fno.graph.api import wire_rows
 
-    Returns entries (defaults applied) for a populated OR legitimately empty
-    graph, and for an absent file. RAISES instead of returning [] when the
-    graph cannot be read cleanly, so a resolution caller can tell "node
-    absent" apart from "graph unreadable". Diagnosis is read-only: no .bak
-    is written on this path.
-    """
-    return _client_for(path).read(path, strict=True)["entries"]
+    return wire_rows(path=path)
 
 
 def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
@@ -1175,16 +1124,20 @@ def served_store_path(path: Path) -> Path:
     return path
 
 
-def read_archive_entries() -> list[dict]:
-    """The archived nodes, best-effort: an absent archive is []. Callers that
-    may test many ids read once and pass the list to
-    :func:`resolve_node_with_archive`."""
-    from fno.paths import graph_archive_json
+def read_archive_entries(path: Path | None = None) -> list[dict]:
+    """The archived residents: one include_archived read of the same store.
+    A store failure raises, an absent store is []."""
+    if path is None:
+        from fno.paths import graph_json
 
-    archive_path = graph_archive_json()
-    if not archive_path.exists():
-        return []
-    return read_graph(archive_path)
+        path = graph_json()
+    from fno.graph.api import wire_rows
+
+    return [
+        row
+        for row in wire_rows(include_archived=True, path=path)
+        if isinstance(row, dict) and row.get("archived_at")
+    ]
 
 
 def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
@@ -1211,26 +1164,14 @@ def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[di
     )
 
 
-def entries_with_archive(entries: list) -> list:
-    """``entries`` plus archived nodes, the working graph winning on id.
-
-    Best-effort and read-only: an absent or unreadable archive degrades to
-    the working graph. The archive store keeps its own readers and lifetime;
-    only its bytes ride the keeper.
-    """
-    from fno.paths import graph_archive_json
-
+def entries_with_archive(entries: list, path: Path | None = None) -> list:
+    """``entries`` plus archived residents, the working graph winning on id.
+    Advisory: any store failure degrades to ``entries`` alone."""
     try:
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
         live = {e.get("id") for e in entries if isinstance(e, dict)}
-        archived = _client_for(archive_path).request(
-            "read_archive", {"path": str(archive_path)}
-        )["entries"]
         return [
             *entries,
-            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
+            *(a for a in read_archive_entries(path) if a.get("id") not in live),
         ]
     except Exception:  # noqa: BLE001 - archive is advisory; any read failure degrades
         return entries
@@ -1242,7 +1183,7 @@ def read_graph_with_archive(path: Path | None = None) -> list[dict]:
         from fno.paths import graph_json
 
         path = graph_json()
-    return entries_with_archive(read_graph_strict(path))
+    return entries_with_archive(read_graph_strict(path), path)
 
 
 # ---------------------------------------------------------------------------
@@ -1276,8 +1217,8 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     runs them after the keeper's publish lands, which is the same position
     relative to other writers."""
     path = Path(path)
-    dropped = outcome["dropped"]
-    backup = outcome["backup"]
+    dropped = outcome.get("dropped", 0)
+    backup = outcome.get("backup")
     if warning := outcome.get("shadow_warning"):
         print(f"Warning: {warning}", file=sys.stderr)
     if dropped > 0:
@@ -1295,7 +1236,7 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
 
     # Claim releases run AFTER the publish: root resolution and recovery
     # mutexes never belong inside the store's critical section.
-    for release in outcome["closure_releases"]:
+    for release in outcome.get("closure_releases", []):
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
     # The client renders in-call when the write landed on the configured
@@ -1334,7 +1275,7 @@ def render_canonical_views() -> int:
 
     failures: list[str] = []
     graph = Path(_paths.graph_json())
-    entries = read_graph(graph)
+    entries = read_graph_strict(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
@@ -1421,11 +1362,30 @@ def _emit_graph_tx_event(**data: Any) -> None:
         pass
 
 
+def _promote_linked_rows(entries: list[dict]) -> None:
+    """The write-path ladder's plan branch, in place: an ``idea`` row whose
+    linked plan reached a rung ships ``ready`` (the keeper cannot read docs,
+    so the client derives the word). Same branch requeue's release uses."""
+    from fno.graph.ladder import Rung, plan_rung
+
+    # One doc read per distinct plan document per publish.
+    rung_cache: "dict[tuple[str, str], Rung]" = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("status") != "idea":
+            continue
+        key = (str(entry.get("cwd") or ""), str(entry.get("plan_path") or ""))
+        rung = rung_cache.get(key)
+        if rung is None:
+            rung = plan_rung(entry)
+            rung_cache[key] = rung
+        if rung not in (Rung.IDEA, Rung.NONE):
+            entry["status"] = "ready"
+
+
 def commit_rows_via_store(path: Path, mutator) -> list[dict]:
-    """The modern raw write: begin, mutate client-side, publish through the
-    keeper's row-commit with the bounded retry, return the committed rows.
-    The write seam for callers with no named op; `locked_mutate_graph` is
-    the legacy name the remaining (pre-wave-9) callers still use. The
+    """The raw write: read one snapshot, mutate it client-side, publish the
+    diff through the keeper's row commit with the bounded retry, return the
+    committed rows. The write seam for callers with no named op; the
     keeper re-derives the write pipeline and publishes under its lock.
     """
     path = Path(path)
@@ -1433,13 +1393,17 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     client = _client_for(path)
 
     for attempt in range(_TX_ATTEMPTS):
-        snap = client.request("begin", {})
-        base_entries = copy.deepcopy(snap["entries"])
-        entries = mutator(snap["entries"])
+        base_version, base_entries, base_digests = _read_snapshot(client)
+        base_entries = copy.deepcopy(base_entries)
+        entries = mutator(copy.deepcopy(base_entries))
         _validate_company_work(entries)
+        _promote_linked_rows(entries)
         plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs, attempt + 1)
+            outcome = _commit_rows(
+                client, base_version, base_digests, base_entries, entries,
+                plan_rungs, attempt + 1,
+            )
             break
         except WriteUnconfirmed as exc:
             diff = _row_diff(base_entries, entries)
@@ -1484,37 +1448,61 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     return _finish_mutation(path, outcome)
 
 
-def locked_mutate_graph(path: Path, mutator) -> list[dict]:
-    """The legacy name of `commit_rows_via_store`, kept for the callers
-    wave 9 has not moved yet."""
-    return commit_rows_via_store(path, mutator)
-
-
 # ---------------------------------------------------------------------------
 # Node resolution + the targeted helpers (typed ops over the keeper)
 # ---------------------------------------------------------------------------
 
-def _resolve_node_id(client_keeper_path: Path, node_id: str) -> str | None:
-    """Resolve a (possibly partial) node id against the begin snapshot.
+def _resolve_node_id(
+    client_keeper_path: Path, node_id: str, *, entries_out: "list | None" = None
+) -> str | None:
+    """Resolve a (possibly partial) node id against the current snapshot.
 
     The fuzzy resolver is surface: it stays Python (`_intake._find_node`),
-    reads the snapshot the mutation is keyed on, and the keeper op re-checks
-    the resolved id under the lock.
+    reads a fresh snapshot, and the keeper op re-checks the resolved id
+    under the lock. ``entries_out``, when given, receives that snapshot: it
+    is already in hand, and a caller that needs it next would otherwise read
+    the whole graph again.
     """
     from fno.graph._intake import _find_node
 
-    # The by-id fast path: one exact row instead of a whole-graph begin.
-    # The tier guard keeps resolution identical to _find_node's exact
-    # tiers (exact id, exact slug); anything else falls through to the
-    # snapshot so title-fuzzy and id-prefix never change.
-    fast = read_nodes_by_ids(client_keeper_path, [node_id])
-    if fast and fast["entries"] and not fast["missing"]:
-        row = fast["entries"][0]
-        if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
-            return row.get("id")
-    snap = _client_for(client_keeper_path).request("begin", {})
-    node = _find_node(snap["entries"], node_id)
+    if entries_out is None:
+        # The by-id fast path: one exact row instead of a whole-graph read.
+        # The tier guard keeps resolution identical to _find_node's exact
+        # tiers (exact id, exact slug); anything else falls through to the
+        # snapshot so title-fuzzy and id-prefix never change.
+        fast = read_nodes_by_ids(client_keeper_path, [node_id])
+        if fast and fast["entries"] and not fast["missing"]:
+            row = fast["entries"][0]
+            if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
+                return row.get("id")
+    _, snap_entries, _ = _read_snapshot(_client_for(client_keeper_path))
+    if entries_out is not None:
+        entries_out.extend(snap_entries)
+    node = _find_node(snap_entries, node_id)
     return node.get("id") if node else None
+
+
+def append_progress_note(
+    path: Path, node_id: str, note: dict, *, entries_out: "list | None" = None
+) -> "tuple[bool, str | None]":
+    """Append a ``{ts, text}`` progress note to a node's ``progress_notes``
+    (append-only), returning ``(found, plan_path)``. Shared by ``fno backlog
+    note`` and the status-fanout backlog-progress adapter.
+
+    ``entries_out`` is filled with the begin snapshot this call already read, so
+    a caller that needs the graph next (the note verb, to resolve who to tell)
+    reuses it instead of paying a second full read.
+    """
+    resolved = _resolve_node_id(Path(path), node_id, entries_out=entries_out)
+    if resolved is None:
+        return False, None
+    result = _run_op(Path(path), "append_progress_note", {"node_id": resolved, "note": note})
+    if not result.get("found"):
+        return False, result.get("plan_path")
+    # Same world-read gate as the wave append: found=true from the op
+    # alone is the op's word, not the published file's.
+    landed, _ = _confirm_note_landed(Path(path), resolved, note)
+    return landed, result.get("plan_path")
 
 
 def append_encounter(
@@ -1610,23 +1598,17 @@ def _readback_row(path: Path, node_id: str) -> "tuple[dict | None, bool]":
 def _run_op(path: Path, name: str, params: dict) -> dict:
     """One typed op through the keeper's full locked cycle, followed by the
     same post-publish duties a mutator-based write ran (renders, releases,
-    nudge): the targeted helpers replaced locked_mutate_graph calls, so they
+    nudge): the targeted helpers replaced the raw mutator calls, so they
     carry the same visible effects.
 
     The plan-rung map rides in the op params, computed over a light
     plan_refs read (id, plan_path, cwd per node) instead of a full
-    begin, which ships the whole graph for one derived value. A session op
-    that opens or closes a do row re-derives in_progress the way any full
-    write would. No Python op mutates plan_path, so the map is exact. The
-    begin fallback keeps a keeper predating the verb working."""
+    snapshot read. A session op that opens or closes a do row re-derives
+    in_progress the way any full write would. No Python op mutates
+    plan_path, so the map is exact."""
     path = Path(path)
     client = _client_for(path)
-    try:
-        rung_entries = client.request("plan_refs", {})["entries"]
-    except RuntimeError as exc:
-        if str(exc) != 'store error (invalid): unknown store method "plan_refs"':
-            raise
-        rung_entries = client.request("begin", {})["entries"]
+    rung_entries = client.request("plan_refs", {})["entries"]
     params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}
     result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
@@ -1878,7 +1860,7 @@ def reap_open_session_record(
         report["settled"] = bool(report.get("found"))
         return report
     try:
-        entries = read_graph(Path(path))
+        entries = read_graph_strict(Path(path))
         node = next((e for e in entries if e.get("id") == resolved), None)
         if node is None:
             report.update({"status_after": None, "remaining_open_do": 0, "settled": report.get("found", False)})
@@ -1904,7 +1886,7 @@ def find_nodes_for_pr(
     """Node ids carrying ``pr_number``, optionally narrowed to one repo slug
     (: pr_number is not unique across repos; the url is the only
     per-node field carrying the repo slug)."""
-    entries = read_graph(Path(path))
+    entries = read_graph_strict(Path(path))
     result = _query(entries, "find_for_pr", {"pr_number": pr_number, "repo": repo})
     return result.get("ids", [])
 

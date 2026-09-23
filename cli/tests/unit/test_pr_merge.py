@@ -14,6 +14,7 @@ import pytest
 from fno.config import AutoMergeBlock
 from fno.pr import _coverage_gate, _hold, _merge
 from fno.pr._proc import Result
+from fno.graph.store import read_graph_strict
 
 # Captured at import, before conftest's autouse hermetic stub replaces the
 # attribute: the test that exercises the door itself needs the real one.
@@ -2903,7 +2904,7 @@ def test_a_merged_additional_pr_is_stamped_merged(monkeypatch, tmp_path):
 
     _merge._sync_graph_merge_status("merged", 1522)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert saved["additional_prs"][0]["merge_status"] == "merged"
     assert saved["merge_status"] == "merged", "the primary status is untouched"
 
@@ -2930,14 +2931,14 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
 
     _merge._sync_graph_merge_status("merged", 1522)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert "merge_status" not in saved["additional_prs"][0]
 
     monkeypatch.setattr(
         "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: None
     )
     _merge._sync_graph_merge_status("merged", 1522)
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert "merge_status" not in saved["additional_prs"][0]
 
 
@@ -2964,9 +2965,9 @@ def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_p
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"]
-    assert saved[0]["merge_status"] is None
-    assert saved[1]["merge_status"] == "merged"
+    saved = {e["id"]: e for e in read_graph_strict(graph)}
+    assert not saved["x-other"].get("merge_status")
+    assert saved["x-ours"]["merge_status"] == "merged"
 
 
 def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_path):
@@ -2984,8 +2985,8 @@ def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_p
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"][0]
-    assert saved["merge_status"] is None
+    saved = read_graph_strict(graph)[0]
+    assert saved.get("merge_status") is None
 
 
 def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
@@ -3002,7 +3003,7 @@ def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert saved["merge_status"] == "merged"
 
 
@@ -3024,7 +3025,7 @@ def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path)
 
     _merge._sync_graph_merge_status("merged", 9999)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert "merge_status" not in saved["additional_prs"][0]
 
 
@@ -3106,9 +3107,6 @@ def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_p
     graph.write_text(json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
-    # read_graph runs through the keeper; the unit stub reads the file instead
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
-
     def fake(cmd, **kwargs):
         if "reconcile" in cmd:
             captured.append((list(cmd), kwargs))
@@ -3133,7 +3131,6 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
     graph.write_text(json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
 
     inner = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),

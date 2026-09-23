@@ -16,25 +16,29 @@ runner = CliRunner()
 
 
 def _route(tmp_path: Path, monkeypatch) -> Path:
-    import fno.graph._constants as gc
+    """The album reads archive residents from the store, so route the store
+    itself into tmp; rows are seeded through the json import."""
+    from fno import paths
 
-    archive = tmp_path / "graph-archive.json"
-    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", archive)
-    return archive
+    graph = tmp_path / "graph.json"
+    monkeypatch.setattr(paths, "graph_json", lambda: graph)
+    return graph
 
 
-def _seed_archive(archive: Path, entries: list[dict]) -> None:
+def _seed_archive(graph: Path, entries: list[dict]) -> None:
     """Rows the way the store writes them: the typed api drops a row the
-    model cannot parse, so seeds carry the stamped fields."""
+    model cannot parse, so seeds carry the stamped fields. Every card is an
+    archive resident, so each row carries archived_at."""
     complete = []
     for e in entries:
         row = {"type": "feature", "priority": "p2", "status": "idea", **e}
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
+        row.setdefault("archived_at", "2026-09-01T00:00:00Z")
         if row["status"] == "done" and not row.get("completed_at"):
             row["completed_at"] = "2026-09-01T00:00:00Z"
         complete.append(row)
-    archive.write_text(json.dumps({"entries": complete}) + "\n")
+    graph.write_text(json.dumps({"entries": complete}) + "\n")
 
 
 def test_json_sorted_desc_gift_only_when_present(tmp_path, monkeypatch):

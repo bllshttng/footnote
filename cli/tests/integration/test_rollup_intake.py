@@ -53,7 +53,11 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _nodes(g: Path) -> list[dict]:
-    return json.loads(g.read_text(encoding="utf-8"))["entries"]
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _created(g: Path, title: str) -> dict:

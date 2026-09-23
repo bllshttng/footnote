@@ -66,9 +66,10 @@ print(f'ok: heads-up={actions[\"heads-up\"]} question={actions[\"question\"]} fy
 
 # The heads-up's node really landed. Asserting only the drain's self-reported
 # `created_node` above would pass against a graph that was never written.
-WORK="$WORK" python3 -c "
-import json, os
-entries = json.load(open(os.path.join(os.environ['WORK'], '.fno', 'graph.json')))['entries']
+WORK="$WORK" uv run --project "$CLI_DIR" python3 -c "
+import os
+from fno.graph.store import read_graph_strict
+entries = read_graph_strict(os.path.join(os.environ['WORK'], '.fno', 'graph.json'))
 assert len(entries) == 1, entries
 node = entries[0]
 assert node['title'] == 'Stubbed node', node
