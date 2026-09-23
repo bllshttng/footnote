@@ -34,6 +34,7 @@ def _emit_blocked(runner, tmp_path, monkeypatch, *, parent, run_fn):
     events = tmp_path / ".fno" / "events.jsonl"
     state = tmp_path / ".fno" / "target-state.md"
     monkeypatch.setattr("fno.events.cli._resolve_parent_handle", lambda explicit: parent)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
 
     # Only the parent-push leg is faked. The event store client shares the
     # subprocess.run module attribute, so its native commit passes through to
@@ -43,7 +44,7 @@ def _emit_blocked(runner, tmp_path, monkeypatch, *, parent, run_fn):
     original_run = _subprocess.run
 
     def _routed(argv, **kw):
-        if argv[:3] == ["fno", "agents", "mail"]:
+        if argv[:3] == ["fno", "agents", "mail"] or argv[1:2] == ["machine-mail-send"]:
             return run_fn(argv, **kw)
         return original_run(argv, **kw)
 
@@ -78,10 +79,13 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
     assert ev["type"] == "blocked"
     # P2: parent is resolved into the durable envelope, not only the push path
     assert ev["parent"] == "claude-parent99"
-    assert sent["argv"][:4] == ["fno", "agents", "mail", "send"]
-    assert "claude-parent99" in sent["argv"]
-    # message references the run so the parent can correlate
-    assert any("R1" in a for a in sent["argv"])
+    assert sent["argv"][:2] == ["/fake/fno-agents", "machine-mail-send"]
+    assert sent["argv"][sent["argv"].index("--arm") + 1] == "events-push"
+    assert sent["argv"][sent["argv"].index("--to") + 1] == "claude-parent99"
+    # The event body references the run so the parent can correlate.
+    body = sent["argv"][sent["argv"].index("--body") + 1]
+    assert "R1" in body
+    assert "[fno:blocked]" in body
 
 
 # -- AC5-EDGE: a CLI-emitted run_summary does not push (Rust finalize owns it) --
@@ -98,7 +102,7 @@ def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
 
     def fake_run(argv, **kw):
         calls.append(argv)
-        if argv[:3] == ["fno", "agents", "mail"]:
+        if argv[:3] == ["fno", "agents", "mail"] or argv[1:2] == ["machine-mail-send"]:
             return _R(0)
         return original_run(argv, **kw)
 
@@ -121,7 +125,7 @@ def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
     from fno.events.store_client import store_db_path
 
     assert store_db_path(events).exists()
-    assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
+    assert not any(a[1:2] == ["machine-mail-send"] for a in calls)
 
 
 # -- P1: resolution matches a spawned row by identity, not name==handle --
@@ -158,7 +162,7 @@ def test_no_parent_no_push(runner, tmp_path, monkeypatch) -> None:
     result, events = _emit_blocked(runner, tmp_path, monkeypatch, parent=None, run_fn=fake_run)
     assert result.exit_code == 0, result.output
     assert read_committed_lines(events)  # event still written
-    assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
+    assert not any(a[1:2] == ["machine-mail-send"] for a in calls)
 
 
 # -- AC1-FR: a failing push loses nothing (event already durable, exit 0) --
@@ -184,6 +188,7 @@ def test_push_parent_subcommand_skips(runner, monkeypatch) -> None:
 
 def test_push_parent_subcommand_pushes(runner, monkeypatch) -> None:
     monkeypatch.setattr("fno.events.cli._resolve_parent_handle", lambda explicit: "claude-parent99")
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
     sent: dict = {}
     monkeypatch.setattr(
         "fno.events.cli.subprocess.run",
@@ -194,5 +199,6 @@ def test_push_parent_subcommand_pushes(runner, monkeypatch) -> None:
         ["push-parent", "--type", "run_summary", "--run", "R1", "--reason", "DonePRGreen"],
     )
     assert result.exit_code == 0
-    assert sent["argv"][:4] == ["fno", "agents", "mail", "send"]
-    assert "claude-parent99" in sent["argv"]
+    assert sent["argv"][:2] == ["/fake/fno-agents", "machine-mail-send"]
+    assert sent["argv"][sent["argv"].index("--arm") + 1] == "events-push"
+    assert sent["argv"][sent["argv"].index("--to") + 1] == "claude-parent99"

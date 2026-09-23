@@ -198,6 +198,7 @@ pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_inject;

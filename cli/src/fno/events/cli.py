@@ -224,21 +224,17 @@ def _push_to_parent(
         msg += f" node={node}"
     if reason:
         msg += f": {reason}"
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("push: note: fno-agents unavailable, skipped parent push", err=True)
+        return False
+    argv = [str(binary), "machine-mail-send", "--arm", "events-push"]
+    argv.extend(["--timeout-secs", "20", "--to", parent, "--body", msg])
     try:
         result = subprocess.run(
-            [
-                "fno",
-                "agents",
-                "mail",
-                "send",
-                parent,
-                msg,
-                "--origin",
-                "scheduler",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=20,
+            argv, check=False, capture_output=True, timeout=20
         )
     except FileNotFoundError:
         typer.echo("push: note: fno unavailable, skipped parent push", err=True)
