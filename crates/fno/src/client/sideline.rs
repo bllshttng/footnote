@@ -471,14 +471,9 @@ impl View {
                 // holder's session, else the node's last do/ship session); no
                 // session id says so. The widest column keeps the handle
                 // visible where the old inline suffix clipped.
-                let tail = match a.tail.as_deref().filter(|t| !t.is_empty()) {
-                    Some(t) => format!("\u{b7} {}", strip_md(t)),
-                    None => match (a.pr, a.pr_session_short.as_deref()) {
-                        (Some(_), Some(sid)) => format!("\u{b7} attach {sid}"),
-                        (Some(_), None) => "\u{b7} no session".to_string(),
-                        (None, _) => String::new(),
-                    },
-                };
+                let tail = row_message_text(a)
+                    .map(|t| format!("\u{b7} {t}"))
+                    .unwrap_or_default();
                 let pr =
                     a.pr.map(|n| format!("#{n}"))
                         .unwrap_or_else(|| "\u{2014}".into());
@@ -699,15 +694,8 @@ impl View {
         if let Some(k) = self.king_label(a) {
             segments.push(k);
         }
-        let msg = match a.tail.as_deref().filter(|t| !t.is_empty()) {
-            Some(t) => strip_md(t),
-            None => match (a.pr, a.pr_session_short.as_deref()) {
-                (Some(_), Some(sid)) => format!("attach {sid}"),
-                (Some(_), None) => "no session".to_string(),
-                (None, _) => String::new(),
-            },
-        };
-        if !msg.is_empty() {
+        let msg = row_message_text(a);
+        if let Some(msg) = msg {
             segments.push(msg);
         }
         let mut text = String::from("  ");
@@ -786,6 +774,20 @@ fn row_age(a: &AgentRow, now: u64) -> String {
 /// handle; the crown's own name replaces it when the wire carries one.
 fn crown_display_name(king: &AgentRow) -> &str {
     &king.name
+}
+
+/// The message text an agent's row shows: the markup-stripped tail, or the
+/// PR-session fallback when the tail is empty. No separator - the list cell
+/// prefixes its dot and the card line joins with dots.
+fn row_message_text(a: &AgentRow) -> Option<String> {
+    match a.tail.as_deref().filter(|t| !t.is_empty()) {
+        Some(t) => Some(strip_md(t)),
+        None => match (a.pr, a.pr_session_short.as_deref()) {
+            (Some(_), Some(sid)) => Some(format!("attach {sid}")),
+            (Some(_), None) => Some("no session".to_string()),
+            (None, _) => None,
+        },
+    }
 }
 
 /// Full-screen sideline: the sideline owns every cell, so every report
