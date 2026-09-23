@@ -2,6 +2,7 @@
 //! `_rollup`/`_status` legs and the stamp module, served by the graph keeper.
 
 pub mod codec;
+pub mod keeper;
 pub mod lock;
 pub mod node_accessors;
 pub mod project;
