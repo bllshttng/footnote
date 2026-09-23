@@ -566,7 +566,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
     };
-    match zero_job_failures(&runs, check_runs, &jobs_total) {
+    match zero_job_failures(&runs, &check_runs, &jobs_total) {
         Err(err) => json!({"error": err}),
         Ok(rows) => json!({
             "rows": rows
