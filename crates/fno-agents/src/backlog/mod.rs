@@ -153,6 +153,23 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
                 .map_err(|error| error.to_string())?,
         )
     };
+    open_connection(graph)
+}
+
+/// Open the store for a caller that already holds the store lock: the
+/// locked_mutate publication seam. Skips the creation lock, because a
+/// second flock on a fresh fd blocks behind the caller's own lock and
+/// burns the full timeout on every write to a fresh graph.
+pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
+    let path = database_path(graph);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    open_connection(graph)
+}
+
+fn open_connection(graph: &Path) -> Result<Connection, String> {
+    let path = database_path(graph);
     let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -662,7 +679,9 @@ pub fn shadow_sync(
     after: &[Value],
     json_version: &str,
 ) -> Result<PathBuf, String> {
-    let mut connection = open(graph)?;
+    // The caller holds the store lock (the locked_mutate publication seam),
+    // so the creation lock here would block behind it and burn the timeout.
+    let mut connection = open_holding_lock(graph)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -679,7 +698,8 @@ pub fn authoritative_sync(
     before: &[Value],
     after: &[Value],
 ) -> Result<String, String> {
-    let mut connection = open(graph)?;
+    // Same seam contract as shadow_sync: the caller holds the store lock.
+    let mut connection = open_holding_lock(graph)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;

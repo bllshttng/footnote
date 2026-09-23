@@ -55,6 +55,29 @@ fn replace_state_returns_the_view_it_replaced() {
 }
 
 #[test]
+fn a_fresh_graph_write_does_not_wait_on_its_own_creation_lock() {
+    // x-94e3: the publication seam holds the store lock; opening the store
+    // must not re-take the creation lock behind it. Before the fix every
+    // replace_state on a fresh graph burned the full 10s timeout, swallowed
+    // the failure, and left no graph.db behind.
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture_node("t-lock", "d")]);
+    let started = std::time::Instant::now();
+    node_state::replace_state(&graph, &ws(&graph, "t-lock", "body")).unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "fresh-graph write waited {:?} on its own creation lock",
+        elapsed
+    );
+    assert!(
+        dir.path().join("graph.db").exists(),
+        "the store was created"
+    );
+}
+
+#[test]
 fn ac1_one_current_state_priors_in_history() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
