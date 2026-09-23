@@ -5,18 +5,8 @@ use super::*;
 
 #[test]
 fn extended_table_keeps_distinguishing_name_suffixes() {
-    let first = agent_row(
-        "dispatch-fno-8bef7b",
-        4,
-        Some(AgentBadge::Working),
-        false,
-    );
-    let second = agent_row(
-        "dispatch-etl-631fd8",
-        5,
-        Some(AgentBadge::Working),
-        false,
-    );
+    let first = agent_row("dispatch-fno-8bef7b", 4, Some(AgentBadge::Working), false);
+    let second = agent_row("dispatch-etl-631fd8", 5, Some(AgentBadge::Working), false);
     let mut v = wide_view(vec![first, second]);
     set_density(&mut v, Density::Extended);
     v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
@@ -28,12 +18,7 @@ fn extended_table_keeps_distinguishing_name_suffixes() {
 
 #[test]
 fn extended_table_prioritizes_name_suffix_over_context() {
-    let mut agent = agent_row(
-        "dispatch-fno-8bef7b",
-        4,
-        Some(AgentBadge::Working),
-        false,
-    );
+    let mut agent = agent_row("dispatch-fno-8bef7b", 4, Some(AgentBadge::Working), false);
     agent.dnd = true;
     agent.reason = Some("a long context reason".into());
     let mut v = wide_view(vec![agent]);
