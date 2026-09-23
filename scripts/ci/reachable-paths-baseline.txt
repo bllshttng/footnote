@@ -34,7 +34,7 @@ A	fno_review_invocation_id	py=cli/src/fno/agents/dispatch.py;rs=crates/fno/src/r
 A	/scripts/ci/preflight.sh	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# data
 A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/src/claims.rs|crates/fno/src/agents_view.rs	# data
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
-A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
+A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs	# msg-twin
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	a crown needs a scope: name an epic or a project	py=cli/src/fno/agents/crown.py;rs=crates/fno-agents/src/court_fold.rs|crates/fno-agents/src/territory.rs	# msg-twin: the Rust scope reader refuses an unnamed crown in the same words the Python verb does; court_fold.rs is the fold consumer of the same compiler
 A	a model vendor is only routable at spawn	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
@@ -109,7 +109,7 @@ A	resume-attach:{short_id}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-age
 A	roster-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	route settings file {path} has no env mapping	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/reentry.rs	# msg-twin: the Rust resolver and the Python restore read the same settings shape and refuse with the same sentence
 A	route_provider,route_model	py=cli/src/fno/config/__init__.py;rs=crates/fno-agents/src/loopcheck/posture.rs|crates/fno-agents/src/loopcheck/settings.rs	# protocol
-A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck.rs|crates/fno-agents/src/loopcheck/coverage_receipt.rs	# msg-twin; the Rust carrier split when the receipt line moved to its own module
+A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck/block_reason.rs|crates/fno-agents/src/loopcheck/coverage_receipt.rs	# msg-twin; the Rust carrier split when the receipt line moved to its own module
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# protocol
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# protocol
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract

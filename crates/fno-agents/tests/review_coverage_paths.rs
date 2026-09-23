@@ -19,6 +19,23 @@ use tempfile::TempDir;
 
 const HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
 
+/// The loopcheck module's production source: the root file plus its child
+/// modules, which hold the code split out of it. Test children are skipped.
+fn loopcheck_source(manifest_dir: &Path) -> String {
+    let mut text = fs::read_to_string(manifest_dir.join("src/loopcheck.rs")).unwrap();
+    let mut children: Vec<PathBuf> = fs::read_dir(manifest_dir.join("src/loopcheck"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    children.sort();
+    for child in children {
+        text.push('\n');
+        text.push_str(&fs::read_to_string(child).unwrap());
+    }
+    text
+}
+
 /// One row of the reachability table (mirrors the table in
 /// docs/architecture/review-lanes.md).
 enum ProducerReach {
@@ -107,10 +124,10 @@ fn writer_return_table() -> Vec<(&'static str, &'static str)> {
 #[test]
 fn every_coverage_status_return_has_a_positive_marker() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(manifest_dir.join("src/loopcheck.rs")).unwrap();
+    let source = loopcheck_source(manifest_dir);
     let start = source.find("fn publish_coverage_status(").unwrap();
     let end = source[start..]
-        .find("/// The give-up line")
+        .find("\n}\n")
         .map(|offset| start + offset)
         .unwrap();
     let publisher = &source[start..end];
@@ -462,10 +479,10 @@ fn every_table_row_names_a_path_that_exists() {
         .nth(2)
         .expect("crate sits at <repo>/crates/fno-agents");
     let cli = fs::read_to_string(repo_root.join("cli/src/fno/pr/cli.py")).unwrap();
-    let rust_srcs: Vec<String> = ["src/loopcheck.rs", "src/finalize.rs"]
-        .iter()
-        .map(|s| fs::read_to_string(manifest_dir.join(s)).unwrap())
-        .collect();
+    let rust_srcs: Vec<String> = vec![
+        loopcheck_source(manifest_dir),
+        fs::read_to_string(manifest_dir.join("src/finalize.rs")).unwrap(),
+    ];
 
     for (path_name, _, _) in path_table() {
         if let Some(rest) = path_name.strip_prefix("fno do pr ") {
@@ -528,7 +545,7 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         .ancestors()
         .nth(2)
         .expect("crate sits at <repo>/crates/fno-agents");
-    let rust = fs::read_to_string(manifest_dir.join("src/loopcheck.rs")).unwrap();
+    let rust = loopcheck_source(manifest_dir);
     let python = fs::read_to_string(repo_root.join("cli/src/fno/pr/_coverage_gate.py")).unwrap();
     // One standing subject, spelled identically on both sides.
     assert!(
