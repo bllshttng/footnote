@@ -327,6 +327,21 @@ fn king_fire(
     king_spawn(state, cwd, events, home)
 }
 
+fn king_gate_status_mock(home: &Path, payload: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = home.join("escalate-mock");
+    let script = fs::read_to_string(&path).unwrap();
+    let body = script.strip_prefix("#!/bin/sh\n").unwrap_or(&script);
+    let gate_status = format!(
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"gate-status\" ]; then\nprintf '%s\\n' '{payload}'\nexit 0\nfi\n"
+    );
+    fs::write(&path, format!("#!/bin/sh\n{gate_status}{body}")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+}
+
 const BOARD_TWO_ACTIONABLE: &str = r#"{
   "actionable": 2, "unreadable": 0,
   "queues": [
@@ -429,6 +444,50 @@ fn king_arm_blocks_while_the_board_is_not_empty() {
         reason.contains("undispatched") && reason.contains("x-1234"),
         "the block reason must name the top actionable row: {reason}"
     );
+}
+
+#[test]
+fn a_fleet_stop_probe_allows_nowork_and_names_the_incident_owner() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-fleet-stop");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &fno);
+    king_gate_status_mock(
+        bin_dir.path(),
+        r#"{"verdict":"refused","reason":"fleet-stop","message":"fleet incident stop is active (generation 19, reason: repro)"}"#,
+    );
+
+    let (code, decision) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0, "the fire must return its decision: {decision}");
+    assert_eq!(decision["decision"], "allow");
+    assert_eq!(decision["termination_reason"], "NoWork");
+    assert!(
+        decision["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fno agents incident clear --reason"),
+        "the message must name the owner: {decision}"
+    );
+}
+
+#[test]
+fn a_gate_status_probe_without_json_keeps_the_king_blocking() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-broken-gate-probe");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, decision) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0, "the fire must return its decision: {decision}");
+    assert_eq!(decision["decision"], "block");
+    assert_ne!(decision["termination_reason"], "NoWork");
 }
 
 #[test]
