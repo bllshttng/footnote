@@ -746,6 +746,7 @@ def test_phase_caps_fit_ceiling():
         _PHASE_CAP_S,
         _resolve_tick_deadline,
     )
+    from fno.pr_watch._dispatch import _MERGE_FLOOR_S
 
     cfg = SimpleNamespace(tick_timeout_seconds=None, interval_seconds=600)
     ceiling = _resolve_tick_deadline(cfg)
@@ -760,6 +761,11 @@ def test_phase_caps_fit_ceiling():
         f"_EVERY_TICK_CAP_S/_FLEET_CAP_S or re-measure"
     )
     assert set(_PHASE_CAP_S) == set(_EVERY_TICK_CAP_S) | set(_FLEET_CAP_S)
+    merge_room = ceiling - (every_tick + fleet_max)
+    assert "merge" not in _PHASE_CAP_S and merge_room >= _MERGE_FLOOR_S, (
+        f"merge floor does not fit: {ceiling}s - ({every_tick}s + {fleet_max}s) "
+        f"= {merge_room}s, floor {_MERGE_FLOOR_S}s"
+    )
 
 
 def _cadence_settings() -> SimpleNamespace:
@@ -775,6 +781,66 @@ def _cadence_settings() -> SimpleNamespace:
             wedged_after_ticks=3,
         ),
     )
+
+
+def _run_merge_tick_with_counts(monkeypatch, counts):
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult, phase_seconds_left
+
+    settings = _cadence_settings()
+    settings.pr_watch.enabled = True
+    rows, observed_left, drained = [], [], []
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick", lambda **_kw: TickResult(open_prs=1, acted=0))
+    monkeypatch.setattr("fno.agents.watchdog.lane_armed", lambda _s: False)
+    monkeypatch.setattr("fno.agents.watchdog.lane_off_detail", lambda _s: "off")
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [])
+    monkeypatch.setattr(prcli, "_emit_event", lambda *a, **_kw: None)
+    monkeypatch.setattr(
+        prcli, "_emit_tick_row", lambda arm, **data: rows.append((arm, data)))
+    monkeypatch.setattr("fno.rust_binary.verb_call", lambda *_a, **_kw: {
+        "candidates": 1, "verdicts": {"granted": 1}, "elapsed_ms": 0,
+        "queue": [{"node_id": "x-planted", "pr": 88, "repo_slug": "owner/repo",
+                   "cwd": str(Path.cwd()), "grant": {"source": "config"}}],
+    })
+
+    def drain(queue, **_kw):
+        drained.extend(queue)
+        observed_left.append(phase_seconds_left())
+        return counts
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.run_execute_queue", drain)
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, result.output
+    return rows, observed_left, drained
+
+
+def test_merge_phase_runs_last_on_the_rest_of_the_ceiling(monkeypatch):
+    counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
+    rows, left, drained = _run_merge_tick_with_counts(monkeypatch, counts)
+    assert len(drained) == 1 and left[0] > 400
+    assert rows[-1][0] == "pr_watch_merge"
+
+
+def test_a_drain_that_decided_nothing_reads_budget_spent(monkeypatch):
+    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 1, "budget": 2}
+    rows, _, _ = _run_merge_tick_with_counts(monkeypatch, counts)
+    arm, data = rows[-1]
+    assert arm == "pr_watch_merge" and data["skip_reason"] == "budget_spent"
+    assert data["acted"] == 0 and "skipped=1 budget=2" in data["detail"]
+
+
+def test_a_hold_is_a_verdict_so_the_merge_row_stays_ok(monkeypatch):
+    counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 2}
+    rows, _, _ = _run_merge_tick_with_counts(monkeypatch, counts)
+    arm, data = rows[-1]
+    assert arm == "pr_watch_merge" and data.get("skip_reason") is None
 
 
 def test_fleet_tail_phases_stagger_across_three_ticks(monkeypatch, _no_global_tick_events):
