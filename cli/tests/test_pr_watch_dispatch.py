@@ -2591,7 +2591,7 @@ class TestTickRecordsAndDeadline:
 
         def _record_queue(queue, **_kw):
             drained.append(list(queue))
-            return {"executed": 1, "held": 0, "failed": 0, "skipped": 0}
+            return {"executed": 1, "held": 0, "failed": 0, "skipped": 0, "budget": 0}
 
         monkeypatch.setattr("fno.pr_watch._dispatch.run_execute_queue", _record_queue,
                             raising=True)
@@ -2622,7 +2622,7 @@ class TestTickRecordsAndDeadline:
         assert merge_rows and merge_rows[-1].get("acted") == 1
         assert merge_rows[-1].get("skip_reason") is None
         assert merge_rows[-1]["detail"] == (
-            "merge sweep=cut candidates=2 granted=1 executed=1 held=0 failed=0 skipped=0 read_ms=812"
+            "merge sweep=cut candidates=2 granted=1 executed=1 held=0 failed=0 skipped=0 budget=0 read_ms=812"
         )
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
@@ -4061,7 +4061,7 @@ class TestDurableGrantExecution:
         self._fake_merge(monkeypatch, 0)
         counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert counts == {"executed": 1, "held": 0, "failed": 0, "skipped": 0}
+        assert counts == {"executed": 1, "held": 0, "failed": 0, "skipped": 0, "budget": 0}
         reserved = self._grant_events(deps, "reserved")
         executed_events = self._grant_events(deps, "executed")
         assert len(reserved) == 1 and len(executed_events) == 1
@@ -4101,7 +4101,7 @@ class TestDurableGrantExecution:
         )
         counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
         parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
         assert any(e["data"]["reason"] == "checks-red" for e in parked)
         assert len(deps["notifications"]) == 1
@@ -4123,7 +4123,7 @@ class TestDurableGrantExecution:
         )
         counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
         parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
         assert any(e["data"]["reason"] == "checks-red" for e in parked)
         from fno.pr_watch._state import WatermarkStore
@@ -4142,7 +4142,7 @@ class TestDurableGrantExecution:
         )
         counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
         from fno.pr_watch._state import WatermarkStore
 
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
@@ -4305,7 +4305,7 @@ class TestDurableGrantExecution:
         assert len(self._merge_calls) == 3
 
     def test_execute_budget_skips_without_calling_merge(self, tmp_path, monkeypatch):
-        """AC3-EDGE: under _FIRE_FLOOR_S of merge-phase slice left, the
+        """AC3-EDGE: under _MERGE_FLOOR_S of merge-phase slice left, the
         queue emits execute-budget, calls no merge, and leaves retries alone."""
         import time as _time
 
@@ -4317,7 +4317,7 @@ class TestDurableGrantExecution:
             budget_left=_time.monotonic() + 10.0,
         )
 
-        assert counts["skipped"] == 1 and counts["executed"] == 0
+        assert counts["budget"] == 1 and counts["skipped"] == 0 and counts["executed"] == 0
         assert self._merge_calls == []
         budget = [
             e for e in deps["events"]

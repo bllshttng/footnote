@@ -416,20 +416,10 @@ _STRANDED_FLOOR_S = 10.0
 #: Skipping under it costs nothing - the next tick starts the scan over.
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
-#: Per-phase alarm caps : each phase runs under its own slice,
-#: min(cap, seconds left before the tick ceiling). Every-tick caps are p90s
-#: of 50 measured ticks (2026-09-17, events.jsonl), rounded up; sweep and
-#: merge are the epic's core work and keep their measured room. The fleet
-#: tail (stranded, recovery, watchdog) runs one phase per tick - the
-#: _run_phase cadence - so the worst tick is the every-tick sum plus the
-#: largest fleet cap. The fit is computed, never restated:
-#: test_phase_caps_fit_ceiling fails the suite when an edit breaks it (the
-#: hand-written sum this table replaced claimed 550s; the table itself
-#: summed to 730 against the 480s ceiling).
+#: Each phase has a measured cap, bounded by tick time. Merge runs last uncapped. The fit test proves _MERGE_FLOOR_S.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
-    "merge": 120,
     "king_wake": 45,
     "notify_watch": 10,
     "heal": 10,
@@ -698,8 +688,7 @@ def tick() -> None:
 
         _run_phase("settings", _phase_settings)
 
-        # Phase order: PR legs first (sweep, king_wake, notify_watch, heal,
-        # stranded), then the fleet-health tail (recovery, watchdog) - per-phase slices removed the shared deadline that gave recovery a head-of-line pass.
+        # Capped PR and fleet-health legs run before the uncapped merge phase.
         def _phase_recovery(_slice_s: float) -> None:
             assert settings is not None and cfg is not None
             set_tick_phase("recovery")
@@ -1217,12 +1206,14 @@ def tick() -> None:
                 notify=lambda message, **_kw: _notify_parked(message),
                 max_retries=cfg.retries, claim=ClaimAdapter(),
             )
+            starved = counts.get("budget", 0) > 0 and not (counts["executed"] + counts["held"] + counts["failed"])
             verdicts = out.get("verdicts") or {}
             detail = (f"{head} candidates={out.get('candidates', 0)} granted={verdicts.get('granted', 0)} "
                       + " ".join(f"{k}={v}" for k, v in counts.items())
                       + f" read_ms={out.get('elapsed_ms', -1)}")
             _emit_tick_row("pr_watch_merge", interval_s=interval,
-                           acted=counts["executed"], detail=detail)
+                           acted=counts["executed"], skip_reason="budget_spent" if starved else None,
+                           detail=detail)
 
 
         # Stranded-worktree recovery, same arming gate as the fleet
@@ -1412,7 +1403,6 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
-        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
@@ -1423,6 +1413,8 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded, arm="stranded", cadence=3, slot=0)
         _run_phase("recovery", _phase_recovery, arm="recovery", cadence=3, slot=1)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog", cadence=3, slot=2)
+        # One merge can outlast any fixed slice, so merge takes what remains.
+        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where. This is the
