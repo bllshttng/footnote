@@ -2022,7 +2022,7 @@ mod tests {
             crate::graph_store::MutateInput {
                 entries: after.clone(),
                 canonical_path: None,
-                base_version: crate::graph_store::file_content_version(&graph),
+                base_version: base_version(&graph),
                 plan_rungs: None,
             },
             std::time::Duration::from_secs(10),
@@ -2075,7 +2075,7 @@ mod tests {
             crate::graph_store::MutateInput {
                 entries: after.clone(),
                 canonical_path: None,
-                base_version: crate::graph_store::file_content_version(&graph),
+                base_version: base_version(&graph),
                 plan_rungs: None,
             },
             std::time::Duration::from_secs(10),
@@ -2126,7 +2126,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unrepresentable_row_refuses_the_publish_instead_of_dropping_it() {
+    fn an_unrepresentable_row_is_carried_verbatim_by_the_authoritative_publish() {
+        // SQLite is the only store: a publish that cannot represent a row
+        // still records it (raw carry) and stamps a version. There is no
+        // json leg left to hold the row, so refusing would lose data.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
@@ -2134,15 +2137,17 @@ mod tests {
         let mut after = before.clone();
         after[0]["status"] = Value::String("not-a-status".into());
 
-        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+        let version = authoritative_sync(&graph, &before, &after).unwrap();
 
-        assert!(
-            error.contains("ab-one"),
-            "error names the dropped row: {error}"
-        );
-        assert!(
-            error.contains("status"),
-            "error names the parse failure: {error}"
+        assert!(!version.is_empty(), "the publish stamped a version");
+        let stored = read_entries(&graph).unwrap();
+        let carried = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-one".into())))
+            .expect("the row survived the publish");
+        assert_eq!(
+            carried["status"], "not-a-status",
+            "the raw row rides verbatim"
         );
     }
 
