@@ -109,12 +109,7 @@ fn release_stopped_at(
             Err(ReadError::GoneAway) => return Err("claim already gone".into()),
             Err(ReadError::Corrupted(error)) => return Err(error),
         };
-        if existing.holder != rec.holder
-            || existing.acquired_at != rec.acquired_at
-            || existing.pid != rec.pid
-            || existing.expires_at != rec.expires_at
-            || existing.session_id != rec.session_id
-        {
+        if &existing != rec {
             return Err("claim changed since the scan".into());
         }
         let duration_ms = (now_ms() - existing.acquired_at).max(0);
@@ -396,8 +391,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let mut fresh = old.clone();
-        fresh.acquired_at = old.acquired_at + 1_000;
-        fresh.pid = Some(std::process::id() as i32);
+        fresh.reason = Some("same-holder replacement".into());
         write_rec(&claims_dir, &fresh);
         crate::claims::release_dir_mutex(&lock, &token);
 
@@ -406,10 +400,7 @@ mod tests {
             "stop release must refuse a later claim generation"
         );
         assert!(path.exists(), "the reacquired holder's lockfile survives");
-        assert_eq!(
-            read_claim_file(&path).unwrap().acquired_at,
-            fresh.acquired_at
-        );
+        assert_eq!(read_claim_file(&path).unwrap().reason, fresh.reason);
     }
 
     fn lockfile_of(dir: &Path, key: &str) -> PathBuf {
