@@ -3,6 +3,7 @@
 # Skill-bundle copies are not listed here: skill-bundles.yaml owns them.
 cli/src/fno/agents/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 crates/fno/src/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+crates/fno/src/event_store.rs	crates/fno-agents/src/event_store.rs	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/merge_posture.toml	crates/fno-agents/src/merge_posture.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/graph/page_reload.js	crates/fno-agents/src/page_reload.js	cargo build --manifest-path crates/fno-agents/Cargo.toml
 cli/src/fno/agents/spawn_phase.toml	crates/fno-agents/src/spawn_phase.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
