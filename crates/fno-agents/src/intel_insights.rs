@@ -1018,7 +1018,7 @@ mod tests {
         let schema2 = dir.join("schema2.json");
         std::fs::write(
             &schema2,
-            run_file(json!([])).replace("\"schema\": 1", "\"schema\": 2"),
+            run_file(json!([])).replacen("\"schema\":1", "\"schema\":2", 1),
         )
         .unwrap();
         let err = load_run(&schema2, &facet_map).unwrap_err();
