@@ -453,8 +453,6 @@ def whoami_command(
             payload["context_used_pct"] = context_reading.used_pct
             payload["context_used_tokens"] = context_reading.used_tokens
             payload["context_window_tokens"] = context_reading.window_tokens
-            if context_reading.compaction_band != "none":
-                payload["context_compaction_band"] = context_reading.compaction_band
         if mail_unread:
             payload["mail_unread"] = mail_unread
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -506,15 +504,10 @@ def whoami_command(
     if provider_line:
         typer.echo(provider_line)
     if context_reading is not None:
-        band = (
-            f", compaction {context_reading.compaction_band}"
-            if context_reading.compaction_band != "none"
-            else ""
-        )
         typer.echo(
             f"context:  {context_reading.used_pct}% used "
             f"({context_reading.used_tokens:,} of "
-            f"{context_reading.window_tokens:,} tokens){band}"
+            f"{context_reading.window_tokens:,} tokens)"
         )
     # opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this

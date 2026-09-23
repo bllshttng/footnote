@@ -2696,33 +2696,6 @@ def _emit_human(
 # ---------------------------------------------------------------------------
 
 
-def _rust_effective_context_window(
-    model: str, configured: int, cap: int, percent: Optional[float]
-) -> Optional[int]:
-    """Ask the Rust owner for the arithmetic; None keeps stale installs compatible."""
-    from fno.rust_binary import call_binary_json
-
-    args = [
-        "--effective-window",
-        "--model",
-        model,
-        "--configured",
-        str(configured),
-        "--cap",
-        str(cap),
-    ]
-    if percent is not None and float(percent).is_integer():
-        args.extend(("--percent", str(int(percent))))
-    try:
-        error, payload = call_binary_json("context-run", args)
-    except Exception:  # noqa: BLE001 - an old/missing bridge keeps Python advisory
-        return None
-    if error is not None or not isinstance(payload, dict):
-        return None
-    effective = payload.get("effective")
-    return effective if isinstance(effective, int) and not isinstance(effective, bool) else None
-
-
 def _codex_context_window_report(app_server_present: bool | None = None) -> dict[str, Any]:
     """What context window a codex thread on the configured model actually gets.
 
@@ -2852,9 +2825,7 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     # falls through to the honest 100% assumption.
     percent = _number(percent, lo=1, hi=100, keep_float=True)
 
-    effective = _rust_effective_context_window(slug, int(configured), int(cap), percent)
-    if effective is None:
-        effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
+    effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
     return {
         "model": slug,
         "model_source": source,

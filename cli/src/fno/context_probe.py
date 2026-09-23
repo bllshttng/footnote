@@ -12,7 +12,6 @@ confused-agent recovery verb) gains no failure mode from this enrichment.
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -26,7 +25,6 @@ from fno.agents.self_stamp import (
     resolve_own_transcript,
     resolve_self_identity,
 )
-from fno.rust_binary import resolve_binary
 
 
 @dataclass(frozen=True)
@@ -37,7 +35,6 @@ class ContextReading:
     window_tokens: int
     used_pct: int
     model: str
-    compaction_band: str = "none"
 
 
 # Window size by model family. Ported VERBATIM from the shell probe. The
@@ -137,9 +134,15 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
         transcript_path = resolve_own_transcript(ident.session_id, ident.harness)
         if transcript_path is None:
             return None
-    native_available, native = _native_probe(transcript_path)
-    if native_available:
-        return native
+    from fno.rust_binary import call_binary_json
+
+    probe = ["--probe", "--transcript", str(transcript_path), "--json"]
+    _error, native = call_binary_json("context-run", probe, timeout=5)
+    try:
+        keys = ("used_tokens", "window_tokens", "used_pct")
+        return ContextReading(*(int(native[k]) for k in keys), model=str(native["model"]))
+    except (KeyError, TypeError, ValueError):
+        pass  # no binary or no reading: the Python reader below answers
     usage = _last_usage(transcript_path)
     if usage is None:
         return None
@@ -155,42 +158,6 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
         used_pct=used_pct,
         model=model,
     )
-
-
-def _native_probe(path: Path) -> tuple[bool, Optional[ContextReading]]:
-    """Use the Rust owner when available; retain the old reader for stale installs.
-
-    A missing or old binary is a compatibility case, not a context reading. A
-    current binary's exit 3 is authoritative unreadable input and therefore
-    returns ``None`` without reviving Python's arithmetic for that session.
-    """
-    binary = resolve_binary()
-    if binary is None:
-        return False, None
-    try:
-        result = subprocess.run(
-            [str(binary), "context-run", "--probe", "--transcript", str(path), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False, None
-    if result.returncode == 3:
-        return True, None
-    if result.returncode != 0:
-        return False, None
-    try:
-        payload = json.loads(result.stdout)
-        return True, ContextReading(
-            used_tokens=int(payload["used_tokens"]),
-            window_tokens=int(payload["window_tokens"]),
-            used_pct=int(payload["used_pct"]),
-            model=str(payload["model"]),
-            compaction_band=str(payload.get("compaction_band", "none")),
-        )
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return False, None
 
 
 def context_command(
@@ -214,22 +181,18 @@ def context_command(
     if reading is None:
         raise typer.Exit(code=3)
     if json_output:
-        payload = {
-            "used_tokens": reading.used_tokens,
-            "window_tokens": reading.window_tokens,
-            "used_pct": reading.used_pct,
-            "model": reading.model,
-        }
-        if reading.compaction_band != "none":
-            payload["compaction_band"] = reading.compaction_band
-        typer.echo(json.dumps(payload))
+        typer.echo(
+            json.dumps(
+                {
+                    "used_tokens": reading.used_tokens,
+                    "window_tokens": reading.window_tokens,
+                    "used_pct": reading.used_pct,
+                    "model": reading.model,
+                }
+            )
+        )
         return
-    band = (
-        f", compaction {reading.compaction_band}"
-        if reading.compaction_band != "none"
-        else ""
-    )
     typer.echo(
         f"{reading.used_pct}% used ({reading.used_tokens:,} of "
-        f"{reading.window_tokens:,} tokens), model {reading.model}{band}"
+        f"{reading.window_tokens:,} tokens), model {reading.model}"
     )

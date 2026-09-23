@@ -51,6 +51,28 @@ def test_probe_sums_all_three_token_kinds_off_last_assistant_line(tmp_path):
     assert reading.model == "claude-opus-5"
 
 
+def test_probe_uses_the_rust_receipt_before_the_transcript_fallback(monkeypatch, tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    calls = []
+
+    def native(verb, args, *, timeout):
+        calls.append((verb, args, timeout))
+        return None, {
+            "used_tokens": 23,
+            "window_tokens": 100,
+            "used_pct": 23,
+            "model": "codex-test-model",
+        }
+
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", native)
+    reading = probe_context(transcript_path=transcript)
+
+    assert reading == ContextReading(23, 100, 23, "codex-test-model")
+    assert calls == [
+        ("context-run", ["--probe", "--transcript", str(transcript), "--json"], 5)
+    ]
+
+
 def test_probe_round_half_up_percent(tmp_path):
     transcript = tmp_path / "t.jsonl"
     # 307_850 / 1_000_000 -> 30.785% rounds to 31 (half-up via window//2).

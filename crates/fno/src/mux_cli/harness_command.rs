@@ -5,6 +5,8 @@ use crate::cli_args::MuxCommandArgs;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RECEIPT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -178,7 +180,9 @@ fn provider_recipe(harness: &str, action: &str) -> Option<(String, String, Strin
 fn action_for(harness: &str, command: &str, proof: ProofKind) -> Option<(String, String, String)> {
     match proof {
         ProofKind::Compact if command == "/compact" => provider_recipe(harness, "compact"),
-        ProofKind::GoalActive if command.starts_with("/goal") => {
+        ProofKind::GoalActive
+            if command == "/goal" || command == "/goal status" || command.starts_with("/goal ") =>
+        {
             let action = if command == "/goal" || command == "/goal status" {
                 "goal_get"
             } else {
@@ -195,6 +199,154 @@ fn print_receipt(receipt: &CommandReceipt) {
         "{}",
         serde_json::to_string(receipt).unwrap_or_else(|_| "{}".into())
     );
+}
+
+fn provider_receipt_matches(
+    method: &str,
+    expected_proof: &str,
+    session_id: &str,
+    scope: Option<&str>,
+    command: &str,
+    receipt: &serde_json::Value,
+) -> bool {
+    if receipt.get("verified").and_then(serde_json::Value::as_bool) != Some(true)
+        || receipt.get("thread_id").and_then(serde_json::Value::as_str) != Some(session_id)
+    {
+        return false;
+    }
+    match method {
+        "thread/compact/start" => {
+            expected_proof == "context-compaction"
+                && receipt.get("action").and_then(serde_json::Value::as_str) == Some("compact")
+                && receipt.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        }
+        "thread/goal/get" | "thread/goal/set" => {
+            if expected_proof != "goal-active"
+                || receipt.get("status").and_then(serde_json::Value::as_str) != Some("active")
+                || receipt
+                    .get("objective")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or(true, |objective| objective.trim().is_empty())
+            {
+                return false;
+            }
+            let owner = receipt
+                .get("continuation_owner")
+                .and_then(serde_json::Value::as_str)
+                .filter(|owner| !owner.trim().is_empty());
+            let Some(owner) = owner else {
+                return false;
+            };
+            let expected_action = if method == "thread/goal/get" {
+                "goal_get"
+            } else {
+                "goal_set"
+            };
+            if receipt.get("action").and_then(serde_json::Value::as_str) != Some(expected_action) {
+                return false;
+            }
+            if let Some(scope) = scope.filter(|scope| !scope.trim().is_empty()) {
+                if owner != format!("king:{}", scope.trim()) {
+                    return false;
+                }
+            }
+            if method == "thread/goal/set" {
+                let Some(objective) = command
+                    .trim()
+                    .strip_prefix("/goal")
+                    .map(str::trim)
+                    .filter(|objective| !objective.is_empty())
+                else {
+                    return false;
+                };
+                let expected_owner = if !scope.unwrap_or_default().trim().is_empty() {
+                    format!("king:{}", scope.unwrap_or_default().trim())
+                } else if let Some(scope) = objective.strip_prefix("$fno:reign ") {
+                    format!("king:{}", scope.trim())
+                } else {
+                    format!("target:{session_id}")
+                };
+                receipt.get("objective").and_then(serde_json::Value::as_str) == Some(objective)
+                    && owner == expected_owner
+            } else {
+                true
+            }
+        }
+        _ => false,
+    }
+}
+
+fn run_provider_action(
+    session_id: &str,
+    cwd: &str,
+    scope: Option<&str>,
+    command: &str,
+    transport: &str,
+    method: &str,
+    expected_proof: &str,
+    timeout: Duration,
+) -> Result<(serde_json::Value, String), String> {
+    if transport != "app-server" || session_id.trim().is_empty() || cwd.is_empty() {
+        return Err("provider action needs an app-server transport, exact session and cwd".into());
+    }
+    let binary = crate::digest_overlay::fno_agents_bin();
+    let mut child = Command::new(binary)
+        .args([
+            "loop",
+            "command",
+            "--session",
+            session_id,
+            "--cwd",
+            cwd,
+            "--method",
+            method,
+            "--text",
+            command,
+        ])
+        .args(scope.into_iter().flat_map(|scope| ["--scope", scope]))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("provider lane could not start fno-agents: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "provider action timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("provider action wait failed: {error}"));
+            }
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("provider action output unreadable: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("provider action exited {} without a receipt", output.status)
+        } else {
+            detail
+        });
+    }
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("provider action returned unreadable JSON: {error}"))?;
+    if !provider_receipt_matches(method, expected_proof, session_id, scope, command, &receipt) {
+        return Err("provider action readback did not prove the requested postcondition".into());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((receipt, raw))
 }
 
 pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
@@ -285,20 +437,57 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
         eprintln!("fno mux command: boundary scheduling is not available on this controller");
         return EXIT_ERROR;
     }
-    let (transport, detail) = match (recipe, row.mux.clone()) {
-        (Some((transport, method, _)), None) => {
-            // The recipe is deliberately surfaced before any pane creation:
-            // a paneless typed action must not steal portal 0. The app-server
-            // owner consumes this receipt in the provider lane.
-            (
-                transport,
-                format!("provider action {method} requires provider lane"),
-            )
-        }
-        (Some((transport, method, _)), Some(_)) => (
+    if let Some((transport, method, expected_proof)) = recipe.as_ref() {
+        let scope = row.crown_scope.as_deref();
+        let (status, before_digest, after_digest, detail) = match run_provider_action(
+            &session_id,
+            &row.cwd,
+            scope,
+            &args.text,
             transport,
-            format!("provider action {method} requires provider lane"),
-        ),
+            method,
+            expected_proof,
+            Duration::from_secs(args.timeout_seconds),
+        ) {
+            Ok((_provider_receipt, raw)) => (
+                CommandStatus::Verified,
+                String::new(),
+                digest(&raw),
+                format!("provider receipt confirmed by {method}"),
+            ),
+            Err(error) => (
+                CommandStatus::Unknown,
+                String::new(),
+                String::new(),
+                format!("provider action result is unconfirmed: {error}"),
+            ),
+        };
+        let receipt = CommandReceipt {
+            request_id,
+            selector: args.selector,
+            session_id: session_id.clone(),
+            harness,
+            transport: transport.clone(),
+            expected_identity: session_id,
+            command: args.text,
+            proof: proof.word().into(),
+            status: status.word().into(),
+            before_digest,
+            after_digest,
+            detail,
+        };
+        if let Err(error) = write_receipt(&receipt) {
+            eprintln!("fno mux command: {error}");
+            return EXIT_ERROR;
+        }
+        print_receipt(&receipt);
+        return if status == CommandStatus::Verified {
+            EXIT_OK
+        } else {
+            EXIT_CONTROL_UNANSWERED
+        };
+    }
+    let (transport, detail) = match (recipe, row.mux.clone()) {
         (None, None) => {
             eprintln!("fno mux command: paneless row has no declared provider action");
             return EXIT_ERROR;
@@ -477,6 +666,118 @@ mod tests {
             ))
         );
         assert!(action_for("claude", "/compact", ProofKind::Compact).is_none());
+        assert!(action_for("codex", "/goalfoo", ProofKind::GoalActive).is_none());
+    }
+
+    #[test]
+    fn provider_compaction_receipt_must_match_the_exact_session_and_completion() {
+        let receipt = serde_json::json!({
+            "verified": true,
+            "action": "compact",
+            "thread_id": "thread-1",
+            "status": "completed"
+        });
+        assert!(provider_receipt_matches(
+            "thread/compact/start",
+            "context-compaction",
+            "thread-1",
+            None,
+            "/compact",
+            &receipt
+        ));
+        assert!(!provider_receipt_matches(
+            "thread/compact/start",
+            "context-compaction",
+            "thread-2",
+            None,
+            "/compact",
+            &receipt
+        ));
+    }
+
+    #[test]
+    fn provider_goal_receipt_must_be_active_for_the_exact_session() {
+        let receipt = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:court"
+        });
+        assert!(provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal $fno:reign court",
+            &receipt
+        ));
+        assert!(!provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-2",
+            Some("court"),
+            "/goal $fno:reign court",
+            &receipt
+        ));
+        let wrong_owner = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:other"
+        });
+        assert!(!provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal $fno:reign court",
+            &wrong_owner
+        ));
+        let wrong_objective = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign other",
+            "continuation_owner": "king:court"
+        });
+        assert!(!provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal $fno:reign court",
+            &wrong_objective
+        ));
+
+        let get_receipt = serde_json::json!({
+            "verified": true,
+            "action": "goal_get",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:court"
+        });
+        assert!(provider_receipt_matches(
+            "thread/goal/get",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal status",
+            &get_receipt
+        ));
+        assert!(!provider_receipt_matches(
+            "thread/goal/get",
+            "goal-active",
+            "thread-1",
+            Some("other"),
+            "/goal status",
+            &get_receipt
+        ));
     }
 
     #[test]
