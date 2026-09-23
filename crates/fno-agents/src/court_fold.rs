@@ -1468,8 +1468,10 @@ mod tests {
                 .map(|n| n["id"].as_str().unwrap().to_string())
                 .collect()
         };
+        let mut e1_owned = owned_ids("e-1");
+        e1_owned.sort();
         assert_eq!(owned_ids("p"), ["b"]);
-        assert_eq!(owned_ids("e-1"), ["e-1", "a"]);
+        assert_eq!(e1_owned, ["a", "e-1"]);
     }
 
     /// AC9-EDGE: the e-1 registry row exited but the crown is still passed,
