@@ -56,7 +56,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | `fno agents mail send\|reply\|unread\|ack\|hold` | Cross-project jsonl messaging; live-inject-first, durable fallback. |
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
 | `fno backlog carveout add` | Last resort: work too big for this PR. Else fix it here. |
-| `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` prints a receipt per id, resumes safely with the same answer, and delivers to the asker over mail or states why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
+| `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` prints one receipt per id, resumes the same answer, and mails the asker or says why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail from="H" id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle. Optional for FYIs.
 
