@@ -1485,7 +1485,7 @@ mod tests {
         let registry = home.registry_json();
         std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
         let pid = std::process::id();
-        let start = crate::claims::process_create_time_ms(pid as i32).unwrap_or(0);
+        let start = crate::daemon::process_start_time(pid).unwrap_or(0);
         std::fs::write(
             &registry,
             format!(

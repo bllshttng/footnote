@@ -51,10 +51,7 @@ impl SuccessionFixture {
         let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
         let prior_node = std::env::var_os("FNO_NODE");
         let pid = std::process::id();
-        let pid_start: u64 = claims::process_create_time_ms(pid as i32)
-            .unwrap_or(0)
-            .try_into()
-            .unwrap_or(0);
+        let pid_start = crate::daemon::process_start_time(pid).unwrap_or(0);
         let mut fixture = Self {
             _lock: lock,
             dir,
