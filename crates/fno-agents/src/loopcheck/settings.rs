@@ -55,7 +55,6 @@ impl Default for Manifest {
 /// first, then APPENDS the node-claim fields (`target_claim_key/holder/ttl`)
 /// after the closing `---`, so `parse_manifest` (frontmatter-bounded) never sees
 /// them. Renewal reads them here instead. Surrounding quotes stripped.
-
 pub(crate) fn scan_manifest_field(content: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     content.lines().find_map(|line| {
@@ -69,7 +68,6 @@ pub(crate) fn scan_manifest_field(content: &str, field: &str) -> Option<String> 
 /// Parse frontmatter from a `---\n...\n---\n` block at the top of a file.
 /// Returns None if the file does not start with `---`.
 /// Unknown fields are silently ignored.
-
 pub(super) fn parse_manifest(content: &str) -> Option<Manifest> {
     let content = content.trim_start();
     if !content.starts_with("---") {
@@ -265,7 +263,6 @@ pub(crate) struct Settings {
 /// Normalize a config.review.reviewers entry / an event's reviewer name: strip a
 /// leading '/' so `/code-review` and `code-review` name the same reviewer
 /// (parity with the Python validator). Quote/comment stripping is the caller's.
-
 pub(super) fn normalize_reviewer(raw: &str) -> String {
     raw.trim().trim_start_matches('/').to_string()
 }
@@ -276,7 +273,6 @@ pub(super) fn normalize_reviewer(raw: &str) -> String {
 /// stores this sentinel so the gate stays active but UNSATISFIABLE - the NUL
 /// byte can never appear in an emitted `review_attestation.reviewer`, so no
 /// evidence ever clears it (codex peer review P1).
-
 pub(super) const MALFORMED_REVIEWERS_SENTINEL: &str = "\u{0}malformed-reviewers";
 
 /// A `config.review.peers` entry. `provider` is kept for messaging and the
@@ -284,7 +280,6 @@ pub(super) const MALFORMED_REVIEWERS_SENTINEL: &str = "\u{0}malformed-reviewers"
 /// route (the claude CLI as transport for a genuinely different model); the gate
 /// identity selects the legacy posting carrier; otherwise the entry contributes
 /// to the composite local-attestation gate.
-
 #[derive(Debug, Default, Clone)]
 pub(super) struct PeerEntry {
     pub(super) provider: String,
@@ -296,7 +291,6 @@ pub(super) struct PeerEntry {
 /// (codex P2 on #448). YAML requires whitespace before the `#`; a value that
 /// IS a comment strips to empty. Quoted values containing '#' are out of
 /// scope for this minimal parser (no known bot login contains '#').
-
 pub(super) fn strip_inline_comment(raw: &str) -> &str {
     if raw.starts_with('#') {
         return "";
@@ -315,7 +309,6 @@ pub(super) fn strip_inline_comment(raw: &str) -> &str {
 /// satisfied (no real bot login contains a NUL), the gate blocks visibly, and a
 /// `loop_check_settings_unparseable` event records it. Distinct from
 /// MALFORMED_REVIEWERS_SENTINEL so an audit sees which gate the config tripped.
-
 pub(super) const UNPARSEABLE_SETTINGS_SENTINEL: &str = "\u{0}unparseable-settings\u{0}";
 
 /// A bare scalar RHS (`key: value`) as a single-item login list. Used when a
@@ -324,7 +317,6 @@ pub(super) const UNPARSEABLE_SETTINGS_SENTINEL: &str = "\u{0}unparseable-setting
 /// value (a `{...}` flow mapping) is NOT a login - degrade to None so both
 /// parsers agree (Python's typed reader drops a mapping to None too; codex P1 on
 /// the two-parser-agreement invariant). Empty -> None.
-
 pub(super) fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
     let v = strip_inline_comment(rest.trim())
         .trim_matches(|c| c == '"' || c == '\'')
@@ -340,7 +332,6 @@ pub(super) fn scalar_as_singleton(rest: &str) -> Option<Vec<String>> {
 /// structured values (array / table). Numbers and bools stringify so a
 /// `required_bots = 123` or a stray bool still coerces to a login string,
 /// matching the old scalar-tolerant behavior.
-
 pub(super) fn scalar_string(v: &toml::Value) -> Option<String> {
     match v {
         toml::Value::String(s) => Some(s.clone()),
@@ -357,7 +348,6 @@ pub(super) fn scalar_string(v: &toml::Value) -> Option<String> {
 ///   array         -> Some(items)     (empty stays Some(empty) = declared no-gate)
 ///   scalar        -> singleton gate  (a bare `key = "codex"` still GATES on codex)
 ///   table/other   -> None            (an inline table is not a login; Python drops it)
-
 pub(super) fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
     match v {
         toml::Value::Array(items) => Some(items.iter().filter_map(scalar_string).collect()),
@@ -375,7 +365,6 @@ pub(super) fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
 /// One `[review.nudge]` per-login override. Every field is optional in
 /// TOML; a value of the wrong type sets `malformed` so that login degrades to
 /// non-nudgeable rather than panicking - the stop gate must never panic (AC8).
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct NudgeOverride {
     pub(super) login: String,
@@ -393,7 +382,6 @@ pub(super) struct NudgeOverride {
 /// ceiling, enabled }`). Lenient by construction, matching `value_as_login_list`:
 /// a non-table value, or any field of the wrong type / a non-positive integer,
 /// marks that login `malformed`. Never panics (AC8).
-
 pub(super) fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
     let Some(table) = v.as_table() else {
         // The whole `nudge` value is not a table (scalar/list): no overrides.
@@ -448,7 +436,6 @@ pub(super) fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
 /// Unlike the login lists, a structurally-wrong mapping fails CLOSED (Python
 /// raises) via the unsatisfiable sentinel, never a silent empty gate. A leading
 /// '/' is normalized off each entry.
-
 pub(super) fn value_as_reviewers(v: &toml::Value) -> Vec<String> {
     match v {
         toml::Value::Array(items) => {
@@ -487,7 +474,6 @@ pub(super) fn value_as_reviewers(v: &toml::Value) -> Vec<String> {
 /// either a scalar (provider only) or a mapping whose `provider`/`identity` keys
 /// are read order-independently (a real map, so no hand key-order handling). A
 /// bare scalar `peers: codex` is one provider (Python's coerce_peers).
-
 pub(super) fn value_as_peers(v: &toml::Value) -> Vec<PeerEntry> {
     let scalar_entry = |s: String| PeerEntry {
         provider: s,
@@ -541,7 +527,6 @@ pub(super) fn value_as_peers(v: &toml::Value) -> Vec<PeerEntry> {
 /// Read an f64 budget cap off a typed Value: a number is Ok, a non-numeric
 /// scalar fails CLOSED as Some(Err(raw)) (so check_budget trips), an
 /// absent/null key is None (unlimited). Mirrors the manifest cap semantics.
-
 pub(super) fn read_f64_cap(v: &toml::Value, ctx: &str) -> Option<Result<f64, String>> {
     match v {
         toml::Value::Integer(n) => Some(Ok(*n as f64)),
@@ -559,7 +544,6 @@ pub(super) fn read_f64_cap(v: &toml::Value, ctx: &str) -> Option<Result<f64, Str
 }
 
 /// Read a u64 budget cap off a typed Value (same fail-closed rule as f64).
-
 pub(super) fn read_u64_cap(v: &toml::Value, ctx: &str) -> Option<Result<u64, String>> {
     match v {
         toml::Value::Integer(n) => Some(u64::try_from(*n).map_err(|_| {
@@ -585,7 +569,6 @@ pub(super) fn read_u64_cap(v: &toml::Value, ctx: &str) -> Option<Result<u64, Str
 /// a scalar, or an array holding a non-string is NOT - it is a mis-declared
 /// gate, and the Err travels to the gate so it blocks with a reason instead of
 /// silently reading as no declaration at all.
-
 pub(crate) fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String> {
     let items = v
         .as_array()
@@ -610,7 +593,6 @@ pub(crate) fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String
 /// be silently outranked by a parseable global file's github_apps during the
 /// global+local merge (an unparseable LOCAL file would then resolve to the
 /// global gate, re-opening the fail-open this fix removes).
-
 pub(super) fn fail_closed_settings() -> Settings {
     let sentinel = Some(vec![UNPARSEABLE_SETTINGS_SENTINEL.to_string()]);
     Settings {
@@ -627,7 +609,6 @@ pub(super) fn fail_closed_settings() -> Settings {
 /// Err so the caller can fail closed + emit an event, rather than silently
 /// zeroing the gate. The typed-Value classification preserves every semantic
 /// the old ListForm branches encoded (see the value_as_* helpers).
-
 pub(super) fn parse_settings_result(content: &str) -> Result<Settings, String> {
     let root: toml::Value = content.parse::<toml::Value>().map_err(|e| e.to_string())?;
     let mut s = Settings::default();
@@ -765,7 +746,6 @@ pub(super) fn parse_settings_result(content: &str) -> Result<Settings, String> {
 /// mirror). Anything else is None, so the caller's default decides - the
 /// Python config loader rejects the same shapes, so no config can load green
 /// on one side and parse differently here.
-
 pub(super) fn lax_bool(v: &toml::Value) -> Option<bool> {
     v.as_bool()
         .or_else(|| {
@@ -797,7 +777,6 @@ pub(super) fn live_merge_gating_optout(key: &str) -> bool {
 /// gate) rather than silently defaulting to no gate. Test-only - production
 /// calls parse_settings_result directly so it can also emit the
 /// `loop_check_settings_unparseable` event on the Err path.
-
 #[cfg(test)]
 pub(crate) fn parse_settings(content: &str) -> Settings {
     parse_settings_result(content).unwrap_or_else(|_| fail_closed_settings())
@@ -806,7 +785,6 @@ pub(crate) fn parse_settings(content: &str) -> Settings {
 // ── ledger parsing ────────────────────────────────────────────────────────────
 
 /// Sum cost_usd for entries matching session_id. Tolerate missing/malformed as 0.
-
 pub(super) fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
     let Ok(content) = std::fs::read_to_string(ledger_path) else {
         return 0.0;

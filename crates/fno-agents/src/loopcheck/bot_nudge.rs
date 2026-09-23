@@ -35,17 +35,11 @@ pub(super) fn post_nudge_comment(
 
 /// The first missing bot that has been nudged to its ceiling and gone silent, if
 /// any. The NoProgress backstop names it instead of a bare fingerprint streak.
-
 pub(super) fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
     pr.bot_nudges
         .iter()
         .find(|n| n.class == NudgeClass::Unresponsive)
 }
-
-/// The commit-status context the merge ruleset requires. One const for
-/// both emitter call sites and the standalone verb arm; the Python publisher
-/// and refresher workflow pin the same name from their own surfaces, and a
-/// context string that splits in two is a green marker on nothing.
 
 /// The give-up line for an unresponsive nudged bot: the operator's
 /// two questions ("will it finish, must I act") answered in one line.
@@ -70,7 +64,6 @@ pub(super) fn nudge_giveup_message(n: &BotNudge) -> String {
 /// footnote may post its `review_handle` to un-stick a required gate that nobody
 /// mentioned. Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
 /// config, not code - see `[review.nudge]` / `resolved_nudge_configs`.
-
 pub(super) struct BotProfile {
     pub(super) login: &'static str,
     pub(super) review_handle: &'static str,
@@ -100,7 +93,6 @@ pub(super) struct BotProfile {
 /// clean-pass comment); `gemini-code-assist` stays `nudgeable: false` with an
 /// empty `review_handle` until its trigger is characterized (Evidence Gaps),
 /// which is strictly more than the old lists knew.
-
 pub(super) const BOT_PROFILES: &[BotProfile] = &[
     BotProfile {
         login: "chatgpt-codex-connector",
@@ -129,7 +121,6 @@ pub(super) const BOT_PROFILES: &[BotProfile] = &[
 /// suffix or be the full login): the profile login is a substring of the author,
 /// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
 /// author's `reply_handle`.
-
 pub(super) fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
     BOT_PROFILES
         .iter()
@@ -140,7 +131,6 @@ pub(super) fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
 /// substring of the other (so a config short name "codex", a full login, and a
 /// "[bot]"-suffixed author all correspond). Symmetric superset of
 /// `login_matches_bot`.
-
 pub(super) fn logins_correspond(a: &str, b: &str) -> bool {
     login_matches_bot(a, b) || login_matches_bot(b, a)
 }
@@ -148,7 +138,6 @@ pub(super) fn logins_correspond(a: &str, b: &str) -> bool {
 /// Default nudge cadence. 15 minutes is the observed 6m55s worst-case
 /// latency on PR #618 with headroom, not a guess; 3 nudges bounds the give-up at
 /// ~45 minutes of *asked-for* waiting versus the unbounded budget burn today.
-
 pub(super) const DEFAULT_NUDGE_WAIT_MINUTES: i64 = 15;
 
 pub(super) const DEFAULT_NUDGE_CEILING: usize = 3;
@@ -157,7 +146,6 @@ pub(super) const DEFAULT_NUDGE_CEILING: usize = 3;
 /// beyond these is a typo, not a cadence: `wait_minutes` is bounded well under
 /// `i64::MAX/60` so `chrono::Duration::minutes` can never overflow-panic in the
 /// stop gate, and a nudge cadence past a week / 1000 asks is meaningless anyway.
-
 pub(super) const MAX_NUDGE_WAIT_MINUTES: i64 = 7 * 24 * 60; // one week
 
 pub(super) const MAX_NUDGE_CEILING: i64 = 1000;
@@ -166,7 +154,6 @@ pub(super) const MAX_NUDGE_CEILING: i64 = 1000;
 /// overlaid with `[review.nudge]` overrides. ONLY nudgeable logins appear here
 /// (enabled, non-empty review_handle, not malformed); any other missing bot
 /// classifies `NotNudgeable`.
-
 #[derive(Debug, Clone)]
 pub(crate) struct NudgeConfig {
     pub(super) login: String,
@@ -180,7 +167,6 @@ pub(crate) struct NudgeConfig {
 /// its login from the set (opting out is never opting into a faster give-up);
 /// an override with no resolvable `review_handle` (neither its own nor a base
 /// profile's) is likewise dropped, since there is nothing to post.
-
 pub(super) fn resolved_nudge_configs(settings: &Settings) -> Vec<NudgeConfig> {
     let mut out: Vec<NudgeConfig> = BOT_PROFILES
         .iter()
@@ -228,7 +214,6 @@ pub(super) fn resolved_nudge_configs(settings: &Settings) -> Vec<NudgeConfig> {
 }
 
 /// The nudge config for a configured missing-bot login, or None (non-nudgeable).
-
 pub(super) fn nudge_config_for<'a>(
     configs: &'a [NudgeConfig],
     bot: &str,
@@ -240,7 +225,6 @@ pub(super) fn nudge_config_for<'a>(
 /// from PR comments every fire - no durable counter - so a mention posted by a
 /// human, `/fno:pr check`, or a sibling worktree counts identically and
 /// self-heals across restart / compaction / handoff.
-
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NudgeClass {
     /// No mention within the wait window: work to DO (post the trigger). Never
@@ -259,7 +243,6 @@ pub(super) enum NudgeClass {
 }
 
 /// One missing bot's classification plus the facts the block message renders.
-
 #[derive(Debug, Clone)]
 pub(super) struct BotNudge {
     pub(super) login: String,
@@ -288,7 +271,6 @@ pub(super) fn nudge_class_idlable(class: &NudgeClass) -> bool {
 /// mention is a request from anyone; only a usage-limit *claim* is scoped to the
 /// bot's own login). Reads NO review timestamp and NO `reviews[].commit`: the
 /// bot gate is PR-lifetime, and touching either silently re-pins it to head.
-
 pub(super) fn classify_bot_nudge(
     login: &str,
     comments: &[Value],
@@ -360,5 +342,19 @@ pub(super) fn classify_bot_nudge(
         nudges: total,
         newest_age_min,
         span_min,
+    }
+}
+
+impl BotNudge {
+    pub(super) fn not_nudgeable(login: &str) -> Self {
+        BotNudge {
+            login: login.to_string(),
+            class: NudgeClass::NotNudgeable,
+            review_handle: String::new(),
+            ceiling: 0,
+            nudges: 0,
+            newest_age_min: 0,
+            span_min: 0,
+        }
     }
 }

@@ -61,7 +61,6 @@ pub(super) fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
 ///
 /// A git that cannot answer reads as DIRTY, so an unreadable tree never
 /// widens what counts as shipped.
-
 pub(super) fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
     matches!(
         git_bounded(git_bin, &["status", "--porcelain"], cwd),
@@ -83,7 +82,6 @@ pub(super) fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
 /// A base that does not resolve, a git that errors, and a HEAD that is
 /// genuinely ahead all answer false, which is the conservative direction: see
 /// [`head_is_shipped`].
-
 pub(super) fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
     for base in ["origin/main", "origin/master"] {
         match git_bounded(
@@ -125,7 +123,6 @@ pub(super) fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
 /// The equality arm is checked first and makes no subprocess call, so the
 /// common path costs nothing. A git that cannot answer leaves the old
 /// behavior exactly as it was.
-
 pub(super) fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> bool {
     if pr.head_oid.is_empty() {
         return false;
@@ -155,7 +152,6 @@ pub(super) fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
 /// streak (US4). Distinguish via gh's deterministic no-PR stderr message. If
 /// gh ever changes the message, no-PR fires degrade to outage semantics
 /// (freeze -> budget ceiling): safe, never a premature termination.
-
 pub(super) fn is_no_pr_stderr(stderr: &[u8]) -> bool {
     String::from_utf8_lossy(stderr)
         .to_lowercase()
@@ -163,7 +159,6 @@ pub(super) fn is_no_pr_stderr(stderr: &[u8]) -> bool {
 }
 
 /// Capture the last ~200 bytes of stderr as a lossy UTF-8 string.
-
 pub(super) fn stderr_tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     let s = s.trim();
@@ -240,7 +235,6 @@ pub(super) fn read_pr_view(
 /// alongside the head, so a caller that goes on to build a full `PrInfo` can
 /// reuse this read instead of issuing a second `gh pr view` for the same
 /// selector.
-
 pub(super) fn read_pr_head_oid(
     gh_bin: &str,
     cwd: &Path,
@@ -268,7 +262,6 @@ pub(super) fn read_pr_head_oid(
 /// read failure conflates. None on any failure: a failed probe must never
 /// fabricate an exhaustion verdict (a false "resets in 40m" would stall a
 /// healthy session for no reason).
-
 pub(super) struct GraphqlQuota {
     pub(super) remaining: i64,
     pub(super) reset_epoch: i64,
@@ -313,7 +306,6 @@ pub(super) fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuo
 /// measured 2026-08-24 secondary body says only "API rate limit exceeded for
 /// user ID ... (HTTP 403)" - no "secondary" anywhere - so a phrase gate
 /// missed the real refusal and read it as an unclassified blip.
-
 pub(super) fn stderr_smells_rate_limit(stderr: &str) -> bool {
     stderr.to_lowercase().contains("rate limit")
 }
@@ -335,7 +327,6 @@ pub(super) fn stderr_smells_rate_limit(stderr: &str) -> bool {
 /// classifies GRAPHQL reads, so a drained graphql bucket on a graphql read
 /// names the primary quota here; the Python classifier sees REST reads only
 /// (whose primary quota is core) and needs no graphql arm.
-
 pub(super) fn refusal_is_secondary(
     stderr: &str,
     probe: Option<&GraphqlQuota>,
@@ -395,7 +386,6 @@ pub(crate) fn is_graphql_read(read: &str) -> bool {
 /// retrying the GraphQL reads this window and know where the answer still
 /// lives - anything less and it burns a fire every tick on a call that
 /// cannot succeed until the reset.
-
 pub(super) fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
     let now = Utc::now().timestamp();
     let mins = ((q.reset_epoch - now) / 60).max(0);

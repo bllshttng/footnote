@@ -50,7 +50,6 @@ pub(super) fn extract_assistant_text(val: &Value) -> String {
 /// message: aborted > watching > promise. aborted is the hardest stop;
 /// watching outranks promise so a session that both promises and asks to idle
 /// idles (its promise is re-evaluated on the next wake).
-
 pub(super) fn detect_intent_from_text(text: &str) -> Intent {
     // Look for <aborted ...> tag
     if let Some(aborted_start) = text.find("<aborted") {
@@ -89,7 +88,6 @@ pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
 /// turn's final assistant text, blocks joined by newline and trimmed),
 /// omitted when empty. Any parse failure -> None so the caller falls back
 /// to the transcript scan.
-
 pub(super) fn extract_last_assistant_message(hook_input: &str) -> Option<String> {
     let val: Value = serde_json::from_str(hook_input).ok()?;
     let s = val.get("last_assistant_message")?.as_str()?;
@@ -107,7 +105,6 @@ pub(super) fn extract_last_assistant_message(hook_input: &str) -> Option<String>
 /// through to the transcript behind a tag-less payload would resurrect the
 /// stale-promise edge the bounded scan exists to contain. Returns the intent
 /// plus its source for the loop_check event (`payload` | `transcript`).
-
 pub(super) fn detect_intent(
     last_assistant_message: Option<&str>,
     transcript_path: &Path,
@@ -125,7 +122,6 @@ pub(super) fn detect_intent(
 /// no payload exists. The bound is load-bearing: a stale promise from
 /// pivoted work must fall out of the window (done()'s head_shipped read is
 /// the real gate against the remainder).
-
 pub(super) const INTENT_LOOKBACK_ENTRIES: usize = 5;
 
 pub(super) fn detect_intent_full(transcript_path: &Path) -> Intent {

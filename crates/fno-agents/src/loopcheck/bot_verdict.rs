@@ -39,7 +39,6 @@ pub(super) fn body_is_reviewer_refusal(body: &str) -> bool {
 /// hence the SYMMETRIC correspond test, not the one-way matches). Empty for a
 /// login with no measured clean-pass shape, which the caller treats as "no
 /// clean-pass evidence".
-
 pub(super) fn clean_pass_markers_for(login: &str) -> &'static [&'static str] {
     BOT_PROFILES
         .iter()
@@ -54,7 +53,6 @@ pub(super) fn clean_pass_markers_for(login: &str) -> &'static [&'static str] {
 /// that names no commit cannot be aged, so counting it would be exactly the
 /// unpinned-attestation hole the local axis already refuses. Trailing
 /// punctuation (`.`, `)`, `,`) is stripped so a sentence-embedded sha parses.
-
 pub(super) fn reviewed_commit_from_body(body: &str) -> &str {
     const MARKER: &str = "Reviewed commit:";
     // The marker match lowercases the body, so the lowercased spelling parses
@@ -104,7 +102,6 @@ pub(super) fn reviewed_commit_from_body(body: &str) -> &str {
 /// the author's login contains the configured name AND the author resolves
 /// to a known bot profile, so a config short name ("codex") cannot draft
 /// every human whose login contains it into the bot's marker lane.
-
 pub(super) fn usage_limit_comment_by(login: &str, c: &Value) -> bool {
     let author = c
         .pointer("/author/login")
@@ -127,7 +124,6 @@ pub(super) fn refusal_comment_by(login: &str, c: &Value) -> bool {
 
 /// A comment's `createdAt`, empty when absent (empty orders as "unknown",
 /// which each caller resolves fail-closed for its own rule).
-
 pub(super) fn comment_ts(c: &Value) -> &str {
     c.get("createdAt").and_then(|v| v.as_str()).unwrap_or("")
 }
@@ -216,7 +212,6 @@ pub(super) fn clean_pass_review(
 /// the flourish, and a bare `starts_with("bravo")` counted both as passes.
 /// Characterized from the measured specimens (PR #947): a new bot's shape
 /// gets its own profile entry, never a loosened predicate.
-
 pub(super) fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
     // The measured follow-ups to a genuine pass sentence. A newline counts as
     // a terminator exactly like a period: the measured pin posts as its own
@@ -281,7 +276,6 @@ pub(super) fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
 /// bot recovered and read the code - a historical refusal is not a life
 /// sentence). Both orderings require positive timestamp evidence; on ties
 /// or absent timestamps the pass stands, symmetrically with the refusal.
-
 pub(crate) fn bot_verdict(
     login: &str,
     reviews: &[Value],

@@ -23,7 +23,6 @@ pub(super) const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 /// component strings are the shared vocabulary: `self`, `independent`,
 /// `github`, `peer`. `check-reviewer-descriptor-parity.sh` pins ranks and
 /// costs against the Python table.
-
 pub(super) fn posture_rung(
     value: &str,
 ) -> Option<(
@@ -78,14 +77,12 @@ pub(super) fn posture_rung(
 }
 
 /// Lookup used by the settings parser: value -> components only.
-
 pub(super) fn posture_components(value: &str) -> Option<&'static [&'static str]> {
     posture_rung(value).map(|(c, _, _, _, _)| c)
 }
 
 /// The resolved posture carried into read_pr_info. Computed once by the
 /// caller (which owns the parsed settings), evaluated against verdicts there.
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PostureConfig {
     pub value: String,
@@ -100,7 +97,6 @@ pub struct PostureConfig {
 
 /// The authoritative posture verdict serialized on every `review_coverage`
 /// row that carries a resolved posture. Python reads these fields verbatim.
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PostureVerdict {
     pub posture: String,
@@ -127,7 +123,6 @@ pub struct PostureVerdict {
 /// The resolved `review.carry_interdiff_lines` (law d-608344c1): the law's
 /// default is 100; `0` disables the arm; a negative config value is a typo and
 /// reads as the default rather than as a refusal nobody asked for.
-
 pub(super) fn carry_interdiff_lines_resolved(settings: &Settings) -> usize {
     match settings.carry_interdiff_lines {
         Some(n) if n >= 0 => n as usize,
@@ -213,7 +208,6 @@ pub(super) fn resolve_posture_config(settings: &Settings) -> PostureConfig {
 /// satisfy the self lane, any other Reviewed verdict does whatever produced
 /// it, and the peer lane counts only verdicts the cross-model resolver
 /// admits (the same-model sentinel never matches a real reviewer name).
-
 pub(super) fn posture_verdict(
     config: &PostureConfig,
     rep: &CoverageReport,
@@ -273,14 +267,12 @@ pub(super) const LOCAL_PEER_REVIEWER: &str = "peer";
 /// An unmatchable reviewer key used when every identity-free peer is the
 /// author's own model family. It keeps the local gate fail-closed independently
 /// of the producer and is rendered as an actionable same-model refusal.
-
 pub(super) const SAME_MODEL_LOCAL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model-local\u{0}";
 
 /// A login no real GitHub account can equal, pushed when a required peer login is
 /// backed ONLY by peers whose model is the author's own (same-model guard). It
 /// REPLACES the clearable login so a same-model review can never satisfy the
 /// cross-model gate.
-
 pub(super) const SAME_MODEL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model\u{0}";
 
 /// Model family of a harness or provider name - the same-model guard's proxy for
@@ -290,7 +282,6 @@ pub(super) const SAME_MODEL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model\u{0}
 /// equals any author family (fail open per-peer). A routed-transport author
 /// (claude CLI over GLM) still reads as anthropic here - a known limitation that
 /// errs toward HOLDING the gate, never wrongly clearing it.
-
 pub(super) fn harness_family(name: &str) -> Option<&'static str> {
     match name.trim().to_ascii_lowercase().as_str() {
         "claude" | "anthropic" => Some("anthropic"),
@@ -304,7 +295,6 @@ pub(super) fn harness_family(name: &str) -> Option<&'static str> {
 /// -> `route_provider`. None unless there are exactly two non-empty comma parts,
 /// matching the loader's parse rule (config/__init__.py coerce_peers), so a
 /// malformed route falls back to the bare provider.
-
 pub(super) fn route_provider(model: &str) -> Option<&str> {
     let mut parts = model.split(',').map(str::trim);
     match (parts.next(), parts.next(), parts.next()) {
@@ -320,7 +310,6 @@ pub(super) fn route_provider(model: &str) -> Option<&str> {
 /// route and runs the bare provider, so trusting a codex/gemini route would
 /// classify a same-model review as cross-model and re-open the bypass this guard
 /// exists to close. Matches the loader, which validates routes for claude only.
-
 pub(super) fn peer_family(peer: &PeerEntry) -> Option<&'static str> {
     let effective = peer
         .model
@@ -335,7 +324,6 @@ pub(super) fn peer_family(peer: &PeerEntry) -> Option<&'static str> {
 /// awareness (the same-model guard is inert). Test-only convenience so existing
 /// tests stay byte-identical; production passes the resolved harness via
 /// [`resolved_required_bots_for_author`].
-
 #[cfg(test)]
 pub(super) fn resolved_required_bots(settings: &Settings) -> Vec<String> {
     resolved_required_bots_for_author(settings, None)
@@ -352,7 +340,6 @@ pub(super) fn resolved_required_bots(settings: &Settings) -> Vec<String> {
 /// the author's own model with SAME_MODEL_PEER_SENTINEL, so a codex-authored run
 /// with `peers: [codex]` can no longer review its own work and clear the gate.
 /// `None` (unknown authorship) leaves the login set byte-identical - fail open.
-
 pub(super) fn resolved_required_bots_for_author(
     settings: &Settings,
     author_harness: Option<&str>,
@@ -410,7 +397,6 @@ pub(super) fn resolved_required_bots_for_author(
 /// an unmatchable sentinel so even a forged `peer: pass` cannot self-review the
 /// change. Unknown peer families remain eligible, matching the existing
 /// identity-backed guard's conservative compatibility rule.
-
 pub(super) fn resolved_local_peer_reviewers_for_author(
     settings: &Settings,
     author_harness: Option<&str>,
@@ -451,7 +437,6 @@ pub(super) fn resolved_local_peer_reviewers_for_author(
 /// review posted under that shared login can never be the thing that clears the
 /// gate - the collision is a fail-closed hold, not an exemption (codex peer
 /// review on PR #375). Peers are walked in config order so output is deterministic.
-
 pub(super) fn apply_same_model_guard(
     logins: &mut Vec<String>,
     settings: &Settings,
@@ -508,7 +493,6 @@ pub(super) fn apply_same_model_guard(
 /// cli/tests/config/optional_apps_default.json). Without a shared default, this
 /// side resolved empty while `fno do pr status` matched two hardcoded logins,
 /// so a worker following the remedy one printed was refused by the other.
-
 pub(super) const DEFAULT_OPTIONAL_APPS: [&str; 2] =
     ["gemini-code-assist", "chatgpt-codex-connector"];
 
@@ -516,7 +500,6 @@ pub(super) const DEFAULT_OPTIONAL_APPS: [&str; 2] =
 /// present but never required. Their blocking findings hold the gate, but their
 /// absence never does. Unset resolves to the
 /// built-in default; an explicit `[]` is a real opt-out and wins over it.
-
 pub(super) fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
     match settings.optional_apps.clone() {
         // Unset: the built-in honored-if-present logins.
@@ -549,7 +532,6 @@ pub(super) fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
 /// Case-insensitive substring match so a configured short name ("codex") or a
 /// full login both match the review author, including gh's `[bot]`-suffixed
 /// form (reference_gh_bot_login_suffix_polling_trap).
-
 pub(crate) fn login_matches_bot(login: &str, bot: &str) -> bool {
     !bot.is_empty() && login.to_lowercase().contains(&bot.to_lowercase())
 }
@@ -558,7 +540,6 @@ pub(crate) fn login_matches_bot(login: &str, bot: &str) -> bool {
 /// Deliberately NOT `login_matches_bot`'s substring match: "ali" must not
 /// read as the author "alice" when the approval-counting rule asks whether
 /// the approver IS the author.
-
 pub(super) fn login_equals(a: &str, b: &str) -> bool {
     !a.is_empty() && a.eq_ignore_ascii_case(b)
 }

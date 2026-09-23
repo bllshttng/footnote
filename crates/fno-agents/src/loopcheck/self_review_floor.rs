@@ -38,7 +38,6 @@ pub(super) const REVIEW_ORDER: &str = "close every finding, commit and push firs
 /// replacement in the refusal. No `--fix` in any hint: a fix pass moves HEAD
 /// and voids the attestation the round just earned. Kept honest against the
 /// Python descriptor table by check-reviewer-descriptor-parity.sh.
-
 pub(super) const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review", false, ""),
     ("code-review", "/fno:review", false, ""),
@@ -49,7 +48,6 @@ pub(super) const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
 /// descriptor's `asserts` field: a surface that names `declare` without saying
 /// it asserts nothing invites an operator to clear the gate with no review
 /// behind it.
-
 pub(super) fn reviewer_entry(name: &str) -> Option<(&'static str, bool, &'static str)> {
     REVIEWER_INVOCATIONS
         .iter()
@@ -61,7 +59,6 @@ pub(super) fn reviewer_entry(name: &str) -> Option<(&'static str, bool, &'static
 /// is unknown or the reviewer declares no override. `harness` is the author
 /// harness from `claims::resolve_harness`, threaded rather than re-read so a
 /// unit test can pin a harness without touching the environment.
-
 pub(super) fn reviewer_invocation_for(
     name: &str,
     harness: Option<&str>,
@@ -86,7 +83,6 @@ pub(super) fn reviewer_invocation_for(
 /// markdown, so the `.md` rule covers them; the `internal/` vault is gitignored
 /// and never appears in a diff. A config file, a lockfile, and a shell script
 /// all count as code.
-
 pub(crate) fn is_documentation_path(path: &str) -> bool {
     // A single leading "./" is stripped once; trim_start_matches would also strip
     // a char set and lstrip a literal-repeated run, diverging from the Python
@@ -106,7 +102,6 @@ pub(crate) fn is_documentation_path(path: &str) -> bool {
 /// codex `/review`) remain the operator's explicit choice; no machinery
 /// depends on them any more, which is the point of owning the reviewer.
 /// Mirrors `harness_can_self_review` in `cli/src/fno/review_capability.py`.
-
 pub(super) fn harness_can_self_review(_harness: Option<&str>) -> bool {
     true
 }
@@ -121,7 +116,6 @@ pub(super) fn harness_can_self_review(_harness: Option<&str>) -> bool {
 /// the verb table: the fno review lane runs wherever the plugin runs, so no
 /// KNOWN harness is verbless for review purposes and every attributed run
 /// floors.
-
 pub(super) const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 
 /// The self-review FLOOR policy on the author harness. Distinct from
@@ -135,7 +129,6 @@ pub(super) const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 /// the hermetic opt-out and stays unfloored. Mirrors `_harness_can_self_review`
 /// in cli/src/fno/pr/_merge.py so the stop gate and the merge gate cannot
 /// disagree on the same PR.
-
 pub(super) fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
     match author_harness {
         Some(h) => harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h),
@@ -146,7 +139,6 @@ pub(super) fn self_review_floor_applies(author_harness: Option<&str>, pinned_non
 /// Pure payload classifier: CODE iff any changed path is not documentation.
 /// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
 /// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
-
 pub(super) fn payload_is_code(paths: &[String]) -> bool {
     paths.iter().any(|p| !is_documentation_path(p))
 }
@@ -157,7 +149,6 @@ pub(super) fn payload_is_code(paths: &[String]) -> bool {
 /// and a lane that already names code-review all get None. Returning the name
 /// (not a bool) keeps "should floor" and "what to floor" in one place - the
 /// reviewer name is the gate input, and splitting them invites drift.
-
 pub(super) fn floor_self_review(
     required_reviewers: &[String],
     lane_configured: bool,
@@ -185,7 +176,6 @@ pub(super) fn floor_self_review(
 /// that RESOLVES but yields no readable diff (unrelated histories: the diff
 /// exits 128 "no merge base") never falls through to the other candidate - a
 /// stale pre-migration sibling would size the payload from a whole era.
-
 pub(super) fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
         match git_bounded(
@@ -234,7 +224,6 @@ pub(super) fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
 /// NAMED PR (`pr_selector`, the review-coverage verb's --pr) that resolves to
 /// nothing is a degraded read of the PR under evaluation, never a no-PR
 /// branch, so it fails closed instead of falling back.
-
 pub(super) fn classify_payload_for_floor(
     gh_bin: &str,
     git_bin: &str,

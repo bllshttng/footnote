@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The commit-status context the merge ruleset requires. One const for
+/// both emitter call sites and the standalone verb arm; the Python publisher
+/// and refresher workflow pin the same name from their own surfaces, and a
+/// context string that splits in two is a green marker on nothing.
 pub(super) const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
 
 pub(super) const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
