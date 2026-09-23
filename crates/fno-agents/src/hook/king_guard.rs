@@ -187,7 +187,7 @@ pub fn run(_args: &[String]) -> i32 {
     };
 
     // 11. Telemetry: one row, one file, failure ignored.
-    emit_telemetry(&cwd, tool, denied.is_some());
+    super::emit_guard_decision(&cwd, "king-delegation-guard", tool, denied.is_some());
 
     let Some(denied) = denied else {
         return allow("");
@@ -209,19 +209,6 @@ fn deny_text(target: &str, repo_root: &Path) -> String {
          A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.king.write_roots.\n",
         repo = repo_root.display(),
     )
-}
-
-/// One `guard_decision` row into the space events file, the bounded appender
-/// `emit_to_both` uses, one file only (as `hooks/lib/guard-mark.sh` did).
-fn emit_telemetry(cwd: &Path, tool: &str, denied: bool) {
-    let path = crate::paths::events_path(cwd);
-    let event = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "type": "guard_decision",
-        "data": {"guard": "king-delegation-guard", "decision": if denied { "block" } else { "allow" }, "tool": tool},
-        "source": "hook"
-    });
-    let _ = crate::claims::append_event_line(&path, &event, std::time::Duration::from_secs(2));
 }
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────
@@ -294,17 +281,8 @@ fn write_targets(command: &str) -> Vec<String> {
             at_command = true;
         } else if nxt {
             nxt = false;
-            // Only a lexer-glued closer (NUL-marked) is substitution syntax;
-            // a quoted or escaped literal closer is part of the path. Closers
-            // and markers interleave when substitutions nest, so a marked
-            // word trims the combined set from the end.
-            let w = if tok.contains('\u{0}') {
-                tok.trim_end_matches([')', '`', '\u{0}'])
-            } else {
-                tok.as_str()
-            };
-            if !w.contains('>') && !is_fd(w) {
-                targets.push(w.to_string());
+            if !tok.contains('>') && !is_fd(tok) {
+                targets.push(tok.clone());
             }
         } else if is_redirect(tok) {
             // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
@@ -352,41 +330,97 @@ fn write_targets(command: &str) -> Vec<String> {
         }
     }
     flush(&verb, &pool, &mut targets);
-    // The verb-operand flush saw the glued closers too; strip them here so
-    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`. A word with
-    // no marker keeps its literal trailing closers.
-    for t in &mut targets {
-        if t.contains('\u{0}') {
-            let n = t.trim_end_matches([')', '`', '\u{0}']).len();
-            t.truncate(n);
-        }
-    }
     targets.retain(|t| !t.is_empty());
     targets
 }
 
 /// Lex a command into words and operator tokens; `None` on an unterminated
-/// quote (a malformed shell never executes). Unlike `shlex::split`, unquoted
-/// `;` `|` `&` `(` `)` newline and redirects arrive as their own tokens, so
-/// `2>&1|tail` can never read as one word.
+/// quote or an unclosed substitution (a malformed shell never executes).
+/// Unlike `shlex::split`, unquoted `;` `|` `&` `(` `)` newline and redirects
+/// arrive as their own tokens, so `2>&1|tail` can never read as one word.
 ///
 /// `<<DELIM`/`<<-DELIM` heredoc bodies are swallowed whole, never re-lexed as
 /// more shell text - unless the reading command is a shell (bash/sh/zsh), in
 /// which case the body is lexed again and its tokens spliced in, so `bash
 /// <<EOF` still judges a real write in its body, but a heredoc mailed as a
 /// file body never donates a phantom write target.
+///
+/// Each command substitution - `$( )` and backticks, quoted or not - stays
+/// one word in place (so `mv $(pick_build x) /tmp/out` still binds
+/// `/tmp/out`) and its body is lexed again, appended after a `\n` token so
+/// callers read it as one more command.
 pub(super) fn lex(command: &str) -> Option<Vec<String>> {
+    lex_at_depth(command, 0)
+}
+
+/// Substitution nesting past this bound lexes to `None`: a hostile nest
+/// never executes, and the recursion must stay bounded.
+const MAX_NEST: usize = 128;
+
+fn lex_at_depth(command: &str, nest: usize) -> Option<Vec<String>> {
+    let mut bodies: Vec<Vec<String>> = Vec::new();
+    let mut toks = lex_until(&mut command.chars().peekable(), false, &mut bodies, nest)?;
+    for body in bodies {
+        toks.push("\n".to_string());
+        toks.extend(body);
+    }
+    Some(toks)
+}
+
+type Src<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Entered just past a glued `(`: the group lexes by the same rules up to
+/// its matching `)`. A `$( )` body is recorded as a command; `$(( ))`
+/// arithmetic and a bare group such as `arr=(a b)` stay words only.
+fn group(
+    chars: &mut Src,
+    bodies: &mut Vec<Vec<String>>,
+    command: bool,
+    nest: usize,
+) -> Option<String> {
+    if nest >= MAX_NEST {
+        return None;
+    }
+    let arith = chars.peek() == Some(&'(');
+    let body = lex_until(chars, true, bodies, nest + 1)?;
+    let word = format!("({})", body.join(" "));
+    if command && !arith {
+        bodies.push(body);
+    }
+    Some(word)
+}
+
+/// Entered just past an opening backtick: raw text to the next unescaped
+/// backtick, lexed again as its own command.
+fn backtick(chars: &mut Src, bodies: &mut Vec<Vec<String>>, nest: usize) -> Option<String> {
+    let mut text = String::new();
+    loop {
+        match chars.next()? {
+            '`' => break,
+            '\\' if matches!(chars.peek(), Some('`' | '\\' | '$')) => text.push(chars.next()?),
+            c => text.push(c),
+        }
+    }
+    bodies.push(lex_at_depth(&text, nest + 1)?);
+    Some(format!("`{text}`"))
+}
+
+/// The lexer worker: tokens of one command, stopping at the matching `)`
+/// when entered inside a substitution. Operator parens opened here nest
+/// through `depth`, so a `case` pattern or arithmetic never ends a
+/// substitution body early.
+fn lex_until(
+    chars: &mut Src,
+    in_subst: bool,
+    bodies: &mut Vec<Vec<String>>,
+    nest: usize,
+) -> Option<Vec<String>> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
-    // Glued `(`/`)` inside a word: an open command substitution survives a
-    // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
-    // counter, not the current word, decides whether `)` is literal.
-    let mut subst = 0usize;
-    let mut bt = 0usize;
+    let mut depth = 0usize;
     // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
     // the newline arm to act on once the delimiter word lands in `toks`.
     let mut heredoc: Option<(bool, bool)> = None;
-    let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\\' => {
@@ -412,6 +446,15 @@ pub(super) fn lex(command: &str) -> Option<Vec<String>> {
                     Some('\\') if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => {
                         cur.push(chars.next()?);
                     }
+                    // A substitution inside double quotes lexes as its own
+                    // command too; its body would otherwise ride inside one
+                    // literal word, unread by any caller.
+                    Some('$') if chars.peek() == Some(&'(') => {
+                        chars.next();
+                        cur.push('$');
+                        cur.push_str(&group(chars, bodies, true, nest)?);
+                    }
+                    Some('`') => cur.push_str(&backtick(chars, bodies, nest)?),
                     Some(ch) => cur.push(ch),
                     None => return None,
                 }
@@ -467,39 +510,32 @@ pub(super) fn lex(command: &str) -> Option<Vec<String>> {
                 }
                 toks.push(op);
             }
+            '(' if !cur.is_empty() => {
+                // A glued `(` keeps the word one token (`mv $(pick x)` binds
+                // `/tmp/out`); the body lexes as its own command.
+                let command = cur.ends_with('$');
+                cur.push_str(&group(chars, bodies, command, nest)?);
+            }
+            ')' if in_subst && depth == 0 => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+                return Some(toks);
+            }
             '(' | ')' => {
-                // Parens are operators at a word boundary; inside a word
-                // they are literal while a `$(...)` substitution is open,
-                // so `$(mktemp)` stays one word.
-                if c == '(' && !cur.is_empty() {
-                    cur.push(c);
-                    subst += 1;
-                } else if c == ')' && subst > 0 {
-                    cur.push(c);
-                    // NUL marks a lexer-glued closer; a quoted literal never
-                    // carries one, so a target trim can tell them apart.
-                    cur.push('\u{0}');
-                    subst -= 1;
-                } else {
-                    if !cur.is_empty() {
-                        toks.push(std::mem::take(&mut cur));
-                    }
-                    toks.push(c.to_string());
+                // Parens are operators at a word boundary; an open group is
+                // never glued into a word, so no closer ever rides in one.
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
                 }
-            }
-            '`' => {
-                // An unquoted backtick is a command-substitution delimiter,
-                // exactly like the `$( ` opener: open glues into the word,
-                // close glues with the marker.
-                if bt > 0 {
-                    cur.push(c);
-                    cur.push('\u{0}');
-                    bt -= 1;
+                if c == '(' {
+                    depth += 1;
                 } else {
-                    cur.push(c);
-                    bt += 1;
+                    depth = depth.saturating_sub(1);
                 }
+                toks.push(c.to_string());
             }
+            '`' => cur.push_str(&backtick(chars, bodies, nest)?),
             '<' | '>' => {
                 let mut redir = String::new();
                 if c == '>' && !cur.is_empty() && cur.bytes().all(|b| b.is_ascii_digit()) {
@@ -530,6 +566,10 @@ pub(super) fn lex(command: &str) -> Option<Vec<String>> {
             }
             _ => cur.push(c),
         }
+    }
+    if in_subst {
+        // An unclosed `$( ` never executes, like an unterminated quote.
+        return None;
     }
     if !cur.is_empty() {
         toks.push(cur);
@@ -632,7 +672,9 @@ fn normpath(p: &Path) -> PathBuf {
 }
 
 fn abs_join(p: &str, cwd: &Path) -> PathBuf {
-    let path = PathBuf::from(p);
+    // A leading `~/` is $HOME (bash expands it unquoted); without this the
+    // tilde path joined the cwd and read as a repo-relative write.
+    let path = crate::king_board::scope::expand_home(p);
     if path.is_absolute() {
         path
     } else {
@@ -951,6 +993,75 @@ mod tests {
         assert_eq!(targets("command mv a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("env FOO=bar cp /tmp/a /tmp/b"), vec!["/tmp/b"]);
         assert_eq!(targets("B=/path mv a b"), vec!["b"]);
+    }
+
+    #[test]
+    fn substitution_bodies_bind_their_writes() {
+        // Every substitution spelling binds exactly its one write target:
+        // the body lexes as its own command, the outer word keeps its place.
+        assert_eq!(targets("N=$(cp a b)"), vec!["b"]);
+        assert_eq!(targets("$(cp a b)"), vec!["b"]);
+        assert_eq!(targets("echo $(cp a b)"), vec!["b"]);
+        assert_eq!(targets("echo \"$(cp a b)\""), vec!["b"]);
+        assert_eq!(targets("\"$(cmd > out)\""), vec!["out"]);
+        assert_eq!(targets("N=`cp a b`"), vec!["b"]);
+        assert_eq!(targets("echo \"`cmd > out`\""), vec!["out"]);
+        assert_eq!(targets("N=$(echo $(cp a b))"), vec!["b"]);
+        assert_eq!(targets("echo \"$(printf \"%s\" x > out)\""), vec!["out"]);
+    }
+
+    #[test]
+    fn process_substitution_keeps_binding() {
+        // The forms that bound before the lexer change keep binding: a bare
+        // group at a word boundary runs in this same token stream.
+        assert_eq!(targets("diff <(cp a b) c"), vec!["b"]);
+        assert_eq!(
+            targets("tee >(cp /dev/stdin crates/fno-agents/src/lib.rs) <<< x"),
+            vec!["crates/fno-agents/src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn substitution_lookalikes_bind_nothing() {
+        // Quoted text is inert; arithmetic has no redirect; a heredoc body
+        // read by a non-shell never donates a target; an unclosed `$( `
+        // never executes.
+        assert!(targets("echo '$(cp a b)'").is_empty());
+        assert!(targets("echo \"a > b\"").is_empty());
+        assert!(targets("N=$(git status 2>&1)").is_empty());
+        assert!(targets("echo \"$((a > b))\"").is_empty());
+        assert!(targets("echo $((a > b))").is_empty());
+        assert!(targets("git commit -m \"$(cat <<'EOF'\nfix: a > b, cp x y\nEOF\n)\"").is_empty());
+        assert!(targets("N=$(cat <<'EOF'\n1) cp x y\nEOF\n)").is_empty());
+        assert!(
+            targets("N=$(cp a b").is_empty(),
+            "unclosed substitution never executes"
+        );
+    }
+
+    #[test]
+    fn substituted_source_write_refuses() {
+        // The crowned-session shape that passed before: a source write read
+        // only as a substitution body must refuse through the repo rule.
+        let repo = std::env::temp_dir().join(format!("kgd-subst-src-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        assert!(!bash_allowed_in(
+            &repo,
+            "N=$(cp notes.txt crates/fno-agents/src/lib.rs)"
+        ));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn tilde_target_resolves_outside_the_repo() {
+        // A leading `~/` expands against $HOME, never joins the cwd as a
+        // repo-relative name; the relative control still refuses. HOME is
+        // read, never set (env writes race the parallel test threads).
+        let repo = std::env::temp_dir().join(format!("kgd-tilde-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        assert!(!write_denied("~/.cargo/config.toml.bak", &repo, &repo, &[]));
+        assert!(write_denied("x/.cargo/config.toml.bak", &repo, &repo, &[]));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

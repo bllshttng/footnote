@@ -841,17 +841,23 @@ fn read_items(cwd: &Path) -> (Vec<AttentionItem>, Vec<String>) {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
+    read_items_at(&fno_dir, cwd)
+}
+
+fn read_items_at(fno_dir: &Path, cwd: &Path) -> (Vec<AttentionItem>, Vec<String>) {
     let mut journals_raw = String::new();
     let mut unreadable: Vec<String> = Vec::new();
-    for path in crate::needs::question_journals(&fno_dir, cwd) {
-        match std::fs::read_to_string(&path) {
+    for path in crate::needs::question_journals(fno_dir, cwd) {
+        match crate::event_store::journal_text_checked(
+            &path,
+            &crate::event_store::EventQuery::of_types(crate::needs::QUESTION_TYPES),
+        ) {
             Ok(content) => {
                 journals_raw.push_str(&content);
                 if !content.ends_with('\n') {
                     journals_raw.push('\n');
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => unreadable.push(format!(
                 "{}: {e}",
                 path.file_name()
@@ -988,8 +994,7 @@ impl SinkIo for RealIo {
         // this item makes this one a superseded marker that changes nothing.
         let home = crate::paths::AgentsHome::from_env();
         let path = crate::provider_cap::questions_path(&home);
-        let already_won = std::fs::read_to_string(&path)
-            .unwrap_or_default()
+        let already_won = crate::event_store::journal_text(&path, &[])
             .lines()
             .any(|line| {
                 serde_json::from_str::<serde_json::Value>(line)
@@ -1072,6 +1077,44 @@ impl SinkIo for RealIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_items_carries_a_store_committed_question() {
+        // AC11-ARM: a store-only operator_question reaches the projection.
+        let _root = crate::paths::DeclaredRoot::declare("attention_store_questio");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let space = crate::paths::space_dir(&cwd).join("events.jsonl");
+        let ask = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-arm-1", "question": "ship?", "blocks": []}
+        });
+        crate::event_store::append_envelope(&space, &ask.to_string(), None).unwrap();
+        let (items, unreadable) = read_items_at(dir.path(), &cwd);
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert!(
+            items.iter().any(|i| i.id.contains("q-arm-1")),
+            "the store-only question projects: {items:?}"
+        );
+    }
+
+    #[test]
+    fn read_items_names_an_unreadable_store() {
+        // AC11-ARM: an unreadable store names itself in `unreadable`.
+        let _root = crate::paths::DeclaredRoot::declare("attention_unreadable_s");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        let space_dir = crate::paths::space_dir(&cwd);
+        std::fs::create_dir_all(&space_dir).unwrap();
+        std::fs::write(space_dir.join("events.db"), b"not a database").unwrap();
+        let (_, unreadable) = read_items_at(dir.path(), &cwd);
+        assert!(
+            unreadable.iter().any(|u| u.contains("events")),
+            "{unreadable:?}"
+        );
+    }
+
     use crate::attention::project;
 
     /// One not-ready question with a live asker: every context field but

@@ -463,10 +463,10 @@ fn remove_empty_shard(dir: &Path) -> bool {
     false
 }
 
-/// Every currently running `cargo` process's cwd, via one `lsof` read (the
-/// same tool `pane_stop.rs` already relies on; works on both macOS and
-/// Linux). `lsof` missing or erroring reads as no live process - the flock
-/// still catches the pure-compile window either way.
+/// Every currently running process matching `command`'s cwd, via one `lsof`
+/// read (the same tool `pane_stop.rs` already relies on; works on macOS and
+/// Linux). A missing command filter reads all process cwds for the merge-tree
+/// guard; the cargo lane keeps its narrower filter.
 ///
 /// `FNO_TEST_LIVE_CARGO_CWDS` (colon-separated paths) substitutes for the
 /// real read in tests: a process whose kernel-reported name is genuinely
@@ -475,19 +475,24 @@ fn remove_empty_shard(dir: &Path) -> bool {
 /// what lets a test drive the tree-to-shard mapping below deterministically.
 ///
 /// `Err` only when `lsof` itself could not be run (missing binary): a normal
-/// "no cargo running right now" read is `Ok(vec![])`, never an error.
-fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
-    if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
-        return Ok(raw
-            .split(':')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .collect());
+/// "no matching process right now" read is `Ok(vec![])`, never an error.
+pub(crate) fn live_cwds(command: Option<&str>) -> Result<Vec<PathBuf>, ()> {
+    if command.is_some() {
+        if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
+            return Ok(raw
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect());
+        }
     }
-    let Ok(output) = Command::new("lsof")
-        .args(["-a", "-d", "cwd", "-c", "cargo", "-Fn"])
-        .output()
-    else {
+    let mut cmd = Command::new("lsof");
+    cmd.args(["-a", "-d", "cwd"]);
+    if let Some(command) = command {
+        cmd.args(["-c", command]);
+    }
+    cmd.arg("-Fn");
+    let Ok(output) = cmd.output() else {
         return Err(());
     };
     Ok(String::from_utf8_lossy(&output.stdout)
@@ -514,7 +519,7 @@ fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
 fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
     let phys_trees: Vec<PathBuf> = trees.iter().map(|t| phys(t)).collect();
     let mut shards = BTreeSet::new();
-    for cwd in live_cargo_cwds()? {
+    for cwd in live_cwds(Some("cargo"))? {
         let cwd = phys(&cwd);
         let Some(tree) = owning_tree(&cwd, &phys_trees) else {
             continue;

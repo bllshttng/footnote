@@ -899,10 +899,11 @@ def rebase(ctx: typer.Context) -> None:
     "push",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "The one guarded push: fetch, rebase onto origin/main, preflight, "
+        "The one guarded push: fetch, rebase onto origin/main, optionally preflight, "
         "push exactly once, print one receipt. Refuses while a CI run on the "
         "remote head is still in flight (--force-ci-cancel overrides and "
-        "records the bypass; --no-preflight skips the preflight leg). "
+        "records the bypass; --preflight opts into the local runner; "
+        "--no-preflight remains an accepted no-op. "
         "Exit 0 pushed, 1 preflight red, 2 a run in flight, 3 a refusal the "
         "caller must fix (protected branch, dirty tree, conflict), 4 a read "
         "error, 127 binary missing."

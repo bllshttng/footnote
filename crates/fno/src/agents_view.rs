@@ -16,8 +16,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::proto::{AgentBadge, AgentRow, AnswerablePrompt, Reach};
-use crate::transcript_tail::read_tail;
-
 // The tail reader lives in its own module (transcript_tail); the sideline
 // entry point keeps its historical path here.
 pub use crate::transcript_tail::session_tails;
@@ -1228,8 +1226,6 @@ pub type TruthBadges = HashMap<String, String>;
 
 /// Claim-live + a fire within this window reads Working; older/absent stays no-badge.
 const TRUTH_RECENCY_WINDOW_S: u64 = 1800; // 30 min
-/// Bounded tail read of events.jsonl so an 11MB log stays cheap per render tick.
-const TRUTH_EVENTS_TAIL_BYTES: u64 = 256 * 1024;
 
 /// The `.fno` state base for events.jsonl, off the same anchor as
 /// `registry_path` (`FNO_AGENTS_HOME`'s parent > `$HOME/.fno`).
@@ -1502,22 +1498,21 @@ fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
-/// Read the last `budget` bytes of the events log (its own budget below).
-fn read_events_tail(path: &Path) -> Option<String> {
-    read_tail(path, TRUTH_EVENTS_TAIL_BYTES)
-}
-
-/// One tail pass over events.jsonl -> `{session_id: age_seconds}` for the newest
-/// loop_check fire per session (mirrors read_prior_fires' tolerant filter).
+/// The store's newest loop_check fires -> `{session_id: age_seconds}` (the
+/// keyed query keeps the render tick cheap without a raw-file tail).
 fn newest_fire_ages(events_path: &Path, now_secs: u64) -> HashMap<String, u64> {
-    let Some(text) = read_events_tail(events_path) else {
-        return HashMap::new();
+    let q = crate::event_store::EventQuery {
+        types: vec!["loop_check".into()],
+        since_ms: Some((now_secs.saturating_sub(TRUTH_RECENCY_WINDOW_S) * 1000) as i64),
+        ..Default::default()
+    };
+    let rows = match crate::event_store::query_events(events_path, &q) {
+        Ok(rows) => rows,
+        Err(_) => return HashMap::new(),
     };
     let mut newest: HashMap<String, u64> = HashMap::new(); // sid -> newest epoch secs
-    for line in text.lines() {
-        if !line.contains("\"loop_check\"") {
-            continue;
-        }
+    for row in &rows {
+        let line = row.line.as_str();
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -4430,12 +4425,10 @@ config_dir = "~/.claude-alt"
             .unwrap();
         }
         fn write_event(&self, sid: &str, ts: &str) {
-            let line =
-                format!(r#"{{"ts":"{ts}","type":"loop_check","data":{{"session_id":"{sid}"}}}}"#);
-            let mut body = std::fs::read_to_string(self.events()).unwrap_or_default();
-            body.push_str(&line);
-            body.push('\n');
-            std::fs::write(self.events(), body).unwrap();
+            let line = format!(
+                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}"}}}}"#
+            );
+            crate::event_store::append_envelope(&self.events(), &line, None).unwrap();
         }
     }
     impl Drop for Tmp {
@@ -4459,6 +4452,23 @@ config_dir = "~/.claude-alt"
             badges.get("target-x-dddd-fleet").map(String::as_str),
             Some("loop 2m ago")
         );
+    }
+
+    #[test]
+    fn newest_fire_ages_reads_a_store_committed_row() {
+        // AC7-HP: a store-only loop_check row 120s before now maps to 120.
+        let t = Tmp::new("fire-ages");
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let ages = newest_fire_ages(&t.events(), now);
+        assert_eq!(ages.get(SID), Some(&120), "{ages:?}");
+    }
+
+    #[test]
+    fn newest_fire_ages_is_empty_without_a_store() {
+        // AC7-HP: no rows -> no badges, never an error.
+        let t = Tmp::new("fire-ages-empty");
+        assert!(newest_fire_ages(&t.events(), 1_800_000_000).is_empty());
     }
 
     #[test]

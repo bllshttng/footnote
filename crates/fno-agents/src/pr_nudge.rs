@@ -690,40 +690,30 @@ fn clean_label(label: &str) -> String {
 
 /// The merge-order pause (the only allowed one): a live decision with the
 /// subject `merge-order:<node>:after:<lead>` names this node, and the lead
-/// node is not done yet. A retracted or superseded decision does not count.
+/// node is not done yet. A retracted or superseded decision does not count
+/// (`derive_live` retires both).
 fn merge_order_hold(home: &AgentsHome, node: &str) -> bool {
     let subject_prefix = format!("merge-order:{node}:after:");
-    let mut newest: Option<(String, String, String)> = None; // (ts, decision_id, lead)
-    let mut retired: std::collections::HashSet<String> = Default::default();
-    let path = home.root().join("decisions.jsonl");
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    // The state dir is where the decisions journal, its store and the graph
+    // live; the read merges the graph decisions with the journal's rows.
+    let state_dir = home
+        .root()
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(".fno"));
+    let Ok(index) = crate::decision_index::read_store_live(
+        &state_dir.join("graph.json"),
+        &state_dir.join("decisions.jsonl"),
+    ) else {
         return false;
     };
-    for line in text.lines() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
-        let data = row.get("data").cloned().unwrap_or(Value::Null);
-        if kind == "decision_retracted" {
-            if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
-                retired.insert(target.to_string());
-            }
-            continue;
-        }
-        let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
+    let mut newest: Option<(String, String, String)> = None; // (ts, decision_id, lead)
+    for row in &index.rows {
+        let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
         if !subject.starts_with(&subject_prefix) {
             continue;
         }
-        let did = data
-            .get("decision_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
-            if !superseded.is_empty() {
-                retired.insert(superseded.to_string());
-            }
-        }
+        let did = row.get("decision_id").and_then(Value::as_str).unwrap_or("");
         let ts = row.get("ts").and_then(Value::as_str).unwrap_or("");
         let take = match &newest {
             None => true,
@@ -737,12 +727,9 @@ fn merge_order_hold(home: &AgentsHome, node: &str) -> bool {
             ));
         }
     }
-    let Some((_, did, lead)) = newest else {
+    let Some((_, _did, lead)) = newest else {
         return false;
     };
-    if retired.contains(&did) {
-        return false;
-    }
     if lead.is_empty() {
         return false;
     }
@@ -2158,5 +2145,28 @@ mod tests {
             !text.contains("ignore all previous instructions `rm"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn merge_order_hold_reads_the_state_dir_decisions_store() {
+        // AC13-NUDGE: a store-only merge-order decision in the state dir
+        // holds, and a store-only retraction releases it.
+        let dir = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let decisions = dir.path().join("decisions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_decision", "source": "operator",
+            "data": {"decision_id": "d-abcd0001", "subject": "merge-order:x-1:after:x-lead",
+                     "decision": "hold x-1 until x-lead merges."}
+        });
+        crate::event_store::append_envelope(&decisions, &row.to_string(), None).unwrap();
+        assert!(merge_order_hold(&home, "x-1"), "the live decision holds");
+        let retraction = serde_json::json!({
+            "ts": "2026-09-17T13:00:00Z", "type": "decision_retracted", "source": "operator",
+            "data": {"target_decision_id": "d-abcd0001", "reason": "superseded by chat"}
+        });
+        crate::event_store::append_envelope(&decisions, &retraction.to_string(), None).unwrap();
+        assert!(!merge_order_hold(&home, "x-1"), "the retraction releases");
     }
 }

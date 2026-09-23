@@ -47,6 +47,7 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation
     "crates/fno-agents/src/day.rs",  # the day readback's read-only completion join
+    "crates/fno-agents/src/pr_nudge.rs",  # the merge-order hold's read-only decision join (read_store_live over the state dir)
     "crates/fno-agents/src/scratch.rs",  # the sweep's status read routes through graph_store::read_rows; the file holds the graph.json path builder at SweepPaths assembly
     "crates/fno-agents/src/route_slot.rs",  # the routing audit's read-only decision projection
     # Not readers: the backend machinery and its names. mod.rs labels the

@@ -31,8 +31,8 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 
 The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:
 
-- **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD holds (law d-cfcf5a8e).
-- **done-node** - the merged sweep prunes a finished, clean, 48h+ tree; branch kept.
+- **DIRTY** - done-and-merged tree goes whatever status; live cwd inside holds (law d-cfcf5a8e).
+- **done-node** - merged sweep prunes a finished clean 30m+ tree; branch kept.
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH.
 - **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).

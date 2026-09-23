@@ -2060,6 +2060,9 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
             ),
         )
         .unwrap();
+    // Production rotation ingests a generation before the rename; the reader
+    // answers from the store, so the seeded generation must be ingested too.
+    crate::event_store::sync(&done_repo.join(".fno/events.jsonl")).unwrap();
 
     let summary = retire_sweep(
         &home,

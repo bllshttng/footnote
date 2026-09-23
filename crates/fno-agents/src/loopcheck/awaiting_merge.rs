@@ -184,9 +184,7 @@ pub(crate) fn main_head_failing_checks(gh_bin: &str, cwd: &Path) -> Option<Vec<S
 /// double-emit or double-notify. Fail-open (false) on an unreadable events
 /// file: at worst one extra notify, never a silent skip of the terminal.
 pub(super) fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return false;
-    };
+    let content = crate::event_store::journal_text(events_path, &["termination"]);
     content.lines().any(|line| {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             return false;
@@ -375,5 +373,21 @@ mod tests {
             serde_json::json!({"id": "x-broken", "plan_path": invalid_plan}),
         );
         assert_eq!(ruling_hold_at("x-broken", &graph2), None);
+    }
+
+    /// AC2-IDEM: a store-committed DoneAwaitingMerge satisfies the guard with
+    /// no raw bytes anywhere.
+    #[test]
+    fn already_emitted_reads_a_store_committed_termination() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let line = serde_json::json!({
+            "ts": "2026-06-06T00:00:00Z", "type": "termination", "source": "hook",
+            "data": {"session_id": "sess-a", "reason": "DoneAwaitingMerge"}
+        })
+        .to_string();
+        crate::event_store::append_envelope(&events, &line, None).unwrap();
+        assert!(already_emitted_awaiting_merge(&events, "sess-a"));
+        assert!(!already_emitted_awaiting_merge(&events, "sess-b"));
     }
 }

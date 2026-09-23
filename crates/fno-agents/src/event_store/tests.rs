@@ -668,4 +668,90 @@ fn journal_text_creates_no_store_for_an_absent_journal() {
     assert!(!store_path(&live).exists());
 }
 
+#[test]
+fn journal_text_reads_committed_rows_in_commit_order() {
+    // AC1-HP: an imported row stays ahead of a store-only commit.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "imported");
+    append(&live, &[a]);
+    sync(&live).unwrap();
+    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "store-only");
+    append_envelope(&live, &b.to_string(), None).unwrap();
+    let text = journal_text(&live, &["reign_checkin"]);
+    assert!(
+        text.find("\"imported\"").unwrap() < text.find("\"store-only\"").unwrap(),
+        "committed rows first, in commit order: {text}"
+    );
+    assert_eq!(text.matches("imported").count(), 1, "each row once: {text}");
+    assert_eq!(
+        text.matches("store-only").count(),
+        1,
+        "each row once: {text}"
+    );
+}
+
+#[test]
+fn journal_text_checked_errs_on_a_broken_store_and_journal_text_falls_back() {
+    // AC1-ERR
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
+    std::fs::write(dir.path().join("events.db"), b"not a database").unwrap();
+    let err = journal_text_checked(&live, &EventQuery::of_types(&["reign_checkin"])).unwrap_err();
+    assert!(err.contains("events.db"), "err names the store path: {err}");
+    assert_eq!(
+        journal_text(&live, &["reign_checkin"]),
+        std::fs::read_to_string(&live).unwrap()
+    );
+}
+
+#[test]
+fn journal_text_appends_only_the_live_lines_the_store_lacks() {
+    // AC1-EDGE: store rows A and B, then the un-imported live line C.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "row-a");
+    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "row-b");
+    append_envelope(&live, &a.to_string(), None).unwrap();
+    append_envelope(&live, &b.to_string(), None).unwrap();
+    append(
+        &live,
+        &[checkin("2026-09-17T12:02:00Z", "x-aaaa", "raw-tail")],
+    );
+    let text = journal_text(&live, &[]);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "A, B, C: {text}");
+    assert!(
+        lines[0].contains("\"row-a\"")
+            && lines[1].contains("\"row-b\"")
+            && lines[2].contains("\"raw-tail\""),
+        "commit order then the unseen tail: {text}"
+    );
+}
+
+#[test]
+fn journal_text_checked_window_does_not_readd_filtered_live_rows() {
+    // AC1-WINDOW: a live row the since_ms window filtered stays out.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "old");
+    let b = checkin("2026-09-17T12:01:00Z", "x-aaaa", "new");
+    append(&live, &[a, b]);
+    sync(&live).unwrap();
+    let c = checkin("2026-09-17T12:02:00Z", "x-aaaa", "store-only");
+    append_envelope(&live, &c.to_string(), None).unwrap();
+    let q = EventQuery {
+        since_ms: parse_rfc3339_ms("2026-09-17T12:00:30Z"),
+        ..EventQuery::of_types(&[])
+    };
+    let text = journal_text_checked(&live, &q).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "B then C, no A: {text}");
+    assert!(
+        lines[0].contains("\"new\"") && lines[1].contains("\"store-only\""),
+        "windowed commit order: {text}"
+    );
+}
+
 mod drift;

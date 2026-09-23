@@ -794,7 +794,6 @@ def test_archive_defers_when_run_inside_worktree(tmp_path, capsys, monkeypatch):
     # AC5-EDGE: never self-remove; defer to the standing sweep with a named receipt.
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
     r.leg_archive()
     out = capsys.readouterr().out
     # `deferred`, not `skipped`. The old emit attached a command to a skipped
@@ -813,7 +812,6 @@ def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
     )
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner, node_ids=["x-90ee"])
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
 
     r.leg_archive()
 
@@ -822,7 +820,7 @@ def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
     request = requests[0]
     assert request["pr"] == 7
     assert request["branch"] == "feature/x"
-    assert request["worktree"] == str(tmp_path)
+    assert request["worktree"] is None
     assert request["node_ids"] == ["x-90ee"]
     assert request["request_id"].startswith("merge-cleanup-")
 
@@ -847,7 +845,6 @@ def test_mint_binds_node_ids_when_reconcile_closed_nothing(tmp_path, monkeypatch
     monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
     _patch_sidecar_scan(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
 
     r.leg_archive()
 
@@ -874,36 +871,19 @@ def test_archive_defer_mints_the_cleanup_request(tmp_path, capsys, monkeypatch):
     # longer depends on a human remembering the sweep verb.
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
     r.leg_archive()
     out = capsys.readouterr().out
     assert "cleanup-requested request_id=merge-cleanup-" in out
 
 
 def test_archive_refusal_leaves_a_standing_request(tmp_path, capsys, monkeypatch):
-    # A guarded refusal (live session, salvage) leaves the tree in place: the
-    # work is still owed, so the request stands for the reaper to retry.
-    inner = FakeRunner(branch="feature/x")
-
-    class _RefusingRunner:
-        calls = inner.calls
-
-        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
-            if argv and "archive-worktree.sh" in " ".join(argv):
-                return Result(2, "", "strict check failed")
-            return inner(argv, cwd=cwd, timeout=timeout)
-
-    r = _bare(tmp_path, _RefusingRunner())
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (tmp_path / "scripts" / "setup").mkdir(parents=True)
-    (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
     r.leg_archive()
     out = capsys.readouterr().out
-    assert "step=archive status=failed" in out
-    assert "exit=2" in out
+    assert "step=archive status=deferred" in out
     assert "cleanup-requested request_id=" in r.ctx.receipts[-1].detail
+    assert not any("archive-worktree.sh" in " ".join(c) for c in runner.calls)
 
 
 def test_cleanup_request_mint_is_idempotent_by_id(tmp_path, monkeypatch):
@@ -932,95 +912,45 @@ def test_cleanup_request_clears_the_sweep_stamp(tmp_path, monkeypatch):
     assert not stamp.exists()
 
 
-def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
-    # AC1-HP: a found worktree for the merged branch is archived.
+def test_archive_mints_request_without_running_script(tmp_path, capsys, monkeypatch):
+    # AC5-HP: the ritual mints the request and leaves removal to the daemon.
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (tmp_path / "scripts" / "setup").mkdir(parents=True)
-    (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
     r.leg_archive()
     out = capsys.readouterr().out
-    assert "step=archive status=ok" in out
-    assert "archived" in out
-    # the archive script was invoked in guarded merge mode, never --force, and
-    # carries the removal-event caller stamp
-    archive_calls = [c for c in runner.calls if "archive-worktree.sh" in " ".join(c)]
-    assert "--merge-triggered" in archive_calls[0]
-    assert "--force" not in archive_calls[0]
-    assert "FNO_WT_REMOVE_CALLER=post-merge ritual" in archive_calls[0]
+    assert "step=archive status=deferred" in out
+    assert "daemon resolves the tree from feature/x" in out
+    assert not any("archive-worktree.sh" in " ".join(c) for c in runner.calls)
 
 
-def test_archive_removes_the_row_only_after_the_worktree_is_gone(tmp_path, monkeypatch):
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (wt / "saved.txt").write_text("saved")
-    (tmp_path / "scripts" / "setup").mkdir(parents=True)
-    (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
-    events = []
-    monkeypatch.setattr(
-        _events,
-        "_emit_daemon_envelope",
-        lambda kind, data: events.append((kind, data)),
-    )
-
-    class ArchiveRunner(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
-            self.calls.append(list(argv))
-            if argv[0] == "gh":
-                return Result(0, '{"state":"MERGED","headRefName":"feature/x"}', "")
-            if "archive-worktree.sh" in " ".join(argv):
-                import shutil
-
-                shutil.rmtree(wt)
-                return Result(0, "archived", "")
-            if argv[1:3] == ["agents", "list"]:
-                import json
-
-                return Result(0, json.dumps({"agents": [{"name": "target-x-90ee-worker", "cwd": str(wt)}]}), "")
-            return Result(0, "", "")
-
-    runner = ArchiveRunner(branch="feature/x")
+def test_archive_never_runs_script_or_removes_rows(tmp_path, monkeypatch):
+    runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner, node_ids=["x-90ee"])
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
-
     r.leg_archive()
-
-    rm_calls = [call for call in runner.calls if call[1:3] == ["agents", "rm"]]
-    assert rm_calls
-    assert "--audit-actor" in rm_calls[0]
-    assert "post-merge" in rm_calls[0]
-    assert any(kind == "merge_cleanup_completed" for kind, _data in events)
+    assert not any("archive-worktree.sh" in " ".join(call) for call in runner.calls)
 
 
-def test_archive_missing_script_receipt_keeps_worktree_and_order(
+def test_archive_receipt_names_daemon_tree_resolution(
     tmp_path, capsys, monkeypatch
 ):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
 
     r.leg_archive()
 
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
-    assert "worktree=" in out
-    assert "archive-worktree.sh missing" in out
+    assert "daemon resolves the tree from feature/x" in out
     assert "cleanup-requested request_id=" in out
 
 
 def test_archive_without_a_worktree_still_mints_the_request(tmp_path, capsys, monkeypatch):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
     r.leg_archive()
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
-    assert "no worktree for feature/x" in out
+    assert "daemon resolves the tree from feature/x" in out
     assert "cleanup-requested request_id=" in out
 
 
@@ -1029,7 +959,6 @@ def test_archive_receipt_is_written_to_the_daemon_journal(
 ):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
     events = []
     monkeypatch.setattr(
         _events,

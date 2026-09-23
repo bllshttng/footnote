@@ -198,7 +198,9 @@ fn row_key(row: &Value) -> (String, String) {
 pub fn read_store_rows(graph: &Path, jsonl: &Path) -> Result<(Vec<Value>, usize), String> {
     let db = crate::backlog::database_path(graph);
     let db_present = db.exists() || graph.exists();
-    let jsonl_present = jsonl.exists();
+    // The journal's store counts as present: rows committed to decisions.db
+    // never touch the file.
+    let jsonl_present = jsonl.exists() || crate::event_store::store_path(jsonl).exists();
     if !db_present && !jsonl_present {
         return Err(format!(
             "no decision store: nothing at {} and nothing at {}",
@@ -227,8 +229,12 @@ pub fn read_store_rows(graph: &Path, jsonl: &Path) -> Result<(Vec<Value>, usize)
     let known: std::collections::HashSet<(String, String)> = rows.iter().map(row_key).collect();
     let mut damaged = 0usize;
     if jsonl_present {
-        let text =
-            std::fs::read_to_string(jsonl).map_err(|e| format!("{}: {e}", jsonl.display()))?;
+        // Store-aware: the journal's committed rows (decisions.db since the
+        // cutover) plus the unseen live lines, in commit order.
+        let text = crate::event_store::journal_text_checked(
+            jsonl,
+            &crate::event_store::EventQuery::of_types(&[]),
+        )?;
         let (jsonl_rows, jsonl_damaged) = flatten_envelopes(&text);
         damaged = jsonl_damaged;
         for row in jsonl_rows {
@@ -256,11 +262,21 @@ pub fn default_store_live() -> Result<Index, String> {
     )
 }
 
-/// Read an index file into its live rows. A missing or unreadable file is
+/// Read an index file into its live rows: the committed rows of the journal's
+/// store plus the unseen live lines. A missing or unreadable file is
 /// `Err` naming the path: a caller that cannot read the index must say so,
 /// never render an empty list that reads as "no rulings exist".
 pub fn read_live(path: &Path) -> Result<Index, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !path.exists() && !crate::event_store::store_path(path).exists() {
+        return Err(format!(
+            "{}: neither the journal nor its store exists",
+            path.display()
+        ));
+    }
+    let text = crate::event_store::journal_text_checked(
+        path,
+        &crate::event_store::EventQuery::of_types(&[]),
+    )?;
     Ok(derive_live(&text))
 }
 
@@ -419,6 +435,35 @@ mod tests {
         let index = live_laws(&path).expect("valid rows still return");
         assert_eq!(index.rows.len(), 2);
         assert_eq!(index.damaged, 2);
+    }
+
+    #[test]
+    fn read_live_reads_a_store_committed_decision() {
+        // AC13-LIVE
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decisions.jsonl");
+        let row = envelope(
+            "d-abcd1234",
+            "2026-09-12T00:00:00Z",
+            "operator",
+            "topic-a",
+            "",
+        )
+        .replacen(
+            "\"type\":\"operator_decision\"",
+            "\"type\":\"operator_decision\",\"source\":\"operator\"",
+            1,
+        );
+        crate::event_store::append_envelope(&path, &row, None).unwrap();
+        let index = read_live(&path).unwrap();
+        assert_eq!(index.rows.len(), 1);
+        assert_eq!(
+            index.rows[0].get("decision_id").and_then(Value::as_str),
+            Some("d-abcd1234")
+        );
+        let missing = dir.path().join("absent.jsonl");
+        let err = read_live(&missing).unwrap_err();
+        assert!(err.contains("absent.jsonl"), "{err}");
     }
 
     fn seed_db(graph: &Path, envelopes: &[String]) {
