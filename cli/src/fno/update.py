@@ -1352,7 +1352,7 @@ def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optiona
     binary a slow post-install step may await. Each verb self-gates. The
     plugin-stage restage rides last: live sessions exec hooks straight from
     the stage, so a restage IS the deploy; gated on the cargo binary because
-    a machine without fno-agents has no stage builder.
+    a machine without fno-agents has no stage builder; the codex refresh follows the restage.
     """
     refresh_cmds: list[list[str]] = []
     try:
@@ -1373,6 +1373,14 @@ def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optiona
         refresh_cmds.append(
             [str(agents_bin), "plugin-install", "--restage", "--source", str(resolved)]
         )
+        try:  # a restage keeps the version; codex re-copies its cache only on a forced converge
+            from fno.setup.codex_plugin import _marker_bytes, resolve_codex_home
+
+            marker = json.loads(_marker_bytes(resolve_codex_home()) or b"")
+        except (OSError, ValueError):
+            marker = {}
+        if await_bin and isinstance(marker, dict) and marker.get("channel") == "dev":
+            refresh_cmds.append([await_bin, "config", "plugin", "install", "codex", "--force"])
     return refresh_cmds, await_bin
 
 
