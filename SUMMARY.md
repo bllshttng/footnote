@@ -2,13 +2,14 @@
 
 ## What landed
 
-- `claude_supervisor.rs` refuses real births for temporary config roots and hermetic runs. Fixture births remain allowed.
+- `claude_supervisor.rs` refuses real births for temporary config roots and hermetic runs. Its fixture exception resolves PATH symlinks before allowing a birth.
 - Python `bg_create` crosses the fenced Rust birth-exec path. It preserves the client environment.
 - Rust owns live and parked Claude resume delivery. Account-pinned routes read roster, control key and transcript from the plan's config root.
 - Python wake and dead attach paths are removed. Python runtime refuses Claude resume.
 - The env registry drives a compile-time supervisor classification test. This head has 163 `FNO_` rows: 34 kept, 118 held and 11 `FNO_TEST_` exemptions.
 - `FNO_INBOX_ROOT` remains held. Its documented purpose is a test override.
 - When `docs/env-vars.md` changes, the CI path filter schedules the registry check.
+- The role-based routing guide retains the model-environment scrub explanation after removing the retired Python wake seam.
 
 ## Plan correction
 
@@ -34,4 +35,6 @@ This head has 163.
 - Its corrected rerun passed.
 - The stale-binary Python target waited 20m25s.
 - I canceled it before argv started. It has no local source verdict.
-- CI will gate that path. No whole-suite local run started.
+- The symlink regression target waited 20m13s.
+- I canceled it at the queue cutoff. It has no local source verdict.
+- CI will gate both paths. No whole-suite local run started.
