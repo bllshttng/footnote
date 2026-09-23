@@ -589,7 +589,7 @@ fn current_branch_quoted(ctx: &PushCtx) -> String {
 struct VerbArgs {
     force: bool,
     in_flight: Option<String>,
-    no_preflight: bool,
+    preflight: bool,
     git_bin: String,
     gh_bin: String,
     fno_bin: String,
@@ -601,7 +601,7 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
     let mut a = VerbArgs {
         force: false,
         in_flight: None,
-        no_preflight: false,
+        preflight: false,
         git_bin: "git".to_string(),
         gh_bin: "gh".to_string(),
         fno_bin: "fno".to_string(),
@@ -626,7 +626,8 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
                 a.in_flight = Some(take("--in-flight")?);
                 i += 1;
             }
-            "--no-preflight" => a.no_preflight = true,
+            "--preflight" => a.preflight = true,
+            "--no-preflight" => {}
             "--git-bin" => {
                 a.git_bin = take("--git-bin")?;
                 i += 1;
@@ -1184,9 +1185,7 @@ pub fn run_push(argv: &[String]) -> i32 {
     }
 
     // (8) Preflight.
-    let (mode, preflight_ok) = if a.no_preflight {
-        (PreflightMode::Skipped, true)
-    } else {
+    let (mode, preflight_ok) = if a.preflight {
         match resolve_preflight_runner(&git, &cwd) {
             Some(runner) => {
                 let runner_str = runner.to_string_lossy().into_owned();
@@ -1206,6 +1205,8 @@ pub fn run_push(argv: &[String]) -> i32 {
             }
             None => (PreflightMode::Absent, true),
         }
+    } else {
+        (PreflightMode::Skipped, true)
     };
     if !preflight_ok {
         return 1;
