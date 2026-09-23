@@ -1347,7 +1347,7 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
 const CODEX_NATIVE_COMMAND_REFUSAL: &str =
     "native-command: use fno mux command <selector> --text <verb> --proof <compact|goal-active|screen>";
 
-pub(crate) fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, String> {
+fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, String> {
     let Some(verb) = text.trim().split_whitespace().next() else {
         return Ok(None);
     };

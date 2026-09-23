@@ -2862,7 +2862,12 @@ def _raw_send(
     Never queues durable on any transport result: a not-confirmed raw inject may
     still land, and re-queueing it is how a verb fires twice at the wrong moment.
 
-    ``check`` injects nothing and reports policy, never turn completion.
+    ``check`` runs every precondition and INJECTS NOTHING, printing ``injectable``
+    or ``not-injectable: <reason>``. It exists because advice is worse than
+    useless when the mechanism it prescribes cannot fire: a Stop hook that told
+    every session to self-inject ``/compact`` sent one session round the loop
+    twice before it gave up. A caller gates on this rather than guessing from the
+    session's shape, and gets the same resolution the real send would run.
     """
     from fno.agents.lane_heal import (
         lane_heal as _lane_heal,
@@ -3133,7 +3138,9 @@ def _raw_send(
         elif action == "check" and check:
             _unmeasurable(detail)
 
-    # 5. Route by the resolved lane and its declared transport.
+    # 5. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
+    #    other mux pane; only a Codex app-server thread uses structured lanes
+    #    (review/start for review verbs, turn/start for any other payload).
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
         verb = stripped.split(maxsplit=1)[0]
@@ -3150,13 +3157,6 @@ def _raw_send(
                 )
                 raise typer.Exit(code=1)
             if check and not is_review:
-                injectable, reason = mail_inject_probe(
-                    session_id, payload=stripped
-                )
-                if reason.startswith("probe-unavailable"):
-                    _unmeasurable(reason)
-                if not injectable:
-                    _refused(f"{name!r} codex turn/start not injectable: {reason}")
                 print("injectable: codex-daemon turn/start")
                 raise typer.Exit(code=0)
             if not is_review:

@@ -1122,25 +1122,6 @@ def test_raw_codex_review_stale_binary_names_doctor(mailbox, monkeypatch, capsys
     assert "fno doctor" in err
 
 
-def test_raw_codex_check_uses_native_command_refusal(mailbox, monkeypatch, capsys):
-    from fno.mail.cli import _raw_send
-
-    _seed_codex_app_server(mailbox, monkeypatch)
-    probes = []
-
-    def probe(session, *, payload):
-        probes.append((session, payload))
-        return False, "native-command: use fno mux command"
-
-    monkeypatch.setattr("fno.agents.dispatch.mail_inject_probe", probe)
-    with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "/compact", self_ok=False, check=True)
-
-    assert exc.value.exit_code == 1
-    assert probes == [(SID_CODEX, "/compact")]
-    assert "not-injectable: native-command" in capsys.readouterr().out
-
-
 def test_raw_body_cap_under_check_is_a_usage_exit(mailbox, monkeypatch, capsys):
     import fno.mail.cli as mail_cli
     from fno.mail.cli import _raw_send

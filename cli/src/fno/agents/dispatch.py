@@ -6146,12 +6146,19 @@ def _mux_pane_send(
             _run(["release", pane])
 
 
-def mail_inject_probe(
-    recipient: str,
-    *,
-    payload: str | None = None,
-) -> tuple[bool, str]:
-    """Probe injection, or check a Codex payload's native-command policy."""
+def mail_inject_probe(recipient: str) -> tuple[bool, str]:
+    """Ask the ``fno-agents mail-inject --probe`` verb whether an injection path to
+    ``recipient`` EXISTS, without injecting anything.
+
+    Returns ``(injectable, reason)``. The probe resolves through the same
+    ``resolve_target`` the real send uses, so it cannot say yes where the send
+    would say no. It answers whether a PATH exists, never whether a turn will
+    land: the recipient's prompt line may still refuse a mid-turn paste.
+
+    Degrades to ``(False, "probe-unavailable")`` when the binary is missing or the
+    call fails, so a caller gating advice on this never claims a path it could not
+    measure.
+    """
     import json
 
     from fno import rust_binary
@@ -6159,16 +6166,11 @@ def mail_inject_probe(
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return False, "probe-unavailable"
-    probe_flag = "--probe" if payload is None else "--check"
-    argv = [str(binary), "mail-inject", probe_flag, "--session", recipient]
-    if payload is not None:
-        argv.extend(("--harness", "codex"))
     try:
         proc = subprocess.run(
-            argv,
+            [str(binary), "mail-inject", "--probe", "--session", recipient],
             capture_output=True,
             text=True,
-            input=payload,
             timeout=_MAIL_INJECT_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
