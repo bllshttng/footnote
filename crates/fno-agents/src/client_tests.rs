@@ -1578,6 +1578,32 @@ fn spawn_explicit_substrate_wins_over_once_alias() {
 }
 
 #[test]
+fn resume_conversion_flags_reach_parse_conversion_args() {
+    // --dry-run/--allow-new-id are parsed by the resume arm's re-parse of
+    // `rest`, so the generic loop must swallow them, not refuse.
+    let args = vec![
+        "convert-proof".to_string(),
+        "--substrate".to_string(),
+        "thread".to_string(),
+        "--dry-run".to_string(),
+        "--allow-new-id".to_string(),
+    ];
+    let (method, params) = build_request("resume", &args).unwrap();
+    assert_eq!(method, "agent.convert");
+    assert_eq!(params["name"], "convert-proof");
+    assert_eq!(params["dry_run"], true);
+    assert_eq!(params["allow_new_id"], true);
+}
+
+#[test]
+fn spawn_still_refuses_dry_run() {
+    // The swallow is guarded to `resume`; every other verb keeps the refusal.
+    let args = vec!["wk".to_string(), "--dry-run".to_string()];
+    let err = build_request("spawn", &args).unwrap_err();
+    assert!(err.contains("unknown flag: --dry-run"), "got: {err}");
+}
+
+#[test]
 fn spawn_headless_flag_aliases_to_substrate_headless() {
     // x-c772: --headless is the front for --substrate headless (identical to
     // --once), for every provider. `-H` was reassigned to --harness (x-6de8).

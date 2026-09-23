@@ -3919,6 +3919,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     positional.push(a);
                 }
             }
+            // The resume arm re-parses the original `rest` with
+            // parse_conversion_args, which owns both flags; swallow them here
+            // so the catch-all does not refuse them first.
+            "--dry-run" | "--allow-new-id" if verb == "resume" => {}
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));
             }
