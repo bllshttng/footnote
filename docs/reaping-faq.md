@@ -73,7 +73,7 @@ These five move or remove state around sessions. None stops or removes a session
 - The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only. The manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
 - The state-file sweep: removes expired claims, stale plan locks, agent locks, the pr-status cache, and claim tmp files (`gc.rs` `state_file_sweep`). No row is touched.
 - The liveness sweep: bands the machine and writes status. It removes nothing (`daemon.rs` `liveness_sweep`).
-- The daily reclaim janitor, with its `cargo_build_dirs` lane: removes disk artifacts, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
+- The daily reclaim janitor, with its `cargo_build_dirs` and `codex_cache_quarantines` lanes: removes cargo build artifacts and stale Codex converge backups under `<codex home>/footnote`, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
 
 ## In what order
 
