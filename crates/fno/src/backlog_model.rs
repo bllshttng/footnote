@@ -880,15 +880,19 @@ fn links(inp: &Inputs, e: &Value, field: &str) -> Vec<Link> {
         .unwrap_or_default()
 }
 
-/// Reverse links: rows whose `field` names this node.
+/// Reverse links: rows whose `field` names this node. The field may be a
+/// single id (`parent`, `contained_in`) or a list (`blocked_by`, `related`).
 fn reverse_links(inp: &Inputs, id: &str, field: &str) -> Vec<Link> {
+    let names = |v: &Value| -> bool {
+        match v {
+            Value::String(s) => s == id,
+            Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(id)),
+            _ => false,
+        }
+    };
     inp.rows
         .iter()
-        .filter(|r| {
-            r.get(field)
-                .and_then(Value::as_array)
-                .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(id)))
-        })
+        .filter(|r| r.get(field).is_some_and(names))
         .filter_map(|r| {
             let rid = r.get("id").and_then(Value::as_str)?;
             let title = r.get("title").and_then(Value::as_str).map(str::to_string);
