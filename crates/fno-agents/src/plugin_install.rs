@@ -708,16 +708,27 @@ fn install_claude(stage: &Path, force: bool) -> Result<String, String> {
         None,
     )?;
     if force {
+        // update keeps same-version files; force means delete and reinstall,
+        // and also covers not-yet-installed, so uninstall failure is fine.
+        let _ = run_checked(
+            &[
+                "claude".into(),
+                "plugin".into(),
+                "uninstall".into(),
+                "fno@footnote".into(),
+            ],
+            None,
+        );
         run_checked(
             &[
                 "claude".into(),
                 "plugin".into(),
-                "update".into(),
+                "install".into(),
                 "fno@footnote".into(),
             ],
             None,
         )?;
-        return Ok(format!("updated fno@footnote from {}", stage.display()));
+        return Ok(format!("reinstalled fno@footnote from {}", stage.display()));
     }
     match run_checked(
         &[
@@ -1027,7 +1038,10 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
                 parsed.json = true;
                 i += 1;
             }
-            "--force" => parsed.force = true,
+            "--force" => {
+                parsed.force = true;
+                i += 1;
+            }
             "--uninstall" => {
                 parsed.uninstall = true;
                 i += 1;
@@ -2012,6 +2026,19 @@ mod tests {
         let parsed = parse_plugin_install_args(&args);
         assert_eq!(parsed.mode.as_deref(), Some("claude"));
         assert!(!parsed.uninstall && !parsed.status && !parsed.quick);
+    }
+
+    /// Regression: the --force arm once skipped `i += 1`, so the parse loop
+    /// spun on the flag forever. The test returning at all is the proof.
+    #[test]
+    fn parse_force_flag_returns_and_sets_flags() {
+        let args: Vec<String> = ["--force", "--status"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert!(parsed.force);
+        assert!(parsed.status);
     }
 
     /// A throwaway HOME for the root-enumeration fixtures. The marketplace
