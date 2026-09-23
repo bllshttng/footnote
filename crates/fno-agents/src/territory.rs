@@ -1335,5 +1335,4 @@ path = "/repo/alpha"
         assert_eq!(good["membership"], "ok");
         assert_eq!(good["live"], 1, "{rows:?}");
     }
-
 }
