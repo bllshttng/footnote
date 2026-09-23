@@ -1281,68 +1281,6 @@ def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
     assert rec.events == []
 
 
-def test_an_admitted_trigger_resumes_one_matching_paused_codex_reign_goal(tmp_path):
-    calls = []
-
-    def resume_fn(target, reason):
-        calls.append((target.scope, reason))
-        return {
-            "provider": "codex",
-            "thread_id": "11111111-2222-3333-4444-555555555555",
-            "scope": target.scope,
-            "objective": "$fno:reign epic-x",
-            "status": "active",
-            "continuation_owner": "king:epic-x",
-        }
-
-    def codex_manifest(manifest):
-        text = manifest.read_text(encoding="utf-8")
-        manifest.write_text(text.replace("fno_id:", "harness: codex\nfno_id:"), encoding="utf-8")
-
-    rec, summary, _manifest = _run(
-        tmp_path,
-        truth=lambda h: {"state": "done"},
-        unread=lambda address: [object()] if address == "king-x" else [],
-        pre=codex_manifest,
-        extra={"resume_fn": resume_fn},
-    )
-
-    assert calls == [("epic-x", "mail")]
-    assert rec.dispatches == [], "a matching paused Codex goal resumes in place"
-    resumed = [event for event in rec.events if event[0] == "king_goal_resumed"]
-    assert resumed and resumed[0][1]["provider_receipt"]["status"] == "active"
-    assert summary["woke"][0]["resumed"] is True
-
-
-def test_no_wake_trigger_does_no_provider_goal_work(tmp_path):
-    calls = []
-
-    def resume_fn(target, reason):
-        calls.append((target.scope, reason))
-        raise AssertionError("provider goal work requires an admitted trigger")
-
-    def prime(manifest):
-        _store_board_hash(
-            _SidecarTarget(manifest),
-            _board_digest("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
-            _board_rows("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
-        )
-
-    rec, _summary, _manifest = _run(
-        tmp_path,
-        unread=lambda address: [],
-        pre=prime,
-        extra={
-            "entries_fn": lambda: _BOARD_QUIET,
-            "scope_resolver": _PROJECT_RESOLVER,
-            "resume_fn": resume_fn,
-        },
-    )
-
-    assert rec.events == []
-    assert calls == []
-
-
 def test_an_unsafe_crown_scope_is_skipped_not_joined(tmp_path):
     # A corrupted registry row can carry a traversal or an absolute path as
     # its crown_scope. The phase must skip the scope, not build a manifest

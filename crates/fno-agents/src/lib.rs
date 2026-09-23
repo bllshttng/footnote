@@ -267,6 +267,7 @@ pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
 pub mod registry_json;
+pub mod reign_goal;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;

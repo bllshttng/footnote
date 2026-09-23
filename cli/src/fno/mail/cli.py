@@ -2744,13 +2744,10 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
-# Single-sourced from the capability table (the codex row's review_verbs and
-# native_verbs, the same place the verb normalizer reads them): a second
-# hand-written enumeration would drift the first time a verb is added.
+# Single-sourced from the capability table (the codex row's review_verbs, the
+# same place the verb normalizer reads native_verbs): a second hand-written
+# enumeration would drift the first time a verb is added.
 _CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
-_CODEX_NATIVE_NON_REVIEW_VERBS = frozenset(
-    _harness_capabilities("codex").get("native_verbs") or ()
-) - _CODEX_REVIEW_VERBS
 def _codex_default_review_base(cwd: str | None) -> str | None:
     """Return the repository-declared origin default branch, never a guessed name."""
     if not cwd:
@@ -2857,10 +2854,10 @@ def _raw_send(
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
     REPL's slash parser runs it before the model sees it.
 
-    This is the prompt-line path for a command that must be parsed by a pane.
-    Codex app-server threads have no prompt line: declared native non-review
-    verbs are refused here and use their provider controller, while structured
-    review verbs and ordinary wrapped text keep their own transports.
+    This is the only way to make a verb the model is barred from invoking
+    actually run (a harness built-in like ``/compact``, or a skill the model may
+    not self-invoke). Ordinary wrapped mail already works for model-invocable
+    verbs. See node and ``internal/fno/plans/20260806-bare-verb-injection.md``.
 
     Never queues durable on any transport result: a not-confirmed raw inject may
     still land, and re-queueing it is how a verb fires twice at the wrong moment.
@@ -3143,7 +3140,7 @@ def _raw_send(
 
     # 5. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
     #    other mux pane; only a Codex app-server thread uses structured lanes
-    #    (review/start for review verbs, turn/start for ordinary text).
+    #    (review/start for review verbs, turn/start for any other payload).
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
         verb = stripped.split(maxsplit=1)[0]
@@ -3151,13 +3148,6 @@ def _raw_send(
             from fno import rust_binary
 
             is_review = verb in _CODEX_REVIEW_VERBS
-            if verb in _CODEX_NATIVE_NON_REVIEW_VERBS:
-                _refused(
-                    f"{name!r} raw {verb} is a declared Codex native command, "
-                    "but the app-server lane has no prompt-line controller; "
-                    f"use `fno agents ask {name} <message>` for the controller "
-                    "replacement, or send ordinary text without `--raw`"
-                )
             if check and rust_binary.resolve_installed_binary() is None:
                 print(
                     "not-injectable: the fno-agents binary is absent or too "

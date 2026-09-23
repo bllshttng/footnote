@@ -35,7 +35,6 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 from __future__ import annotations
 
 import json
-import os
 import re
 import tomllib
 from copy import deepcopy
@@ -831,159 +830,6 @@ def _loop_extension_installed(harness: str) -> bool:
         return False
 
 
-def _read_effective_loop_readiness(
-    harness: str, command: str, *, scope: str = ""
-) -> tuple[Optional[str], Optional[dict]]:
-    """Read the one native predicate used by target and crown admission.
-
-    The result keeps machine, lifecycle, Stop, and provider-goal separate. A
-    missing instrument is an error, not a negative health value, so callers
-    cannot accidentally admit on a partial snapshot.
-    """
-    caps = capabilities(harness)
-    owner = f"king:{scope.strip()}" if scope.strip() else f"target:{harness}"
-
-    def env_leg(name: str) -> tuple[str, Optional[str]]:
-        value = os.environ.get(name, "ready").strip().lower()
-        if value == "ready":
-            return "ready", None
-        if value == "blocked":
-            return "blocked", f"{name}=blocked"
-        if value == "unreadable":
-            return "unreadable", f"{name}=unreadable"
-        return "unreadable", f"{name} has unknown state {value!r}"
-
-    machine, machine_reason = env_leg("FNO_LOOP_MACHINE")
-    stop, stop_reason = env_leg("FNO_LOOP_STOP")
-    participation = caps.get("loop_participation")
-    lifecycle_reason: Optional[str] = None
-    if participation == "native":
-        lifecycle = "ready"
-    elif participation == "extension" and caps.get("loop_extension"):
-        lifecycle = "ready" if _loop_extension_installed(harness) else "unreadable"
-        if lifecycle != "ready":
-            lifecycle_reason = "loop extension is absent or stale"
-    elif participation == "none":
-        lifecycle = "blocked"
-        lifecycle_reason = "no lifecycle boundary invokes loop-check"
-    else:
-        lifecycle = "unreadable"
-        lifecycle_reason = "loop participation declaration is unreadable"
-
-    if harness != "codex":
-        provider_goal, provider_goal_reason = "ready", None
-    else:
-        actions = caps.get("provider_actions")
-        if not isinstance(actions, dict):
-            provider_goal, provider_goal_reason = "unreadable", "Codex provider actions unreadable"
-        elif "goal_get" in actions and "goal_set" in actions:
-            provider_goal, provider_goal_reason = "ready", None
-        else:
-            provider_goal, provider_goal_reason = (
-                "unreadable",
-                "Codex native goal_get and goal_set actions are not both declared",
-            )
-
-    legs = {
-        "machine": machine,
-        "lifecycle": lifecycle,
-        "stop": stop,
-        "provider_goal": provider_goal,
-    }
-    reasons = {
-        name: reason
-        for name, reason in {
-            "machine": machine_reason,
-            "lifecycle": lifecycle_reason,
-            "stop": stop_reason,
-            "provider_goal": provider_goal_reason,
-        }.items()
-        if reason
-    }
-    ready = all(state == "ready" for state in legs.values()) and bool(owner)
-    refusal = next(
-        (
-            f"{name} {state}: {reasons.get(name, 'no positive reading was returned')}"
-            for name, state in legs.items()
-            if state != "ready"
-        ),
-        None,
-    )
-    if refusal is not None:
-        return None, {
-            "ready": ready,
-            "legs": legs,
-            "reasons": reasons,
-            "refusal": refusal,
-            "continuation_owner": owner,
-        }
-    return None, {
-        "ready": True,
-        "legs": legs,
-        "reasons": reasons,
-        "refusal": None,
-        "continuation_owner": owner,
-    }
-
-
-def effective_loop_readiness(harness: str, command: str, *, scope: str = "") -> dict:
-    """Return one typed readiness snapshot, or raise its named refusal."""
-    error, snapshot = _read_effective_loop_readiness(harness, command, scope=scope)
-    if error:
-        raise DispatchResolveError(error)
-    if snapshot is None:
-        raise DispatchResolveError("effective loop readiness returned no snapshot")
-    return snapshot
-
-
-def parse_codex_goal(payload: object) -> Optional[dict]:
-    """Parse the native Codex goal shape into the shared typed Python view."""
-    if not isinstance(payload, dict):
-        raise DispatchResolveError("Codex native goal receipt is unreadable: expected an object")
-    result = payload.get("result")
-    goal = result.get("goal") if isinstance(result, dict) else payload.get("goal")
-    if goal is None:
-        return None
-    if not isinstance(goal, dict):
-        raise DispatchResolveError("Codex native goal receipt is unreadable: goal is not an object")
-    objective = goal.get("objective", goal.get("goal"))
-    status = goal.get("status", "active")
-    owner = goal.get("continuationOwner", goal.get("continuation_owner", goal.get("owner")))
-    if not isinstance(objective, str) or not objective.strip():
-        raise DispatchResolveError("Codex native goal receipt is unreadable: objective is missing")
-    if status not in {"active", "paused", "completed", "done"}:
-        raise DispatchResolveError(f"Codex native goal receipt has unknown status {status!r}")
-    if owner is not None and (not isinstance(owner, str) or not owner.strip()):
-        raise DispatchResolveError("Codex native goal receipt has an unreadable continuation owner")
-    return {
-        "objective": objective,
-        "status": "completed" if status == "done" else status,
-        "continuation_owner": owner,
-    }
-
-
-def ensure_codex_reign_goal(
-    goal: Optional[dict], scope: str, continuation_owner: str
-) -> dict:
-    """Initialize or reuse the reign objective, refusing a different active one."""
-    expected = f"$fno:reign {scope.strip()}"
-    if not scope.strip() or not continuation_owner.strip():
-        raise DispatchResolveError("Codex reign goal needs a scope and continuation owner")
-    if goal and goal.get("status") == "active" and goal.get("objective") != expected:
-        raise DispatchResolveError(
-            f"refusing active Codex objective {goal.get('objective')!r}; expected {expected!r}; "
-            f"continuation owner {continuation_owner}"
-        )
-    if goal and goal.get("status") == "active":
-        return {**goal, "continuation_owner": goal.get("continuation_owner") or continuation_owner}
-    return {
-        "objective": expected,
-        "status": "active",
-        "continuation_owner": continuation_owner,
-        "action": "initialize" if goal is None else "resume",
-    }
-
-
 def check_loop_participation(harness: str, command: str) -> None:
     """Refuse a LOOPING dispatch at a harness that cannot close a loop.
 
@@ -1001,15 +847,16 @@ def check_loop_participation(harness: str, command: str) -> None:
         return
     caps = capabilities(harness)
     participation = caps["loop_participation"]
-    error, snapshot = _read_effective_loop_readiness(harness, command)
-    if error:
-        raise DispatchResolveError(error)
-    if snapshot is None:
-        raise DispatchResolveError("effective loop readiness returned no snapshot")
-    if snapshot["ready"]:
+    if participation == "native":
+        from fno.rust_binary import call_binary_json
+
+        args = ["readiness", "--harness", harness, "--command", command]
+        error, _ = call_binary_json("loop", args)
+        if error:
+            raise DispatchResolveError(error)
         return
     if participation == "extension" and caps.get("loop_extension"):
-        if snapshot["legs"].get("lifecycle") != "ready":
+        if not _loop_extension_installed(harness):
             raise DispatchResolveError(
                 f"refused: harness {harness!r} closes its loop through a "
                 f"fno-installed extension that is absent or stale on this "

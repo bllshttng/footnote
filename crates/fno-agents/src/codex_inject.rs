@@ -1344,7 +1344,39 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
 /// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
 /// daemon listening -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
+const CODEX_NATIVE_COMMAND_REFUSAL: &str =
+    "native-command: use fno mux command <selector> --text <verb> --proof <compact|goal-active|screen>";
+
+fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, String> {
+    let Some(verb) = text.trim().split_whitespace().next() else {
+        return Ok(None);
+    };
+    if !verb.starts_with('/') && !verb.starts_with('$') {
+        return Ok(None);
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged()
+        .map_err(|error| format!("capability contract unreadable: {error}"))?;
+    let capabilities = contract
+        .capabilities("codex")
+        .map_err(|error| format!("Codex capability row unreadable: {error}"))?;
+    let native = capabilities
+        .native_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    let review = capabilities
+        .review_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    Ok((native && !review).then_some(CODEX_NATIVE_COMMAND_REFUSAL))
+}
+
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    match codex_native_command_refusal(text).map_err(|error| {
+        ReviewStartError::Server(format!("native-command policy unreadable: {error}"))
+    })? {
+        Some(reason) => return Err(ReviewStartError::Reason(reason)),
+        None => {}
+    }
     let sock = codex_app_server_socket_path();
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
         Ok(r) => r,
@@ -1981,6 +2013,29 @@ mod tests {
     async fn next_request(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
         let raw = ws.next().await.unwrap().unwrap().into_text().unwrap();
         serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn mail_inject_refuses_declared_codex_native_commands_before_connecting() {
+        let result = deliver_via_codex_daemon("thread-1", "/compact").await;
+        assert_eq!(
+            result,
+            Err(ReviewStartError::Reason(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
+    }
+
+    #[test]
+    fn codex_review_verbs_are_not_classified_as_native_non_review_commands() {
+        assert_eq!(codex_native_command_refusal("/review"), Ok(None));
+        assert_eq!(codex_native_command_refusal("/code-review"), Ok(None));
+    }
+
+    #[test]
+    fn codex_native_command_gate_leaves_ordinary_text_alone() {
+        assert_eq!(
+            codex_native_command_refusal("continue the review"),
+            Ok(None)
+        );
     }
 
     #[test]

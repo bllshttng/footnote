@@ -37,6 +37,9 @@ def _clear_parent_markers(monkeypatch):
 def court(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json", lambda *a, **k: (None, {"ready": True})
+    )
     return tmp_path
 
 

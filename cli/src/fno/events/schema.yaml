@@ -6963,6 +6963,33 @@ event_types:
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
     consumers: [operator]
 
+  - name: king_goal_resumed
+    description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
+    sources: [loop]
+    data:
+      required: [session_id, scope, resumed, successor, provider_receipt]
+      properties:
+        session_id:
+          type: string
+          description: "The exact harness session whose provider goal resumed."
+        scope:
+          type: string
+          description: "The crown scope whose goal was resumed."
+        resumed:
+          type: boolean
+        successor:
+          type: boolean
+        reason:
+          type: string
+          description: "The admitted wake trigger, when the caller supplied one."
+        address:
+          type: string
+          description: "The matched inbox address for a mail wake, when present."
+        provider_receipt:
+          type: object
+          description: "The Codex readback confirming objective, active status and continuation owner."
+    consumers: [operator]
+
   - name: king_drain_reserve
     description: "One king fire whose drain read spent at least half the reserve held back for it. The reserve is silent by design, so this row is the series that shows how close each fire's kill came: elapsed_ms near bound_ms means an expensive read, remaining_budget_ms near zero means a starved fire, and the pair separates the two."
     sources: [hook]

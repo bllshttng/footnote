@@ -605,11 +605,12 @@ def test_raw_refuses_unparsed_codex_review_remainder_before_rpc(
     assert "unrecognized remainder ignored" not in err
 
 
-@pytest.mark.parametrize("payload", ["/reviewboard"])
+@pytest.mark.parametrize("payload", ["/compact", "/reviewboard"])
 def test_raw_delivers_non_review_payload_to_codex_daemon(
     mailbox, monkeypatch, capsys, payload
 ):
-    """Unknown raw text still uses Codex turn/start; reviews use review/start."""
+    """A codex app-server thread takes any payload over turn/start (x-4a68);
+    only review verbs keep review/start."""
     from fno.mail.cli import _raw_send
 
     _seed_codex_app_server(mailbox, monkeypatch)
@@ -629,49 +630,6 @@ def test_raw_delivers_non_review_payload_to_codex_daemon(
     assert capsys.readouterr().out.strip() == "injected"
     assert calls == [(SID_CODEX, payload)]
     assert not review_calls
-
-
-@pytest.mark.parametrize("payload", ["/compact", "/model", "/status"])
-def test_raw_refuses_codex_native_non_review_command_with_controller_replacement(
-    mailbox, monkeypatch, capsys, payload
-):
-    """AC5-HP: app-server raw mail cannot pretend to be Codex's prompt line."""
-    from fno.mail.cli import _raw_send
-
-    _seed_codex_app_server(mailbox, monkeypatch)
-    calls = []
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_codex",
-        lambda session, text, **_k: calls.append((session, text)) or True,
-    )
-    with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", payload, self_ok=False)
-
-    assert exc.value.exit_code != 0
-    assert calls == []
-    err = capsys.readouterr().err
-    assert "declared Codex native command" in err
-    assert "fno agents ask codexpeer" in err
-
-
-def test_raw_check_refuses_codex_native_non_review_command(
-    mailbox, monkeypatch, capsys
-):
-    """AC5-ERR: --check reports the same refusal without injecting anything."""
-    from fno.mail.cli import _raw_send
-
-    _seed_codex_app_server(mailbox, monkeypatch)
-    calls = []
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_codex",
-        lambda *args, **_kwargs: calls.append(args) or True,
-    )
-    with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "/compact", self_ok=False, check=True)
-
-    assert exc.value.exit_code == 1
-    assert calls == []
-    assert "not-injectable" in capsys.readouterr().out
 
 
 def test_raw_delivers_codex_verb_to_codex_daemon(mailbox, monkeypatch, capsys):
@@ -1256,6 +1214,33 @@ def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys,
     assert injected == [(entry, "/compact", None, True)]
     assert not review_calls
     assert "injected" in capsys.readouterr().out
+
+
+def test_mail_inject_codex_preserves_rust_refusal_reason(monkeypatch):
+    from fno.agents import dispatch
+
+    expected = (
+        "native-command: use fno mux command <selector> --text <verb> "
+        "--proof <compact|goal-active|screen>"
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda _thread: None)
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout=json.dumps({"delivered": False, "reason": expected}),
+            stderr="",
+        ),
+    )
+    reason = []
+
+    assert not dispatch._mail_inject_codex(SID_CODEX, "/compact", reason_out=reason)
+    assert reason == [expected]
 
 
 def test_review_start_codex_uses_structured_binary_argv(monkeypatch):

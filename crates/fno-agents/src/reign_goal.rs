@@ -1,0 +1,487 @@
+//! Typed provider goal transitions for a crowned Codex reign.
+
+use crate::codex_thread::{CodexThread, GoalStatus, NativeGoal};
+use crate::king_termination::KingManifest;
+use serde_json::{json, Value};
+use std::path::Path;
+
+#[derive(Clone)]
+enum GoalAction {
+    Ensure {
+        scope: String,
+        owner: String,
+    },
+    Pause {
+        scope: String,
+        owner: String,
+    },
+    Resume {
+        scope: String,
+        owner: String,
+    },
+    Provider {
+        method: String,
+        text: String,
+        scope: String,
+    },
+}
+
+/// Initialize or reuse the exact reign goal before the crown manifest is written.
+pub(crate) fn ensure(session_id: &str, scope: &str, cwd: &Path) -> Result<Value, String> {
+    let scope = scope.trim();
+    let owner = format!("king:{scope}");
+    run_action(
+        session_id,
+        scope,
+        cwd,
+        GoalAction::Ensure {
+            scope: scope.to_string(),
+            owner,
+        },
+    )
+}
+
+/// Pause a matching active goal only after the king loop proved a quiet park.
+pub(crate) fn pause_codex_reign_goal(manifest: &KingManifest, cwd: &Path) -> Result<Value, String> {
+    let (session_id, scope, owner) = manifest_identity(manifest)?;
+    run_action(&session_id, &scope, cwd, GoalAction::Pause { scope, owner })
+}
+
+/// Resume only the paused goal that belongs to this exact crown and session.
+pub(crate) fn resume(manifest: &KingManifest, cwd: &Path) -> Result<Value, String> {
+    let (session_id, scope, owner) = manifest_identity(manifest)?;
+    run_action(
+        &session_id,
+        &scope,
+        cwd,
+        GoalAction::Resume { scope, owner },
+    )
+}
+
+pub(crate) fn pause_reign_goal_receipt(
+    thread_id: &str,
+    scope: &str,
+    continuation_owner: &str,
+    objective: &str,
+) -> Result<Value, String> {
+    if thread_id.trim().is_empty()
+        || scope.trim().is_empty()
+        || continuation_owner.trim().is_empty()
+        || objective.trim().is_empty()
+    {
+        return Err("provider goal receipt is missing identity".to_string());
+    }
+    Ok(json!({
+        "provider": "codex",
+        "thread_id": thread_id,
+        "scope": scope,
+        "objective": objective,
+        "status": "paused",
+        "continuation_owner": continuation_owner,
+    }))
+}
+
+fn manifest_identity(manifest: &KingManifest) -> Result<(String, String, String), String> {
+    if manifest.harness.as_deref() != Some("codex") {
+        return Err("provider goal belongs to a non-Codex reign".to_string());
+    }
+    let session_id = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "Codex provider goal has no session id".to_string())?;
+    let scope = manifest.scope.trim();
+    if scope.is_empty() {
+        return Err("Codex provider goal has no scope".to_string());
+    }
+    Ok((
+        session_id.to_string(),
+        scope.to_string(),
+        format!("king:{scope}"),
+    ))
+}
+
+fn run_action(
+    session_id: &str,
+    scope: &str,
+    cwd: &Path,
+    action: GoalAction,
+) -> Result<Value, String> {
+    if session_id.trim().is_empty() {
+        return Err("Codex provider action is missing an exact session id".to_string());
+    }
+    let session_id = session_id.to_string();
+    let cwd = cwd.to_path_buf();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("Codex provider goal runtime unavailable: {error}"))?;
+    runtime.block_on(async move {
+        let mut thread = CodexThread::resume(
+            cwd,
+            &session_id,
+            None,
+            &crate::codex_posture::CodexPosture::bounded(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+        apply_action(&mut thread, &session_id, action).await
+    })
+}
+
+async fn apply_action(
+    thread: &mut CodexThread,
+    session_id: &str,
+    action: GoalAction,
+) -> Result<Value, String> {
+    match action {
+        GoalAction::Ensure { scope, owner } => {
+            let goal = thread
+                .ensure_reign_goal_typed(&scope, &owner)
+                .await
+                .map_err(|error| format!("Codex provider goal ensure refused: {error}"))?;
+            let expected = crate::codex_thread::reign_objective(&scope);
+            verify_goal(&goal, &expected, GoalStatus::Active, &owner, "ensure")?;
+            goal_receipt(session_id, &scope, &owner, &goal)
+        }
+        GoalAction::Pause { scope, owner } => {
+            let expected = crate::codex_thread::reign_objective(&scope);
+            let current = thread
+                .goal_get_typed()
+                .await
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
+                .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
+            verify_goal(&current, &expected, GoalStatus::Active, &owner, "pause")?;
+            let paused = thread
+                .goal_set_typed(
+                    &current.objective,
+                    GoalStatus::Paused,
+                    current.continuation_owner.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
+            verify_goal(&paused, &expected, GoalStatus::Paused, &owner, "pause")?;
+            goal_receipt(session_id, &scope, &owner, &paused)
+        }
+        GoalAction::Resume { scope, owner } => {
+            let expected = crate::codex_thread::reign_objective(&scope);
+            let current = thread
+                .goal_get_typed()
+                .await
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
+                .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
+            verify_goal(&current, &expected, GoalStatus::Paused, &owner, "resume")?;
+            let active = thread
+                .goal_set_typed(
+                    &current.objective,
+                    GoalStatus::Active,
+                    current.continuation_owner.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
+            verify_goal(&active, &expected, GoalStatus::Active, &owner, "resume")?;
+            goal_receipt(session_id, &scope, &owner, &active)
+        }
+        GoalAction::Provider {
+            method,
+            text,
+            scope,
+        } => provider_action(thread, session_id, &method, &text, &scope).await,
+    }
+}
+
+async fn provider_action(
+    thread: &mut CodexThread,
+    session_id: &str,
+    method: &str,
+    command: &str,
+    scope: &str,
+) -> Result<Value, String> {
+    match method {
+        "thread/compact/start" => {
+            let receipt = thread
+                .compact()
+                .await
+                .map_err(|error| format!("Codex compaction refused: {error}"))?;
+            Ok(json!({
+                "verified": true,
+                "action": "compact",
+                "provider": "codex",
+                "thread_id": session_id,
+                "status": "completed",
+                "receipt": receipt,
+            }))
+        }
+        "thread/goal/get" => {
+            let goal = thread
+                .goal_get_typed()
+                .await
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
+                .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
+            if goal.status != GoalStatus::Active {
+                return Err(format!(
+                    "Codex provider goal is not active: {:?}",
+                    goal.status
+                ));
+            }
+            Ok(json!({
+                "verified": true,
+                "action": "goal_get",
+                "provider": "codex",
+                "thread_id": session_id,
+                "status": "active",
+                "objective": goal.objective,
+                "continuation_owner": goal.continuation_owner,
+            }))
+        }
+        "thread/goal/set" => {
+            let (objective, owner) = goal_set_contract(command, scope, session_id)?;
+            let current = thread
+                .goal_get_typed()
+                .await
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+            let goal = match current {
+                Some(current) if current.objective != objective => {
+                    return Err(format!(
+                        "refusing to replace Codex objective {:?} with {:?}",
+                        current.objective, objective
+                    ));
+                }
+                Some(current) if current.status == GoalStatus::Active => {
+                    verify_goal(&current, objective, GoalStatus::Active, &owner, "goal-set")?;
+                    current
+                }
+                Some(current) => {
+                    verify_goal(&current, objective, GoalStatus::Paused, &owner, "goal-set")?;
+                    thread
+                        .goal_set_typed(objective, GoalStatus::Active, Some(&owner))
+                        .await
+                        .map_err(|error| format!("Codex provider goal set refused: {error}"))?
+                }
+                None => thread
+                    .goal_set_typed(objective, GoalStatus::Active, Some(&owner))
+                    .await
+                    .map_err(|error| format!("Codex provider goal set refused: {error}"))?,
+            };
+            verify_goal(&goal, objective, GoalStatus::Active, &owner, "goal-set")?;
+            Ok(json!({
+                "verified": true,
+                "action": "goal_set",
+                "provider": "codex",
+                "thread_id": session_id,
+                "status": "active",
+                "objective": goal.objective,
+                "continuation_owner": owner,
+            }))
+        }
+        other => Err(format!("unsupported Codex provider action {other:?}")),
+    }
+}
+
+fn goal_set_contract(
+    command: &str,
+    scope: &str,
+    session_id: &str,
+) -> Result<(String, String), String> {
+    let objective = command
+        .trim()
+        .strip_prefix("/goal")
+        .map(str::trim)
+        .filter(|objective| !objective.is_empty())
+        .ok_or_else(|| "Codex goal command needs a non-empty active objective".to_string())?;
+    if matches!(
+        objective.split_whitespace().next(),
+        Some("clear" | "complete" | "completed")
+    ) {
+        return Err("Codex goal clear/complete is not exposed by the provider lane".into());
+    }
+    let owner = if !scope.trim().is_empty() {
+        format!("king:{}", scope.trim())
+    } else if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
+        format!("king:{}", reign_scope.trim())
+    } else {
+        format!("target:{session_id}")
+    };
+    if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
+        if !scope.trim().is_empty() && scope.trim() != reign_scope.trim() {
+            return Err("Codex reign goal scope does not match the selected crown".into());
+        }
+    }
+    Ok((objective.to_string(), owner))
+}
+
+pub(crate) fn run_provider_command(args: &[String]) -> i32 {
+    let session_id = flag(args, "--session").unwrap_or_default();
+    let cwd = flag(args, "--cwd").unwrap_or_else(|| ".".to_string());
+    let method = flag(args, "--method").unwrap_or_default();
+    let text = flag(args, "--text").unwrap_or_default();
+    let scope = flag(args, "--scope").unwrap_or_default();
+    if session_id.trim().is_empty() || method.trim().is_empty() {
+        eprintln!("fno-agents loop command: --session and --method are required");
+        return 2;
+    }
+    match run_action(
+        &session_id,
+        &scope,
+        Path::new(&cwd),
+        GoalAction::Provider {
+            method,
+            text,
+            scope,
+        },
+    ) {
+        Ok(receipt) => {
+            println!("{receipt}");
+            0
+        }
+        Err(error) => {
+            eprintln!("fno-agents loop command: {error}");
+            1
+        }
+    }
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn verify_goal(
+    goal: &NativeGoal,
+    expected_objective: &str,
+    expected_status: GoalStatus,
+    expected_owner: &str,
+    action: &str,
+) -> Result<(), String> {
+    if goal.objective != expected_objective {
+        return Err(format!(
+            "Codex provider goal {action} refused: objective does not match reign: {:?}",
+            goal.objective
+        ));
+    }
+    if goal.status != expected_status {
+        return Err(format!(
+            "Codex provider goal {action} refused: expected {expected_status:?}, got {:?}",
+            goal.status
+        ));
+    }
+    if goal.continuation_owner.as_deref() != Some(expected_owner) {
+        return Err(format!(
+            "Codex provider goal {action} refused: owner does not match reign: {:?}",
+            goal.continuation_owner
+        ));
+    }
+    Ok(())
+}
+
+fn goal_receipt(
+    session_id: &str,
+    scope: &str,
+    owner: &str,
+    goal: &NativeGoal,
+) -> Result<Value, String> {
+    if session_id.trim().is_empty()
+        || scope.trim().is_empty()
+        || owner.trim().is_empty()
+        || goal.objective.trim().is_empty()
+        || goal.continuation_owner.as_deref() != Some(owner)
+    {
+        return Err("provider goal receipt is missing identity".to_string());
+    }
+    let status = match goal.status {
+        GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Completed => "completed",
+    };
+    Ok(json!({
+        "provider": "codex",
+        "thread_id": session_id,
+        "scope": scope,
+        "objective": goal.objective,
+        "status": status,
+        "continuation_owner": owner,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_goal_receipt_keeps_exact_scope_and_owner() {
+        let goal = NativeGoal {
+            objective: "$fno:reign x-aaaa".to_string(),
+            status: GoalStatus::Paused,
+            continuation_owner: Some("king:x-aaaa".to_string()),
+        };
+        let receipt = goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).unwrap();
+        assert_eq!(receipt["provider"], "codex");
+        assert_eq!(receipt["thread_id"], "thread-1");
+        assert_eq!(receipt["scope"], "x-aaaa");
+        assert_eq!(receipt["objective"], "$fno:reign x-aaaa");
+        assert_eq!(receipt["status"], "paused");
+        assert_eq!(receipt["continuation_owner"], "king:x-aaaa");
+    }
+
+    #[test]
+    fn goal_receipt_refuses_a_different_continuation_owner() {
+        let goal = NativeGoal {
+            objective: "$fno:reign x-aaaa".to_string(),
+            status: GoalStatus::Active,
+            continuation_owner: Some("king:x-bbbb".to_string()),
+        };
+        assert!(goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).is_err());
+    }
+
+    #[test]
+    fn goal_set_contract_does_not_offer_clear_and_keeps_reign_scope_pinned() {
+        assert!(goal_set_contract("/goal clear", "x-aaaa", "thread-1").is_err());
+        assert!(goal_set_contract("/goal $fno:reign x-bbbb", "x-aaaa", "thread-1").is_err());
+        assert_eq!(
+            goal_set_contract("/goal $fno:reign x-aaaa", "", "thread-1").unwrap(),
+            ("$fno:reign x-aaaa".to_string(), "king:x-aaaa".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_requires_the_exact_paused_reign_goal() {
+        let goal = NativeGoal {
+            objective: "$fno:reign x-aaaa".to_string(),
+            status: GoalStatus::Paused,
+            continuation_owner: Some("king:x-aaaa".to_string()),
+        };
+        assert!(verify_goal(
+            &goal,
+            "$fno:reign x-aaaa",
+            GoalStatus::Paused,
+            "king:x-aaaa",
+            "resume"
+        )
+        .is_ok());
+        assert!(verify_goal(
+            &goal,
+            "$fno:reign x-bbbb",
+            GoalStatus::Paused,
+            "king:x-aaaa",
+            "resume"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn readable_codex_reign_goal_pauses_without_replacing_its_receipt() {
+        let receipt =
+            pause_reign_goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", "$fno:reign x-aaaa")
+                .expect("the matching active goal can be parked");
+        assert_eq!(receipt["provider"], "codex");
+        assert_eq!(receipt["thread_id"], "thread-1");
+        assert_eq!(receipt["objective"], "$fno:reign x-aaaa");
+        assert_eq!(receipt["status"], "paused");
+        assert_eq!(receipt["continuation_owner"], "king:x-aaaa");
+        assert_eq!(receipt["scope"], "x-aaaa");
+    }
+}

@@ -6917,12 +6917,6 @@ def _mail_inject_codex(
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node).
 
-    ``thread_id`` is the codex threadId (full UUID). Returns True only when the
-    daemon accepts the turn; any miss (binary absent, no daemon socket, thread
-    not attached) returns False so the caller writes the durable fallback. The
-    codex app-server daemon only exists when the user runs it
-    (``codex app-server daemon start``); absent it this is a clean no-op.
-
     ``reason_out``, when a non-empty list, receives the live lane's
     cause on a miss -- the same side-channel contract as
     :func:`_mail_inject_claude`, so a bus-only refusal names itself in the
@@ -6931,8 +6925,6 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    # same injector-level gate as the claude lane; see
-    # _delivery_policy_refusal.
     if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
         if reason_out is not None:
             reason_out.append(BUS_ONLY_POLICY)
@@ -6955,7 +6947,10 @@ def _mail_inject_codex(
     except (OSError, subprocess.SubprocessError):
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+        receipt = json.loads(proc.stdout.strip())
+        if reason_out is not None and receipt.get("reason"):
+            reason_out.append(str(receipt["reason"]))
+        return bool(receipt.get("delivered"))
     except (ValueError, AttributeError):
         return False
 

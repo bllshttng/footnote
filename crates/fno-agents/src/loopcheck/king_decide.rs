@@ -283,7 +283,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         // NoWork; any provider refusal keeps the existing bounded block.
         if history.last_undelivered.is_none() && manifest.harness.as_deref() == Some("codex") {
             if let Ok(provider_receipt) =
-                crate::king_termination::pause_codex_reign_goal(&manifest, &parsed.cwd)
+                crate::reign_goal::pause_codex_reign_goal(&manifest, &parsed.cwd)
             {
                 emit(
                     "quiet-undelivered",

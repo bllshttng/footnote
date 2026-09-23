@@ -156,7 +156,11 @@ def test_an_extension_harness_with_no_declared_installer_is_refused(monkeypatch)
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "agy"])
-def test_a_native_harness_is_dispatched(harness):
+def test_a_native_harness_is_dispatched(monkeypatch, harness):
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda *a, **k: (None, {"ready": True}),
+    )
     check_loop_participation(harness, "/target x-1")
 
 
@@ -189,7 +193,11 @@ def test_resolve_dispatch_resolves_a_looping_target_at_pi(monkeypatch):
     assert resolved["loop_participation"] == "extension"
 
 
-def test_resolve_dispatch_still_resolves_a_looping_target_at_claude():
+def test_resolve_dispatch_still_resolves_a_looping_target_at_claude(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda *a, **k: (None, {"ready": True}),
+    )
     resolved = resolve_dispatch(harness="claude", node_id="x-1")
     assert resolved["command"].startswith("/target")
     assert resolved["loop_participation"] == "native"
@@ -212,57 +220,19 @@ def test_the_direct_spawn_seam_still_calls_the_gate():
     assert "check_loop_participation(harness, message)" in source
 
 
-def test_effective_readiness_is_one_typed_snapshot_with_four_legs():
-    """AC7-HP: admission reads one native predicate with named legs."""
-    import fno.agents.harness_map as harness_map
+def test_native_loop_admission_surfaces_rust_readiness_refusal(monkeypatch):
+    import fno.rust_binary
 
-    assert hasattr(harness_map, "effective_loop_readiness")
-    snapshot = harness_map.effective_loop_readiness(
-        "codex", "/fno:target x-1", scope="x-1"
-    )
-    assert snapshot["ready"] is True
-    assert set(snapshot["legs"]) == {"machine", "lifecycle", "stop", "provider_goal"}
-    assert snapshot["continuation_owner"]
+    calls = []
 
+    def refuse(verb, args):
+        calls.append((verb, args))
+        return "session-refresh-unverified: no correlated Stop fire", None
 
-def test_unreadable_effective_readiness_fails_closed_and_can_recover(monkeypatch):
-    """AC7-ERR/AC7-RECOVER: unreadable is not a healthy false and a later
-    positive native receipt admits again."""
-    import fno.agents.harness_map as harness_map
+    monkeypatch.setattr(fno.rust_binary, "call_binary_json", refuse)
+    with pytest.raises(DispatchResolveError, match="session-refresh-unverified"):
+        check_loop_participation("codex", "/target x-1")
 
-    assert hasattr(harness_map, "_read_effective_loop_readiness")
-    monkeypatch.setattr(
-        harness_map,
-        "_read_effective_loop_readiness",
-        lambda *args, **kwargs: ("machine unreadable: probe failed", None),
-    )
-    with pytest.raises(DispatchResolveError, match="machine unreadable"):
-        harness_map.check_loop_participation("codex", "/target x-1")
-
-    monkeypatch.setattr(
-        harness_map,
-        "_read_effective_loop_readiness",
-        lambda *args, **kwargs: (
-            None,
-            {
-                "ready": True,
-                "legs": {
-                    "machine": "ready",
-                    "lifecycle": "ready",
-                    "stop": "ready",
-                    "provider_goal": "ready",
-                },
-                "continuation_owner": "king:x-1",
-            },
-        ),
-    )
-    harness_map.check_loop_participation("codex", "/target x-1")
-
-
-def test_codex_goal_contract_is_typed_and_names_continuation_owner():
-    """AC8-ERR/AC11-EDGE: goal state is parsed as a typed contract, not an
-    unexamined JSON value, and the owner is part of the receipt."""
-    import fno.agents.harness_map as harness_map
-
-    assert hasattr(harness_map, "ensure_codex_reign_goal")
-    assert hasattr(harness_map, "parse_codex_goal")
+    assert calls == [
+        ("loop", ["readiness", "--harness", "codex", "--command", "/target x-1"])
+    ]
