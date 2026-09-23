@@ -258,7 +258,11 @@ def _fm(path) -> str:
 
 def _project_is_noop(tmp_path, monkeypatch, node) -> bool:
     """Project `node` through the keeper client over a seeded temp graph.
-    True when the round trip rewrote nothing."""
+
+    True when the round trip left the doc's status line alone. The keeper
+    fills graph defaults (priority, tags, ...) into the bare test row, so the
+    mirror fields may legitimately change; the ladder guards only status.
+    """
     import json as _json
 
     import fno.graph.store as gs
@@ -267,7 +271,12 @@ def _project_is_noop(tmp_path, monkeypatch, node) -> bool:
     g = tmp_path / "graph.json"
     g.write_text(_json.dumps({"entries": [node]}))
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    return project_graph_nodes([node], [node["id"]]) == 0
+    from pathlib import Path
+
+    plan = Path(node["plan_path"])
+    before = _fm(plan)
+    project_graph_nodes([node], [node["id"]])
+    return _fm(plan) == before
 
 
 @pytest.mark.parametrize("stamped", ["design", "ready"])
