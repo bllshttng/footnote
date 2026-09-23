@@ -51,6 +51,38 @@ WORKER_SESSION="01a0f1ce-0000-4c1e-8a1c-2d3e4f5a6b7c"
 export WORKER_SESSION
 
 cleanup() {
+    # Keepers FIRST, while the server can still list them: the plain pane's
+    # keeper is never in SURVIVOR_PIDS, and kill-server spares keepers by
+    # design, so without this sweep every run leaked one keeper and its
+    # child (measured).
+    "$MUX_BIN" mux pane keeper list --json 2>/dev/null | python3 -c '
+import json, os, subprocess, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows:
+    if r.get("session") != os.environ["SESSION"]:
+        continue
+    for field in ("keeper_pid", "child_pid"):
+        pid = r.get(field)
+        if pid:
+            subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+' || true
+    sleep 0.3
+    # The argv sweep: anything this run minted carries the run's unique temp
+    # prefix in its argv. A missed keeper probe must not strand the process.
+    ps -axo pid=,command= | python3 -c '
+import subprocess, sys
+needle = sys.argv[1]
+needles = ("fno-agents-worker", "stubbin")
+for ln in sys.stdin:
+    pid, _, rest = ln.strip().partition(" ")
+    if "ps -axo" in ln or "python3 -c" in ln:
+        continue
+    if needle in rest and any(n in rest for n in needles):
+        subprocess.run(["kill", "-9", pid], capture_output=True)
+' "$TMP_DIR" || true
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -9 "$SERVER_PID" 2>/dev/null || true
