@@ -134,6 +134,36 @@ fn run_capture(argv: &[std::ffi::OsString]) -> Result<(i32, String, String), Str
     ))
 }
 
+/// Keep the last useful stderr line, skipping config warnings that can hide it.
+pub(crate) fn stderr_cause(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .rev()
+        .find(|line| !line.starts_with("fno config:"))
+        .or_else(|| lines.last())
+        .copied()
+        .unwrap_or("no stderr");
+    let end = line
+        .char_indices()
+        .nth(120)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    line[..end].to_string()
+}
+
+fn gh_error_cause(error: &str) -> String {
+    stderr_cause(
+        error
+            .split_once(" failed: ")
+            .map_or(error, |(_, stderr)| stderr),
+    )
+}
+
 fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
     let mut argv = vec![fno_bin()];
     argv.extend(args.iter().map(std::ffi::OsString::from));
@@ -273,27 +303,21 @@ fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
 }
 
 fn open_pr_count() -> Result<i64, String> {
-    let argv = vec![
-        std::ffi::OsString::from("gh"),
-        "pr".into(),
-        "list".into(),
-        "--state".into(),
-        "open".into(),
-        "--limit".into(),
-        "200".into(),
-        "--json".into(),
-        "number".into(),
-    ];
-    let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
-    if code != 0 {
-        return Err(format!(
-            "open PR listing failed: {}",
-            err.trim().chars().take(120).collect::<String>()
-        ));
-    }
-    let rows: Value = serde_json::from_str(out.trim())
-        .map_err(|e| format!("open PR listing did not parse: {e}"))?;
-    Ok(rows.as_array().map(|a| a.len() as i64).unwrap_or(0))
+    let cwd = std::env::current_dir().map_err(|e| format!("open PR listing failed: {e}"))?;
+    let pages = crate::pr_push::gh_api_pages(
+        "gh",
+        &cwd,
+        "repos/{owner}/{repo}/pulls?state=open&per_page=100",
+    )
+    .map_err(|error| format!("open PR listing failed: {}", gh_error_cause(&error)))?;
+    Ok(open_pr_total(&pages))
+}
+
+fn open_pr_total(pages: &[Value]) -> i64 {
+    pages
+        .iter()
+        .map(|page| page.as_array().map(|rows| rows.len() as i64).unwrap_or(0))
+        .sum()
 }
 
 fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
@@ -545,10 +569,7 @@ fn epic_line(court: &Value) -> String {
 fn r_capacity() -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["doctor", "footprint", "--json"])?;
     if out.trim().is_empty() {
-        return Err(format!(
-            "footprint unavailable: {}",
-            err.trim().chars().take(120).collect::<String>()
-        ));
+        return Err(format!("footprint unavailable: {}", stderr_cause(&err)));
     }
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("footprint payload did not parse: {e}"))?;
@@ -904,10 +925,7 @@ fn r_main_ci() -> Result<Value, String> {
         ];
         let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
         if code != 0 {
-            return Err(format!(
-                "git ls-remote failed: {}",
-                err.trim().chars().take(120).collect::<String>()
-            ));
+            return Err(format!("git ls-remote failed: {}", stderr_cause(&err)));
         }
         // `git ls-remote origin refs/heads/main` answers "<sha>\trefs/heads/main".
         let sha = out
@@ -923,7 +941,8 @@ fn r_main_ci() -> Result<Value, String> {
         sha
     };
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)?;
+    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)
+        .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
     main_ci_token(rows)
 }
 
@@ -2108,6 +2127,56 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
+        let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
+        assert_eq!(
+            stderr_cause(stderr),
+            "gh: API rate limit exceeded for user ID 4994564. (HTTP 403)"
+        );
+    }
+
+    #[test]
+    fn gh_error_cause_removes_the_gh_api_prefix() {
+        let error = "gh api repos/{owner}/{repo}/commits/<sha>/check-runs failed: fno config: x is not modeled\ngh: API rate limit exceeded (HTTP 403)";
+        assert_eq!(
+            gh_error_cause(error),
+            "gh: API rate limit exceeded (HTTP 403)"
+        );
+    }
+
+    #[test]
+    fn stderr_cause_falls_back_to_the_last_warning_or_empty_placeholder() {
+        assert_eq!(
+            stderr_cause("fno config: first\nfno config: last"),
+            "fno config: last"
+        );
+        assert_eq!(stderr_cause(" \n\t"), "no stderr");
+    }
+
+    #[test]
+    fn stderr_cause_caps_at_120_unicode_characters() {
+        let cause = "é".repeat(300);
+        let result = stderr_cause(&cause);
+        assert_eq!(result.chars().count(), 120);
+        assert_eq!(result, "é".repeat(120));
+    }
+
+    #[test]
+    fn open_pr_total_sums_all_pages() {
+        let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
+        let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
+        assert_eq!(open_pr_total(&[first, second]), 107);
+    }
+
+    #[test]
+    fn open_pr_total_ignores_non_array_pages() {
+        assert_eq!(
+            open_pr_total(&[json!({"unexpected": true}), json!([1, 2])]),
+            2
+        );
+    }
 
     #[test]
     fn scope_key_sanitizes_like_the_writer() {
