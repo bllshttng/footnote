@@ -292,7 +292,7 @@ def test_ask_clear_round_trip_and_idempotence(root: Path):
     assert f"{qid} was already closed; nothing written" in again.stdout
 
     unknown = runner.invoke(outstanding_app, ["clear", "q-neverexisted"])
-    assert unknown.exit_code == 0
+    assert unknown.exit_code == 4
     assert "q-neverexisted is not a question id this machine knows" in unknown.stdout
 
 
@@ -1434,10 +1434,11 @@ def test_question_index_dual_writes_ask_and_close(root: Path):
 
 @requires_rust
 def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
-    # The index write is best-effort Rust-side; pointing it at a directory
-    # makes the append fail while the project journal stays writable.
-    blocked = root / "index-blocked"
-    blocked.mkdir()
+    from fno.events.store_client import store_db_path
+
+    # The SQLite sidecar is the Rust append boundary.
+    blocked = root / "index-blocked.jsonl"
+    store_db_path(blocked).mkdir()
     monkeypatch.setattr("fno.paths.questions_jsonl", lambda: blocked)
 
     result = runner.invoke(outstanding_app, ["ask", "which index?"])
@@ -1449,28 +1450,30 @@ def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: py
 
 
 @requires_rust
-def test_question_close_index_failure_names_id_and_reindex(
+def test_question_close_index_failure_names_id_and_retry(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from fno import paths
-    from fno.events import append_event as real_append_event
+    from fno.events.store_client import store_db_path
 
     asked = runner.invoke(outstanding_app, ["ask", "which close path?"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
-    index_path = paths.questions_jsonl()
-
-    def fail_close_index(event, *, events_path=None):
-        if event["type"] == "operator_question_closed" and events_path == index_path:
-            raise OSError("index unavailable")
-        return real_append_event(event, events_path=events_path)
-
-    monkeypatch.setattr("fno.events.append_event", fail_close_index)
+    question_index = paths.questions_jsonl()
+    ask_event = next(
+        event
+        for event in _journal_events(question_index)
+        if event.get("data", {}).get("question_id") == qid
+    )
+    index_path = root / "close-index.jsonl"
+    index_path.write_text(json.dumps(ask_event) + "\n")
+    store_db_path(index_path).mkdir()
+    monkeypatch.setattr(paths, "questions_jsonl", lambda: index_path)
     result = runner.invoke(outstanding_app, ["clear", qid])
 
     assert result.exit_code == 1
     assert qid in result.output
-    assert "fno inbox outstanding reindex" in result.output
+    assert "index close did not land" in result.output
     project_close = _journal_last(project_log("events.jsonl", project_root=root))
     assert project_close["type"] == "operator_question_closed"
     index_last = _journal_last(index_path)
