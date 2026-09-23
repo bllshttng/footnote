@@ -104,7 +104,10 @@ fn payload_graph(payload: &Value) -> PathBuf {
 
 /// Park the owed payload on the named worker's registry row. Answers
 /// `{"parked": bool}`; first park wins, so a retried spawn never rewrites
-/// the payload a live worker's SessionStart is about to consume.
+/// the payload a live worker's SessionStart is about to consume. The row
+/// stamps `started_at` here because the park IS the spawn instant - the
+/// spawn-side path (spawn_lineage) stamps its open at the same moment - so
+/// the deferred open never reads a later start than a spawn-side row.
 fn park(payload: &Value) -> Result<Value, String> {
     let registry = payload_registry(payload);
     let name = payload
@@ -119,6 +122,7 @@ fn park(payload: &Value) -> Result<Value, String> {
         return Err(format!("park phase {phase:?} is not in the vocabulary"));
     }
     let grant = payload.get("merge_grant").cloned().filter(|v| !v.is_null());
+    let started = crate::daemon::now_rfc3339_like();
     let name = name.to_string();
     let parked = update_registry(&registry, |reg| {
         for entry in reg.entries.iter_mut() {
@@ -126,7 +130,9 @@ fn park(payload: &Value) -> Result<Value, String> {
                 continue;
             }
             if entry.pending_session_row.is_none() {
-                entry.pending_session_row = Some(json!({ "phase": phase, "merge_grant": grant }));
+                entry.pending_session_row = Some(json!({
+                    "phase": phase, "merge_grant": grant, "started_at": started,
+                }));
                 return true;
             }
             return false;
@@ -188,7 +194,14 @@ fn open(payload: &Value) -> Result<Value, String> {
     let harness = row.get("harness").and_then(Value::as_str).unwrap_or("");
     let effort = row.get("effort").and_then(Value::as_str);
     let grant = parked.get("merge_grant").cloned().filter(|v| !v.is_null());
-    let started = crate::daemon::now_rfc3339_like();
+    // The park instant, stamped at spawn; a payload parked before this field
+    // existed falls back to now rather than failing the open.
+    let started = parked
+        .get("started_at")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::daemon::now_rfc3339_like());
     let store = Store::new(&payload_graph(payload));
     let found = api::session_open_parked(
         &store, node, phase, harness, session_id, effort, grant, &started,
@@ -302,6 +315,8 @@ mod tests {
         assert_eq!(sessions[0]["session_id"], json!("sid-1"));
         assert_eq!(sessions[0]["phase"], json!("do"));
         assert_eq!(sessions[0]["effort"], json!("xhigh"));
+        // The row carries the PARK instant as its start, not the open instant.
+        assert!(sessions[0]["started_at"].is_string());
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
         assert!(rows[0].get("pending_session_row").is_none());
 

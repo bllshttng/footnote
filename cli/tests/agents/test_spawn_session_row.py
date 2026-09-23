@@ -246,7 +246,9 @@ def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
     assert _node_rows() == []
     assert "session row open skipped" not in result.stderr
     row = next(r for r in load_registry() if r.name == "nouuid-worker")
-    assert row.pending_session_row == {"phase": "review", "merge_grant": None}
+    assert row.pending_session_row["phase"] == "review"
+    assert row.pending_session_row["merge_grant"] is None
+    assert row.pending_session_row["started_at"]
 
 
 def test_stamp_no_worker_name_skips_named(workdir_claude, capsys) -> None:
