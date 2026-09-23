@@ -1711,7 +1711,7 @@ def inject_spawn_defaults(
     _substrate_ok = bool(prov) and bool(cfg_substrate) and _substrate_compatible(cfg_substrate, prov)
     _pane_tokens_ok = False
     _thread_tokens_ok = False
-    if cfg_permission and prov:
+    if cfg_permission and prov and not _has_permission:
         if _permission_mappable(prov, cfg_permission, "pane"):
             _pane_tokens_ok = True
         if _permission_mappable(prov, cfg_permission, "thread"):

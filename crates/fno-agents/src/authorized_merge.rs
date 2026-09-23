@@ -1914,7 +1914,7 @@ pub fn ci_base_verdict(
 /// current HEAD, or None.
 pub fn covered_head_from_event(cwd: &Path) -> Option<String> {
     let path = crate::paths::events_path(cwd);
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = crate::event_store::journal_text(&path, &["review_coverage"]);
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)
@@ -3825,5 +3825,29 @@ mod tests {
             "released lane must not count"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn covered_head_reads_a_store_committed_coverage_row() {
+        // AC5-HP: a covered row at HEAD committed to the store only.
+        let _root = crate::paths::DeclaredRoot::declare("am_covered_head_store");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(cwd)
+            .output();
+        // No git repo in the temp dir: HEAD is empty, so the scan accepts any
+        // head. A store-only covered row still answers.
+        let _ = head;
+        let line = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
+        })
+        .to_string();
+        let events = crate::paths::events_path(cwd);
+        crate::event_store::append_envelope(&events, &line, None).unwrap();
+        let covered = covered_head_from_event(cwd);
+        assert_eq!(covered.as_deref(), Some("aaaaaaaaaa"), "{covered:?}");
     }
 }

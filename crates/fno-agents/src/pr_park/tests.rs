@@ -46,13 +46,13 @@ fn fixture(paths: &Paths) {
 }"#
     .replace("{fresh}", &fresh);
     write(&paths.delivery, &delivery_text);
-    // The open row's failure detail, as the merge phase recorded it.
-    write(
-        &paths.events,
-        r#"{"ts":"2026-09-16T15:29:00Z","type":"unrelated","data":{"pr":101}}
-{"ts":"2026-09-16T15:29:30Z","type":"merge_grant_execution","data":{"phase":"failed","actor":"pr-watch","pr":101,"exit_code":1}}
-"#,
-    );
+    // The open row's failure detail, as the merge phase committed it.
+    for line in [
+        r#"{"ts":"2026-09-16T15:29:00Z","type":"unrelated","source":"test","data":{"pr":101}}"#,
+        r#"{"ts":"2026-09-16T15:29:30Z","type":"merge_grant_execution","source":"pr-watch","data":{"phase":"failed","actor":"pr-watch","pr":101,"exit_code":1}}"#,
+    ] {
+        crate::event_store::append_envelope(&paths.events, line, None).unwrap();
+    }
     write(
         &paths.err_log,
         r#"{"pr":101,"outcome":"failed","reason":"failed: checks are red; require_checks_pass forbids merging without green","strategy":"merge"}

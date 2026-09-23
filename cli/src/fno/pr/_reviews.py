@@ -174,9 +174,9 @@ from fno.paths import repo_identity as _repo_identity  # noqa: E402
 def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
     """The lines of ``path``'s journal for ``types``, across rotations.
 
-    Rotation ingests a generation into ``<stem>.db`` before the rename, so the
-    store holds every row that left the live file: yield the store rows whose
-    line is not in the live file (oldest first), then the live file verbatim.
+    Every writer commits to the store, so the committed rows are the order of
+    record: yield the store rows the filter matches in commit order, then the
+    live lines the store does not hold yet.
     Any store failure yields the live file alone.
     """
     live = path.resolve()
@@ -188,22 +188,27 @@ def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
         live_lines = []
     store = live.with_name(name.removesuffix(".jsonl") + ".db")
     if store.is_file():
-        in_live = {line.rstrip("\n").removesuffix("\r") for line in live_lines}
         marks = ",".join("?" * len(types))
         conn = None
         try:
             conn = sqlite3.connect(store.as_uri() + "?mode=ro", uri=True)
             rows = conn.execute(
-                f"SELECT line FROM events WHERE type IN ({marks}, '') ORDER BY ts_ms", types
+                f"SELECT line FROM events WHERE type IN ({marks}, '') ORDER BY seq", types
             ).fetchall()
+            held = {bytes(h) for (h,) in conn.execute("SELECT row_hash FROM events")}
         except sqlite3.Error:
-            rows = []
+            rows, held = [], set()
         finally:
             if conn is not None:
                 conn.close()
         for (line,) in rows:
-            if line not in in_live:
-                yield line + "\n"
+            yield line + "\n"
+        import hashlib
+        for line in live_lines:
+            text = line.rstrip("\n").removesuffix("\r")
+            if hashlib.sha256(text.encode()).digest() not in held:
+                yield line
+        return
     yield from live_lines
 
 
@@ -612,15 +617,16 @@ def split_pin_note(note: str) -> tuple[str, str]:
 def _uncovered_row_overtaken(
     data: Optional[dict], row_ts: str, cwd: Optional[str], head: Optional[str]
 ) -> bool:
-    """Whether a head-matching UNCOVERED row has been overtaken by a later
+    """Whether a head-matching stored NO row has been overtaken by a later
     attestation.
 
     Narrow by construction. It fires only for a row that is UNCOVERED at the
-    head being asked about, and only when an in-scope attestation pinned to
-    that same head carries a LATER timestamp than the row. A covered row, a
-    head mismatch and an unknown row are all handled by the arms beside it,
-    and a row with no timestamp cannot be compared, so it is left alone rather
-    than recomputed on a guess.
+    head being asked about, or a covered row whose review posture is explicitly
+    unsatisfied, and only when an in-scope attestation pinned to that same head
+    carries a LATER timestamp than the row. A covered row with a satisfied or
+    absent posture, a head mismatch and an unknown row are handled by the arms
+    beside it, and a row with no timestamp cannot be compared, so it is left
+    alone rather than recomputed on a guess.
 
     Any verdict overtakes, not only a pass. A later fail at the head moved
     what the row reports - a round is spent, and the review count changed -
@@ -631,7 +637,18 @@ def _uncovered_row_overtaken(
     is only "did something attest THIS head after the row was written", and a
     branch-scoped read would pull in rounds for other commits.
     """
-    if not head or not row_ts or not data or data.get("coverage") != "uncovered":
+    if not head or not row_ts or not isinstance(data, dict):
+        return False
+    posture = data.get("review_posture")
+    stored_no = bool(
+        data.get("coverage") == "uncovered"
+        or (
+            data.get("coverage") == "covered"
+            and isinstance(posture, dict)
+            and posture.get("posture_satisfied") is False
+        )
+    )
+    if not stored_no:
         return False
     if data.get("head_sha") != head:
         return False

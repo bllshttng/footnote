@@ -188,19 +188,7 @@ fn main() {
     }
     // A fire answers in microseconds; the runtime never builds for one.
     if args.first().map(String::as_str) == Some("hook") {
-        let code = match args.get(1).map(String::as_str) {
-            Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
-            Some("prompt") => fno_agents::hook::prompt::run(&args[2..]),
-            Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
-            Some("stop") => fno_agents::hook::stop::run(&args[2..]),
-            other => {
-                eprintln!(
-                    "fno-agents hook: unknown entry {other:?}; expected king-guard, prompt, test-run-guard or stop"
-                );
-                2
-            }
-        };
-        std::process::exit(code);
+        std::process::exit(fno_agents::hook::dispatch(&args[1..]));
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1065,23 +1053,7 @@ async fn run(args: Vec<String>) -> i32 {
     // staleness read that doctor/restart/update render. Composes the daemon
     // status (in-process), a ps walk of keepers, and `fno mux ls --json`.
     if verb == "census" {
-        if args[1..].iter().any(|a| a == "--ps") {
-            let (rows, unreadable) = fno_agents::census::process_table();
-            println!(
-                "{}",
-                serde_json::json!({
-                    "ps": fno_agents::census::ps_text(&rows),
-                    "unreadable": unreadable,
-                })
-            );
-            return 0;
-        }
-        let rows = fno_agents::census::census().await;
-        println!(
-            "{}",
-            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-        );
-        return 0;
+        return fno_agents::census::run_verb(&args[1..]).await;
     }
 
     if verb == "restart" {
@@ -3260,7 +3232,7 @@ fn run_roster_reap(rest: &[String]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let scope = fno_agents::agents_config::roster_scope(&cwd);
-    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, scope, dry_run);
+    let summary = fno_agents::roster_reap::roster_reap(&home, &cwd, grace_secs, scope, dry_run);
     print!(
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)
@@ -3769,7 +3741,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("from_name".into(), str_arg(&mut it, "--from-name")?);
             }
             "--yolo" | "-Y" => {
-                // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
+                // The daemon resolves yolo through resolve_thread_posture.
                 params.insert("yolo".into(), Value::Bool(true));
             }
             // The Python spawn seam (rust_runtime

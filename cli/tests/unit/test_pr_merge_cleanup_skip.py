@@ -196,6 +196,34 @@ def test_a_raising_mint_speaks_emit_failed_and_the_merge_stands(tmp_path, monkey
     assert _rows(log, "merge_cleanup_requested") == []
 
 
+def test_the_request_row_names_the_ambient_session_when_no_manifest_exists(
+    tmp_path, monkeypatch
+):
+    # A canonical checkout is not a session, so it has no manifest; the
+    # merging process (here: the king's shell) names itself instead.
+    import fno.agents.events as E
+    import fno.pr._merge as M
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh(monkeypatch, M, ok=True, stdout=MERGED)
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setattr(
+        E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
+    )
+
+    M._emit_merge_cleanup_request(
+        11, str(tmp_path), str(tmp_path / ".fno" / "target-state.md"), []
+    )
+
+    requested = _rows(log, "merge_cleanup_requested")
+    assert len(requested) == 1
+    data = requested[0]["data"]
+    assert data["session_id"] == "sess-king"
+    assert data["harness"] == "claude"
+
+
 def test_an_unknown_reason_is_refused_rather_than_written(tmp_path, monkeypatch):
     from fno.agents.events import emit_merge_cleanup_skipped
 

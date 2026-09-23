@@ -521,7 +521,18 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
     (v, bounds)
 }
 
-/// One journal walk over the five verdict row kinds, with the same mirror
+/// The six verdict row kinds `scan_readings` keeps, one vocabulary for the
+/// store query.
+const READING_TYPES: &[&str] = &[
+    KING_LOOP_CHECK,
+    TERMINATION,
+    REIGN_CHECKIN,
+    CONTEXT_SNAPSHOT,
+    LOOP_CHECK_CONFIG,
+    KING_CONTEXT_NUDGE,
+];
+
+/// One journal walk over the verdict row kinds, with the same mirror
 /// dedupe `scan` applies. `fno_id` keys the loop rows, `harness_session_id`
 /// the compaction snapshots, `scope` the context nudges. `crown_start`
 /// bounds the compaction count to THIS reign: a harness session that
@@ -545,13 +556,11 @@ fn scan_readings(
     let mut fires_ts: Vec<(String, Option<i64>)> = Vec::new();
     let mut terminations: Vec<String> = Vec::new();
     for path in events_paths {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            if !path.exists() {
-                journals.push((path.display().to_string(), 0));
-                continue;
-            }
-            return Err(format!("{}: unreadable journal", path.display()));
-        };
+        let content = crate::event_store::journal_text_checked(
+            path,
+            &crate::event_store::EventQuery::of_types(READING_TYPES),
+        )
+        .map_err(|_| format!("{}: unreadable journal", path.display()))?;
         let mut file_scanned: u64 = 0;
         for raw in content.lines() {
             let line = raw.trim();
@@ -1846,5 +1855,22 @@ mod tests {
             "2026-09-10T11:59:59.999Z",
             "2026-09-10T12:00:00Z"
         ));
+    }
+
+    #[test]
+    fn scan_readings_counts_a_store_committed_fire() {
+        // AC4-CROWN
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let line = json!({
+            "ts": "2026-09-10T12:00:01Z", "type": KING_LOOP_CHECK, "source": "hook",
+            "data": {"session_id": "crown-1", "actionable": 0}
+        });
+        crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
+        let (r, scanned, _dupes, journals) =
+            scan_readings(&[journal], "crown-1", "", "fno", "2026-09-10T12:00:00Z").unwrap();
+        assert_eq!(r.fires, 1, "{r:?}");
+        assert_eq!(scanned, 1);
+        assert_eq!(journals.len(), 1);
     }
 }

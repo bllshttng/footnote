@@ -594,7 +594,7 @@ const PROTECTION_SCRIPTS: Array<{ script: string; tools: string[]; timeoutMs: nu
   { script: "graph-write-protect.sh", tools: ["edit", "write", "bash"], timeoutMs: 10_000 },
   { script: "plan-location-guard.sh", tools: ["write"], timeoutMs: 10_000 },
   { script: "git-protection.py", tools: ["bash"], timeoutMs: 10_000 },
-  { script: "truncation-guard.py", tools: ["bash"], timeoutMs: 10_000 },
+  { script: "pipe-guard.sh", tools: ["bash"], timeoutMs: 10_000 },
   { script: "recursive-grep-guard.py", tools: ["bash"], timeoutMs: 10_000 },
 ]
 

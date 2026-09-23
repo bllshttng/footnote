@@ -185,6 +185,7 @@ fn pushes_once_with_the_behind_receipt() {
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("behind-before=3 behind-after=0"), "{out}");
+    assert!(out.contains("integrate=rebase"), "{out}");
     assert!(out.contains("preflight=absent"), "{out}");
     assert!(out.contains("ci=settled"), "{out}");
     assert!(out.contains("sha=abc1234"), "{out}");
@@ -592,6 +593,97 @@ fn a_second_push_with_main_unchanged_still_fast_forwards() {
     );
     let head = git_in(&a, &["rev-parse", "HEAD"]);
     assert_eq!(remote.trim(), head.trim());
+}
+
+#[test]
+fn a_merge_bearing_branch_merges_main_instead_of_rebasing() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    git_in(&a, &["fetch", "origin"]);
+    git_in(&a, &["merge", "--no-edit", "origin/main"]);
+    git_in(&a, &["push", "origin", "feature/x"]);
+    let old_remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    commit_file(&b, "second-main.txt", "m2\n", "main moves again");
+    git_in(&b, &["push", "origin", "main"]);
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "the merge-bearing push: {out}\n{err}");
+    assert!(out.contains("integrate=merge"), "{out}");
+    let new_remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    git_in(
+        &root.join("remote.git"),
+        &[
+            "merge-base",
+            "--is-ancestor",
+            old_remote.trim(),
+            new_remote.trim(),
+        ],
+    );
+    assert_eq!(
+        git_in(
+            &a,
+            &["rev-list", "--merges", "--count", "origin/main..HEAD"]
+        )
+        .trim(),
+        "2"
+    );
+}
+
+#[test]
+fn a_merge_bearing_branch_at_behind_zero_is_not_rewritten() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    git_in(&a, &["fetch", "origin"]);
+    git_in(&a, &["merge", "--no-edit", "origin/main"]);
+    git_in(&a, &["push", "origin", "feature/x"]);
+    let before = git_in(&a, &["rev-parse", "HEAD"]);
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "the up-to-date merge-bearing push: {out}\n{err}");
+    assert!(out.contains("integrate=merge"), "{out}");
+    let after = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(before.trim(), after.trim());
+    assert_eq!(
+        git_in(
+            &root.join("remote.git"),
+            &["rev-parse", "refs/heads/feature/x"],
+        )
+        .trim(),
+        before.trim()
+    );
+}
+
+#[test]
+fn a_merge_conflict_aborts_and_names_the_merge_door() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    git_in(&a, &["fetch", "origin"]);
+    git_in(&a, &["merge", "--no-edit", "origin/main"]);
+    git_in(&a, &["push", "origin", "feature/x"]);
+    commit_file(&b, "one.txt", "main\n", "main conflicts");
+    git_in(&b, &["push", "origin", "main"]);
+    let before = git_in(&a, &["rev-parse", "HEAD"]);
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 3, "the merge conflict: {out}\n{err}");
+    assert!(err.contains("not safely rebasable"), "{err}");
+    assert!(err.contains("status merge_conflict"), "{err}");
+    assert!(err.contains("files: one.txt"), "{err}");
+    assert!(err.contains("Merge origin/main by hand"), "{err}");
+    assert_eq!(before.trim(), git_in(&a, &["rev-parse", "HEAD"]).trim());
+    assert!(!a.join(".git/MERGE_HEAD").exists());
 }
 
 #[test]

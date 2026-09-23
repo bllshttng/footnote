@@ -25,7 +25,7 @@ const TAG_REPLY: u8 = 5; // both keepers
 /// One row of the process table: the columns `ps -Ao
 /// pid,ppid,state,etime,%cpu,rss,command` reports, read without exec'ing
 /// `ps` (setuid on macOS, so a sandboxed caller's seatbelt refuses it).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
@@ -410,8 +410,7 @@ fn epoch_now() -> u64 {
 
 /// The `ps` leg for platforms where `ps` is not setuid: exec and parse the
 /// same columns the native read returns.
-#[cfg(not(target_os = "macos"))]
-fn process_table_ps() -> (Vec<ProcRow>, usize) {
+pub(crate) fn process_table_ps() -> (Vec<ProcRow>, usize) {
     let Ok(out) = std::process::Command::new("ps")
         .args(["-Ao", "pid,ppid,state,etime,%cpu,rss,command"])
         .output()
@@ -431,8 +430,7 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
 /// only where it has a caller: the Linux leg and its tests, both of which
 /// are `not(target_os = "macos")`. A macOS test build otherwise compiles
 /// it with no caller and deny-warnings turns the dead code into a failure.
-#[cfg(not(target_os = "macos"))]
-fn parse_ps_row(line: &str) -> Option<ProcRow> {
+pub(crate) fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
     // aligned column reads as a parse failure.
@@ -897,6 +895,50 @@ pub async fn census() -> Vec<Value> {
     rows.extend(mux_rows(&table));
     rows.extend(codex_app_server_rows());
     rows
+}
+
+/// Run the daemon-free census subcommand.  The process walk stays in Rust so
+/// Python callers and the machine sample share one table implementation.
+pub async fn run_verb(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg == "--tree-rss") {
+        let Some(index) = args.iter().position(|arg| arg == "--tree-rss") else {
+            unreachable!()
+        };
+        let Some(raw) = args.get(index + 1) else {
+            eprintln!("fno-agents census: --tree-rss needs a pid list");
+            return 2;
+        };
+        let mut pids = Vec::new();
+        for token in raw.split(',').filter(|token| !token.is_empty()) {
+            match token.parse::<u32>() {
+                Ok(pid) => pids.push(pid),
+                Err(_) => {
+                    eprintln!("fno-agents census: invalid pid {token}");
+                    return 2;
+                }
+            }
+        }
+        let (rows, _) = process_table_ps();
+        println!(
+            "{}",
+            json!({"rss_mb": crate::session_cost::tree_rss(&rows, &pids)})
+        );
+        return 0;
+    }
+    if args.iter().any(|arg| arg == "--ps") {
+        let (rows, unreadable) = process_table();
+        println!(
+            "{}",
+            json!({"ps": ps_text(&rows), "unreadable": unreadable})
+        );
+        return 0;
+    }
+    let rows = census().await;
+    println!(
+        "{}",
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+    );
+    0
 }
 
 /// Walk the keeper rows synchronously (tests, and callers already holding no

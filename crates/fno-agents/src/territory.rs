@@ -19,7 +19,7 @@ use crate::paths::AgentsHome;
 use crate::state::{load_registry, Registry, RegistryEntry};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -664,6 +664,48 @@ pub fn record_path(config_cwd: &Path, scope: &str) -> PathBuf {
     state_dir(config_cwd)
         .join("blueprinters")
         .join(format!("{}.json", py_quote(scope)))
+}
+
+fn py_unquote(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let high = (bytes[index + 1] as char).to_digit(16)? as u8;
+            let low = (bytes[index + 2] as char).to_digit(16)? as u8;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Return recorded territory blueprinter names keyed by their stable worker
+/// name. An unreadable record directory proves nothing, so it returns no
+/// markers and leaves the roster sweep on its existing fail-closed path.
+pub fn recorded_scope_workers(config_cwd: &Path) -> BTreeMap<String, String> {
+    let dir = state_dir(config_cwd).join("blueprinters");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return BTreeMap::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|e| e.to_str()) == Some("json")).then_some(path)
+        })
+        .filter_map(|path| {
+            let scope = py_unquote(path.file_stem()?.to_str()?)?;
+            Some((worker_name_for_scope(&scope), scope))
+        })
+        .collect()
 }
 
 /// The state dir: a configured `state_dir` wins, else `$FNO_HOME`, else
@@ -1692,6 +1734,29 @@ path = "/repo/alpha"
         assert_eq!(py_quote("x-a,x-b"), "x-a%2Cx-b");
         assert_eq!(py_quote("a:b/c d"), "a%3Ab%2Fc%20d");
         assert_eq!(py_quote("t~i.l-d_x"), "t~i.l-d_x");
+    }
+
+    #[test]
+    fn recorded_scope_workers_decodes_recorded_scope_keys() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
+        std::env::set_var("FNO_HOME", tmp.path());
+        std::fs::write(tmp.path().join("config.toml"), "").unwrap();
+        let dir = tmp.path().join("blueprinters");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fno.json"), "{}").unwrap();
+        std::fs::write(dir.join("x-a%2Cx-b.json"), "{}").unwrap();
+
+        let workers = recorded_scope_workers(tmp.path());
+        assert_eq!(
+            workers.get("blueprinter-fno-8bef7b"),
+            Some(&String::from("fno"))
+        );
+        assert_eq!(
+            workers.get(&worker_name_for_scope("x-a,x-b")),
+            Some(&String::from("x-a,x-b"))
+        );
     }
 
     #[test]

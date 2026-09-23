@@ -1377,3 +1377,78 @@ fn bare_crash_exit_still_redispatches() {
         "markerless crash must not be classified as a bg-guard park"
     );
 }
+
+// ── store-committed terminations ──────────────────────────────────────────────
+
+fn seed_store_termination(journal_path: &Path, session_key: &str, reason: &str, message: &str) {
+    let line = format!(
+        "{{\"ts\":\"2026-06-06T00:01:00Z\",\"type\":\"termination\",\"source\":\"hook\",\
+         \"data\":{{\"session_id\":\"{session_key}\",\"reason\":\"{reason}\",\"message\":\"{message}\"}}}}"
+    );
+    fno_agents::event_store::append_envelope(journal_path, &line, None)
+        .expect("commit termination to the store");
+}
+
+#[test]
+fn a_termination_committed_only_to_the_store_is_found() {
+    // AC2-HP: no raw bytes exist; both readers still see the row.
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    seed_store_termination(&project_events, "sess-store", "DonePRGreen", "committed");
+
+    let journal = Journal::new_raw(project_events.clone(), global_events.clone());
+    let found = journal
+        .find_termination("sess-store")
+        .expect("find_termination must not error");
+    assert_eq!(found.unwrap().reason, TerminationReason::DonePRGreen);
+    let strict = journal
+        .find_termination_strict("sess-store")
+        .expect("strict must not error");
+    assert_eq!(strict.unwrap().reason, TerminationReason::DonePRGreen);
+}
+
+#[test]
+fn strict_termination_reader_errs_on_a_broken_store() {
+    // AC2-ERR: a project store holding non-SQLite bytes is an error, never
+    // a silent Ok(None); the tolerant reader does not panic.
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    fs::write(dir.path().join("events.db"), b"not a database").unwrap();
+
+    let journal = Journal::new_raw(project_events, global_events);
+    let err = journal
+        .find_termination_strict("sess-broken")
+        .err()
+        .expect("strict must report the unreadable store");
+    assert!(
+        format!("{err}").contains("events.db"),
+        "error names the store path: {err}"
+    );
+    assert!(
+        journal.find_termination("sess-broken").is_ok(),
+        "tolerant reader must not panic"
+    );
+}
+
+#[test]
+fn a_store_committed_termination_supersedes_an_imported_raw_one() {
+    // AC2-EDGE: raw NoProgress imported, later DonePRGreen store-only.
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    seed_termination_event(&project_events, "sess-edge", "NoProgress");
+    fno_agents::event_store::sync(&project_events).unwrap();
+    seed_store_termination(&project_events, "sess-edge", "DonePRGreen", "newest");
+
+    let journal = Journal::new_raw(project_events, global_events);
+    let found = journal
+        .find_termination("sess-edge")
+        .expect("find_termination must not error");
+    assert_eq!(
+        found.unwrap().reason,
+        TerminationReason::DonePRGreen,
+        "the newest committed row wins, not the frozen live file"
+    );
+}

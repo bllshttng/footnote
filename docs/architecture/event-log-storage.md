@@ -69,7 +69,7 @@ as new identity.
 - writers: `fno.events.append_event` (Python), `EventEmitter` and
   `append_event_line` (Rust), `_append_bounded_event` (shell) - all commit
   through the native store
-- readers: `fno.events.store_client` (Python), `query_events` (Rust)
+- readers: `fno.events.store_client` (Python), `query_events` and `journal_text` (Rust)
 - operator surface: `fno doctor event emit|find|audit|gc|export`
 - pre-runtime only: `hook-events.jsonl` stays a bounded diagnostic for
   failures before the native binary can answer; no gate reads it

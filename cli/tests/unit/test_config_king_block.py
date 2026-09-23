@@ -21,7 +21,7 @@ def test_ac19_defaults_with_no_config() -> None:
     # install runs with no config.
     assert "reign check-in" in block.checkin_text
     assert "NoProgress" in block.goal_text
-    assert "done or superseded" in block.goal_text
+    assert "done, superseded or will not do" in block.goal_text
 
 
 def test_ac19_registry_answers_config_get(tmp_path: Path, monkeypatch) -> None:

@@ -1,19 +1,19 @@
 //! `fno-agents subscribe` -- stream registry state transitions + pane exits as
 //! newline-delimited JSON.
 //!
-//! Client-side and daemon-free by design: the daemon already writes every
-//! transition to its own append-only `events.jsonl` (the `inside_leg_report`,
-//! `inside_leg_completed`, and `screen_state_change` kinds it emits at the badge
-//! transition edges). `subscribe` follows that file from EOF and reshapes those
-//! kinds into a stable transition schema, rather than threading a broadcast
-//! channel through the hot registry-write path. The append-only log is also
-//! strictly better substrate for a work-queue consumer than a bounded
-//! drop-oldest broadcast: a slow reader never blocks the daemon (the file is the
-//! buffer) and never drops the "agent went idle" event it needs -- it just reads
-//! it later.
+//! Client-side and daemon-free by design: the daemon already commits every
+//! transition to the events store beside `events.jsonl` (the
+//! `inside_leg_report`, `inside_leg_completed`, and `screen_state_change`
+//! kinds it emits at the badge transition edges). `subscribe` follows those
+//! committed rows by seq and reshapes them into a stable transition schema,
+//! rather than threading a broadcast channel through the hot registry-write
+//! path. The store is also strictly better substrate for a work-queue
+//! consumer than a bounded drop-oldest broadcast: a slow reader never blocks
+//! the daemon (the store is the buffer) and never drops the "agent went
+//! idle" event it needs -- it just reads it later.
 //!
 //! ponytail: no per-subscriber bounded queue / lagged marker / rate coalescing.
-//! The file-follow transport does not have the "slow consumer stalls the daemon"
+//! The seq-follow transport does not have the "slow consumer stalls the daemon"
 //! problem those solve, and the daemon's own emit cadence bounds the rate. Add
 //! them only if a socket-push transport is ever actually required.
 
@@ -21,10 +21,70 @@ use crate::paths::AgentsHome;
 use crate::state::{self, Registry};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+const TRANSITION_TYPES: &[&str] = &[
+    "inside_leg_report",
+    "inside_leg_buffer_flushed",
+    "inside_leg_completed",
+    "screen_state_change",
+];
+/// ponytail: a row whose ts lags its commit by more than this is missed; widen it if that shows up.
+const FOLLOW_SKEW_MS: i64 = 60_000;
+
+/// Where the store-follow stands: the last delivered row's seq and the
+/// connect-time wall clock the window filter keys on.
+struct Cursor {
+    seq: i64,
+    ts_ms: i64,
+}
+
+fn transition_query(since_ms: i64) -> crate::event_store::EventQuery {
+    crate::event_store::EventQuery {
+        types: TRANSITION_TYPES.iter().map(|t| t.to_string()).collect(),
+        since_ms: Some(since_ms),
+        ..Default::default()
+    }
+}
+
+/// The committed transition lines after `cursor`, oldest first; advances it.
+/// A missing or busy store reads as nothing and is retried on the next tick.
+fn poll(journal: &std::path::Path, cursor: &mut Cursor) -> Vec<String> {
+    let Ok(rows) =
+        crate::event_store::query_events(journal, &transition_query(cursor.ts_ms - FOLLOW_SKEW_MS))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        if row.seq <= cursor.seq {
+            continue;
+        }
+        cursor.seq = row.seq;
+        out.push(row.line);
+    }
+    out
+}
+
+/// The cursor at connect: the newest committed seq among recent transition
+/// rows, so the stream starts after connect as today (0 when none).
+fn connect_cursor(journal: &std::path::Path, now_ms: i64) -> Cursor {
+    let mut cursor = Cursor {
+        seq: 0,
+        ts_ms: now_ms,
+    };
+    if let Ok(rows) =
+        crate::event_store::query_events(journal, &transition_query(now_ms - FOLLOW_SKEW_MS))
+    {
+        if let Some(last) = rows.last() {
+            cursor.seq = last.seq;
+        }
+    }
+    cursor
+}
 
 /// One normalized transition, reshaped from an `events.jsonl` line. `agent` is
 /// `None` for `inside_leg_report` (that event carries only `session_id`); the
@@ -141,11 +201,6 @@ struct Filters {
     want_exit: bool,
 }
 
-fn ino_of(m: std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    m.ino()
-}
-
 /// Classify one raw `events.jsonl` line, resolve its agent name, apply the
 /// filters, and emit one NDJSON transition. `reg` caches the registry for
 /// session_id->name resolution (refreshed on a miss); `last_state` tracks the
@@ -201,30 +256,6 @@ fn process_line(
     let _ = out.flush();
     if let Some(a) = agent {
         last_state.insert(a, t.state);
-    }
-}
-
-/// Drain every complete line currently readable from `file` (the fd we follow),
-/// feeding each to [`process_line`]. A trailing partial line is kept in `carry`.
-fn drain_fd(
-    file: &mut std::fs::File,
-    carry: &mut String,
-    home: &AgentsHome,
-    filters: &Filters,
-    reg: &mut Option<Registry>,
-    last_state: &mut HashMap<String, String>,
-) {
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() || buf.is_empty() {
-        return;
-    }
-    carry.push_str(&buf);
-    while let Some(nl) = carry.find('\n') {
-        let line: String = carry.drain(..=nl).collect();
-        let line = line.trim_end();
-        if !line.is_empty() {
-            process_line(line, home, filters, reg, last_state);
-        }
     }
 }
 
@@ -290,51 +321,18 @@ pub async fn run_subscribe(rest: &[String], home: &AgentsHome) -> i32 {
         want_exit,
     };
     let path = home.events_jsonl();
-    let mut carry = String::new();
     let mut last_state: HashMap<String, String> = HashMap::new();
     // Cache the registry for session_id->name resolution; refresh on a miss.
     let mut reg: Option<Registry> = state::load_registry(&home.registry_json()).ok();
 
-    // Follow by holding the fd open (tail -f semantics): reads continue on the
-    // CURRENT inode even after events.jsonl rotates to events.jsonl.1, so the
-    // rotated file's tail drains naturally and we only reopen when the active
-    // path resolves to a NEW inode. Start at EOF -- subscribe is a push stream of
-    // transitions after connect, not a history dump.
-    let mut file: Option<std::fs::File> = match std::fs::File::open(&path) {
-        Ok(mut f) => {
-            let _ = f.seek(SeekFrom::End(0));
-            Some(f)
-        }
-        Err(_) => None,
-    };
-    let mut fd_ino: Option<u64> = file.as_ref().and_then(|f| f.metadata().ok()).map(ino_of);
+    // Follow the store by seq: start after connect -- subscribe is a push
+    // stream of transitions after connect, not a history dump.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut cursor = connect_cursor(&path, now_ms);
 
     loop {
-        // The file may not exist yet at startup; open it (from its start) once
-        // it appears -- there is no history to skip on a freshly created file.
-        if file.is_none() {
-            if let Ok(f) = std::fs::File::open(&path) {
-                fd_ino = f.metadata().ok().map(ino_of);
-                file = Some(f);
-            }
-        }
-        // Drain everything currently available on the fd we follow.
-        if let Some(f) = &mut file {
-            drain_fd(f, &mut carry, home, &filters, &mut reg, &mut last_state);
-        }
-        // Rotation: the active path now resolves to a different inode than our
-        // fd. We just drained our fd to the old inode's true EOF, so reopen and
-        // follow the new active file from its start (no event lost at the seam).
-        let path_ino = std::fs::metadata(&path).ok().map(ino_of);
-        if path_ino.is_some() && path_ino != fd_ino {
-            carry.clear();
-            match std::fs::File::open(&path) {
-                Ok(f) => {
-                    fd_ino = path_ino;
-                    file = Some(f);
-                }
-                Err(_) => file = None,
-            }
+        for line in poll(&path, &mut cursor) {
+            process_line(&line, home, &filters, &mut reg, &mut last_state);
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -441,5 +439,63 @@ mod tests {
         assert_eq!(t.session_id.as_deref(), Some("sid-1"));
         assert_eq!(t.state, "blocked");
         assert_eq!(t.seq, Some(3));
+    }
+
+    fn stamp_rfc3339(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    #[test]
+    fn poll_streams_a_row_committed_after_the_cursor() {
+        // AC8-HP: the connect cursor skips pre-connect rows; one post-connect
+        // commit streams once.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let pre = json!({"ts": stamp_rfc3339(now_ms - 5_000), "type": "inside_leg_report",
+            "source": "daemon", "data": {"session_id": "s0", "state": "working"}});
+        crate::event_store::append_envelope(&journal, &pre.to_string(), None).unwrap();
+        let mut cursor = connect_cursor(&journal, now_ms);
+        let post = json!({"ts": stamp_rfc3339(now_ms + 5_000), "type": "inside_leg_report",
+            "source": "daemon", "data": {"session_id": "s1", "state": "blocked"}});
+        crate::event_store::append_envelope(&journal, &post.to_string(), None).unwrap();
+        let lines = poll(&journal, &mut cursor);
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the post-connect row streams: {lines:?}"
+        );
+        assert!(lines[0].contains("s1"), "{lines:?}");
+        assert!(
+            poll(&journal, &mut cursor).is_empty(),
+            "delivered rows never repeat"
+        );
+    }
+
+    #[test]
+    fn poll_survives_a_missing_store_and_recovers() {
+        // AC8-ERR
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut cursor = Cursor {
+            seq: 0,
+            ts_ms: now_ms,
+        };
+        assert!(
+            poll(&journal, &mut cursor).is_empty(),
+            "no store reads as nothing"
+        );
+        let row = json!({"ts": stamp_rfc3339(now_ms + 1_000), "type": "screen_state_change",
+            "source": "daemon", "data": {"name": "wkA", "state": "working"}});
+        crate::event_store::append_envelope(&journal, &row.to_string(), None).unwrap();
+        let lines = poll(&journal, &mut cursor);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the next poll after the store appears: {lines:?}"
+        );
     }
 }

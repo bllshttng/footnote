@@ -616,6 +616,20 @@ fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     (events, ledger)
 }
 
+/// The two kinds that mark a question open or answered, wherever the family
+/// of question readers folds them.
+pub(crate) const QUESTION_TYPES: &[&str] = &["operator_question", "operator_question_closed"];
+
+/// The event kinds `fold` matches, beside the question pair.
+pub(crate) const NEEDS_TYPES: &[&str] = &[
+    "operator_question",
+    "operator_question_closed",
+    "mail_escalation",
+    "loop_check",
+    "termination",
+    "loop_terminated",
+];
+
 /// One store's read outcome for the `--items` sources readout. A store that
 /// exists and fails to read is `readable: false`; the output never shows an
 /// empty `items` as a clean read.
@@ -644,7 +658,10 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
             .and_then(|n| n.to_str())
             .unwrap_or("journal")
             .to_string();
-        match std::fs::read_to_string(&path) {
+        match crate::event_store::journal_text_checked(
+            &path,
+            &crate::event_store::EventQuery::of_types(NEEDS_TYPES),
+        ) {
             Ok(content) => {
                 sources.push(SourceRead {
                     store,
@@ -655,14 +672,6 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
                 if !content.ends_with('\n') {
                     journals_raw.push('\n');
                 }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // A store that does not exist yet is not a failed read.
-                sources.push(SourceRead {
-                    store,
-                    readable: true,
-                    error: None,
-                });
             }
             Err(e) => sources.push(SourceRead {
                 store,
@@ -800,10 +809,9 @@ pub(crate) fn held_nodes(journals: &[PathBuf]) -> std::collections::BTreeMap<Str
 pub(crate) fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
     let mut raw = String::new();
     for path in journals {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            raw.push_str(&content);
-            raw.push('\n');
-        }
+        let content = crate::event_store::journal_text(path, crate::needs::QUESTION_TYPES);
+        raw.push_str(&content);
+        raw.push('\n');
     }
     held_rows_from_raw(&raw)
 }
@@ -1276,20 +1284,9 @@ pub fn collect_needs_items(
 ) -> Vec<NeedItem> {
     let mut events_raw = String::new();
     for p in event_paths {
-        // questions.jsonl is NOT an events store: the inbox owns those rows,
-        // so its text feeds the fold unchanged. Event journals answer from
-        // committed rows in commit order; the import pulls any journal bytes
-        // a pre-cutover writer (or fixture) left.
-        let is_questions = p.file_name().and_then(|n| n.to_str()) == Some("questions.jsonl");
-        if is_questions {
-            if let Ok(content) = std::fs::read_to_string(p) {
-                events_raw.push_str(&content);
-                if !content.ends_with('\n') {
-                    events_raw.push('\n');
-                }
-            }
-            continue;
-        }
+        // Every source journal — questions.jsonl included — answers from
+        // committed rows in commit order now; the import inside `event_lines`
+        // pulls any journal bytes a pre-cutover writer (or fixture) left.
         if let Ok(lines) = crate::loopcheck::event_lines(p) {
             for line in lines {
                 events_raw.push_str(&line);
@@ -2423,5 +2420,30 @@ mod tests {
             crate::claims::ClaimState::Stale,
         )];
         assert!(stale_claim_item(&claims, now_ms).is_none());
+    }
+
+    #[test]
+    fn held_rows_read_a_store_committed_question() {
+        // AC11-HELD: an open store-only question holds the node; a store-only
+        // close releases it.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let ask = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-1"], "question": "proceed?"}
+        });
+        crate::event_store::append_envelope(&journal, &ask.to_string(), None).unwrap();
+        let held = held_rows(&[journal.clone()]);
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(held[0].node, "x-1");
+        let close = serde_json::json!({
+            "ts": "2026-09-17T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "data": {"question_id": "q-1"}
+        });
+        crate::event_store::append_envelope(&journal, &close.to_string(), None).unwrap();
+        assert!(
+            held_rows(&[journal]).is_empty(),
+            "the close releases the node"
+        );
     }
 }

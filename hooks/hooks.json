@@ -69,7 +69,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/truncation-guard.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pipe-guard.sh"
           },
           {
             "type": "command",
