@@ -324,7 +324,7 @@ def _journal_events(events_path):
 
 @requires_rust
 def test_ask_records_the_answer_text_on_clear(root: Path):
-    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1, "--ask", "finish the lane"]
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
     runner.invoke(outstanding_app, ["clear", qid, "--answer", "the codex lane"])
     lines = [
         json.loads(line)
@@ -1138,7 +1138,7 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
             "89abcdef-full-session", "codex", (), "single"
         ),
     )
-    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1, "--ask", "finish the lane"]
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
     recorded: dict[str, object] = {}
 
     def record_decision(**kwargs):
@@ -1191,7 +1191,7 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
 
     # A withdrawal (no --answer) decides nothing: positive control is the
     # closed event itself, the decision count stays at one from the ask above.
-    qid2 = runner.invoke(outstanding_app, ["ask", "second question?"]).stdout.strip().splitlines()[-1, "--ask", "finish the lane"]
+    qid2 = runner.invoke(outstanding_app, ["ask", "second question?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
     runner.invoke(outstanding_app, ["clear", qid2])
     lines = [
         json.loads(line)
@@ -1348,7 +1348,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     "nothing outstanding". Asserts the positive outcome (the question is still
     found among 20k unrelated rows) plus a wall-clock ceiling.
     """
-    qid = runner.invoke(outstanding_app, ["ask", "buried under noise?"]).stdout.strip().splitlines()[-1, "--ask", "finish the lane"]
+    qid = runner.invoke(outstanding_app, ["ask", "buried under noise?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
     events = project_log("events.jsonl", project_root=root)
     noise = json.dumps(
         {"ts": "2026-08-01T00:00:00Z", "type": "phase_transition", "source": "target",
@@ -1369,7 +1369,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
 
 @requires_rust
 def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
-    qid = runner.invoke(outstanding_app, ["ask", "still readable?"]).stdout.strip().splitlines()[-1, "--ask", "finish the lane"]
+    qid = runner.invoke(outstanding_app, ["ask", "still readable?", "--ask", "finish the lane"]).stdout.strip().splitlines()[-1]
     events = project_log("events.jsonl", project_root=root)
     with events.open("a", encoding="utf-8") as fh:
         fh.write("{not json at all\n")
