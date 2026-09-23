@@ -5,7 +5,7 @@
 //! JSON (post-process). No transcript is read here, and no model runs here.
 
 use crate::intel::SessionRow;
-use chrono::TimeZone;
+use chrono::{TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -155,8 +155,6 @@ pub(crate) fn hours(rows: &[SessionRow]) -> Value {
         "operator_turns": buckets,
     })
 }
-
-use chrono::Timelike;
 
 /// Response time over every kept gap: count, median, p90, and the seven
 /// named buckets.
