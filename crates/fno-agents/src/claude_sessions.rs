@@ -239,6 +239,50 @@ pub(crate) fn session_record_holder(
     ))
 }
 
+/// The `reentry-plan holder <session-id>...` action body: one holder read
+/// per id over the ambient record dirs, one JSON object on stdout keyed by
+/// session id. Exit 0 whenever it printed; the caller reads `held`, never
+/// the exit code.
+pub fn run_holder_action(session_ids: &[String]) -> i32 {
+    let dirs = session_record_dirs();
+    let mut out = serde_json::Map::new();
+    for sid in session_ids {
+        let answer = session_record_holder(&dirs, sid, &|pid| {
+            crate::claims::process_create_time_ms(pid as i32)
+        });
+        out.insert(sid.clone(), holder_json(&answer));
+    }
+    println!("{}", Value::Object(out));
+    0
+}
+
+/// The wire shape one holder read prints: `held` maps Held|NotHeld|Unmeasured
+/// to true|false|null, `proven` rides only a verified match, and `pid` is
+/// named when the read knows one. Pure so tests pin it without a filesystem.
+fn holder_json(holder: &crate::pane_stop::SessionHolder) -> Value {
+    let (held, proven, pid, why) = match holder {
+        crate::pane_stop::SessionHolder::Held { pid, proven, why } => (
+            Value::from(true),
+            Value::from(*proven),
+            pid.map(|p| Value::from(p)).unwrap_or(Value::Null),
+            Value::from(why.as_str()),
+        ),
+        crate::pane_stop::SessionHolder::NotHeld(why) => (
+            Value::from(false),
+            Value::from(false),
+            Value::Null,
+            Value::from(why.as_str()),
+        ),
+        crate::pane_stop::SessionHolder::Unmeasured(why) => (
+            Value::Null,
+            Value::from(false),
+            Value::Null,
+            Value::from(why.as_str()),
+        ),
+    };
+    serde_json::json!({"held": held, "proven": proven, "pid": pid, "why": why})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +568,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Specimen measured 2026-09-23: a claude thread killed -9 and stopped
+    /// in fno, then resumed outside fno with `claude --resume`. The resumed
+    /// process's own record (cwd and display fields dropped) proves the
+    /// authority the registry falsifier must ask: kind interactive,
+    /// procStart equal to that pid's create time.
+    #[test]
+    fn a_session_resumed_outside_fno_is_held_by_its_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        stage(
+            &sessions,
+            "65491.json",
+            r#"{"pid":65491,"sessionId":"bb2731c9-ad46-4303-a80d-152c68e91a4e","startedAt":1790199219816,"procStart":"Wed Sep 23 21:33:39 2026","version":"2.1.281","kind":"interactive","entrypoint":"cli","pidDomain":"darwin"}"#,
+        );
+        let dirs = vec![sessions];
+        let answer = session_record_holder(&dirs, "bb2731c9-ad46-4303-a80d-152c68e91a4e", &|pid| {
+            if pid == 65491 {
+                Some(1_790_199_219_000)
+            } else {
+                None
+            }
+        });
+        assert!(
+            matches!(answer, SessionHolder::Held { proven: true, .. }),
+            "{answer:?}"
+        );
+    }
+
+    /// holder_json: Held prints held true with the proven flag and the pid
+    /// when the read knows one.
+    #[test]
+    fn holder_json_maps_held_to_true_with_proven_and_pid() {
+        let v = holder_json(&SessionHolder::Held {
+            pid: Some(65491),
+            proven: true,
+            why: "pid 65491 holds claude session bb2731c9".into(),
+        });
+        assert_eq!(v["held"], serde_json::json!(true));
+        assert_eq!(v["proven"], serde_json::json!(true));
+        assert_eq!(v["pid"], serde_json::json!(65491));
+        assert!(v["why"].as_str().unwrap().contains("65491"));
+    }
+
+    /// holder_json: a Held bg read carries no pid and still reads held true.
+    #[test]
+    fn holder_json_maps_a_bg_held_without_a_pid() {
+        let v = holder_json(&SessionHolder::Held {
+            pid: None,
+            proven: true,
+            why: "bg job".into(),
+        });
+        assert_eq!(v["held"], serde_json::json!(true));
+        assert_eq!(v["proven"], serde_json::json!(true));
+        assert!(v["pid"].is_null());
+    }
+
+    /// holder_json: NotHeld and Unmeasured never read held true - Unmeasured
+    /// prints held null, and neither is a cancellation.
+    #[test]
+    fn holder_json_never_reads_unmeasured_or_not_held_as_held() {
+        let not_held = holder_json(&SessionHolder::NotHeld("no record".into()));
+        assert_eq!(not_held["held"], serde_json::json!(false));
+        assert_eq!(not_held["proven"], serde_json::json!(false));
+        assert!(not_held["pid"].is_null());
+
+        let unmeasured = holder_json(&SessionHolder::Unmeasured("procStart bad".into()));
+        assert_eq!(unmeasured["held"], serde_json::json!(null));
+        assert_eq!(unmeasured["proven"], serde_json::json!(false));
+        assert!(unmeasured["pid"].is_null());
     }
 }
