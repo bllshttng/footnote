@@ -175,6 +175,7 @@ fn run_null_with_env(
         .args(["resume", &row.command_id])
         .args(extra)
         .env_clear()
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", &fixture.home)
         .env("HOME", fixture.root.path())
         .env("PATH", path)
@@ -198,6 +199,9 @@ fn run_terminal(fixture: &Fixture, row: &Row, path: &Path) -> (u32, String) {
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_fno-agents"));
     command.args(["resume", row.command_id.as_str()]);
     command.env_clear();
+    for (key, value) in fno_agents::test_run::self_owner_env() {
+        command.env(key, value);
+    }
     command.env("FNO_AGENTS_HOME", &fixture.home);
     command.env("HOME", fixture.root.path());
     command.env("PATH", path);
@@ -224,7 +228,11 @@ fn each_contract_harness_prints_its_interactive_resume_form() {
             row.substrate,
             String::from_utf8_lossy(&output.stderr)
         );
-        let form_session_id = row.short_id.as_deref().unwrap_or(&row.resume_id);
+        let form_session_id = if row.harness == "claude" {
+            &row.resume_id
+        } else {
+            row.short_id.as_deref().unwrap_or(&row.resume_id)
+        };
         let rendered = contract
             .render_session_argv_raw(row.harness, "interactive_resume", Some(form_session_id))
             .unwrap();
@@ -345,6 +353,7 @@ fn terminal_missing_binary_and_rowless_session_refusals_are_actionable() {
     let output = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["resume", session_id])
         .env_clear()
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", &fixture.home)
         .env("HOME", fixture.root.path())
         .env("PATH", &empty_path)
@@ -361,6 +370,7 @@ fn terminal_missing_binary_and_rowless_session_refusals_are_actionable() {
     let output = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["resume", "ghost"])
         .env_clear()
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", &fixture.home)
         .env("HOME", fixture.root.path())
         .env("PATH", &empty_path)

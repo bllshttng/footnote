@@ -14,6 +14,10 @@ use crate::truth_probe::family1_truth_state;
 use serde_json::Value;
 use std::path::Path;
 
+/// Test TTL override for exercising expiry on a resume claim.
+#[cfg(test)]
+pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
+
 /// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
 /// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
 /// by the resumed claude and self-releases when the operator quits (no explicit
@@ -22,16 +26,6 @@ use std::path::Path;
 /// one transcript - the residual double-writer window the liveness probe alone
 /// cannot close. `root` is `None` in prod (session: keys route to
 /// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
-/// How long the session single-writer claim guards a mux-pane relaunch.
-/// The launching process exits once the pane is up, so the claim cannot ride
-/// the holder pid the way the in-terminal exec's does (a PID-only claim goes
-/// Stale the moment that pid dies, so a second resumer would steal it before
-/// the resumed claude is probe-live). This TTL keeps the claim Live across
-/// that launch-to-probe-live window; once claude is probe-live the truth probe
-/// (not this claim) stops a second relaunch. Picked wide against slow startup;
-/// after it expires, a crashed worker can be re-resumed rather than blocked.
-pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
-
 pub(crate) fn acquire_resume_session_claim(
     uuid: &str,
     root: Option<&Path>,

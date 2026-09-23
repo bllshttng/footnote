@@ -74,6 +74,22 @@ pub(crate) fn print_resume_command(
     contract: &HarnessContract,
     route: &ResumeRoute,
 ) -> i32 {
+    let form_session_id = if harness == "claude" {
+        // Claude's short id is a transport key; its resume command needs the UUID.
+        entry
+            .get("claude_session_uuid")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                entry
+                    .get("harness_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+            })
+            .unwrap_or(form_session_id)
+    } else {
+        form_session_id
+    };
     if form_session_id.is_empty() {
         eprintln!(
             "fno agents resume: agent {} has no recorded session_id for harness {}.",

@@ -41,20 +41,6 @@ pub(crate) fn mesh_identity_assignments(
     Ok(pairs.iter().map(|(k, v)| format!("{k}={v}")).collect())
 }
 
-/// A row relaunches onto its mux pane when it HAS one and a session id to
-/// relaunch with. Keyed on evidence the registry row carries, never on a
-/// harness name (law d-dbf83820): `mux_spawn` writes the mux ref for every
-/// `--substrate pane` row, and the empty-`session_id` refusal for a harness
-/// whose resume needs one already ran before this predicate is consulted
-/// (: this replaces the `harness == "claude"` narrowing that sent every
-/// non-claude pane row to the in-terminal exec).
-pub(crate) fn pane_relaunch_target<'a>(
-    mux_session: Option<&'a str>,
-    resume_id: &str,
-) -> Option<&'a str> {
-    mux_session.filter(|_| !resume_id.is_empty())
-}
-
 /// The row name a relaunched pane may carry as `--worker`, or `None` when the
 /// name cannot ride the flag: the mux server validates it with the same
 /// registry charset (`[A-Za-z0-9._-]`, <= 64 chars) and refuses the WHOLE
@@ -153,8 +139,7 @@ pub(crate) fn mux_pane_run_failure_message(
 
 /// How long a relaunched pane gets to prove the worker stayed up (mirrors
 /// `_BINDING_WINDOW_S` in mux_spawn.py), and how often it is polled
-/// (`_BINDING_POLL_S`). Both fit inside `MUX_RESUME_CLAIM_TTL_MS` (120s) and
-/// the watchdog's 180s resume timeout.
+/// (`_BINDING_POLL_S`). Both fit inside the watchdog's 180s resume timeout.
 const PANE_PROOF_WINDOW: Duration = Duration::from_secs(8);
 const PANE_PROOF_POLL: Duration = Duration::from_millis(750);
 
@@ -1585,19 +1570,6 @@ mod tests {
         assert_eq!(worker_token(""), None);
         assert_eq!(worker_token(&"x".repeat(65)), None);
         assert_eq!(worker_token("x"), Some("x"));
-    }
-
-    #[test]
-    fn pane_relaunch_target_keys_on_evidence_not_harness() {
-        // AC1: a row with a mux ref and a session id takes the pane; the same
-        // row without an id (the empty-session-id guard already refused for
-        // harnesses that need one, so this is defense in depth) and a row
-        // with no mux ref (thread lane) both answer None - keyed on the pair
-        // the branch consults, never on a harness name (AC1-OC).
-        assert_eq!(pane_relaunch_target(Some("main"), "sid-1"), Some("main"));
-        assert_eq!(pane_relaunch_target(Some("main"), ""), None);
-        assert_eq!(pane_relaunch_target(None, "sid-1"), None);
-        assert_eq!(pane_relaunch_target(None, ""), None);
     }
 
     #[test]
