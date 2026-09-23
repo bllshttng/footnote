@@ -132,7 +132,9 @@ fn addressed_config_dir(overlay_dir: Option<&Path>) -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude"))
+    // Use ClaudeHome's resolver for the default config root.
+    let projects_dir = crate::claude_ask::ClaudeHome::from_env().projects_dir();
+    projects_dir.parent().map(Path::to_path_buf)
 }
 
 fn is_temp_fixture_binary(path: &Path) -> bool {
@@ -469,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_temp_config_dir_refuses_a_real_binary() {
-        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
+        let config_dir = std::env::temp_dir().join("fno-supervisor-test/config");
         let claude_bin = Path::new("/usr/local/bin/claude");
 
         assert!(!birth_allowed(false, Some(&config_dir), Some(claude_bin)));
@@ -478,7 +480,7 @@ mod tests {
     #[test]
     fn a_temp_fixture_binary_still_births() {
         let temp = tempfile::tempdir().unwrap();
-        let config_dir = temp.path().join(".claude");
+        let config_dir = temp.path().join("config");
         let claude_bin = temp.path().join("bin/claude");
         std::fs::create_dir_all(claude_bin.parent().unwrap()).unwrap();
         std::fs::write(&claude_bin, "fixture").unwrap();
@@ -503,7 +505,7 @@ mod tests {
 
     #[test]
     fn a_real_config_dir_keeps_the_guard() {
-        let config_dir = Path::new("/Users/someone/.claude");
+        let config_dir = Path::new("/Users/someone/claude-config");
         let claude_bin = Path::new("/usr/local/bin/claude");
 
         assert!(birth_allowed(false, Some(config_dir), Some(claude_bin)));
@@ -511,14 +513,14 @@ mod tests {
 
     #[test]
     fn no_claude_on_path_under_a_temp_dir_is_refused() {
-        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
+        let config_dir = std::env::temp_dir().join("fno-supervisor-test/config");
 
         assert!(!birth_allowed(false, Some(&config_dir), None));
     }
 
     #[test]
     fn a_hermetic_run_refuses_a_real_binary_for_a_real_dir() {
-        let config_dir = Path::new("/Users/someone/.claude");
+        let config_dir = Path::new("/Users/someone/claude-config");
         let claude_bin = Path::new("/usr/local/bin/claude");
         let temp = tempfile::tempdir().unwrap();
         let fixture_bin = temp.path().join("bin/claude");
