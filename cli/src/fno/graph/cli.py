@@ -1414,8 +1414,6 @@ def _fold_candidates(
         )
     if ranked.degraded and ranked.warning:
         source = f"{source}; degraded: {ranked.warning}"
-    # A live plan surface is an independent fold signal when the filing names
-    # one of the same files. The claim holder comes from the lockfile projection.
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
@@ -3190,19 +3188,6 @@ def cmd_update(
         ),
     ),
 ) -> None:
-    retired_claim_flags = {"by", "by-harness", "by-harness-session"}
-    if any(
-        arg.startswith("--locked-")
-        and arg.removeprefix("--locked-").split("=", 1)[0] in retired_claim_flags
-        for arg in (ctx.args or [])
-    ):
-        typer.echo(
-            "Error: node claim fields are derived from lockfiles. Use: "
-            f"fno agents claim acquire node:{task_id} --holder <holder>",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
     # the patch door first; lifecycle.forward_update_door owns the rest.
     door_args = list(ctx.args or [])
     from fno.graph.lifecycle import DOOR_FLAGS, forward_update_door, refuse_stray_update_flags
@@ -3888,13 +3873,12 @@ def cmd_unclaim(
         ..., help="Node id to free (reverts claimed -> ready, releases the lockfile)"
     ),
 ) -> None:
-    """Release a stale or own node lockfile claim."""
     from fno.backlog.requeue import _unclaim_node
 
     _unclaim_node(task_id)
 
 
-@cli.command("requeue", hidden=True, epilog="Paired verb: fno agents claim status node:<node> reads the holder; requeue releases a gone holder's lockfile.")
+@cli.command("requeue", hidden=True)
 def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
@@ -4101,7 +4085,7 @@ def cmd_next(
             pre_entries = _joined_open_candidates()
         else:
             pre_entries = None
-            if (not project_filter and not all_) or parent:
+            if (not project_filter and not all_) or parent or claim:
                 pre_entries = _read_entries()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
@@ -4109,7 +4093,6 @@ def cmd_next(
     if not project_filter and not all_:
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
-
     # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4424
     parent_target_id: Optional[str] = None
     if parent:
@@ -4123,14 +4106,6 @@ def cmd_next(
             typer.echo(f"no children under {parent_target_id}", err=True)
 
     def _select(entries, occupancy):
-        """One call into the native leg: survivors, in selection order.
-
-        The admission set, the narrowing cascade, and the ranking are the
-        keeper verb's (backlog_ready::select); `next` takes rows[0] of the
-        same answer its sibling verb serves, so the two surfaces cannot
-        drift. `entries` and `occupancy` ride in so the keeper never re-reads
-        claims this command already has.
-        """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
             ClaimsUnavailableError,
@@ -4260,30 +4235,28 @@ def cmd_next(
         return merged
 
     if claim:
-        # One claim path for graph and external trackers. Contention falls
-        # through to the next ranked candidate; the graph never stores a copy.
-        from fno.claims.cli import _parse_ttl
-        from fno.claims.core import ClaimHeldByOther, acquire_claim
-        from fno.claims.io import claims_root_for
+        if pre_entries is not None:
+            from fno.claims.cli import _parse_ttl
+            from fno.claims.core import ClaimHeldByOther, acquire_claim
+            from fno.claims.io import claims_root_for
 
-        entries = pre_entries if _external else _read_entries()
-        occupied, observer = _prepare(entries)
-        candidates = _with_observer(
-            _select(entries, occupied), entries, occupied, observer
-        )
-        for winner in candidates:
-            key = f"node:{winner['id']}"
-            try:
-                acquire_claim(
-                    key,
-                    claim,
-                    ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
-                    root=claims_root_for(key),
-                )
-            except ClaimHeldByOther:
-                continue
-            result[0] = _dispatch_node_summary(winner)
-            break
+            occupied, observer = _prepare(pre_entries)
+            candidates = _with_observer(
+                _select(pre_entries, occupied), pre_entries, occupied, observer
+            )
+            for winner in candidates:
+                key = f"node:{winner['id']}"
+                try:
+                    acquire_claim(
+                        key,
+                        claim,
+                        ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
+                        root=claims_root_for(key),
+                    )
+                except ClaimHeldByOther:
+                    continue
+                result[0] = _dispatch_node_summary(winner)
+                break
     else:
         if _external:
             assert pre_entries is not None
@@ -10802,8 +10775,6 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # The plan link and claim lockfile determine the projected status and
-        # holder; intake does not write claim fields.
         break
     return es
 

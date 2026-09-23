@@ -6,18 +6,7 @@ module is a thin namespace beside ``node:``/``dispatch:``/``walker:``/
 ``lane-slot:``. Repo-local like lane slots (the prefix is not a global-id
 prefix), so every worktree of the project's repo coordinates on one store.
 
-The claim IS the status transition, never a standalone verb a worker calls
-first: the backlog ``task update`` sub-typer takes it inside
-``pending -> in_progress`` and releases it on ``done``. A resolved session PID
-keeps pure PID liveness (``ttl_ms=None``); a thread session with no PID records
-``pid_unavailable`` under a bounded lease, and its session witness keeps it
-live past expiry. ``acquire_claim``'s stale-recovery step archives a dead
-claim and retries. The holder is the FULL
-harness session id, or the roster name ``fno agents spawn`` exports as
-``FNO_WORKER_NAME`` (a spawned worker's provable per-worker identity when a
-session id is shared or absent) - a codex UUIDv7 head-8 is a ~65.5s clock
-bucket, so two codex workers spawned in one minute would share a handle and
-the second would re-acquire the first's task as idempotent.
+The claim is the status transition: ``task update`` acquires inside ``pending -> in_progress`` and releases on ``done``. PID-backed claims use pure PID liveness; pid-less threads get a two-hour lease. Holders are full session ids or ``FNO_WORKER_NAME`` (never UUIDv7 head-8).
 """
 from __future__ import annotations
 
@@ -50,16 +39,7 @@ def acquire_task(
     harness: Optional[str] = None,
     root: Optional[Path] = None,
 ) -> Claim:
-    """Claim a task for ``holder`` with PID liveness or a pid-less lease.
-
-    ``pid`` is the durable harness session pid (``resolve_session_pid``). If
-    it is unavailable, the claim records ``pid_unavailable`` under
-    ``TASK_CLAIM_TTL_MS`` instead of anchoring to the short-lived CLI process.
-    Raises
-    :class:`fno.claims.core.ClaimHeldByOther` naming the live holder when a
-    peer owns the task, :class:`fno.claims.core.ClaimContended` when the
-    recovery mutex stays busy past its retry budget.
-    """
+    """Claim with PID liveness or a pid-less two-hour lease."""
     return acquire_claim(
         key=task_key(node_id, task_id),
         holder=holder,

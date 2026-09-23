@@ -124,15 +124,6 @@ def _gave_up(reason: str) -> _Outcome:
 
 
 class _Failed(int):
-    """A falsy ``_redispatch`` result that says which step missed.
-
-    ``_redispatch`` answers ``True`` or falsy, and every caller tests it with
-    ``is True`` or a truth check. An ``int``
-    subclass valued 0 keeps all of that exact: it is falsy, it equals
-    ``False``, and it is never ``is True``. The reason rides along so the
-    caller can name the branch instead of reporting a bare no.
-    """
-
     reason: str
 
     def __new__(cls, reason: str) -> "_Failed":
@@ -874,8 +865,6 @@ def _redispatch(
     Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
-    actually launched. The child acquires its node claim during target init.
-
     With no ``flags``, the caller guarantees the new active provider's cli is
     ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
     selects the now-active claude record the swap installed in settings.yaml.
@@ -989,8 +978,6 @@ def _redispatch(
             env={**os.environ, "TARGET_NO_MERGE": "1"},
         )
         if proc.returncode != 0:
-            # No replacement worker started: the node claim is already freed
-            # above. Free any dispatch-time lane slot so lane-fill can retry.
             _release_lane_slot(node, cwd)
             return False
         _alias_predecessor(agent, name)

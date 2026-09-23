@@ -1301,13 +1301,6 @@ def cmd_apply(
             node = by_id.get(d["id"])
             if node is None:
                 continue
-            if node.get("locked_by"):
-                locked_errors_holder[0].append(
-                    f"{node['id']} has a node claim held by {node['locked_by']}; "
-                    f"release it with fno agents claim release node:{node['id']} "
-                    "--holder <holder> before triage defer"
-                )
-                continue
             # Clear completed_at so the deferred cascade can take effect.
             # Without this, deferring an already-done node would keep the
             # row pinned to status: done because of the `done > deferred`

@@ -2653,7 +2653,6 @@ def run_pass(
                     if n.get("completed_at") or n.get("deferred_at"):
                         continue  # raced to done/deferred; leave it
                     reason = cand.reason()
-                    # Clear completion so the cascade derives status from the defer.
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = reason
