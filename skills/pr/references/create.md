@@ -132,11 +132,11 @@ Proceed to push (user has chosen not to have CI).
 ### 3. Push Branch
 
 ```bash
-# Fetch, rebase onto origin/main, preflight, push once
+# Fetch, bring in origin/main (rebase, or merge when the branch holds merges), preflight, push once
 fno do pr push
 ```
 
-Handle the verb's refusals like any other refusal here. Exit 3 names the thing to fix: a protected branch, a dirty tree, or a conflict. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red. Do not open the PR yet.
+Handle the verb's refusals like any other refusal here. Exit 3 names the thing to fix: a protected branch, a dirty tree, or a conflict. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. A branch that already merges origin/main uses merge, not rebase. If that merge conflicts, abort it. Merge origin/main by hand, commit, then re-run the push. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red. Do not open the PR yet.
 
 ### 4. Generate PR Description from Commits
 
