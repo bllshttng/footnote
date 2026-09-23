@@ -59,13 +59,12 @@ class CrownTarget:
 def _crowned(
     court_fn: Callable, rows_fn: Optional[Callable] = None
 ) -> tuple[list[CrownTarget], str]:
-    """Crowned scopes root rowless holders at their manifest's owner_cwd;
-    every dropped crown is named with its scope."""
+    """Crowned scopes use registry rows for roots; drops are named by scope."""
     if rows_fn is None:
         from fno.agents.registry import load_registry
 
         rows_fn = load_registry
-    from fno.king.state import king_manifest_path, king_state_root, parse_manifest
+    from fno.king.state import king_manifest_path, king_state_root
 
     rows = rows_fn()
     by_holder = {row.name: row for row in rows}
@@ -93,12 +92,8 @@ def _crowned(
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
-        swept = entries[0].get("manifest_path") if row is None else None
-        if swept:
-            cwd = parse_manifest(Path(swept)).get("owner_cwd") or ""
         if not cwd:
-            why = "manifest unreadable or no owner_cwd" if swept else "unregistered holder"
-            dropped.append(f"{scope}: {why}")
+            dropped.append(f"{scope}: unregistered holder")
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
@@ -110,9 +105,6 @@ def _crowned(
             continue
         if not manifest.is_file():
             dropped.append(f"{scope}: manifest missing at {manifest}")
-            continue
-        if swept and manifest.resolve() != Path(swept).resolve():
-            dropped.append(f"{scope}: owner_cwd resolves {manifest}, not {swept}")
             continue
         out.append(
             CrownTarget(
