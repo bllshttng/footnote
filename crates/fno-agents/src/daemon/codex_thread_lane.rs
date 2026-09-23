@@ -295,7 +295,7 @@ async fn resolve_target_cwd(cwd: &Path, node: Option<&str>, seed: &str) -> Resul
     let ensured = {
         let node = node_owned.clone();
         tokio::task::spawn_blocking(move || {
-            if !crate::launch_workdir::is_canonical_checkout(&requested) {
+            if !crate::canonical_check::is_canonical_checkout(&requested) {
                 return Ok(requested);
             }
             crate::launch_workdir::ensure_node_workdir(&requested, &node, "codex")
