@@ -360,7 +360,7 @@ def test_rank_band_excludes_bool_and_nonfinite():
 
 def test_render_md_tolerates_huge_int_rank(tmp_path):
     """A huge-int rank (hand-edited graph.json) must not raise out of the render
-    path: render fires inside locked_mutate_graph and only OSError is swallowed."""
+    path: render fires inside commit_rows_via_store and only OSError is swallowed."""
     entries = [_entry("ab-rb000020", project="web", priority="p1", rank=10**400)]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)  # must not raise OverflowError

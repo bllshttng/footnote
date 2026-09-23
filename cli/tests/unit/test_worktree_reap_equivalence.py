@@ -36,10 +36,13 @@ def _gate_binary():
         REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents",
         REPO_ROOT / "target" / "debug" / "fno-agents",
     ):
-        if cand.is_file():
+        # Executability, not existence: the changed lane's scrub leaves
+        # non-executable files behind, and a pinned non-executable path makes
+        # every probe read as probe-failed rather than as "nothing to pin".
+        if cand.is_file() and os.access(cand, os.X_OK):
             return cand
     found = resolve_binary()
-    if found is None:
+    if found is None or not os.access(found, os.X_OK):
         pytest.skip(
             "no fno-agents binary resolves; the gate corpus runs in the cargo "
             "suite, this lane only pins bash/binary agreement"
@@ -139,6 +142,22 @@ CORPUS = [
 ]
 
 
+def _gate_env() -> dict:
+    """The child env with the gate pinned to the binary this module tested.
+
+    The changed lane scrubs target/ mid-job, so a child that re-resolves
+    through $PATH or a stale target path answers nothing; the lib then
+    synthesizes probe-failed and every not-blocked row flips. With no LIVE
+    binary at all there is nothing to pin, and inheriting the parent env
+    would hand the script a dead FNO_AGENTS_BIN to probe-fail on, so the
+    test skips exactly like the corpus tests above do.
+    """
+    binary = _gate_binary()
+    if binary is None:
+        pytest.skip("no live fno-agents binary: bash/binary agreement is unpinnable")
+    return dict(os.environ, FNO_AGENTS_BIN=str(binary))
+
+
 def _bash_verdict(path: Path) -> bool:
     """Run the shared bash helper exactly as both bash call sites do."""
     script = (
@@ -150,6 +169,7 @@ def _bash_verdict(path: Path) -> bool:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        env=_gate_env(),
     )
     assert "YES" in r.stdout or "NO" in r.stdout, f"helper emitted nothing: {r.stderr}"
     return "YES" in r.stdout
@@ -169,6 +189,7 @@ def _archive_script_verdict(path: Path) -> bool:
         text=True,
         cwd=str(REPO_ROOT),
         timeout=60,
+        env=_gate_env(),
     )
     # POSITIVE CONTROL. A "not blocked" verdict must mean the script reached and
     # passed the check, never that it bailed earlier for an unrelated reason.
@@ -188,7 +209,7 @@ def _archive_script_verdict(path: Path) -> bool:
 
 
 @pytest.mark.parametrize("name,mutate,expected", CORPUS, ids=[c[0] for c in CORPUS])
-def test_gate_binary_and_bash_agree(tmp_path: Path, name: str, mutate, expected: bool) -> None:
+def test_gate_binary_and_bash_agree(tmp_path: Path, name: str, mutate, expected: bool, native_backlog_door) -> None:
     repo = _make_repo(tmp_path / name)
     mutate(repo)
 
@@ -200,7 +221,7 @@ def test_gate_binary_and_bash_agree(tmp_path: Path, name: str, mutate, expected:
 
 
 @pytest.mark.parametrize("name,mutate,expected", CORPUS, ids=[c[0] for c in CORPUS])
-def test_archive_script_agrees(tmp_path: Path, name: str, mutate, expected: bool) -> None:
+def test_archive_script_agrees(tmp_path: Path, name: str, mutate, expected: bool, native_backlog_door) -> None:
     repo = _make_repo(tmp_path / name)
     mutate(repo)
 
@@ -210,10 +231,14 @@ def test_archive_script_agrees(tmp_path: Path, name: str, mutate, expected: bool
     # pins those). `unborn` is the one corpus row where that diverges.
     expected_archive = True if name == "unborn" else expected
 
-    assert _archive_script_verdict(repo) == expected_archive
+    actual = _archive_script_verdict(repo)
+    assert actual == expected_archive, (
+        f"{name}: archive verdict {actual} != corpus {expected_archive}; "
+        f"FNO_AGENTS_BIN={os.environ.get('FNO_AGENTS_BIN', '<unset>')}"
+    )
 
 
-def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
+def test_deletions_only_worktree_is_actually_removed(tmp_path: Path, native_backlog_door) -> None:
     """Clearing the predicate is not enough: the removal must SUCCEED.
 
     `git worktree remove` counts a tracked file missing from disk as "modified"
@@ -232,11 +257,14 @@ def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
         capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
     )
 
-    assert r.returncode == 0, f"archive failed: {r.stderr}"
+    assert r.returncode == 0, (
+        "archive failed: "
+        f"{r.stderr}\nFNO_AGENTS_BIN={os.environ.get('FNO_AGENTS_BIN', '<unset>')}"
+    )
     assert not repo.exists(), "predicate passed but the worktree is still on disk"
 
 
-def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path) -> None:
+def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path, native_backlog_door) -> None:
     """A gate that cannot answer must never read as permission.
 
     An absence of "no" is not a yes. This drives the helper with a binary
@@ -265,7 +293,7 @@ def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path) -> None
     assert "probe-failed" in r.stdout
 
 
-def test_gate_binary_emits_the_grammar_the_callers_parse(tmp_path: Path) -> None:
+def test_gate_binary_emits_the_grammar_the_callers_parse(tmp_path: Path, native_backlog_door) -> None:
     """Pin the receipt grammar at its one source: the gate binary.
 
     The bash helper keys on `reapable=yes` with exit 0 and `reapable=no` on
@@ -307,7 +335,7 @@ TOKEN_CASES = [
 
 
 @pytest.mark.parametrize("branch,expected", TOKEN_CASES, ids=[c[0] for c in TOKEN_CASES])
-def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expected):
+def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expected, native_backlog_door):
     from fno.pr.closure import branch_node_ids
 
     assert branch_node_ids(branch) == expected, "the Python producer moved under the corpus"
@@ -324,7 +352,19 @@ def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expect
 
     home = tmp_path / "graph-home" / "agents"
     home.mkdir(parents=True)
-    rows = [{"id": tok, "status": "done"} for tok in expected]
+    # The typed fold drops a row the model cannot represent, so each seed
+    # carries the fields the model requires.
+    rows = [
+        {
+            "id": tok,
+            "slug": tok,
+            "title": f"node {tok}",
+            "type": "feature",
+            "status": "done",
+            "priority": "p2",
+        }
+        for tok in expected
+    ]
     (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
     env = dict(os.environ, FNO_AGENTS_HOME=str(home))
 

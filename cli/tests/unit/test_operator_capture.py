@@ -109,7 +109,9 @@ def test_status_with_missing_transcript_refuses(tmp_path, tmp_ledger, monkeypatc
 
 
 def _entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def test_idea_operator_request_reads_back(tmp_graph):
@@ -179,7 +181,7 @@ def test_find_filters_by_source_kind(tmp_graph):
         entries.append({"id": "ab-org000001", "title": "worker idea", "status": "idea"})
         return entries
 
-    gs.locked_mutate_graph(tmp_graph, seed)
+    gs.commit_rows_via_store(tmp_graph, seed)
 
     result = runner.invoke(
         app,

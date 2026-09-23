@@ -62,6 +62,7 @@ impl Store {
 }
 
 pub use crate::backlog::model::state_type;
+pub use crate::backlog::search::search;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -545,15 +546,19 @@ fn mutate(
     mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    if crate::backlog::backend(&store.graph) == crate::backlog::Backend::Sqlite {
+    // The store owns a pre-materialization seed too: with no db on disk the
+    // single-row path's first open folds the seed, so an unnamed store never
+    // falls to the json leg just for being young. Only a store explicitly
+    // named json keeps the whole-graph rollback cycle.
+    let named_json = crate::backlog::backend(&store.graph) == crate::backlog::Backend::Json
+        && crate::backlog::database_path(&store.graph).exists();
+    if !named_json {
         // Single-row path: the immediate transaction reads
         // the current authoritative rows, writes only the changed node's
         // aggregates, and the gate event names this mutation (AC24).
         return crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))
             .map_err(ApiError);
     }
-    // The json leg keeps the whole-graph cycle: it serves the rollback arm
-    // until the JSON retirement wave.
     let landed =
         crate::graph_store::mutate_rows(&store.graph, MUTATE_TIMEOUT, None, None, |rows| {
             apply(rows).map_err(crate::graph_store::StoreError::Invalid)

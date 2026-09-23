@@ -1603,7 +1603,10 @@ def test_capture_project_roots_does_not_resolve_every_graph_entry(
     sibling.mkdir()
     graph = tmp_path / "graph.json"
     graph.write_text(
-        json.dumps({"entries": [{"cwd": str(this)}, {"cwd": str(sibling)}]}),
+        json.dumps({"entries": [
+            {"id": "ab-this0001", "cwd": str(this)},
+            {"id": "ab-sibl0001", "cwd": str(sibling)},
+        ]}),
         encoding="utf-8",
     )
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)

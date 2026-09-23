@@ -236,7 +236,10 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     result = _run_init(repo, env)
     state = _state(repo)
     assert state, result.stderr
-    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+    # The store owns state; the json mirror can lag the last write.
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(home / ".fno" / "graph.json")[0]
     acquire = next(
         line for line in log.read_text().splitlines() if "claim acquire" in line
     )
@@ -264,7 +267,10 @@ def test_stale_installed_fno_stamps_owner_only_and_says_so(tmp_path):
     env["MOCK_ABI_STALE"] = "1"
 
     r = _run_init(repo, env)
-    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+    # The store owns state; the json mirror can lag the last write.
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(home / ".fno" / "graph.json")[0]
 
     assert graph.get("locked_by"), f"owner must survive a stale fno: {graph}"
     assert not graph.get("locked_by_harness"), \
