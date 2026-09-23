@@ -211,9 +211,6 @@ pub(crate) fn codex_resume_route(
     loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
     io: &dyn ViewportIo,
 ) -> Option<i32> {
-    if entry.get("harness").and_then(Value::as_str) != Some("codex") {
-        return None;
-    }
     // A thread row delivers over the daemon, never a terminal exec:
     // `codex resume <id>` needs a tty and a headless caller has none.
     if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
