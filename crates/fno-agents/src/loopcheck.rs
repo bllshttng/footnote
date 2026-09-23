@@ -9676,8 +9676,8 @@ mod read_bounds;
 
 pub(crate) use read_bounds::{
     clamp_to_fire_deadline, drain_reserve_half_spent, stopgate_drain_timeout,
-    stopgate_fire_remaining_ms, stopgate_hold_drain_reserve, stopgate_read_timeout,
-    stopgate_stamp_fire, STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
+    stopgate_fire_remaining_ms, stopgate_harness_margin_remaining_ms, stopgate_hold_drain_reserve,
+    stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_DRAIN_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
@@ -11357,7 +11357,7 @@ mod tests {
         // Budget spent: every read still gets a positive, killable bound.
         assert_eq!(
             clamp_to_fire_budget(s, std::time::Duration::ZERO),
-            STOPGATE_BOUND_FLOOR
+            read_bounds::STOPGATE_BOUND_FLOOR
         );
     }
 

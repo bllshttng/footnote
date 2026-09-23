@@ -351,7 +351,13 @@ fn translate(
     let _ = std::fs::remove_file(&counter);
 
     // One control-plane arm row for this fire.
-    emit_tick(hook_cwd, decision, &termination_reason, driver);
+    emit_tick(
+        hook_cwd,
+        decision,
+        &termination_reason,
+        driver,
+        &fire.hook_harness_id,
+    );
 
     // ── Block ─────────────────────────────────────────────────────────────────
     if decision == "block" {
@@ -518,7 +524,7 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
         .unwrap_or(0)
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
-    emit_tick(cwd, "blocked", "unavailable", driver);
+    emit_tick(cwd, "blocked", "unavailable", driver, session_id);
     if count <= MAX_UNAVAIL_RETRIES {
         return emit_block_for_harness(&format!(
             "checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running"
@@ -571,17 +577,25 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     2
 }
 
-/// One control-plane arm row for this fire.
-fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
+/// One control-plane arm row for this fire. The row carries the fire's
+/// session id: `emit_tick` writes one row per SPACE with no session key of
+/// its own, so a reader of `fno agents status` could not tell a king's own
+/// fire from its newest neighbor - the exact misread that sent x-2440
+/// chasing a driver=target misclassification for days.
+fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
     let project_events = events_path(cwd);
     let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
         .unwrap_or_else(|| project_events.clone());
-    let detail = format!(
+    let mut detail = format!(
         "driver={driver} decision={decision} reason={}",
         if reason.is_empty() { "live" } else { reason }
     );
+    if !session.is_empty() {
+        let short: String = session.chars().take(8).collect();
+        detail.push_str(&format!(" session={short}"));
+    }
     let data = serde_json::json!({
         "arm": "stop_hook",
         "scheduler": "hook:target-stop-hook",
@@ -1282,5 +1296,49 @@ mod tests {
             None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The tick row names the fire's session so a reader of `fno agents
+    /// status` can tell a king's own fire from its newest neighbor.
+    #[test]
+    fn the_tick_row_names_its_session_and_an_empty_one_omits_the_field() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
+
+        emit_tick(
+            dir.path(),
+            "block",
+            "live",
+            "king",
+            "41725e5f-1c20-4b81-824e",
+        );
+        let row = std::fs::read_to_string(crate::paths::events_path(dir.path())).unwrap();
+        assert!(
+            row.contains("driver=king decision=block reason=live session=41725e5f"),
+            "{row}"
+        );
+
+        emit_tick(dir.path(), "allow", "", "target", "");
+        let row = std::fs::read_to_string(crate::paths::events_path(dir.path())).unwrap();
+        let last = row.lines().last().unwrap_or_default();
+        assert!(
+            last.contains("driver=target decision=allow reason=live"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("session="),
+            "an empty session omits the field: {last}"
+        );
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("GLOBAL_EVENTS_PATH");
     }
 }

@@ -114,20 +114,60 @@ pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     })
 }
 
+/// The drain's own floor: the smallest bound a drain read can still meet.
+/// `fno agents king drain` answers in 1.5s to 1.7s warm on this machine
+/// (the bare CLI cold start alone costs 1.36s), so the generic 250ms floor
+/// was five to seven times under the cost of STARTING the drain - a
+/// deterministic kill no cache warmth or quiet fire could pass. 5s is about
+/// 3x the measured drain; every non-drain read keeps the 250ms floor.
+pub(crate) const STOPGATE_DRAIN_FLOOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How far past the fire budget a drain may reach: the harness kills the
+/// stop hook at 60s and the fire budget is 50s, so 10s of real margin
+/// exist; 8s keeps 2s for the decision write. Inside that margin the drain
+/// keeps its floor even when the budget is spent.
+pub(crate) const STOPGATE_HARNESS_MARGIN: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The drain read's bound: the reserved read measures against the fire's
 /// full remaining budget - the reserve is what every OTHER read held back
-/// for it.
+/// for it - and keeps a floor it can actually meet for as long as the
+/// harness kill still leaves the decision writable.
 pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, deadline, _) = *cell.borrow();
         let configured = stopgate_configured_timeout(override_ms);
         match deadline {
             Some(d) => {
-                let remaining = d.saturating_duration_since(std::time::Instant::now());
-                clamp_to_fire_budget(configured, remaining)
+                let now = std::time::Instant::now();
+                let remaining = d.saturating_duration_since(now);
+                let hard_remaining = d
+                    .checked_add(STOPGATE_HARNESS_MARGIN)
+                    .map(|hard| hard.saturating_duration_since(now))
+                    .unwrap_or_default();
+                std::cmp::max(
+                    configured.min(remaining),
+                    STOPGATE_DRAIN_FLOOR.min(hard_remaining),
+                )
+                .max(STOPGATE_BOUND_FLOOR)
             }
             None => configured,
         }
+    })
+}
+
+/// What remains of this fire's harness margin at the moment of the call, in
+/// ms: how much past-budget reach the drain still has before the generic
+/// floor applies. 0 when no fire is stamped.
+pub(crate) fn stopgate_harness_margin_remaining_ms() -> u64 {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => d
+            .checked_add(STOPGATE_HARNESS_MARGIN)
+            .map(|hard| {
+                hard.saturating_duration_since(std::time::Instant::now())
+                    .as_millis() as u64
+            })
+            .unwrap_or(0),
+        None => 0,
     })
 }
 
@@ -235,6 +275,22 @@ mod tests {
             *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
         });
         assert_eq!(stopgate_read_timeout(), STOPGATE_PRE_DRAIN_SPENT_BOUND);
+        // The drain keeps a floor it can meet: a fresh 30s ceiling collapsed
+        // to the deadline, but the harness margin is unspent at the line, so
+        // the drain floor still applies - never the 250ms generic floor that
+        // no CLI cold start could pass.
+        assert_eq!(stopgate_drain_timeout(), STOPGATE_DRAIN_FLOOR);
+    }
+
+    #[test]
+    fn a_drain_past_the_harness_margin_falls_to_the_generic_floor() {
+        // 9s past the budget deadline the 8s harness margin is gone: the
+        // generic 250ms floor applies so the hook still answers before the
+        // 60s harness kill, leaving ~2s for the decision write.
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(9);
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
+        });
         assert_eq!(stopgate_drain_timeout(), STOPGATE_BOUND_FLOOR);
     }
 
