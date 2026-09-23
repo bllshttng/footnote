@@ -55,6 +55,27 @@ fn spawn_keeper(tag: &str, graph: &Path, sock: &Path) -> Keeper {
     Keeper { child }
 }
 
+/// Like [`spawn_keeper`], plus one env var the keeper process reads at
+/// startup (the claims-root override the refusal test needs).
+fn spawn_keeper_with_env(tag: &str, graph: &Path, sock: &Path, key: &str, val: &str) -> Keeper {
+    let child = Command::new(WORKER_BIN)
+        .args([
+            "--store-keeper",
+            "--sock",
+            sock.to_str().unwrap(),
+            "--graph",
+            graph.to_str().unwrap(),
+            "--session",
+            tag,
+        ])
+        .env(key, val)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn store keeper");
+    Keeper { child }
+}
+
 fn wait_for_socket(sock: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1001,4 +1022,124 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
         "positive control: at least one staged commit must have answered ok, got {outcomes:?}"
     );
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
+
+#[test]
+fn ready_board_mode_orders_every_entry_with_its_facts() {
+    let home = short_home("board-mode");
+    let graph = home.join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_vec(&json!({
+            "entries": [
+                {"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"},
+                {"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"},
+                {"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
+                 "completed_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-loose", "status": "ready", "priority": "p1"},
+                {"id": "x-def", "status": "deferred", "priority": "p2"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper("board-mode", &graph, &sock);
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let result = ok_result(rpc(
+        &mut stream,
+        1,
+        "ready",
+        json!({"board": true, "claimed": []}),
+    ));
+    let ids: Vec<String> = result["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(ids.len(), 5, "every entry id, no admission: {ids:?}");
+    for id in ["x-e", "x-c1", "x-c2", "x-loose", "x-def"] {
+        assert!(ids.iter().any(|i| i == id), "{id} rides in ids: {ids:?}");
+    }
+    assert!(
+        result["underway"]
+            .as_array()
+            .expect("underway array")
+            .iter()
+            .any(|v| v == "x-e"),
+        "the epic with a done child is underway: {result}"
+    );
+    assert_eq!(
+        result["effective_priority"]["x-c1"],
+        json!("p1"),
+        "the p2 child of a p1 epic carries the epic's priority: {result}"
+    );
+
+    // The board's order restricted to selection's admitted ids equals the
+    // selection order itself - the board never invents a second order.
+    let ready = ok_result(rpc(&mut stream, 2, "ready", json!({"claimed": []})));
+    let ready_ids: Vec<String> = ready["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !ready_ids.is_empty(),
+        "positive control: selection admits some"
+    );
+    let board_order = ready_ids.iter().map(|id| {
+        ids.iter()
+            .position(|b| b == id)
+            .unwrap_or_else(|| panic!("{id} missing from board ids"))
+    });
+    let positions: Vec<usize> = board_order.collect();
+    let mut sorted = positions.clone();
+    sorted.sort();
+    assert_eq!(
+        positions, sorted,
+        "board ids order extends selection order: {positions:?}"
+    );
+    drop(keeper);
+}
+
+#[test]
+fn ready_board_mode_refuses_when_claims_are_unreadable() {
+    let home = short_home("board-claims");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let claims_root = home.join("claims-root");
+    std::fs::create_dir_all(claims_root.join(".fno")).unwrap();
+    // A regular file where read_dir expects a directory: ENOTDIR, the
+    // unknown-claim-state the ready op fails closed on.
+    std::fs::write(claims_root.join(".fno/claims"), b"not a directory").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper_with_env(
+        "board-claims",
+        &graph,
+        &sock,
+        "FNO_CLAIMS_ROOT",
+        claims_root.to_str().unwrap(),
+    );
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let reply = rpc(&mut stream, 1, "ready", json!({"board": true}));
+    assert_eq!(reply.get("ok"), Some(&json!(false)), "refused: {reply}");
+    assert_eq!(
+        reply["error"]["kind"],
+        json!("claims_unavailable"),
+        "kind names the claims store: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("live claim state is unavailable"),
+        "the refusal names the claims store: {reply}"
+    );
+    drop(keeper);
 }
