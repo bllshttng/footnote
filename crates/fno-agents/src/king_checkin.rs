@@ -3332,7 +3332,10 @@ mod tests {
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
-        assert!(summary[0].contains("2 node(s)"), "lines: {lines:?}");
+        assert!(
+            summary[0].contains("2 question(s) for this crown"),
+            "lines: {lines:?}"
+        );
         let verbs: Vec<&String> = lines
             .iter()
             .filter(|l| l.contains("fno backlog decide"))
