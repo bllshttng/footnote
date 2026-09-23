@@ -14,7 +14,7 @@ The stop hook reads the world; it does not maintain state. The only writer is th
 
 Every scheduled arm appends one `control_plane_tick` row to the journal it already uses. The row says what the arm did, or why it did nothing: `data{arm, scheduler, acted, skip_reason, detail, interval_s}`.
 
-The arms: [background-processes.md](background-processes.md#arms) holds the list of every arm, its scheduler, its host, and its default interval; that page is the one arms list, and this section keeps only the row shape, the readout, and the causes.
+The arms: [background-processes.md](background-processes.md#arms) holds every arm, its scheduler, its host, and its interval. That page is the one arms list. This section keeps the row shape, the readout, and the causes.
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
