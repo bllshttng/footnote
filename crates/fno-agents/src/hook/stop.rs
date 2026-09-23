@@ -1305,12 +1305,12 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&elsewhere).unwrap();
         assert_ne!(
-            super::events_space(&repo),
-            super::events_space(&elsewhere),
+            crate::hook::events_space(&repo),
+            crate::hook::events_space(&elsewhere),
             "positive control: the row cwd and the payload cwd must key different spaces"
         );
         let scope = "x-test-epic";
-        let kings = super::events_space(&repo).join("kings");
+        let kings = crate::hook::events_space(&repo).join("kings");
         std::fs::create_dir_all(&kings).unwrap();
         let manifest = kings.join(format!("{scope}.md"));
         std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: court\n---\n").unwrap();
@@ -1324,7 +1324,7 @@ mod tests {
         let rows = vec![crowned];
         assert_eq!(
             super::king_manifest_in(&rows, sid, None, &elsewhere),
-            Some(manifest),
+            Some(manifest.clone()),
             "the row's cwd, not the payload cwd, names the space"
         );
         let terminal = RegistryEntry {
@@ -1375,7 +1375,7 @@ mod tests {
         // A row whose cwd names a removed directory (a deleted linked
         // worktree keys its own dead slug) falls back to the payload cwd's
         // space before answering None.
-        let payload_kings = super::events_space(&elsewhere).join("kings");
+        let payload_kings = crate::hook::events_space(&elsewhere).join("kings");
         std::fs::create_dir_all(&payload_kings).unwrap();
         std::fs::write(payload_kings.join(format!("{scope}.md")), "fallback").unwrap();
         let dead_cwd = RegistryEntry {
