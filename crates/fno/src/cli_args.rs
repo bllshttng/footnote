@@ -177,6 +177,9 @@ pub struct MuxCommandArgs {
     /// Optional bounded screen assertion for the screen recipe.
     #[arg(long)]
     pub expect: Option<String>,
+    /// Regex that must positively identify an empty composer before typing.
+    #[arg(long)]
+    pub empty_composer: Option<String>,
     /// Maximum seconds spent waiting for the command-specific proof.
     #[arg(long, default_value_t = 30)]
     pub timeout_seconds: u64,

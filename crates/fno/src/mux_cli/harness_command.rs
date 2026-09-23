@@ -85,6 +85,8 @@ struct CommandReceipt {
     expected_identity: String,
     command: String,
     proof: String,
+    expected_screen: Option<String>,
+    empty_composer: Option<String>,
     status: String,
     before_digest: String,
     after_digest: String,
@@ -144,6 +146,8 @@ fn write_receipt(receipt: &CommandReceipt) -> Result<(), String> {
         || existing.expected_identity != receipt.expected_identity
         || existing.command != receipt.command
         || existing.proof != receipt.proof
+        || existing.expected_screen != receipt.expected_screen
+        || existing.empty_composer != receipt.empty_composer
     {
         return Err("command receipt reservation does not match the submitted action".into());
     }
@@ -569,9 +573,19 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         eprintln!("fno mux command: --proof screen requires --expect <regex>");
         return EXIT_USAGE;
     }
+    if proof == ProofKind::Screen && args.empty_composer.is_none() {
+        eprintln!("fno mux command: --proof screen requires --empty-composer <regex>");
+        return EXIT_USAGE;
+    }
     if let Some(pattern) = args.expect.as_deref() {
         if let Err(error) = Regex::new(pattern) {
             eprintln!("fno mux command: --expect is not a valid regex: {error}");
+            return EXIT_USAGE;
+        }
+    }
+    if let Some(pattern) = args.empty_composer.as_deref() {
+        if let Err(error) = Regex::new(pattern) {
+            eprintln!("fno mux command: --empty-composer is not a valid regex: {error}");
             return EXIT_USAGE;
         }
     }
@@ -592,6 +606,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             if receipt.selector != args.selector
                 || receipt.command != args.text
                 || receipt.proof != proof.word()
+                || receipt.expected_screen != args.expect
+                || receipt.empty_composer != args.empty_composer
             {
                 eprintln!(
                     "fno mux command: request id {request_id:?} already belongs to a different action"
@@ -652,6 +668,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             expected_identity: session_id,
             command: args.text,
             proof: proof.word().into(),
+            expected_screen: args.expect.clone(),
+            empty_composer: args.empty_composer.clone(),
             status: CommandStatus::Refused.word().into(),
             before_digest: before_digest.clone(),
             after_digest: after_digest.clone(),
@@ -692,6 +710,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         expected_identity: session_id.clone(),
         command: args.text.clone(),
         proof: proof.word().into(),
+        expected_screen: args.expect.clone(),
+        empty_composer: args.empty_composer.clone(),
         status: CommandStatus::Unknown.word().into(),
         before_digest: String::new(),
         after_digest: String::new(),
@@ -704,6 +724,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
                 if receipt.selector == args.selector
                     && receipt.command == args.text
                     && receipt.proof == proof.word()
+                    && receipt.expected_screen == args.expect
+                    && receipt.empty_composer == args.empty_composer
                     && receipt.session_id == session_id =>
             {
                 print_receipt(&receipt);
@@ -763,6 +785,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             expected_identity: session_id,
             command: args.text,
             proof: proof.word().into(),
+            expected_screen: args.expect.clone(),
+            empty_composer: args.empty_composer.clone(),
             status: status.word().into(),
             before_digest,
             after_digest,
@@ -828,6 +852,27 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
+    let empty_composer = args
+        .empty_composer
+        .as_deref()
+        .and_then(|pattern| Regex::new(pattern).ok())
+        .expect("screen proof validates its empty-composer regex before submission");
+    if !empty_composer.is_match(&before) {
+        let mut receipt = reservation.clone();
+        receipt.status = CommandStatus::Refused.word().into();
+        receipt.before_digest = digest(&before);
+        receipt.after_digest = receipt.before_digest.clone();
+        receipt.detail =
+            "refused before typing: screen did not prove the composer empty; screen unchanged"
+                .into();
+        if let Err(error) = write_receipt(&receipt) {
+            eprintln!("fno mux command: {error}");
+            return EXIT_ERROR;
+        }
+        eprintln!("fno mux command: {}", receipt.detail);
+        print_receipt(&receipt);
+        return EXIT_ERROR;
+    }
     let expected_identity = session_id.clone();
     if let Err(error) = send_pane_bytes(
         &sock,
@@ -846,6 +891,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             expected_identity: expected_identity.clone(),
             command: args.text,
             proof: proof.word().into(),
+            expected_screen: args.expect.clone(),
+            empty_composer: args.empty_composer.clone(),
             status: classify_postcondition(true, Err(error.to_string()))
                 .word()
                 .into(),
@@ -874,6 +921,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             expected_identity: expected_identity.clone(),
             command: args.text,
             proof: proof.word().into(),
+            expected_screen: args.expect.clone(),
+            empty_composer: args.empty_composer.clone(),
             status: CommandStatus::Unknown.word().into(),
             before_digest: digest(&before),
             after_digest: digest(&before),
@@ -920,6 +969,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         expected_identity,
         command: args.text,
         proof: proof.word().into(),
+        expected_screen: args.expect.clone(),
+        empty_composer: args.empty_composer.clone(),
         status: status.word().into(),
         before_digest: digest(&before),
         after_digest: digest(&after),
@@ -1174,6 +1225,8 @@ mod tests {
             expected_identity: "thread-full-id".into(),
             command: "/compact".into(),
             proof: "compact".into(),
+            expected_screen: None,
+            empty_composer: None,
             status: CommandStatus::Unknown.word().into(),
             before_digest: String::new(),
             after_digest: String::new(),

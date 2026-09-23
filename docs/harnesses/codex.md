@@ -185,9 +185,12 @@ Use provider-backed compact and goal receipts. Manual Escape followed by
 The exact-session command journey is opt-in and must use a disposable session
 and the isolated roots below. It covers idle, busy refusal, pending-composer
 preservation, the `/rc` picker, timeout with no retry, provider compaction, and
-paused-to-active goal resume. The command controller refuses a short selector,
-an identity mismatch, an unreadable registry, or any root outside this private
-set; it never creates or re-points a live session.
+paused-to-active goal resume. Screen proofs require an `FNO_EMPTY_COMPOSER_EXPECT`
+regex that matches the blank prompt before typing and an `FNO_SCREEN_EXPECT`
+regex that appears only after the command. The command controller refuses a
+short selector, an identity mismatch, an unreadable registry, a non-empty
+composer, or any root outside this private set; a paneless pane action opens a
+new portal and closes only that command's portal after its terminal receipt.
 
 ```bash
 FNO_HOME=/private/tmp/fno-continuation-proof \

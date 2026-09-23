@@ -14,8 +14,8 @@ usage: harness-command-control-smoke.sh --session <full-session-uuid> --harness 
 
 The selected session must already be a disposable session registered below
 the isolated FNO roots. This command does not create, restart, or re-point a
-live session. Set FNO_SCREEN_EXPECT to a regex that is absent before each
-screen action and appears after it.
+live session. Set FNO_EMPTY_COMPOSER_EXPECT to a regex for the empty prompt
+and FNO_SCREEN_EXPECT to a post-submit marker absent before each screen action.
 USAGE
 }
 
@@ -133,17 +133,18 @@ run_case() {
   local timeout_seconds="$5"
   local screen_expect="${6:-$SCREEN_EXPECT}"
   local expected_error="${7:-}"
+  local empty_composer_expect="${8:-${FNO_EMPTY_COMPOSER_EXPECT:-}}"
   local request_id="${RUN_ID}-${case_name}"
   local out="$RUN_DIR/${case_name}.stdout"
   local err="$RUN_DIR/${case_name}.stderr"
   local code=0
   local expect_args=()
   if [[ "$proof" == screen ]]; then
-    if [[ -z "$screen_expect" ]]; then
-      echo "command-control-blocked: $case_name needs FNO_SCREEN_EXPECT" >&2
+    if [[ -z "$screen_expect" || -z "$empty_composer_expect" ]]; then
+      echo "command-control-blocked: $case_name needs FNO_SCREEN_EXPECT and FNO_EMPTY_COMPOSER_EXPECT" >&2
       exit 2
     fi
-    expect_args=(--expect "$screen_expect")
+    expect_args=(--expect "$screen_expect" --empty-composer "$empty_composer_expect")
   fi
   set +e
   "$MUX_BIN" mux command "$SESSION" \
@@ -239,21 +240,21 @@ if [[ "$HARNESS" == codex ]]; then
   run_case paused-to-active "/goal resume" goal-active verified 30
   run_case idle-goal "/goal" goal-active verified 30
   run_case busy-refusal "/goal" goal-active refused 30 "" "refusing before typing"
-  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "pending composer"
+  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "composer"
   run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
   run_case timeout-no-retry "/compact" compact unknown 1
   run_case provider-compact "/compact" compact verified 30
 else
   run_case idle-status "/status" screen verified 30
   run_case busy-refusal "/status" screen refused 30 "$SCREEN_EXPECT" "refusing before typing"
-  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "pending composer"
+  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "composer"
   run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
   run_case timeout-no-retry "/status" screen unknown 1 "$SCREEN_EXPECT"
   run_case provider-compact "/compact" screen verified 30 "${FNO_COMPACT_SCREEN_EXPECT:-$SCREEN_EXPECT}"
   run_case paused-to-active "/rc" screen verified 30 "$SCREEN_EXPECT"
 fi
 
-python3 - "$RUN_DIR" "$SESSION" "$HARNESS" "$ROOT" <<'PY'
+python3 - "$RUN_DIR" "$SESSION" "$HARNESS" "$ROOT" "$RUN_ID" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -261,7 +262,7 @@ import sys
 from pathlib import Path
 
 run_dir = Path(sys.argv[1])
-session, harness, root = sys.argv[2:]
+session, harness, root, run_id = sys.argv[2:]
 rows = []
 for path in sorted(run_dir.glob("*.stdout")):
     for line in path.read_text(errors="replace").splitlines():
