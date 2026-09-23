@@ -59,7 +59,60 @@ CREATE TABLE IF NOT EXISTS supersessions (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   successor_id TEXT, cause TEXT, reason TEXT, verified_at TEXT, evidence_pr INTEGER,
   surfaces TEXT, matched_surfaces TEXT
+);
+CREATE TABLE IF NOT EXISTS nodes_raw (
+  id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, body TEXT NOT NULL
 );";
+
+/// Carry a row the node model cannot represent: its verbatim JSON is the
+/// stored form, so a read hands it back exactly as the caller wrote it.
+pub fn save_raw(
+    connection: &Connection,
+    id: &str,
+    ordinal: i64,
+    body: &Value,
+) -> Result<(), String> {
+    let text = serde_json::to_string(body).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO nodes_raw(id, ordinal, body) VALUES(?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET ordinal = excluded.ordinal, body = excluded.body",
+            params![id, ordinal, text],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub fn delete_raw(connection: &Connection, id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM nodes_raw WHERE id = ?1", params![id])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Raw-carried rows as (id, ordinal, body), ordinal order.
+pub fn raw_rows(connection: &Connection) -> Result<Vec<(String, i64, Value)>, String> {
+    let mut statement = connection
+        .prepare("SELECT id, ordinal, body FROM nodes_raw ORDER BY ordinal, id")
+        .map_err(|error| error.to_string())?;
+    let found = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut rows = Vec::new();
+    for row in found {
+        let (id, ordinal, body) = row.map_err(|error| error.to_string())?;
+        let body: Value =
+            serde_json::from_str(&body).map_err(|error| format!("nodes_raw {id}: {error}"))?;
+        rows.push((id, ordinal, body));
+    }
+    Ok(rows)
+}
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
@@ -325,105 +378,67 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The node columns both the single load and the batched export scan.
-const NODE_COLUMNS: &str = "id, ordinal, slug, title, kind, status, priority, rank, project, cwd,
+/// One node with its mirrors and child aggregates, or None when the id is
+/// unknown.
+pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, ordinal, slug, title, kind, status, priority, rank, project, cwd,
                     domain, estimate, difficulty, description, plan_path, parent_id,
                     contained_in, superseded_by, caused_by, fixes_pr, ownership_defect,
                     created_at, touched_at, completed_at, completion_note, deferred_at,
                     deferred_reason, deferred_kind, queued_at, queued_reason, reopened_at,
                     reopened_reason, archived_at, session_id, has_brief, blocks_everything,
-                    cost_usd, vision_path, artifact_url, extras";
-
-type NodeRowParts = (
-    String,         // id
-    i64,            // ordinal
-    String,         // slug
-    String,         // title
-    String,         // kind
-    String,         // status
-    String,         // priority
-    Option<f64>,    // rank
-    Option<String>, // project
-    Option<String>, // cwd
-    Option<String>, // domain
-    Option<String>, // estimate
-    Option<String>, // difficulty
-    Option<String>, // description
-    Option<String>, // plan_path
-    Option<String>, // parent_id
-    Option<String>, // contained_in
-    Option<String>, // superseded_by
-    Option<String>, // caused_by
-    Option<i64>,    // fixes_pr
-    Option<String>, // created_at
-    Option<String>, // touched_at
-    Option<String>, // completed_at
-    Option<String>, // completion_note
-    Option<String>, // deferred_at
-    Option<String>, // deferred_reason
-    Option<String>, // deferred_kind
-    Option<String>, // queued_at
-    Option<String>, // queued_reason
-    Option<String>, // reopened_at
-    Option<String>, // reopened_reason
-    Option<String>, // archived_at
-    Option<String>, // session_id
-    Option<String>, // archived_at
-    Option<i64>,    // has_brief
-    Option<i64>,    // blocks_everything
-    Option<f64>,    // cost_usd
-    Option<String>, // vision_path
-    Option<String>, // artifact_url
-    String,         // extras
-);
-
-fn map_base_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRowParts> {
-    Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, i64>(1)?,
-        row.get::<_, String>(2)?,
-        row.get::<_, String>(3)?,
-        row.get::<_, String>(4)?,
-        row.get::<_, String>(5)?,
-        row.get::<_, String>(6)?,
-        row.get::<_, Option<f64>>(7)?,
-        row.get::<_, Option<String>>(8)?,
-        row.get::<_, Option<String>>(9)?,
-        row.get::<_, Option<String>>(10)?,
-        row.get::<_, Option<String>>(11)?,
-        row.get::<_, Option<String>>(12)?,
-        row.get::<_, Option<String>>(13)?,
-        row.get::<_, Option<String>>(14)?,
-        row.get::<_, Option<String>>(15)?,
-        row.get::<_, Option<String>>(16)?,
-        row.get::<_, Option<String>>(17)?,
-        row.get::<_, Option<String>>(18)?,
-        row.get::<_, Option<i64>>(19)?,
-        row.get::<_, Option<String>>(20)?,
-        row.get::<_, Option<String>>(21)?,
-        row.get::<_, Option<String>>(22)?,
-        row.get::<_, Option<String>>(23)?,
-        row.get::<_, Option<String>>(24)?,
-        row.get::<_, Option<String>>(25)?,
-        row.get::<_, Option<String>>(26)?,
-        row.get::<_, Option<String>>(27)?,
-        row.get::<_, Option<String>>(28)?,
-        row.get::<_, Option<String>>(29)?,
-        row.get::<_, Option<String>>(30)?,
-        row.get::<_, Option<String>>(31)?,
-        row.get::<_, Option<String>>(32)?,
-        row.get::<_, Option<String>>(33)?,
-        row.get::<_, Option<i64>>(34)?,
-        row.get::<_, Option<i64>>(35)?,
-        row.get::<_, Option<f64>>(36)?,
-        row.get::<_, Option<String>>(37)?,
-        row.get::<_, Option<String>>(38)?,
-        row.get::<_, String>(39)?,
-    ))
-}
-
-/// The base-row parts into a Node plus the export's presence markers.
-fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec<String>), String> {
+                    cost_usd, vision_path, artifact_url, extras
+             FROM nodes WHERE id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement
+        .query_map(params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<i64>>(19)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<String>>(22)?,
+                row.get::<_, Option<String>>(23)?,
+                row.get::<_, Option<String>>(24)?,
+                row.get::<_, Option<String>>(25)?,
+                row.get::<_, Option<String>>(26)?,
+                row.get::<_, Option<String>>(27)?,
+                row.get::<_, Option<String>>(28)?,
+                row.get::<_, Option<String>>(29)?,
+                row.get::<_, Option<String>>(30)?,
+                row.get::<_, Option<String>>(31)?,
+                row.get::<_, Option<String>>(32)?,
+                row.get::<_, Option<String>>(33)?,
+                row.get::<_, Option<i64>>(34)?,
+                row.get::<_, Option<i64>>(35)?,
+                row.get::<_, Option<f64>>(36)?,
+                row.get::<_, Option<String>>(37)?,
+                row.get::<_, Option<String>>(38)?,
+                row.get::<_, String>(39)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
     let (
         node_id,
         ordinal,
@@ -465,7 +480,10 @@ fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec
         vision_path,
         artifact_url,
         extras,
-    ) = parts;
+    ) = match rows.next() {
+        Some(row) => row.map_err(|error| error.to_string())?,
+        None => return Ok(None),
+    };
     let status = Status::parse(&status).map_err(|error| error.to_string())?;
     let priority = Priority::parse(&priority).map_err(|error| error.to_string())?;
     let ownership_defect = match ownership_defect {
@@ -553,48 +571,42 @@ fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec
     };
     node.apply_residual(residual)
         .map_err(|error| error.to_string())?;
-
-    Ok((node, supersession_extras, child_lists_present))
-}
-
-/// One node with its mirrors and child aggregates, or None when the id is
-/// unknown.
-pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
-    let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
-    let mut statement = connection
-        .prepare_cached(&sql)
-        .map_err(|error| error.to_string())?;
-    let mut rows = statement
-        .query_map(params![id], map_base_row)
-        .map_err(|error| error.to_string())?;
-    let parts = match rows.next() {
-        Some(row) => row.map_err(|error| error.to_string())?,
-        None => return Ok(None),
-    };
-    let (mut node, supersession_extras, child_lists_present) = base_from_parts(parts)?;
     let mut claim_statement = connection
-        .prepare_cached(
+        .prepare(
             "SELECT locked_by, harness, harness_session, locked_at
              FROM node_claims WHERE node_id = ?1",
         )
         .map_err(|error| error.to_string())?;
     node.claim = claim_statement
-        .query_row(params![id], map_claim_row)
+        .query_row(params![id], |row| {
+            Ok(NodeClaim {
+                locked_by: row.get(0)?,
+                harness: row.get(1)?,
+                harness_session: row.get(2)?,
+                locked_at: row.get(3)?,
+            })
+        })
         .optional()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
     let mut dispatch_statement = connection
-        .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
+        .prepare("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
         .map_err(|error| error.to_string())?;
     node.dispatch = dispatch_statement
-        .query_row(params![id], map_dispatch_row)
+        .query_row(params![id], |row| {
+            Ok(Dispatch {
+                verb: row.get(0)?,
+                brief: row.get(1)?,
+                model: row.get(2)?,
+            })
+        })
         .optional()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
     // The 14 columns overlay what apply_residual parsed; the two provenance
     // fields with no columns (origin_evidence, request_origin) survive from it.
     let mut provenance_statement = connection
-        .prepare_cached(
+        .prepare(
             "SELECT source, source_kind, source_project, source_session_id, source_harness,
                     source_cwd, source_node_id, source_plan_path, source_inbox_msg,
                     spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
@@ -603,22 +615,100 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         )
         .map_err(|error| error.to_string())?;
     let provenance_row = provenance_statement
-        .query_row(params![id], map_provenance_parts)
+        .query_row(params![id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+            ))
+        })
         .optional()
         .map_err(|error| error.to_string())?;
-    apply_provenance(&mut node, provenance_row);
+    if let Some((
+        source,
+        source_kind,
+        source_project,
+        source_session_id,
+        source_harness,
+        source_cwd,
+        source_node_id,
+        source_plan_path,
+        source_inbox_msg,
+        spawned_by_session,
+        spawned_by_harness,
+        spawned_by_cwd,
+        think_session_id,
+        think_output_path,
+    )) = provenance_row
+    {
+        let origin_evidence = node.provenance.origin_evidence.clone();
+        let request_origin = node.provenance.request_origin.clone();
+        node.provenance = Provenance {
+            source,
+            source_kind,
+            source_project,
+            source_session_id,
+            source_harness,
+            source_cwd,
+            source_node_id,
+            source_plan_path,
+            source_inbox_msg,
+            spawned_by_session,
+            spawned_by_harness,
+            spawned_by_cwd,
+            think_session_id,
+            think_output_path,
+            origin_evidence,
+            request_origin,
+        };
+    }
     let mut supersession_statement = connection
-        .prepare_cached(
+        .prepare(
             "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
                     matched_surfaces
              FROM supersessions WHERE node_id = ?1",
         )
         .map_err(|error| error.to_string())?;
     node.supersession = supersession_statement
-        .query_row(params![id], map_supersession_parts)
+        .query_row(params![id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
         .optional()
         .map_err(|error| error.to_string())?
-        .map(|parts| supersession_from_parts(parts, supersession_extras));
+        .map(
+            |(successor, cause, reason, verified_at, evidence_pr, surfaces, matched_surfaces)| {
+                Supersession {
+                    successor,
+                    cause,
+                    reason,
+                    verified_at,
+                    evidence_pr,
+                    surfaces: surfaces.and_then(|text| serde_json::from_str(&text).ok()),
+                    matched_surfaces: matched_surfaces
+                        .and_then(|text| serde_json::from_str(&text).ok()),
+                    extras: supersession_extras,
+                }
+            },
+        );
     // Child aggregates. The tables cannot tell an empty list from an absent
     // key, so the "child_lists_present" marker decides Some vs None.
     let present = |name: &str| child_lists_present.iter().any(|listed| listed == name);
@@ -671,295 +761,6 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     Ok(Some(node))
 }
 
-/// The provenance row read as parts; origin/request ride the residual.
-pub(crate) type ProvenanceParts = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-/// The supersessions row read as parts.
-pub(crate) type SupersessionParts = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-    Option<String>,
-);
-
-fn map_claim_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClaim> {
-    Ok(NodeClaim {
-        locked_by: row.get(0)?,
-        harness: row.get(1)?,
-        harness_session: row.get(2)?,
-        locked_at: row.get(3)?,
-    })
-}
-
-fn map_dispatch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Dispatch> {
-    Ok(Dispatch {
-        verb: row.get(0)?,
-        brief: row.get(1)?,
-        model: row.get(2)?,
-    })
-}
-
-fn map_provenance_parts(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProvenanceParts> {
-    Ok((
-        row.get::<_, Option<String>>(0)?,
-        row.get::<_, Option<String>>(1)?,
-        row.get::<_, Option<String>>(2)?,
-        row.get::<_, Option<String>>(3)?,
-        row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-        row.get::<_, Option<String>>(6)?,
-        row.get::<_, Option<String>>(7)?,
-        row.get::<_, Option<String>>(8)?,
-        row.get::<_, Option<String>>(9)?,
-        row.get::<_, Option<String>>(10)?,
-        row.get::<_, Option<String>>(11)?,
-        row.get::<_, Option<String>>(12)?,
-        row.get::<_, Option<String>>(13)?,
-    ))
-}
-
-fn map_supersession_parts(row: &rusqlite::Row<'_>) -> rusqlite::Result<SupersessionParts> {
-    Ok((
-        row.get::<_, Option<String>>(0)?,
-        row.get::<_, Option<String>>(1)?,
-        row.get::<_, Option<String>>(2)?,
-        row.get::<_, Option<String>>(3)?,
-        row.get::<_, Option<i64>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-        row.get::<_, Option<String>>(6)?,
-    ))
-}
-
-/// Overlay the provenance row on the residual-carried fields.
-fn apply_provenance(node: &mut Node, parts: Option<ProvenanceParts>) {
-    if let Some((
-        source,
-        source_kind,
-        source_project,
-        source_session_id,
-        source_harness,
-        source_cwd,
-        source_node_id,
-        source_plan_path,
-        source_inbox_msg,
-        spawned_by_session,
-        spawned_by_harness,
-        spawned_by_cwd,
-        think_session_id,
-        think_output_path,
-    )) = parts
-    {
-        let origin_evidence = node.provenance.origin_evidence.clone();
-        let request_origin = node.provenance.request_origin.clone();
-        node.provenance = Provenance {
-            source,
-            source_kind,
-            source_project,
-            source_session_id,
-            source_harness,
-            source_cwd,
-            source_node_id,
-            source_plan_path,
-            source_inbox_msg,
-            spawned_by_session,
-            spawned_by_harness,
-            spawned_by_cwd,
-            think_session_id,
-            think_output_path,
-            origin_evidence,
-            request_origin,
-        };
-    }
-}
-
-/// Build a Supersession from its row parts plus the residual extras.
-fn supersession_from_parts(parts: SupersessionParts, extras: Map<String, Value>) -> Supersession {
-    let (successor, cause, reason, verified_at, evidence_pr, surfaces, matched_surfaces) = parts;
-    Supersession {
-        successor,
-        cause,
-        reason,
-        verified_at,
-        evidence_pr,
-        surfaces: surfaces.and_then(|text| serde_json::from_str(&text).ok()),
-        matched_surfaces: matched_surfaces.and_then(|text| serde_json::from_str(&text).ok()),
-        extras,
-    }
-}
-
-/// Every node in ordinal order, assembled through the same mappers and
-/// helpers the single-node load uses. One full scan per table instead of
-/// ten statements per node.
-pub(crate) fn export_all(connection: &Connection) -> Result<Vec<Node>, String> {
-    let sql = format!("SELECT {NODE_COLUMNS} FROM nodes ORDER BY ordinal, id");
-    let mut statement = connection
-        .prepare_cached(&sql)
-        .map_err(|error| error.to_string())?;
-    let parts: Vec<NodeRowParts> = statement
-        .query_map([], map_base_row)
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-
-    let mut claims: std::collections::HashMap<String, NodeClaim> = std::collections::HashMap::new();
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT locked_by, harness, harness_session, locked_at, node_id
-             FROM node_claims",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(4)?, map_claim_row(row)?))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (node_id, claim) = row.map_err(|error| error.to_string())?;
-        claims.insert(node_id, claim);
-    }
-
-    let mut dispatches: std::collections::HashMap<String, Dispatch> =
-        std::collections::HashMap::new();
-    let mut statement = connection
-        .prepare_cached("SELECT verb, brief, model, node_id FROM node_dispatch")
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(3)?, map_dispatch_row(row)?))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (node_id, dispatch) = row.map_err(|error| error.to_string())?;
-        dispatches.insert(node_id, dispatch);
-    }
-
-    let mut provenances: std::collections::HashMap<String, ProvenanceParts> =
-        std::collections::HashMap::new();
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT source, source_kind, source_project, source_session_id, source_harness,
-                    source_cwd, source_node_id, source_plan_path, source_inbox_msg,
-                    spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
-                    think_output_path, node_id
-             FROM node_provenance",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(14)?, map_provenance_parts(row)?))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (node_id, parts) = row.map_err(|error| error.to_string())?;
-        provenances.insert(node_id, parts);
-    }
-
-    let mut supersessions: std::collections::HashMap<String, SupersessionParts> =
-        std::collections::HashMap::new();
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
-                    matched_surfaces, node_id
-             FROM supersessions",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(7)?, map_supersession_parts(row)?))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (node_id, parts) = row.map_err(|error| error.to_string())?;
-        supersessions.insert(node_id, parts);
-    }
-
-    let mut sessions_all = sessions::load_all(connection)?;
-    let mut comments_all = comments::load_all(connection)?;
-    let mut encounters_all = encounters::load_all(connection)?;
-    let mut prs_all = pull_requests::load_all(connection)?;
-    let mut relations_all = relations::load_all(connection)?;
-
-    let mut out = Vec::with_capacity(parts.len());
-    for parts in parts {
-        let (mut node, supersession_extras, present) = base_from_parts(parts)?;
-        let id = node.id.clone();
-        let claim = claims.remove(&id);
-        let dispatch = dispatches.remove(&id);
-        let provenance_parts = provenances.remove(&id);
-        let supersession_parts = supersessions.remove(&id);
-        node.claim = claim.unwrap_or_default();
-        node.dispatch = dispatch.unwrap_or_default();
-        apply_provenance(&mut node, provenance_parts);
-        node.supersession =
-            supersession_parts.map(|p| supersession_from_parts(p, supersession_extras));
-        let listed = |name: &str| present.iter().any(|item| item == name);
-        let sessions_list = sessions_all.remove(&id).unwrap_or_default();
-        node.sessions = if listed("sessions") {
-            Some(sessions_list)
-        } else {
-            None
-        };
-        let comments_list = comments_all.remove(&id).unwrap_or_default();
-        node.comments = if listed("comments") {
-            Some(comments_list)
-        } else {
-            None
-        };
-        let encounters_list = encounters_all.remove(&id).unwrap_or_default();
-        node.encounters = if listed("encounters") {
-            Some(encounters_list)
-        } else {
-            None
-        };
-        let pr_rows = prs_all.remove(&id).unwrap_or_default();
-        let primary = if listed("primary_pr") {
-            pr_rows.first().cloned()
-        } else {
-            None
-        };
-        let rest: Vec<PullRequest> = if primary.is_some() {
-            pr_rows.into_iter().skip(1).collect()
-        } else {
-            pr_rows
-        };
-        node.primary_pr = primary;
-        node.additional_prs = if listed("additional_prs") {
-            Some(rest)
-        } else {
-            None
-        };
-        node.relations = relations_all.remove(&id).unwrap_or_default();
-        if listed("blocked_by") && node.relations.blocked_by.is_none() {
-            node.relations.blocked_by = Some(Vec::new());
-        }
-        if listed("related") && node.relations.related.is_none() {
-            node.relations.related = Some(Vec::new());
-        }
-        if listed("supersedes") && node.relations.supersedes.is_none() {
-            node.relations.supersedes = Some(Vec::new());
-        }
-        out.push(node);
-    }
-    Ok(out)
-}
 fn parse_ownership_defect(text: &str) -> Result<OwnershipDefect, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let object = value

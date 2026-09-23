@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from fno.graph.store import read_graph_strict
 
 
 UNIT = "x-6320"
@@ -105,7 +106,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         graph_path.write_text(json.dumps({"entries": complete}) + "\n")
 
     def read() -> dict:
-        raw = json.loads(graph_path.read_text())["entries"]
+        raw = read_graph_strict(graph_path)
         return {e["id"]: e for e in raw}
 
     write(_world(tmp_path))

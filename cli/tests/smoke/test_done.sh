@@ -97,10 +97,11 @@ fi
 # AC: `fno done ab-smoke0001 --note "smoke test"` sets completion_note
 uv run fno-py done ab-smoke0001 --note "smoke test marker" >/dev/null 2>&1 \
   || die "'fno done ab-smoke0001 --note' exited $? (rerun without >/dev/null to see it)"
-status=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0001')
+# graph.json is a fold-on-open seed: writes land in the store, so reads and
+# later seeds go through the store client, never the file.
+status=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+e = next(x for x in read_graph_strict('$TMP/.fno/graph.json') if x['id'] == 'ab-smoke0001')
 print(e.get('status'), e.get('completion_note'))
 ")
 if [[ "$status" != "done smoke test marker" ]]; then
@@ -110,20 +111,16 @@ fi
 
 # AC: Ledger rollup fills session_id / cost_usd / cost_sessions / points
 # Seed a second ab node AND a matching ledger entry, then run fno done.
-cat > "$TMP/.fno/graph.json" <<'JSON'
-{
-  "entries": [
-    {
-      "id": "ab-smoke0002",
-      "title": "Rollup smoke target",
-      "status": "ready",
-      "domain": "code",
-      "plan_path": "/smoke/plans/feature-x",
-      "created_at": "2026-04-22T00:00:00+00:00"
-    }
-  ]
-}
-JSON
+uv run python -c "
+from fno.graph.store import commit_rows_via_store
+commit_rows_via_store(__import__('pathlib').Path('$TMP/.fno/graph.json'), lambda entries: entries + [{
+    'id': 'ab-smoke0002',
+    'title': 'Rollup smoke target',
+    'status': 'ready',
+    'domain': 'code',
+    'plan_path': '/smoke/plans/feature-x',
+    'created_at': '2026-04-22T00:00:00+00:00',
+}])"
 cat > "$TMP/.fno/ledger.json" <<'JSON'
 {
   "entries": [
@@ -138,10 +135,9 @@ cat > "$TMP/.fno/ledger.json" <<'JSON'
 }
 JSON
 uv run fno-py done ab-smoke0002 --pr 99 >/dev/null 2>&1 || true
-rollup=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0002')
+rollup=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+e = next(x for x in read_graph_strict('$TMP/.fno/graph.json') if x['id'] == 'ab-smoke0002')
 print(e.get('session_id'), e.get('cost_usd'), e.get('points'), len(e.get('cost_sessions') or []))
 ")
 if [[ "$rollup" != "smoke-sess-1 4.25 5 1" ]]; then
@@ -150,22 +146,23 @@ if [[ "$rollup" != "smoke-sess-1 4.25 5 1" ]]; then
 fi
 
 # AC: `--backfill` works on an already-done node without flipping status.
-python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0002')
-e['session_id'] = None
-e['cost_usd'] = None
-e['cost_sessions'] = []
-e['points'] = None
-json.dump(d, open('$TMP/.fno/graph.json', 'w'), indent=2)
+uv run python -c "
+from fno.graph.store import commit_rows_via_store
+def clear(entries):
+    for e in entries:
+        if e['id'] == 'ab-smoke0002':
+            e['session_id'] = None
+            e['cost_usd'] = None
+            e['cost_sessions'] = []
+            e['points'] = None
+    return entries
+commit_rows_via_store(__import__('pathlib').Path('$TMP/.fno/graph.json'), clear)
 "
 uv run fno-py done ab-smoke0002 --backfill >/dev/null 2>&1 \
   || die "'fno done ab-smoke0002 --backfill' exited $? (rerun without >/dev/null to see it)"
-backfilled=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0002')
+backfilled=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+e = next(x for x in read_graph_strict('$TMP/.fno/graph.json') if x['id'] == 'ab-smoke0002')
 print(e.get('status'), e.get('session_id'), e.get('cost_usd'))
 ")
 if [[ "$backfilled" != "done smoke-sess-1 4.25" ]]; then

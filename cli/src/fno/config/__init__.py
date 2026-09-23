@@ -69,7 +69,6 @@ from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
 from fno.config.status_sinks import ReachMeRow as ReachMeRow
-from fno.config._graph import GraphBlock
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
@@ -3865,7 +3864,6 @@ class ConfigBlock(BaseModel):
     plans_filename: str = "%Y%m%d-{slug}-{node}.md"
     branch: BranchBlock = Field(default_factory=BranchBlock)
     paths: PathsBlock = Field(default_factory=PathsBlock)
-    graph: GraphBlock = Field(default_factory=GraphBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     inbox: InboxBlock = Field(default_factory=InboxBlock)

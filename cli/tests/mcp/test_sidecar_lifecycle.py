@@ -54,6 +54,11 @@ def _spawn_sidecar(home_dir: Path) -> tuple[subprocess.Popen, Path]:
     home = home_dir.resolve()
     env = dict(os.environ)
     env["HOME"] = str(home)
+    # The autouse sandbox's settings pins would redirect the child's
+    # state_dir away from this tmp home; the child must see only HOME.
+    env.pop("FNO_CONFIG", None)
+    env.pop("FNO_GLOBAL_SETTINGS_PATH", None)
+    env.pop("FNO_NO_CANONICAL_CONFIG", None)
     # An absent pin is not the opt-out: it declares nothing, and a child that
     # ever pulls pytest in transitively would then refuse every state accessor.
     # These children pin HOME into a tmp home already, so "0" states the intent.

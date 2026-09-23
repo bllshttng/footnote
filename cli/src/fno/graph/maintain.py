@@ -2397,14 +2397,14 @@ def run_pass(
     """
     import typer
 
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import read_graph_strict, commit_rows_via_store
     from fno.graph.statuses import recompute_statuses
     from fno.graph._intake import _find_node
     from fno.graph.render import make_kanban_column
     from fno.graph.render_html import _load_wip_caps
 
     # Read once; derive status so the judgment legs see accurate states.
-    entries = recompute_statuses(read_graph(graph_path()))
+    entries = recompute_statuses(read_graph_strict(graph_path()))
 
     if suspect_reverts:
         # Short-circuit: a read-only retro sweep, not another leg.
@@ -2699,7 +2699,7 @@ def run_pass(
                     typer.echo(f"warning: stale-ready defer of {cand.node_id} failed: {exc}", err=True)
             return ents
 
-        locked_mutate_graph(graph_path(), mutator)
+        commit_rows_via_store(graph_path(), mutator)
 
     # --- leg 8: validity sweep (proposal-only, never mutates) - reviews the
     # oldest stale ideas into an immutable deck; watermarked ideas never
@@ -2737,7 +2737,7 @@ def run_pass(
             # node that raced to claimed/done/deferred DURING analysis voids its
             # recommendation (AC4-EDGE).
             def _reread():
-                return recompute_statuses(read_graph(graph_path()))
+                return recompute_statuses(read_graph_strict(graph_path()))
 
             validity_result = run_validity_sweep(
                 entries,

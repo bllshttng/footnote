@@ -211,9 +211,9 @@ def test_mint_avoids_archived_id(tmp_path, monkeypatch):
 
     _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4, state_dir=str(tmp_path))
 
-    from fno.paths import graph_archive_json
+    from fno.graph._constants import _graph_archive_json as archive_path_fn
 
-    archive_path = graph_archive_json()
+    archive_path = archive_path_fn()
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(
         json.dumps({"entries": [{"id": "xy-dead", "completed_at": "2026-01-01T00:00:00Z"}]}),
@@ -240,9 +240,9 @@ def test_mint_archive_read_failure_degrades_to_working_pool(tmp_path, monkeypatc
     """A corrupt archive must not block minting (advisory read, x-f69b)."""
     _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4, state_dir=str(tmp_path))
 
-    from fno.paths import graph_archive_json
+    from fno.graph._constants import _graph_archive_json as archive_path_fn
 
-    archive_path = graph_archive_json()
+    archive_path = archive_path_fn()
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text("{not json at all", encoding="utf-8")
 

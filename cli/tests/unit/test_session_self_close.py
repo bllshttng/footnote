@@ -60,9 +60,9 @@ def _invoke(monkeypatch, g: Path, *args: str):
 
 
 def _row(g: Path) -> dict:
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    return read_graph(g)[0]["sessions"][0]
+    return read_graph_strict(g)[0]["sessions"][0]
 
 
 def test_ac2_hp_the_owning_session_self_closes_and_receipt_says_ended(
@@ -98,7 +98,7 @@ def test_ac2_err_ending_another_sessions_open_row_refuses(tmp_path, monkeypatch)
     )
     assert r.exit_code == 2
     assert "fno backlog session reap-open" in r.output
-    assert "ended_at" not in _row(g)
+    assert _row(g).get("ended_at") is None
 
 
 def test_ac2_edge_a_backfill_with_no_prior_row_records(tmp_path, monkeypatch):

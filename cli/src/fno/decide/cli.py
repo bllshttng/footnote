@@ -55,9 +55,9 @@ def _subject_node_id(subject: str, entries: Optional[list] = None) -> Optional[s
         # matcher's answer for the same subject.
         subject = subject.strip()
         if entries is None:
-            entries = _graph_entries()
-        return _resolved_node(subject, entries) or _resolved_node(
-            subject.strip().casefold(), entries
+            entries = _graph_entries() or None
+        return _resolved_node(subject, entries or []) or _resolved_node(
+            subject.strip().casefold(), entries or []
         )
     except Exception:  # noqa: BLE001 - an advisory hint is never the answer
         return None
@@ -791,7 +791,7 @@ def _list_decisions(
         if subject:
             from fno.decide import _graph_entries
 
-            entries = _graph_entries()
+            entries = _graph_entries() or None  # strict lifecycle retry for an empty read
         label, found, damaged = list_decisions(
             subject,
             limit=None,
@@ -813,6 +813,12 @@ def _list_decisions(
         typer.echo(f"backlog decisions: {exc}", err=True)
         raise typer.Exit(1)
 
+    if unknown := [row for row in found if row.get("lifecycle") == "unknown"]:
+        typer.echo(
+            f"backlog decisions: {unknown[0].get('lifecycle_reason')}, "
+            f"so {len(unknown)} coord ruling(s) read UNKNOWN, not unscoped.",
+            err=True,
+        )
     decisions = found[:limit] if limit > 0 else found
     truncated = len(decisions) < len(found)
     # Computed for EVERY subject read, not only an empty one. The specimen this
@@ -820,7 +826,7 @@ def _list_decisions(
     # four rulings filed under ` scope`. A near-miss scan that only runs
     # when the answer is empty would have stayed silent on exactly that case,
     # and a partial answer reads as a whole one.
-    near = near_miss_subjects(subject, entries=entries) if subject else []
+    near = near_miss_subjects(subject, entries=entries or []) if subject else []
 
     # Plan rulings: sibling plans whose consolidation.rejected names this
     # node. The index cannot hold them, so this scan is the one surface the
