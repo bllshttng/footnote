@@ -5,7 +5,7 @@ You have been crowned over one scope, and the crown expires when you exit. That 
 
 One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
 
-Nothing holds you here while work is pending. That changed. With `config.king.enabled` set, coronation through `fno agents crown` or `fno agents spawn --crown` arms the scope manifest automatically, and `fno-agents loop-check --driver king` holds this session open while `fno inbox board` names work you can shrink (a bare call is scoped to your crown's manifest; `--state <path>` reads outside it). It lets you exit only on a clean board. That is a floor under the abdication, not supervision of the tail. It exists because a king filed eight nodes, dispatched none, and sat idle for an hour with a full board. A clean board exits you for real. When the board refills, a human crowns the next king by hand: nothing crowns one for you. A full board that stops shrinking is different. Before the loop lets you go, it records one operator question naming the stalled rows. A stuck board is never a silent exit.
+Nothing holds you here while work is pending. That changed. With `config.king.enabled` set, coronation through `fno agents crown` or `fno agents spawn --crown` arms the scope manifest automatically, and `fno-agents loop-check --driver king` holds this session open while `fno inbox board` names work you can shrink (a bare call is scoped to your crown's manifest; `--state <path>` reads outside it). It lets you exit only on a clean board. That is a floor under the abdication, not supervision of the tail. It exists because a king filed eight nodes, dispatched none, and sat idle for an hour with a full board. A clean board exits you for real. When the board refills, a human crowns the next king by hand: nothing crowns one for you. A full board that stops shrinking is different. Before the loop lets you go, it records one user question naming the stalled rows. A stuck board is never a silent exit.
 
 The core loop is **keep-map-true + promote-next-wave**.
 It is never dispatch-ordering: you do not hand work to workers, you make the graph say what should run next and let the existing hands do their job.
@@ -67,7 +67,7 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
   --crown <epic> --substrate pane --workspace <epic>
 ```
 
-`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `thread` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so a user who set `thread` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
 
 What `pane` buys here is the COURT, not the crown.
 The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
@@ -149,7 +149,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 
 **Rule.** Every ruling channel is in [Recording a ruling](../SKILL.md#recording-a-ruling).
 
-**Priority.** High-priority work comes from the OPERATOR or from a KING SUPERIOR, not from whoever mails you most. Push back on either when you disagree, think clearly, and advocate for your team and your epic. The failure mode is structural, not a discipline gap: mail arrives as a discrete event with an id and a queue, so it gets recorded, while operator conversation is a stream with no boundary, so it does not - and the direction a king records FROM is the direction it gets pushed from. So the capture loop is part of the tick, not a memory exercise: run `fno inbox operator status`, disposition every queued operator turn before the tick ends, file an operator ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add` (new work follows the same rule), record an operator ruling with `fno inbox law set`, then ack the turn naming what it produced: `fno inbox operator ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`. A captured law lands as `chat_attested`, never as `operator`, and that is honest attribution rather than a downgrade: the ack records that the operator asked; it does not manufacture authority an agent never had.
+**Priority.** High-priority work comes from the USER or from a KING SUPERIOR, not from whoever mails you most. Push back on either when you disagree, think clearly, and advocate for your team and your epic. The failure mode is structural, not a discipline gap: mail arrives as a discrete event with an id and a queue, so it gets recorded, while user conversation is a stream with no boundary, so it does not - and the direction a king records FROM is the direction it gets pushed from. So the capture loop is part of the tick, not a memory exercise: run `fno inbox operator status`, disposition every queued user turn before the tick ends, file a user ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add` (new work follows the same rule), record a superuser ruling with `fno inbox law set`, then ack the turn naming what it produced: `fno inbox user ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`. A captured law lands as `chat_attested`, never as `operator`, and that is honest attribution rather than a downgrade: the ack records that the user asked; it does not manufacture authority an agent never had.
 
 **Dispatch.**
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|thread|headless` starts a worker (`bg` is the deprecated alias for `thread`).
@@ -219,7 +219,7 @@ Wiring `blocked_by` *after* linking loses that race and stampedes a wave that wa
 
 ### 1. Read the track
 
-Read your operator's lane before the graph.
+Read your user's lane before the graph.
 
 `fno outstanding` prints its count and top item at session start, in every session, and `fno inbox board` lists it as the first queue, above `undispatched`.
 
@@ -306,7 +306,7 @@ When an S node is next in a chain you just serialized but unselectable for want 
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
 
-The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the operator lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
+The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
 
 Use `fno do plan path` for the canonical filename.
 

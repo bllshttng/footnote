@@ -1,6 +1,6 @@
 # Per-task Executor Resolution
 
-Operator routes each task to a subagent based on a three-tier resolver. This
+The `waves` mode routes each task to a subagent based on a three-tier resolver. This
 doc describes the chain, the locked surface inference list, override paths,
 and failure modes.
 
@@ -155,7 +155,7 @@ deviation from this locked contract.
 
 `/impeccable` is treated as a subprocess. The `frontend-executor` agent
 parses `/impeccable critique` output and decides whether to loop, but
-operator owns the canonical gate-artifact write (`do-{sid}.md`) at wave
+The `waves` runner owns the canonical gate-artifact write (`do-{sid}.md`) at wave
 end. If `/impeccable`'s output format changes, the parser falls back to
 `score=0` (treated as another iteration) and `next-subcommand=craft`. The
 max-iter ceiling guarantees termination.

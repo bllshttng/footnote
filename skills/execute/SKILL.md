@@ -1,7 +1,7 @@
 ---
 name: execute
-description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves, alias operator). Use when: 'do this plan', 'execute the plan', 'run the waves'."
-argument-hint: "[flat|waves|operator] <plan-path>"
+description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves). Use when: 'do this plan', 'execute the plan', 'run the waves'."
+argument-hint: "[flat|waves] <plan-path>"
 metadata:
   requires:
     binaries:
@@ -73,7 +73,7 @@ The default mode `flat` takes a **plan path**. The `waves` mode (and its one-rel
 The `do` lifecycle row is no longer stamped here. It is written when the session
 releases its node claim at a finished terminal (`DonePRGreen`, `DoneAdvisory`,
 `DoneDelivery`, `NoWork`): `started_at` from the claim's acquire time, `ended_at`
-at the release instant - a true per-session hold window, the operator's "who
+at the release instant - a true per-session hold window, the user's "who
 touched this node, and for how long". This is the third code choke point (ship =
 pr_number, blueprint = plan_path, do = claim release), so a direct CLI call or a
 non-Claude worker that skips this skill still gets the row. A session that stops

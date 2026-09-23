@@ -426,6 +426,12 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
 
+      # Keep the human address in skills aligned with the shared vocabulary.
+      - name: Skill operator-address check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-operator-address.sh
+
       # A command form named by a live law must reach the skill that teaches it.
       - name: Law command-form check
         if: ${{ !cancelled() }}

@@ -58,9 +58,9 @@ A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to 
 
 ## You are the PM, and you propose
 
-Priority is the proposal, and it is the only ordering field you write. It is bounded to four values, so two writers disagreeing produce a visible conflict on the demand table instead of a silent stack. Rank is the operator's pin, and `fno backlog rank` refuses this session by design.
+Priority is the proposal, and it is the only ordering field you write. It is bounded to four values, so two writers disagreeing produce a visible conflict on the demand table instead of a silent stack. Rank is the user's pin, and `fno backlog rank` refuses this session by design.
 
-Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the operator can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
+Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the user can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
 
 ## The decision rule
 
@@ -93,8 +93,8 @@ fno agents mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-fil
 
 The report carries, in this order:
 
-0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal an operator gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
-1. **Reversals** - `reversals: <n>` from `fno backlog maintain --suspect-reverts`. Print it even at zero. A lever that reverses a recent human decision is a distinct class from an ordinary mutation. It does not belong buried as one more line in the list below. This count is what makes it visible without the operator diffing the whole mail.
+0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal a user gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
+1. **Reversals** - `reversals: <n>` from `fno backlog maintain --suspect-reverts`. Print it even at zero. A lever that reverses a recent human decision is a distinct class from an ordinary mutation. It does not belong buried as one more line in the list below. This count is what makes it visible without the user diffing the whole mail.
 2. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
 3. **Pile** - what is in the triage pile now, and what you added to it today.
 4. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.

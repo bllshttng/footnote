@@ -1,7 +1,7 @@
 # Synthesis Checklist
 
 Quick-reference for the orchestrator's pre-dispatch validation.
-Loaded by operator SKILL.md Section 3a.
+Loaded by `skills/execute/SKILL.md` Section 3a.
 
 ## The Five-Point Check
 

@@ -135,7 +135,7 @@ The stop hook reads your final message and makes ONE decision from it. There are
 
 **Never** end a turn with tag-less prose while the mission is incomplete. That is the ONLY thing that blocks - the hook re-invokes you with "continue working" for zero progress. If you have nothing to add and are not done, do not post: arm-and-tag (2) or take the next action (3).
 
-**Residual-turn austerity.** The arm-and-tag turn (and any timeout re-arm) must be near-empty: the tag plus at most one short line. No status recap, no "waiting for it to settle", no restating what you armed. The transcript is the operator's review artifact; the wait machinery's job is to be invisible in it.
+**Residual-turn austerity.** The arm-and-tag turn (and any timeout re-arm) must be near-empty: the tag plus at most one short line. No status recap, no "waiting for it to settle", no restating what you armed. The transcript is the user's review artifact; the wait machinery's job is to be invisible in it.
 
 Only Claude sessions idle on `<watching>` today; codex/gemini keep the block-every-tick behavior until their daemon waker ships, so on those harnesses ending a wait turn near-silently still costs a nudge, but keep it terse anyway.
 
@@ -156,7 +156,7 @@ For a from-idea run, a multi-phase run, or any **M/L** ready node, the whole pha
 ```bash
 # Size profiles (primary interface)
 /target S "fix the login bug"            # small: do + PR, no ceremony
-/target M "add user auth"                # medium: operator + docs + external
+/target M "add user auth"                # medium: waves + docs + external
 /target L "rebuild billing"              # large: everything including adversarial
 /target "add user auth"                  # no size = medium (default)
 
@@ -192,8 +192,8 @@ For the full execution-mode comparison, interactive-mode wizard, override-flag t
 | Subcommand | Name | Executor | Ceremony |
 |------------|------|----------|----------|
 | `S` / `small` | Small | do | Build + PR only |
-| `M` / `medium` (or omit) | Medium (default) | operator | + external, docs |
-| `L` / `large` | Large | operator | Everything: research, adversarial, browser, clean |
+| `M` / `medium` (or omit) | Medium (default) | `waves` | + external, docs |
+| `L` / `large` | Large | `waves` | Everything: research, adversarial, browser, clean |
 
 Load [references/size-profiles.md](references/size-profiles.md) for the full capability matrix and [references/flag-migration.md](references/flag-migration.md) for the override-flag list.
 
@@ -248,7 +248,7 @@ Quick summary:
   On this path you MUST also set `TARGET_BEASTMODE` explicitly - `1` when the invocation carried the `beastmode` / `beast` modifier, empty otherwise. The helper reads the bare env var and cannot tell an explicit grant from one inherited from an ancestor shell or a spawning parent; `fno do target init` scrubs that for you, and this path has no such scrub.
 - **`fno do target init` owns the node claim - do NOT claim it yourself.** Init acquires `node:<id>` via `fno agents claim` (TTL-anchored to the durable session PID) and records `target_claim_key`/`holder`/`ttl` in the manifest on success. A `note: legacy graph-claim skipped (non-fatal)` line is EXPECTED and is not a failure - the authoritative `fno agents claim` runs right after it. Never run `fno agents claim acquire` manually to "fix" it: a claim from a transient shell PID dies instantly and goes `stale`, clobbering init's good claim. To confirm ownership, run `fno agents claim status node:<id>` and check that the live `holder` equals your own session_id (`fno whoami` prints it). Do NOT trust the `target_claim_*` manifest fields for this: they are an init-time SNAPSHOT and can lie after the supervisor PID is respawned - the live lockfile holder is the only ownership truth. A `suspect` state (TTL-unexpired but dead pid) still belongs to your session; it is never up for grabs.
 - **Join is the caller side of a wide plan, and init is where it fires.** When the bound plan carries `join: auto`, init measures the plan width and hands the remainder out. It reads the width with `python -m fno.backlog.join_trigger width`, then runs `fno backlog join <node>`. When the plan carries `join: manual` (the default), init fires nothing. The remaining waves then wait for a person or a crowned `/fno:reign` king to run `fno backlog join <node>`. Join refuses by exit code. 2 is no live node claim, 3 is width 1, 4 is no usable bound plan, 5 is already joined. A refusal is non-fatal and never blocks init. The joiner side of the same contract is the joiner posture in [/execute waves](../execute/references/waves.md).
-- **Rulings govern the run from init.** The stage block (`## Law governing target`, injected by the law-stage hook) and the rulings a plan's `decisions_acknowledged` entries name are fixed: obey them, never re-derive them, never re-ask them. A directive from the operator or the king with no ruling behind it gets exactly one challenge: name the alternative, ask once with the cost of each side, then follow the answer. A second challenge on the same subject in the same session is a violation of this rule, not diligence.
+- **Rulings govern the run from init.** The stage block (`## Law governing target`, injected by the law-stage hook) and the rulings a plan's `decisions_acknowledged` entries name are fixed: obey them, never re-derive them, never re-ask them. A directive from the user or the king with no ruling behind it gets exactly one challenge: name the alternative, ask once with the cost of each side, then follow the answer. A second challenge on the same subject in the same session is a violation of this rule, not diligence.
 - For every plan input, run `validate-plan.sh` against the resolved plan file or folder, including single-file quick plans.
 - Resolve domain from CLI flag → plan → settings → `code` default.
 - For idea inputs, run the discovery gate before /blueprint.
@@ -288,7 +288,7 @@ fi
 
 ### 4. Execute Pipeline
 
-**Capability escalation + cross-project routing.** Context pressure is handled by compaction and never triggers a fresh session. Continue across blueprint/do and wave boundaries in this session. Only an external operator or supervising king may invoke the explicit capability-escalation transaction after selecting a stronger destination. Its proof and decision-line contract are in [references/self-handoff.md](references/self-handoff.md). A legacy `cross_project: true` manifest still routes foreign work through spawn-into-project rather than a removed parallel pipeline.
+**Capability escalation + cross-project routing.** Context pressure is handled by compaction and never triggers a fresh session. Continue across blueprint/do and wave boundaries in this session. Only an external user or supervising king may invoke the explicit capability-escalation transaction after selecting a stronger destination. Its proof and decision-line contract are in [references/self-handoff.md](references/self-handoff.md). A legacy `cross_project: true` manifest still routes foreign work through spawn-into-project rather than a removed parallel pipeline.
 
 ---
 

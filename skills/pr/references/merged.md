@@ -26,7 +26,7 @@ anywhere in the verb.
 - `config.post_merge.maintainer_marker` (optional, default empty) is the discriminator tag for maintainer-only items (decisions, sign-offs, manual setups). Leave it empty unless the parking-lot destination is a SHARED vault where maintainer items can otherwise drown in unrelated checkboxes. An empty default ships no one's initials. The capture parser honors the same key, so `fno backlog capture list --by-type` and `tidy` recognize the tag too.
 - `gh` is authenticated for reading the merged diff.
 
-## Autonomous mode (no operator present)
+## Autonomous mode (no user present)
 
 Merge-detection dispatches this ritual as a background worker with no human to
 prompt (the watcher passes an `autonomous` token; a manual headless run sets
@@ -99,7 +99,7 @@ fno backlog find 'deferred from PR #<n>'
 For each open node, offer a one-touch decision (in autonomous mode: log each as
 `undecided` and continue - no regression over today):
 
-- **promote** -> `fno backlog update <id> --priority p1` (rank is the operator's pin and refuses this session)
+- **promote** -> `fno backlog update <id> --priority p1` (rank is the user's pin and refuses this session)
 - **keep** as filed -> no-op
 - **defer** explicitly -> `fno backlog defer <id>`
 - **supersede** -> `fno backlog supersede <other-id> --replaces <id> --cause "..." --surface <path>`, or

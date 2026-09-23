@@ -11,7 +11,7 @@ skill revisions, but the section heading is the contract.
 
 ## Why this exists
 
-The operator routes tasks through a three-tier resolver
+The `waves` mode routes tasks through a three-tier resolver
 (`task.executor` → `plan.executor` → surface inference). The surface matcher
 lives in the in-package module `fno.executor._surface` and is locked by
 PR #196's plan.
@@ -61,8 +61,8 @@ Outputs:
   `do` via surface inference.
 - `mixed` - both signals fire. Lock plan-level to `do` and surface
   per-task `executor: impeccable` overrides for tasks whose file lists
-  match the surface-inference patterns. This mirrors the operator's
-  three-tier resolver and keeps cost honest: impeccable runs only where
+  match the surface-inference patterns. This mirrors the `waves` resolver
+  and keeps cost honest: impeccable runs only where
   it earns its keep.
 - `unknown` - neither family matched. Treat like backend-only at the
   call site (no prompt, no lock). The runtime resolver still has the
