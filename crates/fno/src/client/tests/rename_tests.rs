@@ -76,12 +76,72 @@ async fn rename_keys_agent_empty_enter_keeps_the_overlay_open() {
 }
 
 #[tokio::test]
+async fn selector_r_opens_the_seeded_agent_rename_overlay() {
+    let mut v = view_with_agents(vec![blocked_row("worker-x", 3, None)]);
+    let idx = agent_row_at(&v, |a| a.name == "worker-x");
+    v.selector = Some(idx);
+    let mut sent: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"r", &mut sent).await.unwrap();
+    assert!(sent.is_empty(), "opening the overlay sends nothing");
+    assert_eq!(v.selector, None, "the selector closes");
+    assert_eq!(
+        v.rename,
+        Some((RenameTarget::Agent("worker-x".into()), "worker-x".into()))
+    );
+}
+
+#[tokio::test]
+async fn selector_r_refuses_external_agent_rename() {
+    let mut row = blocked_row("daemon-row", 4, None);
+    row.external = true;
+    let mut v = view_with_agents(vec![row]);
+    let idx = agent_row_at(&v, |a| a.name == "daemon-row");
+    v.selector = Some(idx);
+    let mut sent: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"r", &mut sent).await.unwrap();
+    assert!(sent.is_empty(), "an external row cannot be renamed");
+    assert!(v.rename.is_none(), "an external row opens no overlay");
+    assert_eq!(
+        v.notice.as_ref().map(|(message, _)| message.as_str()),
+        Some("an external row's name belongs to its claude session")
+    );
+}
+
+#[tokio::test]
+async fn selector_r_opens_the_seeded_exited_agent_rename_overlay() {
+    let mut row = blocked_row("worker-x", 3, None);
+    row.exited = true;
+    let mut v = view_with_agents(vec![row]);
+    let idx = agent_row_at(&v, |a| a.name == "worker-x");
+    v.selector = Some(idx);
+    let mut sent: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"r", &mut sent).await.unwrap();
+    assert!(sent.is_empty(), "opening the overlay sends nothing");
+    assert_eq!(
+        v.rename,
+        Some((RenameTarget::Agent("worker-x".into()), "worker-x".into()))
+    );
+}
+
+#[tokio::test]
 async fn rename_agent_menu_entry_opens_the_seeded_overlay() {
     let mut v = view_with_agents(vec![blocked_row("worker-x", 3, None)]);
     let idx = agent_row_at(&v, |a| a.name == "worker-x");
     assert!(v.open_row_menu(idx, Anchor::Center));
-    // Rename has no accelerator: select it by index, then Enter drives
-    // the same execute path a click uses.
+    let key = crate::keys::menu_byte_for("rename-agent").expect("rename-agent is registered");
+    let hint = v
+        .row_menu
+        .as_ref()
+        .expect("row menu open")
+        .popup
+        .rows
+        .iter()
+        .find_map(|row| match row {
+            PopupRow::Entry { label, hint, .. } if label == "Rename" => Some(hint.clone()),
+            _ => None,
+        })
+        .expect("rename entry has a drawn hint");
+    assert_eq!(hint, crate::keys::menu_key_for("rename-agent").unwrap());
     let pos = v
         .row_menu
         .as_ref()
@@ -90,9 +150,14 @@ async fn rename_agent_menu_entry_opens_the_seeded_overlay() {
         .iter()
         .position(|a| matches!(a, MenuAction::RenameAgent))
         .expect("rename entry present on a plain fno row");
-    v.row_menu.as_mut().unwrap().popup.select(pos);
     let mut sent: Vec<u8> = Vec::new();
-    row_menu_keys(&mut v, b"\r", &mut sent).await.unwrap();
+    assert_eq!(
+        crate::keys::menu_byte_for("rename-agent"),
+        Some(key),
+        "the drawn key is the dispatched key"
+    );
+    assert!(pos < v.row_menu.as_ref().unwrap().actions.len());
+    row_menu_keys(&mut v, &[key], &mut sent).await.unwrap();
     let (target, seed) = v.rename.clone().expect("rename overlay opened");
     match target {
         RenameTarget::Agent(name) => {
