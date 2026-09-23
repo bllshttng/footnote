@@ -233,6 +233,20 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
     .to_string()
 }
 
+/// Resume one exact thread for provider control without changing its model,
+/// sandbox, approval policy, or thread config.
+pub(crate) fn thread_resume_control_request_json(id: u64, thread_id: &str, cwd: &Path) -> String {
+    json!({
+        "id": id,
+        "method": "thread/resume",
+        "params": {
+            "threadId": thread_id,
+            "cwd": cwd,
+        }
+    })
+    .to_string()
+}
+
 /// Build the typed native compaction action. The caller must prove completion
 /// from the same thread's `contextCompaction` lifecycle item; this frame is
 /// only the submit half of that transaction.
@@ -871,6 +885,35 @@ impl CodexThread {
         config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<Self, ThreadDriverError> {
         Self::resume_with_state_dirs(cwd, thread_id, model, posture, effort, &[], config).await
+    }
+
+    /// Resume one exact thread for provider actions without overriding its
+    /// existing permission or model settings.
+    pub(crate) async fn resume_for_control(
+        cwd: impl Into<PathBuf>,
+        thread_id: &str,
+    ) -> Result<Self, ThreadDriverError> {
+        if thread_id.trim().is_empty() {
+            return Err(ThreadDriverError::Protocol(
+                "harness_session_id is required for codex resume".into(),
+            ));
+        }
+        let cwd = cwd.into();
+        let mut driver = Self::launch(cwd.clone()).await?;
+        let request = thread_resume_control_request_json(1, thread_id, &cwd);
+        let response = driver.request(1, request).await?;
+        let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
+            .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
+        if confirmed_id != thread_id {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/resume returned {confirmed_id}, expected {thread_id}"
+            )));
+        }
+        driver.thread_id = confirmed_id;
+        driver.rollout_path = PathBuf::from(rollout_path);
+        driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
+        Ok(driver)
     }
 
     /// [`CodexThread::resume`] plus the state-root grant. A resumed thread
@@ -2280,6 +2323,23 @@ mod tests {
         assert_eq!(value["method"], "thread/resume");
         assert_eq!(value["params"]["threadId"], "thread-1");
         assert_eq!(value["params"]["cwd"], "/tmp/worktree");
+    }
+
+    #[test]
+    fn control_resume_does_not_override_existing_thread_policy() {
+        let value: Value = serde_json::from_str(&thread_resume_control_request_json(
+            7,
+            "thread-full-id",
+            Path::new("/worktrees/feature"),
+        ))
+        .unwrap();
+        assert_eq!(value["method"], "thread/resume");
+        assert_eq!(value["params"]["threadId"], "thread-full-id");
+        assert_eq!(value["params"]["cwd"], "/worktrees/feature");
+        assert!(value["params"].get("sandbox").is_none());
+        assert!(value["params"].get("approvalPolicy").is_none());
+        assert!(value["params"].get("model").is_none());
+        assert!(value["params"].get("config").is_none());
     }
 
     #[test]

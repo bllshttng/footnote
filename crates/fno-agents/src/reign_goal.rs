@@ -118,16 +118,9 @@ fn run_action(
             .build()
             .map_err(|error| format!("Codex provider goal runtime unavailable: {error}"))?;
         runtime.block_on(async move {
-            let mut thread = CodexThread::resume(
-                cwd,
-                &session_id,
-                None,
-                &crate::codex_posture::CodexPosture::bounded(),
-                None,
-                None,
-            )
-            .await
-            .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+            let mut thread = CodexThread::resume_for_control(cwd, &session_id)
+                .await
+                .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
             apply_action(&mut thread, &session_id, action).await
         })
     })?
