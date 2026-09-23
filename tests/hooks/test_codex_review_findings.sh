@@ -45,6 +45,8 @@ grep -q 'request-self-review' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not name the review request path"; exit 1; }
 grep -q 'fno do pr push --no-preflight' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not push a PR fix before re-review"; exit 1; }
+grep -q "When it reads rounds_exhausted true" "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge does not name the at-cap path"; exit 1; }
 grep -q 'merge on green CI' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not explain the at-cap disposition"; exit 1; }
 ! grep -qE 'fno agents mail|daemon|king' "$TMP/turn-findings.err" \
