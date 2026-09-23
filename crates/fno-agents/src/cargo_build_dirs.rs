@@ -1622,9 +1622,8 @@ mod tests {
         init_git_repo(&env.root);
         let target = env.root.join("crates/fake/target");
         plant_target(&target, seven_h());
-        let build = plant(&env.fno_base, "00", "tree0011", seven_h(), true);
+        let build = plant(&env.fno_base, "00", "aaaa11", seven_h(), true);
         std::env::set_var("CBD_TARGET_ANSWER", &target);
-
         let report = reclaim_tree_build_output(&env.root, SystemTime::now(), true);
 
         assert!(report.unread.is_none(), "{report:?}");
