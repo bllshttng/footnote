@@ -200,26 +200,6 @@ pub fn fno_py() -> std::ffi::OsString {
     std::ffi::OsString::from("fno-py")
 }
 
-/// Exec the Python front door with the given spawn argv. `fno` is the entry
-/// point on a deployed machine; a bare venv install only ships `fno-py`, so a
-/// NotFound on the first candidate falls through to the PATH-robust resolver.
-pub fn exec_python_front(args: &[String]) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(fno_bin())
-        .arg("agents")
-        .args(args)
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .exec();
-    if err.kind() == std::io::ErrorKind::NotFound {
-        return std::process::Command::new(fno_py())
-            .arg("agents")
-            .args(args)
-            .env("FNO_AGENTS_RUNTIME", "python")
-            .exec();
-    }
-    err
-}
-
 /// The executable `fno-py` in `exe`'s directory, if any. `exe` is a parameter
 /// so the leg is testable (bootstrap.rs's `resolve_via_sibling` does the
 /// same); production passes `current_exe`.
