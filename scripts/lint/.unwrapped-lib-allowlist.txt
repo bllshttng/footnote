@@ -19,7 +19,6 @@ corrections-lock.sh
 phase-handoff.sh
 target-guard.sh
 spawn-subagent.sh
-hook-events.sh
 blocked-taxonomy.sh
 checkpoint.sh
 graph-resolve.sh
@@ -142,13 +141,6 @@ blocked-handler.sh
 # Pure sourcing library; tests source it directly for behavioral + structural
 # checks. No standalone CLI of its own.
 verified-merge.sh
-
-# Phase 12 of stop-hook refactor: budget-display computation. Reads
-# total_cost_usd + budget_cap_usd from STATE_FILE; sets COST_DISPLAY for
-# the resume system message. Pure display logic; the actual budget
-# enforcement (cap trip) lives in crates/fno-agents/src/loopcheck.rs.
-# Sourced by the hook; not a user-facing entry point.
-budget-display.sh
 
 # Advisory body-length lint for gate artifacts. Soft warning only;
 # called from gates-satisfied.sh::gate_satisfied to surface bloat in

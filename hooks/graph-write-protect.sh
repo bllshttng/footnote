@@ -189,7 +189,7 @@ case "$TOOL" in
         if drive_authority_active && declare -F emit_event >/dev/null 2>&1; then
             emit_event "hook" "gate_edit_forged_during_drive" \
                 "$(jq -nc --arg fp "$FILE_PATH" '{file_path:$fp, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
-                2>/dev/null || true
+                || true
         fi
         _block "$_MANIFEST_REASON"
     fi
@@ -200,7 +200,7 @@ case "$TOOL" in
                 "$(jq -nc --arg fp "$FILE_PATH" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                     '{action_type:"artifact_edited_operator_initiated", file_path:$fp, last_operator_edit:$ts, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
                 "hook" \
-                2>/dev/null || true
+                || true
         fi
         _approve
     fi
