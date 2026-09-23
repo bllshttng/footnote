@@ -1395,8 +1395,9 @@ mod tests {
     ) -> (tempfile::TempDir, std::path::PathBuf, Value) {
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
+        std::fs::create_dir_all(dir.path().join(".fno")).unwrap();
         std::fs::write(
-            dir.path().join("config.toml"),
+            dir.path().join(".fno/config.toml"),
             "[[work.workspaces.main.projects]]\nname = \"p\"\npath = \"/repo/p\"\n",
         )
         .unwrap();
@@ -1508,8 +1509,9 @@ mod tests {
     fn an_unreadable_registry_nulls_owned_with_a_reason() {
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
+        std::fs::create_dir_all(dir.path().join(".fno")).unwrap();
         std::fs::write(
-            dir.path().join("config.toml"),
+            dir.path().join(".fno/config.toml"),
             "[[work.workspaces.main.projects]]\nname = \"p\"\npath = \"/repo/p\"\n",
         )
         .unwrap();
