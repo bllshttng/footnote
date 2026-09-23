@@ -281,30 +281,39 @@ def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
 
 
-def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
-    """The dry run passes no gate the real spawn would refuse on. The
-    preview reads the ONE gate's probe answer."""
-    _lane_fill_world(monkeypatch, [_ready_node("x-win")])
+def test_preview_keeps_gate_refusal_visible_without_axis_stop(monkeypatch):
     from fno.agents import spawn_gate
     from fno.backlog.explain import build_lane_fill_report
 
-    answer = {
-        "verdict": "accepted",
-        "rows": [
-            {
-                "name": "cpu-share",
-                "measured": "2.10/12.00 cores",
-                "threshold": "50%",
-                "verdict": "refuse",
-                "key": "agents.max_fleet_cpu_share",
-                "note": "spawn-gate: cannot decide",
-            }
-        ],
+    gate_row = {
+        "name": "gate-verdict",
+        "measured": "fleet-stop",
+        "threshold": "accepted",
+        "verdict": "refuse",
+        "note": "fleet incident stop is active",
     }
-    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: answer)
-    report = build_lane_fill_report(epic="x-epic")
-    assert report["selection"]["stop"] == "load-refused"
-    assert report["decision"]["would_dispatch"] == ["x-win"]
+    cpu_row = {
+        "name": "cpu-share", "measured": "2.10/12.00 cores", "threshold": "50%",
+        "verdict": "refuse", "key": "agents.max_fleet_cpu_share",
+        "note": "spawn-gate: cannot decide",
+    }
+    cases = [
+        ([_ready_node("x-win")], gate_row, "cap-full"),
+        ([], gate_row, None),
+        ([], cpu_row, None),
+    ]
+    for ready, row, expected_stop in cases:
+        _lane_fill_world(monkeypatch, ready, max_lanes=0)
+        monkeypatch.setattr(
+            spawn_gate,
+            "probe_capacity",
+            lambda *a, **k: {"verdict": "refused", "rows": [row]},
+        )
+        report = build_lane_fill_report(epic="x-epic")
+        assert report["selection"]["stop"] == expected_stop
+        rendered = next(g for g in report["gates"] if g["name"] == row["name"])
+        assert rendered["measured"] == row["measured"]
+        assert rendered["verdict"] == "refuse"
 
 # ---------------------------------------------------------------------------
 # ROUTING derives the slot from the node's verb (x-4890)
