@@ -57,7 +57,7 @@ A waiting build writes a marker under `<claims root>/.fno/claims/build-waiters/`
 
 ## Run admission
 
-Both cargo doors queue in arrival order beside the suite door: a waiter holds a ticket in a FIFO queue dir next to its claim's lockfile and attempts the acquire only from the front of the queue. This is new for the compile and run-slot doors; the suite door has queued this way since the claim queue shipped.
+Both cargo doors queue in arrival order beside the suite door. A waiter holds a ticket in a FIFO dir beside the claim's lockfile and attempts the acquire only at the front. The compile and run-slot doors are new to this. The suite door has queued this way since the claim queue shipped.
 
 The build claim covers the compile door only. A fresh-build `cargo test` calls no rustc, so it passed admission entirely while it ran every test binary. On 2026-09-17 at 22:37 this 12-CPU machine carried 9 live cargo runs at once, and every mitigation was a human killing processes by hand. So the machine holds a pool of run slots beside the build claim: `test.max_cargo_runs` in `.fno/config.toml`, default 2. A cargo run takes a slot at the first door it reaches. The slot is keyed to the cargo pid with no TTL. When that cargo exits, the slot frees.
 
@@ -72,7 +72,7 @@ What the cap does not cover: a cargo started outside a footnote checkout reaches
 
 ## Lanes
 
-Every admission door orders its waiters in up to three lanes, best first: `priority`, then `queue` (arrival order), then, at the suite door only, `full`. A lane is one claim-queue dir beside the claim's lockfile. A waiter tries the acquire only while every better lane is empty and it sits at the front of its own lane. An empty lane reserves nothing. No lane ever signals a running holder; a holder runs to completion (or to its own budget) regardless of who waits.
+Every admission door orders its waiters in up to three lanes, best first: `priority`, then `queue` (arrival order), then, at the suite door only, `full`. A lane is one claim-queue dir beside the claim's lockfile. A waiter tries the acquire only while every better lane is empty and it sits at the front of its own lane. An empty lane reserves nothing. No lane ever signals a running holder. A holder runs to completion (or to its own budget) regardless of who waits.
 
 The priority lane names one checkout. The user sets it, or a king sets it on the user's word:
 
@@ -82,11 +82,11 @@ fno agents claim status test:priority
 fno agents claim release test:priority --holder worktree:<checkout>
 ```
 
-A second acquire is refused and names the holder. A lane with no TTL is ignored. The lane reorders all three doors: compile admission, run slots, and the suite claim. The idle takeover at the build door is unchanged: a holder cargo that runs no compile still loses the slot after the idle window, lane or no lane.
+A second acquire is refused and names the holder. A lane with no TTL is ignored. The lane reorders all three doors: compile admission, run slots, and the suite claim. The idle takeover at the build door is unchanged. A holder cargo that runs no compile still loses the slot after the idle window, lane or no lane.
 
-The full lane exists at the suite door only. A run whose cargo argv selects a whole crate (no test-name filter, no `--test`/`--bin`/`--example`/`--bench`/`--doc`, no nextest filterset; `--lib` alone counts as whole) waits in the full lane while targeted runs are queued, for at most its own run budget, then joins the normal queue at the back. The guard refuses a whole suite from an agent outright unless the command carries the `FNO_TEST_FULL=1` prefix, so the full lane is the escape hatch's queue, not a normal path.
+The full lane exists at the suite door only. A whole-crate argv selects every test in a crate: no test-name filter, no `--test`/`--bin`/`--example`/`--bench`/`--doc`, no nextest filterset. `--lib` alone counts as whole. The run waits in the full lane while targeted runs queue, for at most its own budget, then joins the normal queue at the back. The guard refuses a whole suite from an agent outright unless the command carries the `FNO_TEST_FULL=1` prefix. The full lane is that escape hatch's queue, not a normal path.
 
-The waiting line names what a waiter is doing: `holder_left_s=` on the suite wait reads the holder's remaining budget and goes negative once the holder overruns it; `lane=`, `yielding_to=` and `priority=` name the waiter's lane, the better lane it is yielding to, and the checkout that holds the priority lane.
+The waiting line names what a waiter is doing. `holder_left_s=` on the suite wait reads the holder's remaining budget and goes negative once the holder overruns it. `lane=`, `yielding_to=` and `priority=` name the waiter's lane, the better lane it is yielding to, and the checkout that holds the priority lane.
 
 ## What this does not cover
 
