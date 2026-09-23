@@ -85,9 +85,9 @@ pub struct TruthProbe {
 }
 
 fn family1_truth_command(handle: &str) -> std::process::Command {
-    // FNO_BIN-aware (the same override scrape's callers honor): the cargo
-    // test job pins the checkout front there, because a bare "fno" has no
-    // PATH leg in that environment and every probe ENOENTs.
+    // FNO_BIN-aware (the same override scrape's callers honor); the cargo
+    // test job puts the checkout front on PATH, because a bare "fno" has
+    // no PATH leg in that environment and every probe ENOENTs.
     let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
         .args(["agents", "truth", handle, "--json"])

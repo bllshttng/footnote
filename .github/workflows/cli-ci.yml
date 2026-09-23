@@ -590,11 +590,6 @@ jobs:
     # silent skip.
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
-      # The gc_receipts family-1 truth probes spawn the `fno` front door; the
-      # build step below puts the checkout binary there. Without it every
-      # probe ENOENTs, the settled-stamp assertions read empty, and the
-      # family fails for a provisioning reason rather than a real one.
-      FNO_BIN: ${{ github.workspace }}/crates/fno/target/debug/fno
 
     steps:
       - name: Checkout
@@ -605,7 +600,14 @@ jobs:
           fetch-depth: 0
 
       - name: Build the fno front for the truth probes
-        run: cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test --lib`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise,
+        # so the probes ENOENT without this.
+        run: |
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
 
       - name: Set isolated FNO state roots
         run: |
