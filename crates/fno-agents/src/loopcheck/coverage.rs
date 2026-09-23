@@ -2,6 +2,26 @@
 
 use super::*;
 
+// ── review coverage ──────────────────────────────────────────────────
+//
+// The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
+// all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
+// about reviews computed entirely from what did NOT happen: nobody is still
+// owed, no finding is outstanding, no reviewer is unattested. A quota refusal is
+// dropped from `missing_bots` (PR #214) and reads as a pass; on a config with no
+// required bots, nothing can object, so `reviewed` is true on zero reviews.
+//
+// Coverage is the missing predicate: did anyone actually review? It is a
+// first-class value reported everywhere, never folded back into the objection
+// boolean (collapsing it back undoes this node).
+//
+// Producer axis, not producer string. Two review producers share the display
+// name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
+// can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
+// by the App's quota). They are told apart by `CoverageProducer`, never by the
+// reviewer string. A third local lane,
+// claude `/code-review`, shares the `LocalAttestation` axis.
+
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
 pub(super) struct ReviewInfo {
