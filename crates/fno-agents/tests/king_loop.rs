@@ -560,7 +560,10 @@ fn an_open_question_from_this_king_allows_a_clean_board_to_wait() {
     assert_eq!(d["decision"], "allow", "decision: {d}");
     assert_eq!(d["termination_reason"], "NoWork");
     assert!(
-        d["reason"].as_str().unwrap().starts_with("waiting on the user"),
+        d["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("waiting on the user"),
         "the stop must name the user wait: {d}"
     );
 }
@@ -1211,7 +1214,6 @@ fn every_king_noprogress_terminal_escalates() {
         "the blind terminal names the reading it measured (x-ff27), got: {}",
         blind_calls[0]
     );
-
 }
 
 /// The ceiling `--max-iterations` advertises must actually bind.
@@ -1391,12 +1393,10 @@ fn a_quiet_board_with_undelivered_scope_terminates_nowork_while_waiting() {
     assert_eq!(last.0, 0, "{:?}", last.1);
     assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
     assert_eq!(last.1["termination_reason"], "NoWork");
-    assert!(
-        last.1["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("waiting on CI or a worker")
-    );
+    assert!(last.1["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on CI or a worker"));
     let logged = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !logged.contains("--reason NoProgress"),
@@ -1449,7 +1449,10 @@ fn an_unreadable_drain_is_never_a_progress_baseline() {
         "{:?}",
         fires[2].1
     );
-    assert!(fires[2].1["reason"].as_str().unwrap().starts_with("waiting on CI or a worker"));
+    assert!(fires[2].1["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on CI or a worker"));
 }
 
 /// AC5: the unreadable-questions block is bounded, and each blocking fire
@@ -1506,12 +1509,18 @@ fn an_open_operator_question_records_one_nowork_terminal() {
     assert_eq!(code, 0);
     assert_eq!(d["decision"], "allow", "fire: {:?}", d);
     assert_eq!(d["termination_reason"], "NoWork", "fire: {:?}", d);
-    assert!(d["reason"].as_str().unwrap().starts_with("waiting on the user"));
+    assert!(d["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on the user"));
 
     let (repeat_code, repeat) = king_fire(&state, cwd, &events, &spec);
     assert_eq!(repeat_code, 0);
     assert_eq!(repeat["decision"], "allow", "repeat: {:?}", repeat);
-    assert!(repeat["reason"].as_str().unwrap().contains("already terminal"));
+    assert!(repeat["reason"]
+        .as_str()
+        .unwrap()
+        .contains("already terminal"));
     let terminals = event_text(&events)
         .lines()
         .filter(|line| line.contains("\"type\":\"termination\""))
