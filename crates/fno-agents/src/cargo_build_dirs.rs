@@ -1717,7 +1717,7 @@ mod tests {
         assert!(occupied.contains(&phys(&nested)), "{occupied:?}");
         assert!(!occupied.contains(&phys(&tree)), "{occupied:?}");
         assert!(occupied_trees(
-            &[root, tree],
+            &[root.clone(), tree.clone()],
             &reg,
             &crate::claude_roster::ClaudeAgentsSnapshot::unknown("test"),
             None,
