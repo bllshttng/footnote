@@ -574,7 +574,11 @@ pub fn control_key_path() -> PathBuf {
 /// client, allowed via peerUid"), so the caller treats this as optional, never an
 /// error. [corroborated]
 pub fn read_control_key() -> Option<String> {
-    let raw = std::fs::read_to_string(control_key_path()).ok()?;
+    read_control_key_in(&daemon_dir())
+}
+
+pub(crate) fn read_control_key_in(daemon_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(daemon_dir.join("control.key")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         None

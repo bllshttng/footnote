@@ -4539,8 +4539,6 @@ mod tests {
         // The live-attach route acquires this key before injecting. Verify the
         // shared lock contract independently: it refuses a second concurrent
         // writer on the same row, as the session-claim path does for its key.
-        // refuses a second concurrent writer, the same contract
-        // acquire_resume_session_claim already has for its own key.
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
         let short_id = "deadbeef";
         let root = cv_tmpdir();
