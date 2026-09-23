@@ -8,7 +8,7 @@ There is ONE spawn gate: `crates/fno-agents/src/spawn_gate.rs`, with the lane ax
 
 Two modes:
 
-- `gate` runs the full admission gate. The payload is `{mode, name, substrate, force, no_wait, route_provider, account, caller_session, holder_pid, seed, session_phase}`. An admitted answer is `{status: "admitted", gate_key, gate_holder, worker_key, worker_holder}`. A key is null when that claim is not held. A refused answer is `{status: "refused", exit_code, receipt, event}`. The gate refuses when the seed's first verb, read through `spawn_phase.toml`, or the explicit `session_phase` label names review.
+- `gate` runs the full admission gate. Its payload is `{mode, name, substrate, force, no_wait, route_provider, account, caller_session, holder_pid, seed, session_phase}`. An admitted answer is `{status: "admitted", gate_key, gate_holder, worker_key, worker_holder}`. When a claim is not held, its key is null. A refusal is `{status: "refused", exit_code, receipt, event}`. When the seed's first verb or explicit `session_phase` label names review, the gate refuses. Seed verbs use `spawn_phase.toml`.
 - `probe` is the read-only capacity reading. `fno agents gate-status`, the lane readouts, `explain` and the advance width all consume it. The payload is `{mode: "probe", caller_session, only}`. Set `only: ["lanes"]` to skip the CPU and RAM reads. This is for callers already on the spawn path. The answer keeps the probe's verdict shape. It adds three blocks every reader consumes. `lanes` covers every capped provider and every provider a live row names, each `{cap, live, counted}`. `share` is `{kings, share, held, held_rows, unattributed}`. `rows` holds the explain Gate dicts in `{name, measured, threshold, verdict, key, note}` shape.
 
 ## Claims cross the boundary owned by the caller
@@ -32,7 +32,7 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 - 86 the per-territory team cap. The one permanent, non-queueable machine refusal with its own number, so a caller never retries it as capacity; the territory attribution being unreadable refuses with this number too.
 - 87 gate unavailable. The gate verb is missing, failed, or timed out. Fail closed: never admit on an unreadable gate.
 - 88 blueprint thread cap. More than `agents.profiles.blueprint.max_live` live `bp` threads, or more than one per territory, refuses the spawn and teaches the subagent path.
-- 89 review session. A seed or label naming review is a permanent refusal before `--force` and `FNO_SPAWN_GATE=0`; run the inline fno review lane.
+- 89 review session. A seed or label that names review causes a permanent refusal. The refusal runs before `--force` and the `FNO_SPAWN_GATE=0` bypass. Run the inline fno review lane.
 
 ## Reading a refusal
 
