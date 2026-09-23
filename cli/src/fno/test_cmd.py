@@ -659,7 +659,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("cost-accuracy harness", ".",
      "uv run --project cli python tests/lib/test_cost_tracker_pricing.py\n"
      "uv run --project cli python tests/metrics/test_session_cost_dedup.py\n"
-     "uv run --project cli python tests/metrics/test_backfill_cost_recompute.py\n"
      "bash tests/lib/test_cost_tracker_sh_parity.sh"),
     ("loop-check shim + immutable manifest harness", ".",
      "bash tests/hooks/test_loop_check_shim.sh\n"
@@ -709,7 +708,13 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("autocorrect prompt contract", ".", "bash scripts/tests/test_autocorrect_prompt_contract.sh"),
     ("corrections skill-commit SOURCE resolution", ".", "bash tests/hooks/test_corrections_skill_commit.sh"),
     ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
-    ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
+    # The workspace .cargo/config.toml redirects build-dir to the cargo-home
+    # base, so a plain `cargo build` writes the binary THERE and leaves the
+    # classic target/ the FRONT export and the claim-door pin both name
+    # abandoned for cargo to reclaim - the resolver then reads None mid-run.
+    # Pin the classic layout, the same spell smoke-setup uses.
+    ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents",
+     'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build'),
     # The debug binary is present here, so the @requires_rust parity suites run
     # instead of skipping. Stub the provider CLIs on PATH (test_rust_verb_parity
     # presence-checks them without faking); per-test fakes still win where a

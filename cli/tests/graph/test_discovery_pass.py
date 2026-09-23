@@ -50,7 +50,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(constants, "GRAPH_ARCHIVE_JSON", tmp_path / "archive.json")
     monkeypatch.setattr(store, "GRAPH_JSON", graph)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "archive.json")
+    monkeypatch.setattr("fno.graph._constants._graph_archive_json", lambda: tmp_path / "archive.json")
     return graph
 
 

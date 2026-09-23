@@ -179,7 +179,8 @@ def test_paths_emit_shell_writes_file(
     assert out.exists(), "output file must be created"
     content = out.read_text(encoding="utf-8")
     assert "STATE_DIR" in content
-    assert "GRAPH_JSON_PATH" in content
+    # GRAPH_JSON_PATH is gone by design: the json-leg path bridge was deleted
+    # and the shell stub no longer publishes a graph path.
 
 
 # ---------------------------------------------------------------------------

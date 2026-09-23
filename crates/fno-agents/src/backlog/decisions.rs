@@ -54,12 +54,23 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
             if line.trim().is_empty() {
                 continue;
             }
-            let event: Value = serde_json::from_str(line).map_err(|error| {
-                format!(
-                    "decisions import: invalid JSON at line {}: {error}",
-                    line_number + 1
-                )
-            })?;
+            // A torn append is dead weight, not an incident: refusing open()
+            // over it would brick every store read (decisions_imported never
+            // stamps) and hide the good rows behind one bad line. Skip it
+            // loudly; the Python legacy scan still counts it as damaged and
+            // names `fno backlog decide-reindex` as the recovery.
+            let event: Value = match serde_json::from_str(line) {
+                Ok(event) => event,
+                Err(error) => {
+                    eprintln!(
+                        "warning: decisions import: {} line {} did not parse ({}); it is NOT folded",
+                        journal.display(),
+                        line_number + 1,
+                        error
+                    );
+                    continue;
+                }
+            };
             insert_event(&transaction, &event)
                 .map_err(|error| format!("decisions import: line {}: {error}", line_number + 1))?;
         }

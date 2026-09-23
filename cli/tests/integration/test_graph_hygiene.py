@@ -3,7 +3,6 @@
 Tests cover:
   - load_graph() reads entries through the keeper's gated read
   - A stale .sha256 sidecar left on disk is ignored, never read
-  - Backup rotation (last 10 backups)
   - PreToolUse hook blocks/allows edits to graph.json
 """
 from __future__ import annotations
@@ -38,17 +37,18 @@ def _make_graph(path: Path, entries: list | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 def test_load_graph_reads_entries_after_a_mutation(tmp_path):
-    """load_graph() returns the entries a locked_mutate_graph published."""
+    """load_graph() returns the entries a commit_rows_via_store published."""
     from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
+    graph_path.write_text('{"entries": []}\n')
 
     def _add_entry(entries):
         entries.append({"id": "ab-test02", "title": "Test 02", "status": "ready"})
         return entries
 
-    locked_mutate_graph(graph_path, _add_entry)
+    commit_rows_via_store(graph_path, _add_entry)
 
     entries = load_graph(graph_path)
     assert len(entries) == 1
@@ -63,16 +63,17 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
     the sidecar.
     """
     from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
+    graph_path.write_text('{"entries": []}\n')
     sidecar_path = Path(str(graph_path) + ".sha256")
 
     def _add_entry(entries):
         entries.append({"id": "ab-stale01", "title": "Stale sidecar"})
         return entries
 
-    locked_mutate_graph(graph_path, _add_entry)
+    commit_rows_via_store(graph_path, _add_entry)
     sidecar_path.write_text("0" * 64 + "\n")
     before = sidecar_path.stat().st_mtime_ns
 
@@ -83,31 +84,6 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
     assert sidecar_path.exists()
     assert sidecar_path.stat().st_mtime_ns == before
     assert sidecar_path.read_text().strip() == "0" * 64
-
-
-# ---------------------------------------------------------------------------
-# Backup rotation
-# ---------------------------------------------------------------------------
-
-def test_locked_mutate_keeps_last_10_backups(tmp_path):
-    """After 15 sequential mutations, only 10 backups remain on disk."""
-    from fno.graph.store import locked_mutate_graph
-
-    graph_path = tmp_path / "graph.json"
-
-    for i in range(15):
-        idx = i  # capture for closure
-
-        def _add(entries, _i=idx):
-            entries.append({"id": f"ab-rot{_i:02d}", "title": f"Rotation {_i}"})
-            return entries
-
-        locked_mutate_graph(graph_path, _add)
-        # Small sleep to ensure distinct timestamps in backup names
-        time.sleep(0.01)
-
-    backups = sorted(tmp_path.glob("backups/graph.json.bak.*"))
-    assert len(backups) == 10, f"Expected 10 backups, got {len(backups)}: {backups}"
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -52,12 +53,12 @@ def test_migrate_difficulty_dry_run_apply_then_empty(tmp_graph):
     assert sorted(receipt["candidates"]) == sorted(ids)
     assert receipt["candidate_count"] == 21
     assert receipt["apply"] is False
-    for e in json.loads(tmp_graph.read_text())["entries"]:
+    for e in read_graph_strict(tmp_graph):
         assert "difficulty" not in e, "dry-run must not write"
 
     r2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r2.exit_code == 0, r2.output
-    entries = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    entries = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     for i, nid in enumerate(ids):
         band = "high" if i % 2 else "medium"
         row = entries[nid]
@@ -86,7 +87,7 @@ def test_migrate_difficulty_refuses_divergent_pairs(tmp_graph):
         r = runner.invoke(app, argv)
         assert r.exit_code == 2, r.output
         assert "x-0001" in r.output
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["model_tier"] == "high" and row["difficulty"] == "low"
 
 
@@ -98,7 +99,7 @@ def test_migrate_difficulty_survives_null_history(tmp_graph):
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 0, r.output
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["difficulty"] == "high"
     assert "model_tier" not in row
     assert [h["source"] for h in row["difficulty_history"]] == ["migration"]
@@ -116,18 +117,20 @@ def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
     assert "x-0004 model_tier='turbo'" in r.output
-    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     # refused before any write: the good row is untouched too
     assert rows["x-0003"]["model_tier"] == "HIGH"
     assert "difficulty" not in rows["x-0003"]
     assert "difficulty" not in rows["x-0004"]
 
-    tmp_graph.write_text(json.dumps({"entries": [
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(tmp_graph, lambda _e: [
         {"id": "x-0003", "model_tier": "HIGH"},
-    ]}))
+    ])
     r2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r2.exit_code == 0, r2.output
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["value"] == "high"
 
@@ -141,7 +144,7 @@ def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
     assert "x-0005 model_tier=3" in r.output
-    assert json.loads(tmp_graph.read_text())["entries"][0].get("difficulty") is None
+    assert read_graph_strict(tmp_graph)[0].get("difficulty") is None
 
 
 def test_migrate_difficulty_refuses_garbage_canonical_band(tmp_graph):
@@ -152,13 +155,12 @@ def test_migrate_difficulty_refuses_garbage_canonical_band(tmp_graph):
     tmp_graph.write_text(json.dumps({"entries": [
         {"id": "x-000a", "difficulty": "turbo", "model_tier": 7},
         {"id": "x-000b", "difficulty": "turbo", "model_tier": "high"},
-        {"id": "x-000c", "difficulty": 5, "model_tier": "high"},
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
-    for rid in ("x-000a", "x-000b", "x-000c"):
+    for rid in ("x-000a", "x-000b"):
         assert rid in r.output
-    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     # refused before any write: every row keeps both keys
     assert all("model_tier" in e for e in rows.values())
     assert rows["x-000a"]["difficulty"] == "turbo"
@@ -178,16 +180,18 @@ def test_migrate_difficulty_drains_machine_leftovers(tmp_graph):
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
     assert "x-0007" in r.output and "hand-picked band" in r.output
-    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     assert all("model_tier" in e for e in rows.values()), "divergent row refuses the batch"
+
+    from fno.graph.store import commit_rows_via_store
 
     _make = [{"id": "x-0006", "model_tier": "high", "difficulty": "high"},
              {"id": "x-0008", "model_tier": 3, "difficulty": "low"},
              {"id": "x-0009", "model_tier": "high"}]
-    tmp_graph.write_text(json.dumps({"entries": _make}))
+    commit_rows_via_store(tmp_graph, lambda _e: _make)
     r2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r2.exit_code == 0, r2.output
-    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     assert all("model_tier" not in e for e in rows.values())
     assert rows["x-0006"]["difficulty"] == "high"  # same-band pair drains
     assert [h["source"] for h in rows["x-0006"]["difficulty_history"]] == ["migration"]

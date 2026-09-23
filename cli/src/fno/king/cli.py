@@ -1000,9 +1000,15 @@ def drain_cmd(
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
-    # A moved post-read identity describes bytes the count never saw.
+    # A moved post-read identity describes bytes the count never saw - except
+    # first contact: the read itself materializes the db, which moves the
+    # identity from the seed-file stat to the store version with no write in
+    # between, so that flip is the count's own key.
     post = drain_cache.graph_ident(path)
-    if post is not None and post == ident:
+    materialized = (
+        ident is not None and ident[0] == "json" and post is not None and post[0] == "sqlite"
+    )
+    if post is not None and (post == ident or materialized):
         drain_cache.store(scope, post, undelivered)
     typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
 

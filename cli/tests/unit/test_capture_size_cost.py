@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph._intake import VALID_NODE_TYPES, normalize_size, normalize_type
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -37,7 +38,7 @@ def _route_graph(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
 
 def _entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text())["entries"]
+    return read_graph_strict(g)
 
 
 # -- normalize_size --------------------------------------------------------

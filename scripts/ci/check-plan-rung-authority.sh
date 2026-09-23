@@ -434,6 +434,17 @@ while IFS= read -r reader; do
                 || true
         )"
     fi
+    if [ "$reader" = "crates/fno-agents/src/merge_hold.rs" ]; then
+        # merge_hold's #[cfg(test)] fixtures seed graph ROWS whose JSON
+        # carries a "status" field (graph vocabulary, not plan frontmatter);
+        # the reader itself never touches a plan document.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '^[0-9]+:[[:space:]]*"status":[[:space:]]*"ready",$' \
+                | grep -vE '"(type|slug|title|parent|priority|plan_path|cwd|id)":' \
+                || true
+        )"
+    fi
     if [ -n "$matches" ]; then
         fm_status="${fm_status}${reader}:
 ${matches}

@@ -167,24 +167,26 @@ def test_add_carveout_raises_the_owning_nodes_difficulty_band(tmp_path, monkeypa
     _write_manifest(tmp_path, graph_node_id="x-out1")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [{
-        "id": "x-out1", "title": "t", "status": "in-progress", "difficulty": "medium",
+        "id": "x-out1", "title": "t", "status": "in_progress", "difficulty": "medium",
     }]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     cv, _ = add_carveout(
         tmp_path, kind="deferred", description="left-out work", storage_root=tmp_path
     )
     assert cv.node == "x-out1"
-    rows = json.loads(graph.read_text(encoding="utf-8"))
-    node = next(r for r in rows["entries"] if r["id"] == "x-out1")
+    from fno.graph.store import read_graph_strict
+
+    node = next(r for r in read_graph_strict(graph) if r["id"] == "x-out1")
     assert node["difficulty"] == "high"  # medium + one
     assert node["difficulty_history"][-1]["source"] == "outcome:carveout"
     assert node["difficulty_history"][-1]["value"] == "high"
     # a bandless node stays bandless: round-up already reads absent as strong
-    graph.write_text(json.dumps({"entries": [{
-        "id": "x-out2", "title": "t", "status": "in-progress",
-    }]}), encoding="utf-8")
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(graph, lambda _entries: [{
+        "id": "x-out2", "title": "t", "status": "in_progress",
+    }])
     _write_manifest(tmp_path, graph_node_id="x-out2")
     add_carveout(tmp_path, kind="deferred", description="more", storage_root=tmp_path)
-    rows = json.loads(graph.read_text(encoding="utf-8"))
-    node = next(r for r in rows["entries"] if r["id"] == "x-out2")
+    node = next(r for r in read_graph_strict(graph) if r["id"] == "x-out2")
     assert "difficulty" not in node

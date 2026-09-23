@@ -117,7 +117,7 @@ names the other holder (AC2).
 Re-parenting AWAY from the delivery unit un-adopts the node
 (). Without this there is no supported way out of a mistyped
 `adopt` id: only decompose writes `contained_in`, re-running the
-spec without the entry leaves the stale value, and graph.json is a
+spec without the entry leaves the stale value, and the graph store is a
 hook-blocked forbidden surface - so one typo permanently unarmed a
 real delivery unit AND had the cascade later stamp it "shipped
 inside <owner>", a false completion note on work that never

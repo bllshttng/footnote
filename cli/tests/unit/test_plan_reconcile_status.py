@@ -312,8 +312,10 @@ def test_AC5_ERR_sweep_leaves_both_vocabularies_untouched(tmp_path: Path):
 def _write_graphs(tmp_path: Path, live: list, archived: list) -> Path:
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text(json.dumps({"entries": live}))
-    (home / "graph-archive.json").write_text(json.dumps({"entries": archived}))
+    # One store, one seed: archive residents are rows carrying archived_at,
+    # not a second file.
+    rows = list(live) + [dict(row, archived_at=row.get("archived_at", "2026-01-01T00:00:00Z")) for row in archived]
+    (home / "graph.json").write_text(json.dumps({"entries": rows}))
     return home / "graph.json"
 
 
@@ -327,7 +329,6 @@ def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
         archived=[{"id": "x-gone", "status": "done"}],
     )
     monkeypatch.setattr(paths, "graph_json", lambda: graph)
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
     status_map = rs._node_status_map(graph)
@@ -351,7 +352,6 @@ def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
     home.mkdir()
     (home / "graph.json").write_text(json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
     assert rs._node_status_map(home / "graph.json") == {"x-live": "done"}
@@ -371,7 +371,6 @@ def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
         archived=[{"id": "x-shipped", "status": "done"}],
     )
     monkeypatch.setattr(paths, "graph_json", lambda: graph)
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
 
     plans = tmp_path / "plans"
     plans.mkdir()
@@ -462,7 +461,6 @@ def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_pat
         json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
     )
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
 
     assert rs._node_status_map(paths.graph_json()) == {}  # corruption is absent evidence, not archive-only truth
 

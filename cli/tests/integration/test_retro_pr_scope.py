@@ -139,7 +139,7 @@ def test_pr_flag_skips_unrelated_sentinels(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "retro_pending_dir", lambda: sd)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
-    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(store, "read_graph_strict", lambda p: [])
 
     processed: list = []
     synth: list = []
@@ -188,7 +188,7 @@ def test_pr_flag_scopes_by_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "retro_pending_dir", lambda: sd)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
-    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(store, "read_graph_strict", lambda p: [])
 
     processed: list = []
 
@@ -271,7 +271,7 @@ def test_run_threads_canonical_node_root(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "retro_pending_dir", lambda: sd)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: canonical)
-    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(store, "read_graph_strict", lambda p: [])
 
     captured: dict = {}
 
@@ -309,7 +309,7 @@ def test_explicit_foreign_repo_not_attributed_to_local(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "retro_pending_dir", lambda: sd)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
-    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(store, "read_graph_strict", lambda p: [])
     # The ACTUAL local repo, independent of the --repo override.
     monkeypatch.setattr(rcli, "_current_repo_slug", lambda *a, **k: "acme/local")
 
@@ -552,7 +552,7 @@ def _run_synthetic_pr(tmp_path, monkeypatch, *, ledger_entries, local_slug="o/r"
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(paths, "ledger_json", lambda: tmp_path / "ledger.json")
     monkeypatch.setattr(cocore, "resolve_carveout_root", lambda: tmp_path)
-    monkeypatch.setattr(store, "read_graph", lambda p: [])
+    monkeypatch.setattr(store, "read_graph_strict", lambda p: [])
     monkeypatch.setattr(rcli, "_current_repo_slug", lambda *a, **k: local_slug)
 
     captured: dict = {}
