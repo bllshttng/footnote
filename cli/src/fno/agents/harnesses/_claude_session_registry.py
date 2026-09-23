@@ -26,10 +26,8 @@ rather than touching ``harnesses.claude``:
   from rows whose ``state`` is in the terminal-or-needs-input set when
   ``output.result`` is missing.
 
-All paths derive from :func:`_claude_roots` (HOME's root, an ambient
-``CLAUDE_CONFIG_DIR``, each claude account's ``config_dir``), so tests
-can pin ``HOME`` and ``FNO_CONFIG`` via :func:`monkeypatch.setenv` and
-avoid touching real claude state.
+All paths derive from :func:`_claude_roots` (HOME's root first, never
+replaced, then an ambient ``CLAUDE_CONFIG_DIR``, each account's dir).
 
 This module is read-only: a future schema drift in claude is detected
 either by ``locate_session`` returning ``None`` (jobId moved or kind
@@ -92,26 +90,18 @@ class StateSnapshot:
 
 
 def _claude_roots() -> list[Path]:
-    """Every claude config root: HOME's, an ambient CLAUDE_CONFIG_DIR, each claude account's config_dir."""
     roots = [Path.home() / ".claude"]
-    ambient = os.environ.get("CLAUDE_CONFIG_DIR")
-    if ambient:
-        roots.append(Path(ambient))
+    roots += [Path(v) for v in [os.environ.get("CLAUDE_CONFIG_DIR")] if v]
     try:
         from fno.adapters.providers.loader import load_providers
-
-        roots += [
-            Path(r.config_dir)
-            for r in load_providers().records
-            if r.harness == "claude" and r.config_dir
-        ]
+        records = load_providers().records
+        roots += [Path(r.config_dir) for r in records if r.harness == "claude" and r.config_dir]
     except Exception:  # noqa: BLE001 - an unreadable config leaves the ambient roots
         pass
     return roots
 
 
 def session_dirs() -> list[Path]:
-    """Every root's ``sessions`` dir, read once even when a root symlinks it onto another."""
     return list(dict.fromkeys((root / "sessions").resolve() for root in _claude_roots()))
 
 

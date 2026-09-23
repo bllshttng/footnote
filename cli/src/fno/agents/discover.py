@@ -130,11 +130,9 @@ _DEFAULT_RECENCY_SECONDS = 600.0
 
 def default_sessions_dirs() -> list[Path]:
     """Claude Code's per-session registry directories on this host."""
-    override = os.environ.get(SESSIONS_DIR_ENV)
-    if override:
+    if override := os.environ.get(SESSIONS_DIR_ENV):
         return [Path(override)]
     from fno.agents.harnesses._claude_session_registry import session_dirs
-
     return session_dirs()
 
 
