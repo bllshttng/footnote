@@ -56,6 +56,11 @@ pub struct CapMember {
     pub node: Option<String>,
     /// The row's worktree, where a successor spawn must land.
     pub cwd: Option<String>,
+    /// The resolved transcript path (a claude transcript or a codex rollout)
+    /// for every harness. `serde(default)` keeps an older persisted snapshot
+    /// readable.
+    #[serde(default)]
+    pub transcript: Option<String>,
     pub capped: bool,
     /// None = measured, no quota tail. Some = why the tail is unmeasured.
     pub cap_unknown: Option<String>,
@@ -194,12 +199,13 @@ type TailReading = (Option<String>, Option<String>, Option<String>);
 /// `{"type":"assistant","isApiErrorMessage":true,"message":{"content":
 /// [{"type":"text","text":"API Error: Request rejected (429) · [1308][Usage
 /// limit reached for 5 hour. ...]"}]}}`.
-pub fn capped_tail(transcript: &Path) -> TailReading {
-    let meta = match std::fs::metadata(transcript) {
-        Ok(m) => m,
-        Err(e) => return (None, None, Some(format!("transcript-unreadable: {e}"))),
-    };
-    let size = meta.len();
+/// The complete lines of a transcript's last [`TAIL_BYTES`], with the file
+/// size, or the named reason when the file cannot be read. The claude and
+/// codex tail readers share this window.
+fn tail_window_lines(transcript: &Path) -> Result<(u64, Vec<String>), String> {
+    let size = std::fs::metadata(transcript)
+        .map_err(|e| format!("transcript-unreadable: {e}"))?
+        .len();
     let start = size.saturating_sub(TAIL_BYTES);
     // Read from one byte earlier so the window's first byte can be checked
     // against the newline that precedes it: a seek landing exactly on a line
@@ -207,22 +213,29 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
     // as the newest assistant entry.
     let read_from = start.saturating_sub(1);
     use std::io::{Read, Seek, SeekFrom};
-    let bytes = match std::fs::File::open(transcript).and_then(|mut f| {
-        f.seek(SeekFrom::Start(read_from))?;
-        let mut buf = Vec::with_capacity((size - read_from) as usize);
-        f.read_to_end(&mut buf)?;
-        Ok(buf)
-    }) {
-        Ok(bytes) => bytes,
-        Err(e) => return (None, None, Some(format!("transcript-unreadable: {e}"))),
-    };
+    let bytes = std::fs::File::open(transcript)
+        .and_then(|mut f| {
+            f.seek(SeekFrom::Start(read_from))?;
+            let mut buf = Vec::with_capacity((size - read_from) as usize);
+            f.read_to_end(&mut buf)?;
+            Ok(buf)
+        })
+        .map_err(|e| format!("transcript-unreadable: {e}"))?;
     let text = String::from_utf8_lossy(&bytes);
-    let mut lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
     // Drop the one guaranteed-partial fragment (the line containing read_from)
     // only when the window did not begin on a line boundary.
     if read_from > 0 && bytes.first() != Some(&b'\n') {
         lines.remove(0);
     }
+    Ok((size, lines))
+}
+
+pub fn capped_tail(transcript: &Path) -> TailReading {
+    let (size, lines) = match tail_window_lines(transcript) {
+        Ok(v) => v,
+        Err(reason) => return (None, None, Some(reason)),
+    };
     for line in lines.iter().rev() {
         if !line.contains("\"type\":\"assistant\"") {
             continue;
@@ -253,6 +266,76 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
             return (ts, Some(joined.chars().take(200).collect()), None);
         }
         return (ts, None, None);
+    }
+    if size > TAIL_BYTES {
+        return (
+            None,
+            None,
+            Some("tail-window-missed-newest-assistant".to_string()),
+        );
+    }
+    (
+        None,
+        None,
+        Some("no-assistant-entry-in-transcript".to_string()),
+    )
+}
+
+/// Read a codex rollout tail and answer whether the NEWEST decisive row says
+/// the session is quota-capped. Decisive rows, newest first: an `event_msg`
+/// `task_complete` (capped when its `error.codex_error_info` is
+/// `usage_limit_exceeded` or its `error.message` carries a quota signal; a
+/// `task_complete` with no `error` is not capped) and an assistant
+/// `response_item` `message` (the session produced output after any earlier
+/// wall). Fixture shape measured in the wild: `{"type":"event_msg",
+/// "payload":{"type":"task_complete",...,"error":{"message":"You've hit your
+/// usage limit. ... try again at Sep 19th, 2026 9:34 AM.",
+/// "codex_error_info":"usage_limit_exceeded"}}}`.
+pub fn codex_capped_tail(rollout: &Path) -> TailReading {
+    let (size, lines) = match tail_window_lines(rollout) {
+        Ok(v) => v,
+        Err(reason) => return (None, None, Some(reason)),
+    };
+    for line in lines.iter().rev() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(payload) = row.get("payload") else {
+            continue;
+        };
+        let decisive = match row.get("type").and_then(Value::as_str) {
+            Some("event_msg")
+                if payload.get("type").and_then(Value::as_str) == Some("task_complete") =>
+            {
+                payload.get("error").is_some_and(|e| {
+                    e.get("codex_error_info").and_then(Value::as_str)
+                        == Some("usage_limit_exceeded")
+                        || e.get("message")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_quota_text)
+                })
+            }
+            Some("response_item")
+                if payload.get("type").and_then(Value::as_str) == Some("message")
+                    && payload.get("role").and_then(Value::as_str) == Some("assistant") =>
+            {
+                false
+            }
+            _ => continue,
+        };
+        let ts = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let excerpt = if decisive {
+            payload
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(|m| m.chars().take(200).collect::<String>())
+        } else {
+            None
+        };
+        return (ts, excerpt, None);
     }
     if size > TAIL_BYTES {
         return (
@@ -305,32 +388,61 @@ const RESET_HORIZON_S: i64 = 14 * 24 * 3600;
 pub fn reset_epoch_from_excerpt(text: &str, tz: Option<&str>, now: i64) -> Option<i64> {
     static STAMP_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static OFFSET_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CODEX_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let stamp_re = STAMP_RE
         .get_or_init(|| regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?").unwrap());
-    let m = stamp_re.find(text)?;
-    let mut stamp = m.as_str().replacen(' ', "T", 1);
-    if stamp.len() == 16 {
-        stamp.push_str(":00");
-    }
-    let rest = &text[m.end()..];
     let offset_re = OFFSET_RE.get_or_init(|| regex::Regex::new(r"^[+-]\d{2}:\d{2}").unwrap());
-    let epoch = if rest.starts_with('Z') {
-        chrono::DateTime::parse_from_rfc3339(&format!("{stamp}Z"))
-            .ok()?
-            .timestamp()
-    } else if let Some(off) = offset_re.find(rest) {
-        chrono::DateTime::parse_from_rfc3339(&format!("{stamp}{}", off.as_str()))
-            .ok()?
-            .timestamp()
+    // The codex usage-limit message names its reset as a naive vendor stamp:
+    // "try again at Sep 19th, 2026 9:34 AM."
+    let codex_re = CODEX_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th), (\d{4}) (\d{1,2}):(\d{2}) ([AP]M)",
+        )
+        .unwrap()
+    });
+    let epoch = if let Some(m) = stamp_re.find(text) {
+        let mut stamp = m.as_str().replacen(' ', "T", 1);
+        if stamp.len() == 16 {
+            stamp.push_str(":00");
+        }
+        let rest = &text[m.end()..];
+        if rest.starts_with('Z') {
+            chrono::DateTime::parse_from_rfc3339(&format!("{stamp}Z"))
+                .ok()?
+                .timestamp()
+        } else if let Some(off) = offset_re.find(rest) {
+            chrono::DateTime::parse_from_rfc3339(&format!("{stamp}{}", off.as_str()))
+                .ok()?
+                .timestamp()
+        } else {
+            // A naive stamp means what the record's reset_timezone says; with
+            // none (or an unparseable zone name) it is refused, never guessed.
+            naive_epoch_in_zone(&stamp, "%Y-%m-%dT%H:%M:%S", tz)?
+        }
+    } else if let Some(c) = codex_re.captures(text) {
+        let stamp = format!(
+            "{} {:02}, {} {:02}:{:02} {}",
+            &c[1],
+            c[2].parse::<u32>().ok()?,
+            &c[3],
+            c[4].parse::<u32>().ok()?,
+            c[5].parse::<u32>().ok()?,
+            &c[6]
+        );
+        // The codex stamp carries no offset either: same refusal to guess.
+        naive_epoch_in_zone(&stamp, "%b %d, %Y %I:%M %p", tz)?
     } else {
-        // A naive stamp means what the record's reset_timezone says; with
-        // none (or an unparseable zone name) it is refused, never guessed.
-        use chrono::TimeZone as _;
-        let zone = tz?.parse::<chrono_tz::Tz>().ok()?;
-        let naive = chrono::NaiveDateTime::parse_from_str(&stamp, "%Y-%m-%dT%H:%M:%S").ok()?;
-        zone.from_local_datetime(&naive).single()?.timestamp()
+        return None;
     };
     (epoch <= now + RESET_HORIZON_S).then_some(epoch)
+}
+
+/// Parse `stamp` with `fmt` and resolve it as a naive local time in `tz`.
+fn naive_epoch_in_zone(stamp: &str, fmt: &str, tz: Option<&str>) -> Option<i64> {
+    use chrono::TimeZone as _;
+    let zone = tz?.parse::<chrono_tz::Tz>().ok()?;
+    let naive = chrono::NaiveDateTime::parse_from_str(stamp, fmt).ok()?;
+    Some(zone.from_local_datetime(&naive).single()?.timestamp())
 }
 
 /// Pure core of the runtime-state resolution so tests never race process env.
@@ -471,6 +583,9 @@ pub struct CapScan {
     /// `reset_timezone` zones read from config.toml `[[accounts.records]]`,
     /// keyed by record id and by route provider prefix.
     pub record_zones: BTreeMap<String, String>,
+    /// The codex rollout store root; `None` resolves `$CODEX_HOME/sessions`
+    /// or `~/.codex/sessions` through codex_store.
+    pub codex_sessions_dir: Option<std::path::PathBuf>,
 }
 
 /// The env-resolved scan, built once and shared by the status verb and the
@@ -486,6 +601,7 @@ pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
             .home()
             .to_path_buf(),
         record_zones: record_reset_timezones(cwd),
+        codex_sessions_dir: None,
     }
 }
 
@@ -521,6 +637,9 @@ pub fn snapshot_with(
         &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
         &thread_ids,
     );
+    // The codex store listing, walked at most once per snapshot and only when
+    // some codex row needs the fallback past its log_path.
+    let mut codex_files: Option<Vec<crate::codex_store::CodexSessionFile>> = None;
     let mut lanes: BTreeMap<(String, String), Vec<CapMember>> = BTreeMap::new();
     for row in &rows {
         let Some(name) = s_field(row, "name") else {
@@ -543,6 +662,7 @@ pub fn snapshot_with(
             account: account.clone(),
             node,
             cwd,
+            transcript: None,
             capped: false,
             cap_unknown: None,
             newest_assistant: None,
@@ -556,11 +676,23 @@ pub fn snapshot_with(
         let lookup_id = session_id
             .clone()
             .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()));
-        let transcript = lookup_id
-            .as_deref()
-            .and_then(|sid| crate::claude_drive::find_transcript_in(&scan.projects_dir, sid));
+        // A codex row never resolves in the claude projects dir (its registry
+        // row carries session_id = short_id = null), so its rollout resolves
+        // from log_path, else from the codex sessions store by thread id.
+        let transcript = if harness == "codex" {
+            codex_rollout_path(row, scan, &mut codex_files)
+        } else {
+            lookup_id
+                .as_deref()
+                .and_then(|sid| crate::claude_drive::find_transcript_in(&scan.projects_dir, sid))
+        };
+        member.transcript = transcript.as_ref().map(|p| p.to_string_lossy().to_string());
         if let Some(t) = &transcript {
-            let (ts, excerpt, unknown) = capped_tail(t);
+            let (ts, excerpt, unknown) = if harness == "codex" {
+                codex_capped_tail(t)
+            } else {
+                capped_tail(t)
+            };
             member.newest_assistant = ts;
             member.cap_unknown = unknown;
             if let Some(excerpt) = excerpt {
@@ -656,6 +788,40 @@ pub fn snapshot_with(
         measured_at: epoch_to_rfc3339(now_epoch),
         measured_at_epoch: now_epoch,
     })
+}
+
+/// The rollout a codex registry row reads its tail from: the row's own
+/// `log_path` when it names an existing `rollout-` file, else the first store
+/// rollout matching the row's `harness_session_id` (then `session_id`). A row
+/// that resolves neither keeps `transcript-not-found`.
+fn codex_rollout_path(
+    row: &Value,
+    scan: &CapScan,
+    codex_files: &mut Option<Vec<crate::codex_store::CodexSessionFile>>,
+) -> Option<PathBuf> {
+    if let Some(p) = s_field(row, "log_path") {
+        let p = PathBuf::from(p);
+        if p.is_file()
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.starts_with("rollout-"))
+        {
+            return Some(p);
+        }
+    }
+    let id = s_field(row, "harness_session_id").or_else(|| s_field(row, "session_id"))?;
+    let files = codex_files.get_or_insert_with(|| {
+        crate::codex_store::codex_sessions(scan.codex_sessions_dir.as_deref(), 0)
+    });
+    files
+        .iter()
+        .find(|f| {
+            f.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| crate::codex_store::codex_rollout_matches(n, id))
+        })
+        .map(|f| f.path.clone())
 }
 
 pub fn epoch_to_rfc3339(epoch: i64) -> String {
@@ -1715,10 +1881,7 @@ fn write_handoff_doc(
     let dir = lanes_dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let node = member.node.clone().unwrap_or_else(|| "no-node".to_string());
-    let transcript = member
-        .session_id
-        .as_deref()
-        .and_then(crate::claude_drive::find_transcript);
+    let transcript = member.transcript.as_deref().map(PathBuf::from);
     let old_transcript = transcript
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
@@ -1781,6 +1944,7 @@ mod tests {
             compaction_home: home.clone(),
             claude_home: home,
             record_zones: BTreeMap::new(),
+            codex_sessions_dir: None,
         }
     }
 
@@ -2131,6 +2295,316 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Codex rollout fixtures copied from the measured rollout
+    // (usage_limit_exceeded at 2026-09-18T19:38:21.593Z, shortened to one
+    // text block for the assistant row; free-text identifiers sanitized).
+    const CODEX_CAPPED_LINE: &str = r#"{"timestamp":"2026-09-18T19:38:21.593Z","ordinal":5915,"type":"event_msg","payload":{"type":"task_complete","turn_id":"01a0b606-d9d4-7f20-a7fe-0693b1dd0526","last_agent_message":null,"error":{"message":"You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 19th, 2026 9:34 AM.","codex_error_info":"usage_limit_exceeded"},"started_at":1789760297,"completed_at":1789760301,"duration_ms":4132}}"#;
+    const CODEX_CLEAN_LINE: &str = r#"{"timestamp":"2026-09-17T00:12:27.671Z","ordinal":317,"type":"event_msg","payload":{"type":"task_complete","turn_id":"01a0acac-9eb2-7341-8dac-62247fdb76eb","last_agent_message":"Acknowledged as `nothing`: recursive hook text, not a stand-down order. The reign continues in court mode.","started_at":1789603389,"completed_at":1789603947,"duration_ms":558548,"time_to_first_token_ms":101946}}"#;
+    const CODEX_ASSISTANT_LINE: &str = r#"{"timestamp":"2026-09-17T00:04:53.037Z","ordinal":18,"type":"response_item","payload":{"type":"message","id":"msg_047dfbc85cb91180016aab2ea3061487d0b4af00de3b8a3e75","role":"assistant","content":[{"type":"output_text","text":"codex posture: the wake arm's backstop is this king's only beat.\n\nVerifying the crown.\n"}],"phase":"commentary","internal_chat_message_metadata_passthrough":{"turn_id":"01a0acac-9eb2-7341-8dac-62247fdb76eb","create_time":1789603489.755306,"content_item_kinds":["unknown"]}}}"#;
+    const CODEX_TASK_STARTED_LINE: &str = r#"{"timestamp":"2026-09-18T19:39:00.000Z","ordinal":5916,"type":"event_msg","payload":{"type":"task_started","turn_id":"01a0b606-d9d4-7f20-a7fe-0693b1dd0526"}}"#;
+    const CODEX_THREAD: &str = "01a0c80c-1234-5678-9abc-cdef01234567";
+
+    /// One codex registry row naming its rollout thread (log_path optional).
+    fn codex_row(name: &str, thread: &str, log_path: Option<&str>) -> String {
+        let log = log_path
+            .map(|p| format!(r#","log_path":"{p}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"name":"{name}","harness":"codex","provider":"openai","launch_account":"default","state":"working","harness_session_id":"{thread}"{log}}}"#
+        )
+    }
+
+    /// AC1-HP: a codex row whose log_path names a fixture rollout resolves
+    /// that file and reads measured in its lane.
+    #[test]
+    fn ac1_hp_codex_row_resolves_its_log_path_rollout() {
+        let root = std::env::temp_dir().join(format!("pc-cx1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let rollout = root.join(format!("rollout-2026-09-18T12-00-00-{CODEX_THREAD}.jsonl"));
+        write(&rollout, &format!("{CODEX_ASSISTANT_LINE}\n"));
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{}]}}"#,
+                codex_row("w-codex", CODEX_THREAD, Some(&rollout.to_string_lossy()))
+            )
+            .as_str(),
+        );
+        let scan = CapScan {
+            codex_sessions_dir: Some(root.join("sessions")),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        assert!(
+            lane.members[0]
+                .transcript
+                .as_deref()
+                .is_some_and(|t| t.ends_with(".jsonl")),
+            "{:?}",
+            lane.members[0]
+        );
+        assert_eq!(lane.members[0].cap_unknown, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC1-EDGE: a codex row with no log_path resolves its rollout through
+    /// the codex sessions store by harness_session_id, and the handoff doc
+    /// names the rollout path.
+    #[test]
+    fn ac1_edge_codex_row_without_log_path_resolves_through_the_store() {
+        let root = std::env::temp_dir().join(format!("pc-cx2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let sessions = root.join("sessions").join("2026").join("09").join("18");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join(format!("rollout-2026-09-18T12-00-00-{CODEX_THREAD}.jsonl"));
+        write(&rollout, &format!("{CODEX_ASSISTANT_LINE}\n"));
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{}]}}"#,
+                codex_row("w-codex", CODEX_THREAD, None)
+            )
+            .as_str(),
+        );
+        let scan = CapScan {
+            codex_sessions_dir: Some(root.join("sessions")),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        assert_eq!(lane.members[0].cap_unknown, None);
+        let t = lane.members[0].transcript.clone().expect("transcript");
+        assert!(t.contains(CODEX_THREAD), "{t}");
+        let home = AgentsHome::at(root.join("agents-home"));
+        let doc = write_handoff_doc(&home, lane, &lane.members[0], "dest", 1_000_000_000).unwrap();
+        let body = std::fs::read_to_string(&doc).unwrap();
+        assert!(body.contains(&t), "{body}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC1-ERR: a codex row whose rollout exists nowhere stays
+    /// transcript-not-found and its lane stays unmeasured.
+    #[test]
+    fn ac1_err_codex_row_without_a_rollout_stays_unmeasured() {
+        let root = std::env::temp_dir().join(format!("pc-cx3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{}]}}"#,
+                codex_row("w-codex", CODEX_THREAD, None)
+            )
+            .as_str(),
+        );
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let scan = CapScan {
+            codex_sessions_dir: Some(root.join("sessions")),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        assert_eq!(
+            lane.members[0].cap_unknown.as_deref(),
+            Some("transcript-not-found")
+        );
+        assert_eq!(lane.state, "unmeasured");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC2-HP: a codex rollout ending with the measured usage_limit_exceeded
+    /// task_complete reads capped in openai:default.
+    #[test]
+    fn ac2_hp_codex_usage_limit_task_complete_reads_capped() {
+        let root = std::env::temp_dir().join(format!("pc-cx4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let rollout = root.join(format!("rollout-2026-09-18T12-00-00-{CODEX_THREAD}.jsonl"));
+        write(&rollout, &format!("{CODEX_CAPPED_LINE}\n"));
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{}]}}"#,
+                codex_row("w-codex", CODEX_THREAD, Some(&rollout.to_string_lossy()))
+            )
+            .as_str(),
+        );
+        let scan = CapScan {
+            codex_sessions_dir: Some(root.join("sessions")),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        assert!(lane.members[0].capped, "{:?}", lane.members[0]);
+        assert_eq!(lane.members[0].cap_unknown, None);
+        assert!(
+            lane.members[0]
+                .excerpt
+                .as_deref()
+                .is_some_and(|e| e.starts_with("You've hit your usage limit")),
+            "{:?}",
+            lane.members[0].excerpt
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC2-EDGE/ERR: a codex session that produced an assistant message after
+    /// the capped task_complete reads not capped; a newest clean task_complete
+    /// reads measured, not capped.
+    #[test]
+    fn ac2_edge_codex_rows_after_the_wall_and_clean_completions_read_measured() {
+        let root = std::env::temp_dir().join(format!("pc-cx5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let rollouts = root.join("sessions");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let resumed = rollouts.join(format!("rollout-2026-09-18T12-00-00-{CODEX_THREAD}.jsonl"));
+        write(
+            &resumed,
+            &format!("{CODEX_CAPPED_LINE}\n{CODEX_TASK_STARTED_LINE}\n{CODEX_ASSISTANT_LINE}\n"),
+        );
+        let other = "01a0c80c-aaaa-bbbb-cccc-dddddddddddd";
+        let clean = rollouts.join(format!("rollout-2026-09-18T12-00-01-{other}.jsonl"));
+        write(&clean, &format!("{CODEX_CLEAN_LINE}\n"));
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{},{}]}}"#,
+                codex_row("w-codex-a", CODEX_THREAD, None),
+                codex_row("w-codex-b", other, None)
+            )
+            .as_str(),
+        );
+        let scan = CapScan {
+            codex_sessions_dir: Some(rollouts.clone()),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        let a = lane.members.iter().find(|m| m.name == "w-codex-a").unwrap();
+        let b = lane.members.iter().find(|m| m.name == "w-codex-b").unwrap();
+        assert!(!a.capped, "{a:?}");
+        assert_eq!(a.cap_unknown, None);
+        assert!(!b.capped, "{b:?}");
+        assert_eq!(b.cap_unknown, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC3-HP/ERR: the codex reset stamp parses in the record's zone, is
+    /// refused with no zone, and two capped codex rows open the lane at it.
+    #[test]
+    fn ac3_hp_codex_reset_stamp_opens_the_lane_in_the_record_zone() {
+        assert_eq!(
+            reset_epoch_from_excerpt(
+                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 19th, 2026 9:34 AM.",
+                Some("America/Los_Angeles"),
+                1_789_761_600
+            ),
+            Some(1_789_835_640)
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt("try again at Sep 19th, 2026 9:34 AM.", None, 1_789_761_600),
+            None
+        );
+        let root = std::env::temp_dir().join(format!("pc-cx6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let rollouts = root.join("sessions");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let a = rollouts.join(format!("rollout-2026-09-18T12-00-00-{CODEX_THREAD}.jsonl"));
+        let b = rollouts.join(format!(
+            "rollout-2026-09-18T12-00-01-01a0c80c-aaaa-bbbb-cccc-dddddddddddd.jsonl"
+        ));
+        write(&a, &format!("{CODEX_CAPPED_LINE}\n"));
+        write(&b, &format!("{CODEX_CAPPED_LINE}\n"));
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{},{}]}}"#,
+                codex_row("w-codex-a", CODEX_THREAD, None),
+                codex_row("w-codex-b", "01a0c80c-aaaa-bbbb-cccc-dddddddddddd", None)
+            )
+            .as_str(),
+        );
+        let mut zones = BTreeMap::new();
+        zones.insert("openai".to_string(), "America/Los_Angeles".to_string());
+        let scan = CapScan {
+            codex_sessions_dir: Some(rollouts.clone()),
+            record_zones: zones,
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        // `now` sits after the capped turn and inside the 14-day horizon.
+        let snap = snapshot_with(&scan, 1_789_761_600, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, Some(1_789_835_640));
+        assert!(lane.missing_reset_timezone.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn ac2_err_missing_reset_and_missing_timezone_are_named_not_guessed() {
         let root = std::env::temp_dir().join(format!("pc-err-{}", std::process::id()));
@@ -2326,6 +2800,7 @@ mod tests {
                 account: "zai-main".into(),
                 node: Some("x-9999".into()),
                 cwd: None,
+                transcript: None,
                 capped: true,
                 cap_unknown: None,
                 newest_assistant: None,
@@ -2359,6 +2834,7 @@ mod tests {
             compaction_home: root.clone(),
             claude_home: root.clone(),
             record_zones: BTreeMap::new(),
+            codex_sessions_dir: None,
         }
     }
 
@@ -2654,6 +3130,7 @@ mod tests {
             account: "zai-main".into(),
             node: None,
             cwd: None,
+            transcript: None,
             capped,
             cap_unknown: None,
             newest_assistant: ts.map(|t| epoch_to_rfc3339(t)),

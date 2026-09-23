@@ -2,18 +2,13 @@
 //! parity-oracle: (none - the Python legs were deleted in the same change; the goldens are the contract)
 //!
 //! Characterization for the territory port (x-e221): the Rust fact set
-//! (`active_backlog::native_receipt` / `territory::territory_rows` /
-//! `blueprint_feed_status`) is pinned by the frozen goldens under
-//! tests/golden/territory/. The goldens were captured from the Python legs
+//! (`active_backlog::native_receipt` / `territory::territory_rows`) is pinned
+//! by the frozen goldens under tests/golden/territory/. The goldens were
+//! captured from the Python legs
 //! while a differential oracle still ran (step 2 of the port protocol,
 //! docs/architecture/dual-implementation-inventory.md); that oracle is gone,
 //! and capture mode now refuses - a golden can only be captured while the old
 //! leg runs.
-//!
-//! One field is normalized before compare: the feed receipt's
-//! worker_name_next embeds a label with a per-scope digest (the deleted
-//! Python leg used sha1, the port sha256; only per-scope stability is
-//! load-bearing, so the digest is masked, never compared).
 
 use common::{assert_golden as assert_golden_common, capture_mode, Golden};
 use serde_json::{json, Value};
@@ -41,7 +36,7 @@ fn build_fixture(active_backlog_extra: &str, graph: Value, registry_rows: Value)
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().to_string_lossy().replace('\'', "");
     // state_dir points into the fixture so the fact set resolves the graph,
-    // the registry, and the blueprinter records inside it.
+    // the registry, and the config inside it.
     // active_backlog_extra folds into the same table (never a second header,
     // TOML forbids it).
     let config = format!(
@@ -111,16 +106,6 @@ fn canon(v: &Value) -> String {
     serde_json::to_string(&sorted(v)).unwrap()
 }
 
-/// Mask the per-scope digest in worker_name_next (the deleted Python leg used
-/// sha1, the port sha256; the digest itself is not the contract).
-fn mask_name_next(v: &mut Value) {
-    if let Some(obj) = v.as_object_mut() {
-        if obj.contains_key("worker_name_next") {
-            obj.insert("worker_name_next".to_string(), json!("<digest>"));
-        }
-    }
-}
-
 fn rust_drain(fixture: &Fixture) -> Value {
     let targets = fno_agents::active_backlog::native_receipt(fixture.tmp.path(), &fixture.registry)
         .expect("native receipt");
@@ -132,13 +117,6 @@ fn rust_rows(fixture: &Fixture) -> Value {
         fixture.tmp.path(),
         &fixture.registry
     ))
-}
-
-fn rust_feed(fixture: &Fixture, scope: &str) -> Value {
-    let mut v =
-        fno_agents::territory::blueprint_feed_status(fixture.tmp.path(), &fixture.registry, scope);
-    mask_name_next(&mut v);
-    v
 }
 
 /// The fixture root moves every run; the goldens must not care. Output is
@@ -229,16 +207,4 @@ fn rows_projection() {
     std::fs::write(&plan_doc, "---\nstatus: design\n---\n").unwrap();
     let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
     assert_case("rows_projection", &fixture, || rust_rows(&fixture));
-}
-
-#[test]
-fn feed_status() {
-    let plan = tempfile::TempDir::new().unwrap();
-    let plan_doc = plan.path().join("idea-plan.md");
-    std::fs::write(&plan_doc, "---\nstatus: design\n---\n---").unwrap();
-    let fixture = build_fixture("", base_graph(&plan_doc), crown_registry());
-    let mut rec = fno_agents::territory::read_record(fixture.tmp.path(), "e-1");
-    rec["fed"]["e-1-fed"] = json!({"at": "2020-01-01T00:00:00Z", "ok": false});
-    fno_agents::territory::write_record(fixture.tmp.path(), "e-1", &mut rec);
-    assert_case("feed_status", &fixture, || rust_feed(&fixture, "e-1"));
 }
