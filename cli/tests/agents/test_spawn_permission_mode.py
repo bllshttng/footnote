@@ -348,6 +348,51 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
     assert "permission_mode" not in receipt
 
 
+def test_codex_yolo_receipt_names_yolo_via_python(runner, monkeypatch):
+    """--yolo on a codex spawn names yolo (codex's own spelling) in the
+    receipt, never claude's bypassPermissions (x-6c8a)."""
+    from fno import rust_binary
+    from fno.agents import dispatch, spawn_gate
+
+    # Force the Python fallback so the receipt under test is this module's.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+
+    class _Gate:
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="codex", short_id="abcd1234"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "yolo"
+    assert "permission_mode" not in receipt
+
+    # The env-resolved harness counts too: no --harness, the invoking-harness
+    # marker names codex, and the receipt still reads yolo.
+    monkeypatch.setenv("CODEX_THREAD_ID", "t-env-codex")
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w2", "hi", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "yolo"
+    assert "permission_mode" not in receipt
+
+
 def test_claude_python_build_argv_threads_permission_mode():
     """The Python claude bg argv builder mirrors Rust: --permission-mode rides
     between --name and --model; unset is byte-identical."""
