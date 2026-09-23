@@ -224,6 +224,15 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
 /// `spawn_gate.py::CPU_HOLD_POLL_S`.
 const CPU_HOLD_POLL: Duration = Duration::from_secs(15);
 const CPU_ADMIT_SAMPLES: u32 = 2;
+/// A blind CPU read (an undecidable band or an unreadable probe) is re-read
+/// this many times before the gate refuses. A blind read is not evidence the
+/// fleet is over, so it never holds for the whole queue budget, and it never
+/// admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
+const CPU_BLIND_SAMPLES: u32 = 3;
+#[cfg(not(test))]
+const CPU_BLIND_POLL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CPU_BLIND_POLL: Duration = Duration::from_millis(10);
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
@@ -1477,6 +1486,10 @@ fn decide_gate(
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
     let mut under_streak: u32 = 0;
+    // Consecutive blind CPU reads in the current run. Reset by the hold and
+    // admit arms, so the count covers back-to-back blind reads only and the
+    // receipt's `samples` names what actually happened.
+    let mut blind_samples: u32 = 0;
     // Start of the current UNBROKEN run of failed acquisitions (None = holding
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
@@ -1671,24 +1684,45 @@ fn decide_gate(
             let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
-                    // The refusal is decided; drop the mutex BEFORE printing
-                    // so queued spawners (and --no-wait callers) never sit
-                    // behind anything.
-                    guard.release();
-                    eprintln!("{}", admission.reason);
-                    let mut receipt = serde_json::json!({
-                        "status": "refused",
-                        "reason": cpu.token,
-                        "axes_read": axes_read.clone(),
-                    });
-                    for (k, v) in figures.as_object().into_iter().flatten() {
-                        receipt[k] = v.clone();
+                    // A blind read is not evidence the fleet is over: the
+                    // instrument can be blind for one pass while the machine
+                    // is fine (2026-09-19: a worker refused twice on
+                    // cpu_instrument_unreadable, a footprint read seconds
+                    // later admitted clean). A waiting spawn re-reads a
+                    // bounded number of times before it believes the
+                    // refusal; --no-wait keeps one sample.
+                    blind_samples += 1;
+                    if !flags.no_wait && blind_samples < CPU_BLIND_SAMPLES {
+                        guard.release_gate_mutex();
+                        eprintln!(
+                            "{NOTE} {reason}; re-reading in {s}s (read \
+                             {blind_samples} of {CPU_BLIND_SAMPLES})",
+                            s = CPU_BLIND_POLL.as_secs(),
+                            reason = admission.reason,
+                        );
+                        pause = CPU_BLIND_POLL;
+                    } else {
+                        // The refusal is decided; drop the mutex BEFORE printing
+                        // so queued spawners (and --no-wait callers) never sit
+                        // behind anything.
+                        guard.release();
+                        eprintln!("{}", admission.reason);
+                        let mut receipt = serde_json::json!({
+                            "status": "refused",
+                            "reason": cpu.token,
+                            "samples": blind_samples,
+                            "axes_read": axes_read.clone(),
+                        });
+                        for (k, v) in figures.as_object().into_iter().flatten() {
+                            receipt[k] = v.clone();
+                        }
+                        return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
+                            .ev("reason", serde_json::json!(cpu.token))
+                            .ev("samples", serde_json::json!(blind_samples))
+                            .ev("axis", serde_json::json!("cpu"))
+                            .ev("axes_read", serde_json::json!(axes_read))
+                            .ev("figures", figures));
                     }
-                    return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
-                        .ev("reason", serde_json::json!(cpu.token))
-                        .ev("axis", serde_json::json!("cpu"))
-                        .ev("axes_read", serde_json::json!(axes_read))
-                        .ev("figures", figures));
                 }
                 "hold" => {
                     // LD4: over is a HOLD - the fleet's own work drains - not
@@ -1696,6 +1730,7 @@ fn decide_gate(
                     // fails on the first over sample.
                     held_on_cpu = true;
                     under_streak = 0;
+                    blind_samples = 0;
                     guard.release_gate_mutex();
                     if flags.no_wait {
                         eprintln!("{}", admission.reason);
@@ -1752,6 +1787,7 @@ fn decide_gate(
                             // queued passes do not reprint the admit line.
                             held_on_cpu = false;
                             under_streak = 0;
+                            blind_samples = 0;
                         }
                     }
                     if !hold_pause {
@@ -2400,6 +2436,24 @@ pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     if let Ok(raw) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD") {
         if !raw.is_empty() {
             return Ok(raw);
+        }
+    }
+    // Test seam for the re-read loop: one payload PER read. Each call
+    // consumes the first line; the last line sticks, so a positive control
+    // can count the reads that actually happened. `ERR <words>` answers the
+    // no-payload path.
+    #[cfg(test)]
+    if let Ok(seq) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ") {
+        if !seq.is_empty() {
+            let raw = std::fs::read_to_string(&seq).expect("payload-seq file readable");
+            let (first, rest) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
+            if !rest.is_empty() {
+                std::fs::write(&seq, rest).expect("payload-seq file writable");
+            }
+            if let Some(why) = first.strip_prefix("ERR ") {
+                return Err(why.to_string());
+            }
+            return Ok(first.to_string());
         }
     }
     let argv = footprint_probe_argv().ok_or_else(|| {
@@ -3781,6 +3835,334 @@ MemAvailable:    8000000 kB\n";
             Some(0),
             "no questions journal, nobody waits"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shared admission fixture's payload for one verdict, as the probe
+    /// would print it: the same file the Python suite pins, so the gate's
+    /// re-read tests cannot grow their own reading.
+    fn fixture_payload(verdict: &str) -> String {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/agents/fixtures/spawn_gate_admission.json");
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .expect("the shared fixture must exist beside the Python suite"),
+        )
+        .expect("fixture is JSON");
+        let case = doc["cases"]
+            .as_array()
+            .expect("fixture carries cases")
+            .iter()
+            .find(|c| c["payload"]["admission"]["verdict"] == verdict)
+            .unwrap_or_else(|| panic!("fixture carries a {verdict} case"));
+        serde_json::to_string(&case["payload"]).unwrap()
+    }
+
+    /// AC1-HP: a waiting spawn re-reads a blind instrument a bounded number
+    /// of times, then refuses with the sample count on the receipt. The
+    /// re-read is bounded in TIME too: three reads refuse in seconds, never
+    /// in QUEUE_TIMEOUT.
+    #[test]
+    fn a_blind_read_refuses_after_bounded_rereads() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-blind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+        let seq = dir.join("payload-seq.txt");
+        let blind = format!("{}\n", fixture_payload("undecidable"));
+        std::fs::write(&seq, format!("{blind}{blind}{blind}")).unwrap();
+        std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+
+        let started = Instant::now();
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w1".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: false,
+                },
+                ..Default::default()
+            },
+        );
+        let elapsed = started.elapsed();
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        let refusal = got.err().expect("a blind instrument never admits");
+        assert_eq!(refusal.exit_code, EXIT_LOAD_REFUSED, "{refusal:?}");
+        let receipt = refusal.receipt.expect("refusal carries a receipt");
+        assert_eq!(receipt["reason"], "cpu_share_undecidable");
+        assert_eq!(receipt["samples"], 3);
+        assert!(
+            receipt["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("cannot be decided")),
+            "the receipt carries the reading's own gap sentence: {receipt}"
+        );
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC1-ERR (no-wait half): --no-wait keeps one sample, exactly as
+    /// before the re-read existed.
+    #[test]
+    fn no_wait_refuses_a_blind_read_on_the_first_sample() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("fno-gate-blind-nowait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+        let seq = dir.join("payload-seq.txt");
+        let blind = format!("{}\n", fixture_payload("undecidable"));
+        std::fs::write(&seq, format!("{blind}{blind}{blind}")).unwrap();
+        std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w1".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                ..Default::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        let refusal = got.err().expect("a blind instrument never admits");
+        assert_eq!(refusal.exit_code, EXIT_LOAD_REFUSED, "{refusal:?}");
+        let receipt = refusal.receipt.expect("refusal carries a receipt");
+        assert_eq!(receipt["reason"], "cpu_share_undecidable");
+        assert_eq!(receipt["samples"], 1);
+        // Positive control: exactly one read consumed one line, two remain.
+        assert_eq!(
+            std::fs::read_to_string(&seq).unwrap().lines().count(),
+            2,
+            "one blind read, not three"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC1-EDGE: the point of the re-read. A transient blind read costs one
+    /// probe, never a worker: the next readable answer admits.
+    #[test]
+    fn a_blind_read_then_an_admit_admits() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-admit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+        let seq = dir.join("payload-seq.txt");
+        let admit = r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#;
+        std::fs::write(
+            &seq,
+            format!("ERR footprint unavailable: worker root liveness unavailable\n{admit}\n"),
+        )
+        .unwrap();
+        std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        // An empty registry: the only thing this run must survive past the
+        // CPU axis is the slot census, and zero rows against 999 passes it.
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w1".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: false,
+                },
+                ..Default::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        assert!(
+            got.is_ok(),
+            "a readable admit after a blind read admits: {got:?}"
+        );
+        // Positive control: both reads happened. The ERR line is consumed,
+        // the admit line sticks.
+        let left = std::fs::read_to_string(&seq).unwrap();
+        assert!(left.contains("\"verdict\":\"admit\""), "{left}");
+        assert!(!left.contains("ERR "), "{left}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC1-ERR: an instrument that stays unreadable through the whole budget
+    /// refuses as cpu_instrument_unreadable, never admits.
+    #[test]
+    fn an_unreadable_instrument_never_admits_by_rereading() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+        let seq = dir.join("payload-seq.txt");
+        let err_line = "ERR footprint unavailable: worker root liveness unavailable\n".repeat(3);
+        std::fs::write(&seq, err_line).unwrap();
+        std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w1".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: false,
+                },
+                ..Default::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        let refusal = got.err().expect("an unreadable instrument never admits");
+        assert_eq!(refusal.exit_code, EXIT_LOAD_REFUSED, "{refusal:?}");
+        let receipt = refusal.receipt.expect("refusal carries a receipt");
+        assert_eq!(receipt["reason"], "cpu_instrument_unreadable");
+        assert_eq!(receipt["samples"], 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
