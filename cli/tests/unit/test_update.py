@@ -2390,6 +2390,58 @@ def test_post_install_chain_without_cargo_skips_restage(monkeypatch, tmp_path) -
     assert not any("plugin-install" in c for c in refresh_cmds)
 
 
+def test_post_install_chain_refreshes_codex_dev_channel(monkeypatch, tmp_path) -> None:
+    """AC5-HP: a dev-channel codex install re-copies its cache only on a
+    forced converge, so the chain ends restage-then-codex-refresh."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    owned = tmp_path / "codex" / "footnote"
+    owned.mkdir(parents=True)
+    (owned / "plugin-channel.json").write_text(
+        json.dumps({"channel": "dev", "marketplace": "footnote", "source": "s"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "fno.pr_watch.cli._resolve_fno_binary", lambda: "/resolved/fno"
+    )
+    monkeypatch.setattr(
+        update, "_cargo_installed_bin", lambda: tmp_path / "cargo-bin" / "fno-agents"
+    )
+
+    refresh_cmds, await_bin = update._post_install_refresh_cmds(tmp_path / "cli-src")
+
+    assert refresh_cmds[-1] == [
+        "/resolved/fno", "config", "plugin", "install", "codex", "--force"
+    ]
+    assert refresh_cmds[-2][-4:] == [
+        "plugin-install", "--restage", "--source", str(tmp_path / "cli-src")
+    ]
+    assert await_bin == "/resolved/fno"
+
+
+def test_post_install_chain_skips_codex_without_dev_channel(monkeypatch, tmp_path) -> None:
+    """AC5-ERR: no marker, a release marker, or a marker that is not a JSON
+    object -> the chain carries no codex command."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setattr(
+        "fno.pr_watch.cli._resolve_fno_binary", lambda: "/resolved/fno"
+    )
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: None)
+    owned = tmp_path / "codex" / "footnote"
+    owned.mkdir(parents=True)
+    marker = owned / "plugin-channel.json"
+
+    for payload in (None, {"channel": "release"}, []):
+        if payload is None:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+
+        refresh_cmds, await_bin = update._post_install_refresh_cmds(tmp_path)
+
+        assert not any("codex" in c for c in refresh_cmds), (payload, refresh_cmds)
+        assert await_bin == "/resolved/fno"
+
+
 # ---------------------------------------------------------------------------
 # update_readiness: AC1-HP, AC2-HP, AC3-HP, AC4-EDGE
 # ---------------------------------------------------------------------------

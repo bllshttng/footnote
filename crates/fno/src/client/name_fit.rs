@@ -62,8 +62,8 @@ mod tests {
 
     #[test]
     fn keeps_the_distinguishing_tail() {
-        assert_eq!(fit_name("blueprinter-fno-8bef7b", 12), "bluep…8bef7b");
-        assert_eq!(fit_name("blueprinter-etl-631fd8", 12), "bluep…631fd8");
+        assert_eq!(fit_name("dispatch-fno-8bef7b", 12), "dispa…8bef7b");
+        assert_eq!(fit_name("dispatch-etl-631fd8", 12), "dispa…631fd8");
         assert_eq!(fit_name("king-a792-control", 12), "king-…ontrol");
         assert_eq!(fit_name("king-a792-control-g2", 12), "king-…rol-g2");
     }

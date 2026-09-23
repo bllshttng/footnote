@@ -33,7 +33,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
-const NUMERIC_DIFF_KEYS: [&str; 9] = [
+const NUMERIC_DIFF_KEYS: [&str; 11] = [
     "open_prs",
     "free_claim_no_driver",
     "blocked",
@@ -43,6 +43,8 @@ const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "live_workers",
     "undelivered",
     "held_open",
+    "blueprint_running",
+    "blueprint_ceiling",
 ];
 
 /// Diff keys absent from the previous beat's data: a hand-journaled baseline
@@ -132,6 +134,36 @@ fn run_capture(argv: &[std::ffi::OsString]) -> Result<(i32, String, String), Str
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// Keep the last useful stderr line, skipping config warnings that can hide it.
+pub(crate) fn stderr_cause(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .rev()
+        .find(|line| !line.starts_with("fno config:"))
+        .or_else(|| lines.last())
+        .copied()
+        .unwrap_or("no stderr");
+    let end = line
+        .char_indices()
+        .nth(120)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    line[..end].to_string()
+}
+
+fn gh_error_cause(error: &str) -> String {
+    stderr_cause(
+        error
+            .split_once(" failed: ")
+            .map_or(error, |(_, stderr)| stderr),
+    )
 }
 
 fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
@@ -272,28 +304,79 @@ fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
     Err(format!("board payload names no {name} queue"))
 }
 
-fn open_pr_count() -> Result<i64, String> {
-    let argv = vec![
-        std::ffi::OsString::from("gh"),
-        "pr".into(),
-        "list".into(),
-        "--state".into(),
-        "open".into(),
-        "--limit".into(),
-        "200".into(),
-        "--json".into(),
-        "number".into(),
-    ];
-    let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
-    if code != 0 {
-        return Err(format!(
-            "open PR listing failed: {}",
-            err.trim().chars().take(120).collect::<String>()
-        ));
+/// The default blueprint-subagent ceiling when no provider budget applies
+/// (no new config key: a registry row is barred, so the default is a named
+/// Rust constant).
+const DEFAULT_BLUEPRINT_CEILING: usize = 2;
+
+/// The check-in's blueprint reading: this session's live blueprint
+/// subagents against the ceiling, then which unplanned nodes to start and
+/// which to skip. The claim list and the session id arrive through the seam
+/// (arguments, not ambient reads) so the unit tests need no claims directory.
+/// A failed source is this reading's error, never a zero: an unreadable claim
+/// list read as `running 0` would name starts past the ceiling.
+fn r_blueprint(
+    board: &Result<Value, String>,
+    cwd: &Path,
+    session_id: Option<String>,
+    claims: Result<Vec<String>, String>,
+) -> Result<Value, String> {
+    let session_id = session_id
+        .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
+    let holders = claims?;
+    let holder = format!("blueprint-session:{session_id}");
+    let running = holders.iter().filter(|h| **h == holder).count();
+    let board = board.as_ref()?;
+    let rows = board_queue(board, "unplanned")?
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let candidates: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let provider = std::env::var("FNO_ROUTE_PROVIDER").unwrap_or_default();
+    let (ceiling, ceiling_source) =
+        match crate::spawn_gate_lanes::provider_subagents_cap(cwd, &provider) {
+            Some(cap) => (cap, format!("agents.provider_limits.{provider}.subagents")),
+            None => (DEFAULT_BLUEPRINT_CEILING, "default 2".to_string()),
+        };
+    let open = ceiling.saturating_sub(running);
+    let starts: Vec<String> = candidates.iter().take(open).cloned().collect();
+    let mut skips: Vec<Value> = candidates
+        .iter()
+        .skip(open)
+        .map(|id| json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
+        .collect();
+    if candidates.is_empty() && running == 0 {
+        skips.push(json!({"id": null, "reason": "no unplanned node in scope"}));
     }
-    let rows: Value = serde_json::from_str(out.trim())
-        .map_err(|e| format!("open PR listing did not parse: {e}"))?;
-    Ok(rows.as_array().map(|a| a.len() as i64).unwrap_or(0))
+    Ok(json!({
+        "running": running,
+        "ceiling": ceiling,
+        "ceiling_source": ceiling_source,
+        "starts": starts,
+        "skips": skips,
+    }))
+}
+
+fn open_pr_count() -> Result<i64, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("open PR listing failed: {e}"))?;
+    let pages = crate::pr_push::gh_api_pages(
+        "gh",
+        &cwd,
+        "repos/{owner}/{repo}/pulls?state=open&per_page=100",
+    )
+    .map_err(|error| format!("open PR listing failed: {}", gh_error_cause(&error)))?;
+    Ok(open_pr_total(&pages))
+}
+
+fn open_pr_total(pages: &[Value]) -> i64 {
+    pages
+        .iter()
+        .map(|page| page.as_array().map(|rows| rows.len() as i64).unwrap_or(0))
+        .sum()
 }
 
 fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
@@ -545,10 +628,7 @@ fn epic_line(court: &Value) -> String {
 fn r_capacity() -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["doctor", "footprint", "--json"])?;
     if out.trim().is_empty() {
-        return Err(format!(
-            "footprint unavailable: {}",
-            err.trim().chars().take(120).collect::<String>()
-        ));
+        return Err(format!("footprint unavailable: {}", stderr_cause(&err)));
     }
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("footprint payload did not parse: {e}"))?;
@@ -924,10 +1004,7 @@ fn r_main_ci() -> Result<Value, String> {
         ];
         let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
         if code != 0 {
-            return Err(format!(
-                "git ls-remote failed: {}",
-                err.trim().chars().take(120).collect::<String>()
-            ));
+            return Err(format!("git ls-remote failed: {}", stderr_cause(&err)));
         }
         // `git ls-remote origin refs/heads/main` answers "<sha>\trefs/heads/main".
         let sha = out
@@ -943,7 +1020,8 @@ fn r_main_ci() -> Result<Value, String> {
         sha
     };
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)?;
+    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)
+        .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
     main_ci_token(rows)
 }
 
@@ -1020,8 +1098,8 @@ fn control_plane_attention(
     attention
 }
 
-/// One territory row per scope: live against cap, the blueprinter
-/// handle, and the kingless mark, read from the same projection the spawn
+/// One territory row per scope: live against cap and the kingless mark,
+/// read from the same projection the spawn
 /// gate's cap enforces. An `membership: unknown` row is a failed reading, so
 /// a blind spot prints `READER FAILED territory` instead of an empty table.
 fn r_territory(ctx: &Ctx) -> Result<Value, String> {
@@ -1059,6 +1137,12 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     };
     take("user_notes", r_user_notes(ctx));
     take("board", r_board(&beat.board, &beat.folded, open_pr_count()));
+    take("blueprint", {
+        let (session_id, _harness) = crate::claims::resolve_identity();
+        let claims = crate::claims::list(Some("node:"), None, false)
+            .map(|rows| rows.iter().map(|r| r.holder.clone()).collect());
+        r_blueprint(&beat.board, &ctx.cwd, session_id, claims)
+    });
     take(
         "escalations",
         std::env::current_dir()
@@ -1094,6 +1178,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
                 board.value.get(key).cloned().unwrap_or(Value::Null),
             );
         }
+    }
+    if let Some(bp) = get("blueprint").filter(|r| r.ok) {
+        data.insert("blueprint_running".into(), bp.value["running"].clone());
+        data.insert("blueprint_ceiling".into(), bp.value["ceiling"].clone());
+        data.insert("blueprint_starts".into(), bp.value["starts"].clone());
+        data.insert("blueprint_skips".into(), bp.value["skips"].clone());
     }
     if let Some(esc) = get("escalations").filter(|r| r.ok) {
         if esc.value.get("unreadable").is_none() {
@@ -1365,6 +1455,44 @@ fn render_lines(
         }
     }
 
+    match failed("blueprint") {
+        Some(r) => lines.push(format!("READER FAILED blueprint: {}", r.error)),
+        None => {
+            let bp = by_name("blueprint")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            lines.push(format!(
+                "blueprint: running {} of {} ({})",
+                dash(bp.get("running")),
+                dash(bp.get("ceiling")),
+                dash(bp.get("ceiling_source")),
+            ));
+            for id in bp
+                .get("starts")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+            {
+                lines.push(format!(
+                    "  start /fno:blueprint subagent {}",
+                    dash(Some(id))
+                ));
+            }
+            for skip in bp
+                .get("skips")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+            {
+                lines.push(format!(
+                    "  skip {} : {}",
+                    dash(skip.get("id")),
+                    dash(skip.get("reason"))
+                ));
+            }
+        }
+    }
+
     match failed("escalations") {
         Some(r) => lines.push(format!("READER FAILED escalations: {}", r.error)),
         None => {
@@ -1518,22 +1646,14 @@ fn render_lines(
                 } else {
                     ""
                 };
-                let bp = row.get("blueprinter").filter(|b| !b.is_null());
-                let bp_name = bp.and_then(|b| s_str(b, "name")).unwrap_or("none");
-                let bp_live = bp
-                    .and_then(|b| b.get("live"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
                 lines.push(format!(
-                    "  {} rung {} mission {} live {}/{}{} blueprinter {}{}",
+                    "  {} rung {} mission {} live {}/{}{}",
                     dash(row.get("scope")),
                     dash(row.get("rung")),
                     dash(row.get("mission")),
                     dash(row.get("live")),
                     dash(row.get("cap")),
                     kingless,
-                    bp_name,
-                    if bp_live { " (live)" } else { "" },
                 ));
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
@@ -2135,6 +2255,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {
+        let stderr = "fno config: a is not modeled\nfno config: b is not modeled\ngh: API rate limit exceeded for user ID 4994564. (HTTP 403)";
+        assert_eq!(
+            stderr_cause(stderr),
+            "gh: API rate limit exceeded for user ID 4994564. (HTTP 403)"
+        );
+    }
+
+    #[test]
+    fn gh_error_cause_removes_the_gh_api_prefix() {
+        let error = "gh api repos/{owner}/{repo}/commits/<sha>/check-runs failed: fno config: x is not modeled\ngh: API rate limit exceeded (HTTP 403)";
+        assert_eq!(
+            gh_error_cause(error),
+            "gh: API rate limit exceeded (HTTP 403)"
+        );
+    }
+
+    #[test]
+    fn stderr_cause_falls_back_to_the_last_warning_or_empty_placeholder() {
+        assert_eq!(
+            stderr_cause("fno config: first\nfno config: last"),
+            "fno config: last"
+        );
+        assert_eq!(stderr_cause(" \n\t"), "no stderr");
+    }
+
+    #[test]
+    fn stderr_cause_caps_at_120_unicode_characters() {
+        let cause = "é".repeat(300);
+        let result = stderr_cause(&cause);
+        assert_eq!(result.chars().count(), 120);
+        assert_eq!(result, "é".repeat(120));
+    }
+
+    #[test]
+    fn open_pr_total_sums_all_pages() {
+        let first = Value::Array((0..100).map(|n| json!({"number": n})).collect());
+        let second = Value::Array((100..107).map(|n| json!({"number": n})).collect());
+        assert_eq!(open_pr_total(&[first, second]), 107);
+    }
+
+    #[test]
+    fn open_pr_total_ignores_non_array_pages() {
+        assert_eq!(
+            open_pr_total(&[json!({"unexpected": true}), json!([1, 2])]),
+            2
+        );
+    }
+
+    #[test]
     fn scope_key_sanitizes_like_the_writer() {
         assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
@@ -2550,6 +2720,16 @@ mod tests {
         vec![
             Reading::took("user_notes", Value::Null),
             Reading::took("board", board),
+            Reading::took(
+                "blueprint",
+                json!({
+                    "running": 0,
+                    "ceiling": 2,
+                    "ceiling_source": "default 2",
+                    "starts": [],
+                    "skips": [],
+                }),
+            ),
             Reading::took("escalations", json!({"open": 0, "overdue": 0})),
             Reading::took("blocked_child", json!([{"node": "x-1"}])),
             Reading::took("court", court),
@@ -2581,6 +2761,191 @@ mod tests {
             .unwrap_or_else(|| panic!("fixture has no {} reading", r.name));
         readings[i] = r;
     }
+
+    /// A board payload naming one `unplanned` queue with `ids` as candidates.
+    fn unplanned_board(ids: &[&str]) -> Value {
+        json!({"queues": [{"name": "unplanned", "status": "ok", "count": ids.len(),
+             "rows": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()
+        }]})
+    }
+
+    /// Call `r_blueprint` with a fixed provider (so the ambient
+    /// FNO_ROUTE_PROVIDER cannot leak in) and a temp config dir.
+    fn blueprint_reading(
+        dir: &std::path::Path,
+        config_toml: &str,
+        board: Value,
+        session_id: Option<&str>,
+        holders: Vec<String>,
+    ) -> Result<Value, String> {
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(fnodir.join("config.toml"), config_toml).unwrap();
+        // FNO_CONFIG pins the walk to the fixture the way the lanes-cap test
+        // does: a repo-root .fno/config.toml must never leak into the read.
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_provider = std::env::var_os("FNO_ROUTE_PROVIDER");
+        std::env::set_var("FNO_ROUTE_PROVIDER", "zai");
+        let reading = r_blueprint(&Ok(board), dir, session_id.map(str::to_string), Ok(holders));
+        match prior_provider {
+            Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
+            None => std::env::remove_var("FNO_ROUTE_PROVIDER"),
+        }
+        match prior_config {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        reading
+    }
+
+    /// The happy path: 4 unplanned candidates, running 0, ceiling 2 read from
+    /// the provider budget: the first two ids in board order start, the rest
+    /// skip at the ceiling.
+    #[test]
+    fn r_blueprint_starts_up_to_the_ceiling_in_board_order() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-happy-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "[agents.provider_limits.zai]\nsubagents = 2\n",
+            unplanned_board(&["x-1", "x-2", "x-3", "x-4"]),
+            Some("sess-1"),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(reading["running"], 0);
+        assert_eq!(reading["ceiling"], 2);
+        assert_eq!(
+            reading["ceiling_source"],
+            "agents.provider_limits.zai.subagents"
+        );
+        assert_eq!(reading["starts"], json!(["x-1", "x-2"]), "{reading}");
+        assert_eq!(
+            reading["skips"],
+            json!([
+                {"id": "x-3", "reason": "at ceiling 0 of 2"},
+                {"id": "x-4", "reason": "at ceiling 0 of 2"}
+            ]),
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The floor: 0 candidates and running 0 leaves the one null skip, so a
+    /// beat with nothing to start still leaves a receipt.
+    #[test]
+    fn r_blueprint_leaves_a_receipt_when_nothing_is_unplanned() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-empty-{}", std::process::id()));
+        let reading =
+            blueprint_reading(&dir, "", unplanned_board(&[]), Some("sess-1"), vec![]).unwrap();
+        assert_eq!(reading["starts"], json!([]));
+        assert_eq!(
+            reading["skips"],
+            json!([{"id": null, "reason": "no unplanned node in scope"}])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// At the ceiling no candidate starts, whatever the queue holds.
+    #[test]
+    fn r_blueprint_skips_everything_at_the_ceiling() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-ceil-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "[agents.provider_limits.zai]\nsubagents = 2\n",
+            unplanned_board(&["x-1", "x-2", "x-3"]),
+            Some("sess-1"),
+            vec![
+                "blueprint-session:sess-1".to_string(),
+                "blueprint-session:sess-1".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(reading["running"], 2);
+        assert_eq!(reading["starts"], json!([]));
+        assert_eq!(reading["skips"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            reading["skips"][0]["reason"], "at ceiling 2 of 2",
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Another session's blueprint claim never counts toward this king's
+    /// running total.
+    #[test]
+    fn r_blueprint_does_not_count_another_sessions_claim() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-other-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&["x-1"]),
+            Some("sess-1"),
+            vec!["blueprint-session:someone-else".to_string()],
+        )
+        .unwrap();
+        assert_eq!(reading["running"], 0);
+        assert_eq!(reading["starts"], json!(["x-1"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing session id fails the reading: it must never read as
+    /// `running 0`, which would name starts past the ceiling.
+    #[test]
+    fn r_blueprint_fails_without_a_session_id() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-nosess-{}", std::process::id()));
+        let reading = blueprint_reading(&dir, "", unplanned_board(&["x-1"]), None, vec![]);
+        assert!(reading.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable unplanned queue fails the reading instead of reading as
+    /// an empty candidate list.
+    #[test]
+    fn r_blueprint_fails_on_an_unreadable_unplanned_queue() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-badq-{}", std::process::id()));
+        let board = json!({"queues": [{"name": "unplanned", "status": "error",
+            "error": "graph unreadable", "rows": []}]});
+        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![]);
+        assert!(reading.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The journaled row carries the same starts and skips the lines print,
+    /// and no territory line ever contains `blueprinter` again.
+    #[test]
+    fn the_blueprint_journal_matches_the_lines_and_the_territory_line_is_clean() {
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let bp_line = lines.iter().find(|l| l.starts_with("blueprint:")).unwrap();
+        assert_eq!(*bp_line, "blueprint: running 0 of 2 (default 2)");
+        assert_eq!(
+            data.get("blueprint_running"),
+            Some(&json!(0)),
+            "journal: {data:?}"
+        );
+        assert_eq!(data.get("blueprint_starts"), Some(&json!([])));
+        assert_eq!(data.get("blueprint_skips"), Some(&json!([])));
+        let mut territory_seen = false;
+        for line in &lines {
+            assert!(
+                !line.contains("blueprinter"),
+                "territory line leaked the blueprinter: {line}"
+            );
+            if line.starts_with("territory:") {
+                territory_seen = true;
+            }
+        }
+        assert!(territory_seen, "territory line missing: {lines:?}");
+    }
+
+    // ---- check_account_login_with: one test per rule ----
 
     #[test]
     fn disagree_compares_meanings_not_spellings() {
@@ -2817,9 +3182,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(15)));
+        assert_eq!(data.get("coverage"), Some(&json!(16)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 15 of 15 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 16 of 16 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -2917,7 +3282,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 14 of 15 readings ok")));
+            .any(|l| l.starts_with("coverage: 15 of 16 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -3043,7 +3408,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 14 of 14 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 15 of 15 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -3052,7 +3417,7 @@ mod tests {
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
                      "owned_active": 2, "live_workers": 3, "undelivered": 9,
-                     "held_open": 0}})
+                     "held_open": 0, "blueprint_running": 0, "blueprint_ceiling": 2}})
     }
 
     #[test]
@@ -3181,7 +3546,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 14 of 15 readings ok")));
+            .any(|l| l.starts_with("coverage: 15 of 16 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.

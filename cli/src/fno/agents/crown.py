@@ -24,7 +24,7 @@ deleted and was unreleased; re-crown such a row rather than merging spellings.
 from __future__ import annotations
 
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Optional
 
 #: The bottom rung. Kept as a bound rather than a magic number so the stored
@@ -661,44 +661,33 @@ def settle_spawn_crown(
 ) -> "tuple[list, str, list]":
     """Apply a pre-launch crown-settle PLAN under the registry lock.
 
-    ``plan`` is the answer :func:`plan_spawn_crown` already got from Rust's
-    ``crown-settle`` payload kind, against a registry snapshot read before the
-    lock. This is a plain compare against the rows this write actually sees,
-    never a re-decision - the ``granting_scope`` idiom (``promote_existing_session``
-    below). Clears terminal holders of ``scope`` as before (cause
-    ``holder_terminal``); when the live holders this write sees still match
-    ``plan["holders"]``, applies ``plan["vacate"]`` (cause ``succession``) and
-    returns ``plan["outcome"]``. A holder that appeared since the plan was
-    computed - the one case a stale plan cannot see - still declines here: two
-    live crowns over one scope cannot be undone (see the caller in
-    ``dispatch.py``). Returns ``(rows, outcome, vacated)``: outcome is
+    ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
+    launch. Rust checks its holder identities against the rows this write sees
+    and returns indexes to clear. If Rust is unavailable or its answer is
+    malformed, the spawn declines without changing any row. Returns
+    ``(rows, outcome, vacated)``: outcome is
     ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
     dropping the crown fields when declined), and ``vacated`` lists
     ``(row_before_clear, cause)`` to journal once the write commits.
     """
-    from fno.agents.registry import TERMINAL_STATUSES
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
-    vacated: list = []
-    for index, row in enumerate(rows):
-        if row.crown_scope == scope and row.status in TERMINAL_STATUSES:
-            vacated.append((row, "holder_terminal"))
-            rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-    live_holders = sorted(
-        row.name for row in rows
-        if row.name != exclude_name
-        and row.crown_scope == scope
-        and row.status not in TERMINAL_STATUSES
-    )
-    if live_holders == sorted(plan.get("holders") or []):
-        vacate_names = set(plan.get("vacate") or [])
-        for index, row in enumerate(rows):
-            if row.crown_scope == scope and row.name in vacate_names:
-                vacated.append((row, "succession"))
-                rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-        return rows, plan["outcome"], vacated
-    if live_holders:
-        return rows, "declined", vacated
-    return rows, "granted", vacated
+    try:
+        answer = spawn_overlay_call({
+            "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
+            "plan": plan, "rows": [asdict(row) for row in rows],
+        })
+        outcome = answer["outcome"]
+        if outcome not in ("granted", "succeeded", "declined"):
+            raise ValueError("invalid crown-settle outcome")
+        marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
+        marks += [(i, "succession") for i in answer["vacate_rows"]]
+        vacated = [(rows[i], cause) for i, cause in marks]
+    except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
+        return rows, "declined", []
+    for index, _ in marks:
+        rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
+    return rows, outcome, vacated
 
 
 def plan_spawn_crown(
@@ -739,10 +728,7 @@ def plan_spawn_crown(
         "succession": succession,
         "caller": caller,
         "exclude_name": exclude_name,
-        "rows": [
-            {"name": row.name, "crown_scope": row.crown_scope, "status": row.status}
-            for row in rows
-        ],
+        "rows": [asdict(row) for row in rows],
     }
     try:
         answer = spawn_overlay_call(payload)
