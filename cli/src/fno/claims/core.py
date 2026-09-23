@@ -2121,7 +2121,7 @@ def release_claim(
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     native_root = root or _configured_claim_root()
-    prior_payload = _native_claim("status", key, _native_root_flags(native_root))
+    prior_payload = _native_claim("status", key, _native_root_flags(native_root)) if strict else {}
     prior = None
     if prior_payload.get("state") not in {None, "free"} and prior_payload.get("holder"):
         prior = Claim.model_validate(prior_payload)

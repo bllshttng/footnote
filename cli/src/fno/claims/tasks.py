@@ -38,7 +38,6 @@ def acquire_task(
     harness: Optional[str] = None,
     root: Optional[Path] = None,
 ) -> Claim:
-    """Claim with PID liveness or a pid-less two-hour lease."""
     return acquire_claim(
         key=task_key(node_id, task_id),
         holder=holder,
