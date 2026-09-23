@@ -13,7 +13,6 @@ sees two live crowns over one scope and none sees zero.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -445,11 +444,14 @@ def test_a_race_holder_still_declines_in_the_write(court, monkeypatch, capsys) -
     the one case two live crowns over one scope cannot be undone from."""
     from fno.agents import dispatch as dispatch_mod
 
+    refusal, plan = dispatch_mod.plan_spawn_crown(SCOPE, None, False)
+    assert refusal is None
+    assert plan is not None
     _seat("other-king", "a-different-session")
     monkeypatch.setattr(
         dispatch_mod,
         "plan_spawn_crown",
-        lambda *a, **k: (None, {"outcome": "granted", "holders": [], "vacate": []}),
+        lambda *a, **k: (None, plan),
     )
 
     _spawn_heir()
@@ -457,3 +459,31 @@ def test_a_race_holder_still_declines_in_the_write(court, monkeypatch, capsys) -
     assert _row("heir").crown_level is None
     assert _row("other-king").crown_level == 2, "the actual holder is untouched"
     assert "crown declined" in capsys.readouterr().err
+
+
+def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsys) -> None:
+    """A reclaimed name with a new session is not the holder the plan saw."""
+    from fno.agents import crown, dispatch as dispatch_mod
+
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("other-king", "old-session")
+    refusal, plan = crown.plan_spawn_crown(SCOPE, None, True)
+    assert refusal is None
+    assert plan is not None
+
+    update_registry(lambda rows: [row for row in rows if row.name != "other-king"])
+    _seat("other-king", "new-session")
+    monkeypatch.setattr(dispatch_mod, "plan_spawn_crown", lambda *a, **k: (None, plan))
+
+    _spawn_heir(succeed=True)
+
+    heir = _row("heir")
+    holder = _row("other-king")
+    assert heir is not None and heir.crown_level is None
+    assert holder is not None
+    assert (holder.crown_level, holder.harness_session_id) == (2, "new-session")
+    assert "crown declined" in capsys.readouterr().err
+    assert not any(
+        event["kind"] == "agent_crown_vacated" and event["holder"] == "other-king"
+        for event in _events()
+    )
