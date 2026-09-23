@@ -11,6 +11,14 @@ use crate::spawn_journal::ReentryVerdict;
 /// twin of `reentry::REENTRY_REFUSED_EXIT`.
 const REENTRY_REFUSED_EXIT: i32 = 3;
 
+/// Stamp the child command only; the server's environment also reaches pane
+/// shells, so it must not inherit the mux caller marker.
+fn mux_command(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = crate::process_admission::tokio_command(bin);
+    command.env("FNO_CALLER_KIND", "mux");
+    command
+}
+
 /// Why `run_resume_argv` failed. The split is load-bearing: the mux
 /// gesture fail-opens to the declared-form render ONLY on `Unavailable`; a
 /// `Refused` line names the door that restores the route and spawns nothing.
@@ -44,8 +52,7 @@ pub(super) async fn run_resume_argv(
              resume it with `fno agents resume <row>`",
         ))
     };
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command.args([
         "resume-argv",
         harness,
@@ -120,8 +127,7 @@ struct AgentVerbResult {
 }
 
 async fn run_agent_verb(verb: &str, name: &str, timeout: Duration) -> AgentVerbResult {
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args([verb, name])
         .stdin(std::process::Stdio::null())
@@ -269,8 +275,7 @@ fn reap_notice(stdout: &str) -> String {
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 pub(super) async fn run_reap() -> String {
     const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         // --no-mux keeps this gesture on its registry-row contract:
         // the 20s bound kills only the direct child, so a mux tab sweep that
@@ -390,8 +395,7 @@ fn reap_progress_note(stderr: &str) -> String {
 /// stderr's first line.
 pub(super) async fn run_agent_rename(token: &str, new_name: &str) -> Result<String, String> {
     const RENAME_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args(["rename", token, "--name", new_name])
         .stdin(std::process::Stdio::null())
@@ -425,8 +429,7 @@ pub(super) async fn run_reentry_plan(
     transition: &str,
 ) -> Result<ReentryVerdict, String> {
     const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args(["reentry-plan", name, "--transition", transition])
         .stdin(std::process::Stdio::null())
@@ -465,7 +468,7 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let mut command = crate::process_admission::tokio_command(fno_bin());
+    let mut command = mux_command(fno_bin());
     command
         .args(["agents", "mail", "send", "--", name, text])
         .stdin(std::process::Stdio::null())
@@ -872,6 +875,131 @@ mod tests {
         assert!(
             elapsed >= Duration::from_secs(55),
             "timed out after {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    struct PinnedFnoBin {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PinnedFnoBin {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("FNO_BIN");
+            std::env::set_var("FNO_BIN", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for PinnedFnoBin {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("FNO_BIN", value),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+        }
+    }
+
+    struct PinnedCallerKind {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PinnedCallerKind {
+        fn unset() -> Self {
+            let previous = std::env::var_os("FNO_CALLER_KIND");
+            std::env::remove_var("FNO_CALLER_KIND");
+            Self { previous }
+        }
+    }
+
+    impl Drop for PinnedCallerKind {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("FNO_CALLER_KIND", value),
+                None => std::env::remove_var("FNO_CALLER_KIND"),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RowGesture {
+        Resume,
+        Stop,
+        Remove,
+        Mail,
+        Reap,
+    }
+
+    async fn run_row_gesture(gesture: RowGesture) {
+        match gesture {
+            RowGesture::Resume => {
+                run_resume("agent").await;
+            }
+            RowGesture::Stop => {
+                run_agent_action("stop", "agent").await;
+            }
+            RowGesture::Remove => {
+                run_remove("agent").await;
+            }
+            RowGesture::Mail => {
+                run_mail_send("agent", "hello").await;
+            }
+            RowGesture::Reap => {
+                run_reap().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mux_row_gestures_stamp_child_and_map_to_one_cli_verb() {
+        let _serial = fno_env_lock();
+        let _home_guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _bin_guard = crate::pane_send_audit::FNO_BIN_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _caller_kind = PinnedCallerKind::unset();
+        let (tmp, _agents_env) = resume_fixture(
+            "gesture-table",
+            "#!/bin/bash\n\
+             printf 'agents|%s|%s\\n' \"${FNO_CALLER_KIND-unset}\" \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             case \"$1\" in\n\
+               resume) echo 'resumed agent' ;;\n\
+               stop) echo 'stopped agent' ;;\n\
+               rm) echo 'removed: agent' ;;\n\
+               reap) printf '{\\\"reaped\\\":[]}\\n' ;;\n\
+             esac\n\
+             exit 0\n",
+        );
+        let fno_bin = tmp.join("fake-fno.sh");
+        write_fake_bin(
+            &fno_bin,
+            "#!/bin/bash\n\
+             printf 'fno|%s|%s\\n' \"${FNO_CALLER_KIND-unset}\" \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'msg-1 queued'\n\
+             exit 0\n",
+        );
+        let _fno_bin = PinnedFnoBin::set(&fno_bin);
+
+        let gesture_table = [
+            (RowGesture::Resume, "agents|mux|resume agent"),
+            (RowGesture::Stop, "agents|mux|stop agent"),
+            (RowGesture::Remove, "agents|mux|rm agent"),
+            (RowGesture::Mail, "fno|mux|agents mail send -- agent hello"),
+            (RowGesture::Reap, "agents|mux|reap --json --no-mux"),
+        ];
+        for (gesture, _) in gesture_table {
+            run_row_gesture(gesture).await;
+        }
+
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        let actual: Vec<_> = log.lines().collect();
+        let expected: Vec<_> = gesture_table.iter().map(|(_, argv)| *argv).collect();
+        assert_eq!(actual, expected);
+        assert!(
+            std::env::var_os("FNO_CALLER_KIND").is_none(),
+            "caller kind belongs to each child command, not the server"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
