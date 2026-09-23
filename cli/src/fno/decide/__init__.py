@@ -1282,6 +1282,12 @@ def list_decisions(
         if subject and looks_like_decision_id(subject)
         else ""
     )
+    graph_unread = None
+    if any(_decision_lane(row) == "coord" for row in decisions) and entries is None:
+        try:
+            entries = _graph_entries(required=True)
+        except Exception as exc:  # noqa: BLE001 - unread is not unscoped
+            graph_unread, entries = f"the graph could not be read ({exc})", []
     by_subject = _subject_matcher(subject, entries=entries) if subject else None
 
     def keep(row: dict) -> bool:
@@ -1298,12 +1304,6 @@ def list_decisions(
         return by_subject is not None and by_subject(str(row.get("subject") or ""))
     out: "list[dict]" = []
     emitted: "set[str]" = set()
-    graph_entries: list[dict] = []
-    if any(_decision_lane(row) == "coord" for row in decisions):
-        # Reuse a caller's strict graph read when it already has one. Without
-        # this, the caller can read a healthy graph and this second read can
-        # fail, silently turning coord rows into unscoped rows.
-        graph_entries = entries if entries is not None else _graph_entries(required=True)
 
     for row in decisions:
         if not keep(row):
@@ -1331,9 +1331,11 @@ def list_decisions(
             row["lifecycle_reason"] = "graduated to enforced artifact"
             row["lifecycle_evidence"] = retirement
         elif row["lane"] == "coord":
-            lifecycle, evidence = _coord_lifecycle(row, graph_entries)
+            lifecycle, evidence = _coord_lifecycle(row, entries or [])
             if evidence:
                 row["lifecycle_evidence"] = evidence
+            if graph_unread and (row.get("expiry_ref") or row.get("subject")):
+                lifecycle, row["lifecycle_reason"] = "unknown", graph_unread
         elif row["lane"] == "unattributed":
             lifecycle = "unscoped"
         else:
@@ -1341,7 +1343,7 @@ def list_decisions(
         row["lifecycle"] = lifecycle
         if lane is not None and row["lane"] != lane:
             continue
-        if state not in {None, "all"} and lifecycle != state:
+        if state not in {None, "all"} and lifecycle not in {state, "unknown"}:
             continue
         row.pop("_event_type", None)
         out.append(row)
@@ -1396,10 +1398,7 @@ def review_list() -> dict[str, Any]:
     _, rows, damaged = list_decisions(limit=None, state="all")
     grouped: dict[str, list[dict[str, Any]]] = {}
     display_subjects: dict[str, str] = {}
-    try:
-        graph_entries = _graph_entries(required=True)
-    except Exception:
-        graph_entries = []
+    graph_entries = _graph_entries()
     subjectless = 0
     subjectless_rows: list[dict[str, Any]] = []
     invalid_authority = 0
