@@ -6,15 +6,15 @@ A pass encodes a wave and abdicates (`/fno:reign <scope> --once`). A reign witho
 
 Three facts fix the design, all measured against the harness internals:
 
-- fno already has a better goal than the native `/goal` for kings. The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, exits `NoWork` on a clean board, and escalates every `NoProgress`. The native `/goal` evaluator reads only the transcript.
-- The king can inject native commands itself. `fno agents mail send '<command>' --to-self --raw` types the command verbatim, as from the operator. So the reign arms its own `/loop` and `/goal` at start, without waiting for a ritual.
-- `/loop 4h` fires as a heartbeat and keeps the process from idling out. A Monitor fires only on change, which is what the one watcher needs.
+- The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, and exits `NoWork` on a clean board or while it waits only on the user, CI or a worker. `NoProgress` remains the bounded fail-closed path.
+- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`; its settled-PR watch runs as `claude --bg --exec`, so quiet polling invokes no model. Other harnesses use the heartbeat or external wake documented in the beat table.
+- `king.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache. The watch is event-driven, not a Monitor, and relaunch is single-flight through its scope lock.
 
 ## The one arm, and the demand reads
 
-The 2026-09-10 measurement covered one 12-hour reign. The stop hook drove all four real dispatches. The six monitor arms surfaced nothing the king acted on. Court costs are charged per wake, not per hour. So the skill arms ONE monitor, a harness-tracked Monitor running a shell until-loop. No tokens while waiting. When the condition changes, the session wakes.
+The settled-PR watch is the one demand arm. It polls the crown row and `pr_nudge_escalated`, then checks only owned nodes and their PR merge gates. A quiet shell job costs no king turns; a matched ready PR mails the crown and exits. Its scope lock makes a check-in or postcompact relaunch safe.
 
-1. **Nudge-escalation wake, 600s.** The daemon nudge ladder is the one poke for every quiet session on an open PR. It mails a live session and resumes one whose process is gone. After three nudges with no activity it files one operator question and emits `pr_nudge_escalated`. The king's arm reads that event for its own `owned` nodes and never pokes a worker. A crown never adds a second writer. The join and the skips live in the skill's Arm the beat section, and this page does not restate them.
+1. **Settled-PR watch, 600s.** The daemon nudge ladder is the one poke for every quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch joins that event to `manifest_session` and `owned` scope nodes, then reads `fno do pr status`. Ready with no blockers mails the crown the merge lever. A missing court row, unreadable event file or failed probe mails a named failure and exits.
 
 The deleted arms are demand reads. Each is read on demand. Mail arrives as a conversation turn and cannot be missed. The board and crown liveness are check-in body reads. A red row in `fno agents status` stays the mechanical trigger for the one dispatch exception. Main CI is read as one verdict token (`red`, `green`, `pending`), never a check-run count. Several of the most productive reign wakes began with "main flipped green". Capacity is the spawn gate's job. The gate refused twice in the measured reign, correctly. The band's five readings changed no decision.
 
@@ -44,7 +44,7 @@ The crown survives a compact. Its evidence does not. After a compaction the sess
 
 ## Stop semantics
 
-Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board exits `NoWork`, and the loop re-enters on the next beat. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook. A reign never `/goal clear` on NoProgress.
+Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next heartbeat, mail or settled-PR watch wakes it. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook.
 
 ## The dispatch exception and its journal row
 
@@ -92,8 +92,8 @@ The daemon retire arm owns the reaper. Each tick runs the dead-crown sweep befor
 
 ## The codex limit
 
-Codex exposes none of `/goal`, `/loop`, or Monitor. A codex reign has no self-injected beat. The wake arm's backstop is its only pulse. The skill names this in its first line.
+Codex has no native heartbeat or watch launcher; its externally owned wake arm is the pulse. The beat table names this limit and the other harness-specific choices.
 
 ## Config keys
 
-`config.king` carries the injected texts, so an OSS user edits one place. `king.checkin_interval` defaults to `4h`. The verdict window is three intervals and the hook missed-beat row is two intervals, so the defaults read 12h and 8h. `king.checkin_text` and `king.goal_text` carry the prompts. The skill prints the defaults verbatim. A fresh install runs with no config.
+`config.king` carries the injected check-in text, so an OSS user edits one place. `king.checkin_interval` defaults to `55m`. The verdict window is three intervals and the hook missed-beat row is two intervals, so the defaults read 165m and 110m. A legacy `king.goal_text` key is ignored by the config block. A fresh install runs with no config.

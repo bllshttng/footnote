@@ -82,13 +82,16 @@ pub(crate) fn additional_pr_open(extra: &Value, node_id: &str, primaries: &Prima
     })
 }
 
-/// One planned stamp: the node, the extra PR, and the recorded outcome.
+/// One planned stamp: the node, the PR, and the recorded outcome. A stamp
+/// with `primary` set rides the node's own primary PR; the rest target one
+/// `additional_prs` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrStamp {
     pub(crate) node: String,
     pub(crate) number: i64,
     pub(crate) url: Option<String>,
     pub(crate) merge_status: &'static str,
+    pub(crate) primary: bool,
 }
 
 /// A GitHub PR url's REST path and its number:
@@ -112,11 +115,46 @@ fn rest_path_and_number(url: &str) -> Option<(String, i64)> {
     Some((format!("repos/{owner}/{repo}/pulls/{n}"), n))
 }
 
-/// One GitHub read per unsettled extra on a held node, planned ahead of the
-/// settle. Only a done, merged node carrying an open do row is visited; a
-/// node with no `cwd` gets no read, and an entry with no number gets no
-/// path. `Merged` and `Closed` plan a stamp; `Open` and an unreadable
-/// answer plan nothing.
+/// The primary arm's one read: the REST path from the node's own `pr_url`,
+/// else `repos/{owner}/{repo}/pulls/<pr_number>` when the url is blank or
+/// missing, else no read at all - a url that does not parse is never
+/// re-guessed into a repo. Only a `Merged` answer plans a stamp; `Open`,
+/// `Closed` and an unreadable answer leave the node exactly as it was.
+fn primary_read(
+    entry: &Value,
+    cwd: &str,
+    read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
+) -> Option<PrStamp> {
+    let node_id = crate::graph_store::entry_id(entry)?.to_string();
+    let pr_url = entry.get("pr_url").and_then(Value::as_str);
+    let (path, number, url) = match pr_url.and_then(rest_path_and_number) {
+        Some((path, n)) => (path, n, pr_url.map(str::to_string)),
+        None => {
+            if pr_url.is_some_and(|u| !u.trim().is_empty()) {
+                return None;
+            }
+            let n = entry.get("pr_number").and_then(Value::as_i64)?;
+            (format!("repos/{{owner}}/{{repo}}/pulls/{n}"), n, None)
+        }
+    };
+    match read(&path, cwd)? {
+        PrState::Merged => Some(PrStamp {
+            node: node_id,
+            number,
+            url,
+            merge_status: "merged",
+            primary: true,
+        }),
+        PrState::Open | PrState::Closed => None,
+    }
+}
+
+/// One GitHub read per unsettled PR on a held node, planned ahead of the
+/// settle. A done node carrying an open do row and a `cwd` is visited: a
+/// node whose own merge is unrecorded reads its primary once, and a merged
+/// node's unsettled extras are each read once. A node with no `cwd` gets no
+/// read, an entry with no number gets no path, and `Open` plus an
+/// unreadable answer plan nothing.
 pub(crate) fn plan_stamps(
     entries: &[Value],
     read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
@@ -130,9 +168,6 @@ pub(crate) fn plan_stamps(
         if entry.get("status").and_then(Value::as_str) != Some("done") {
             continue;
         }
-        if entry.get("merge_status").and_then(Value::as_str) != Some("merged") {
-            continue;
-        }
         let has_open_do = entry
             .get("sessions")
             .and_then(Value::as_array)
@@ -143,6 +178,22 @@ pub(crate) fn plan_stamps(
         let Some(cwd) = entry.get("cwd").and_then(Value::as_str) else {
             continue;
         };
+        let merge_status = entry.get("merge_status").and_then(Value::as_str);
+        if merge_status == Some("merged") {
+            // fall through to the extras
+        } else if merge_status.is_none() {
+            // An out-of-band merge the writers never recorded: the one gap
+            // the reaper cannot settle past. One read records it; anything
+            // else the read could answer leaves the node held.
+            if let Some(stamp) = primary_read(entry, cwd, read) {
+                stamps.push(stamp);
+            } else {
+                continue;
+            }
+        } else {
+            // A recorded failure or closed outcome is a verdict, not a gap.
+            continue;
+        }
         for extra in entry
             .get("additional_prs")
             .and_then(Value::as_array)
@@ -177,6 +228,7 @@ pub(crate) fn plan_stamps(
                 number,
                 url: url.map(str::to_string),
                 merge_status,
+                primary: false,
             });
         }
     }
@@ -184,12 +236,25 @@ pub(crate) fn plan_stamps(
 }
 
 /// Write planned stamps into rows in memory, for the dry run. The first
-/// matching entry per stamp wins; an already-settled entry is skipped.
+/// matching entry per stamp wins; an already-settled entry is skipped. A
+/// primary stamp fills the node's top-level `merge_status` when absent or
+/// null; the extras arm is unchanged.
 pub(crate) fn apply_stamps(entries: &mut [Value], stamps: &[PrStamp]) {
     for stamp in stamps {
         for entry in entries.iter_mut() {
             if crate::graph_store::entry_id(entry) != Some(stamp.node.as_str()) {
                 continue;
+            }
+            if stamp.primary {
+                if matches!(entry.get("merge_status"), None | Some(Value::Null)) {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "merge_status".to_string(),
+                            Value::String(stamp.merge_status.to_string()),
+                        );
+                    }
+                }
+                break;
             }
             let Some(extras) = entry
                 .get_mut("additional_prs")
@@ -264,8 +329,9 @@ pub(crate) fn gh_pr_state_reader() -> impl FnMut(&str, &str) -> Option<PrState> 
     }
 }
 
-/// The stamp pass ahead of the settle: one GitHub read per unsettled extra
-/// on a held node, one `pull_request_stamp` write per answer, each write
+/// The stamp pass ahead of the settle: one GitHub read per unsettled PR on
+/// a held node, one store stamp per answer - the primary's through
+/// `primary_pr_stamp`, an extra's through `pull_request_stamp` - each write
 /// confirmed on the returned node. Every stamp refusal is named, and its
 /// row keeps its hold. An unreadable graph plans nothing here: the settle's
 /// own read names the refusal, and both legs share the store.
@@ -279,33 +345,59 @@ pub(crate) fn stamp_pass(
         return refusals;
     };
     for stamp in plan_stamps(&entries, read) {
-        let result = crate::backlog::api::pull_request_stamp(
-            &store,
-            &stamp.node,
-            stamp.number,
-            stamp.url.as_deref(),
-            stamp.merge_status,
-        );
+        let kind = if stamp.primary {
+            "primary stamp"
+        } else {
+            "stamp"
+        };
+        let result = if stamp.primary {
+            crate::backlog::api::primary_pr_stamp(
+                &store,
+                &stamp.node,
+                stamp.number,
+                stamp.url.as_deref(),
+                stamp.merge_status,
+            )
+        } else {
+            crate::backlog::api::pull_request_stamp(
+                &store,
+                &stamp.node,
+                stamp.number,
+                stamp.url.as_deref(),
+                stamp.merge_status,
+            )
+        };
         match result {
             Ok(payload) if payload.success => {
                 let confirmed = payload.node.as_ref().is_some_and(|node| {
-                    node.additional_prs.iter().flatten().any(|extra| {
-                        extra.number == Some(stamp.number)
-                            && extra.merge_status.as_deref() == Some(stamp.merge_status)
-                    })
+                    if stamp.primary {
+                        node.primary_pr.as_ref().is_some_and(|pr| {
+                            pr.number == Some(stamp.number)
+                                && pr.merge_status.as_deref() == Some(stamp.merge_status)
+                        })
+                    } else {
+                        node.additional_prs.iter().flatten().any(|extra| {
+                            extra.number == Some(stamp.number)
+                                && extra.merge_status.as_deref() == Some(stamp.merge_status)
+                        })
+                    }
                 });
                 if !confirmed {
                     refusals.push((
                         stamp.node.clone(),
-                        "stamp refused: returned node lacks the stamp".to_string(),
+                        format!("{kind} refused: returned node lacks the stamp"),
                     ));
                 }
             }
             Ok(_) => refusals.push((
                 stamp.node.clone(),
-                "stamp refused: no matching unsettled entry".to_string(),
+                if stamp.primary {
+                    "primary stamp refused: no matching unrecorded primary".to_string()
+                } else {
+                    "stamp refused: no matching unsettled entry".to_string()
+                },
             )),
-            Err(err) => refusals.push((stamp.node.clone(), format!("stamp refused: {}", err.0))),
+            Err(err) => refusals.push((stamp.node.clone(), format!("{kind} refused: {}", err.0))),
         }
     }
     refusals
@@ -546,18 +638,21 @@ mod tests {
                 number: 1523,
                 url: None,
                 merge_status: "merged",
+                primary: false,
             },
             PrStamp {
                 node: "x-hold".into(),
                 number: 1522,
                 url: None,
                 merge_status: "merged",
+                primary: false,
             },
             PrStamp {
                 node: "x-absent".into(),
                 number: 1,
                 url: None,
                 merge_status: "merged",
+                primary: false,
             },
         ];
         apply_stamps(&mut entries, &stamps);

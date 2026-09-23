@@ -36,7 +36,6 @@ use crate::spawn_gate_reservations::{
 };
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Exit codes, allocated by the shared table in
@@ -639,95 +638,60 @@ fn slot_refusal_line(
 
 /// The territory (key, member node ids, kingless) a node belongs to, or
 /// `None` when the answer cannot be READ (unreadable graph, node absent,
-/// uncompilable live crown). Mirrors the Python `_territory_of_node`:
-/// membership is EXCLUSIVE and most-specific-first - a node under a live
-/// crown scope counts for that crown's territory; an uncrowned node counts
-/// for its project's loose territory (project nodes minus every crowned
-/// set), so one worker never consumes two territories' caps. `kingless` is
-/// false for a live crown scope, true for the loose fallback - a workspace
-/// project no live crown rules - the same answer `resolve_territories`
-/// computes for the drain readout. AC9-HP parity: keep both sides agreeing.
+/// unreadable registry, uncompilable live crown). Membership is exclusive:
+/// the deepest live crown whose scope holds the node owns it, the lowest
+/// canonical scope on a tie (`territory::node_owners`); an unowned node
+/// counts for its project's loose territory, so one worker never consumes
+/// two territories' caps. `kingless` is false for a crown scope, true for
+/// the loose fallback.
 pub(crate) fn territory_of_node(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
     warnings: &mut Vec<String>,
 ) -> Option<(String, std::collections::HashSet<String>, bool)> {
-    use crate::king_board::graph_json_path;
     use crate::king_board::project_map;
-    use crate::territory::compile_territory;
 
-    // Through the backend switch (`graph_store::read_rows`): under sqlite
-    // the file is a frozen mirror, and a cap answered from it polices a
-    // territory the store does not recognize. Unreadable is None, the same
-    // cannot-READ contract as before.
-    let entries: Vec<Value> = {
-        let path = graph_json_path(config_cwd);
-        match crate::graph_store::read_rows(&path) {
-            Ok(rows) => rows,
-            Err(_) => return None,
-        }
+    // Through the backend switch (`graph_store::read_rows_strict`): a cap
+    // answered from a frozen sqlite mirror polices a territory the store
+    // does not recognize. Unreadable is None, the cannot-READ contract.
+    let entries: Vec<Value> = match crate::territory::graph_entries(config_cwd) {
+        Ok(rows) => rows,
+        Err(_) => return None,
     };
-    let by_id: HashMap<String, &Value> = entries
+    let row = entries
         .iter()
-        .filter_map(|e| {
-            let id = e.get("id").and_then(Value::as_str)?;
-            Some((id.to_string(), e))
-        })
-        .collect();
-    let row: Option<&Value> = by_id.get(node).copied();
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(node));
     if row.is_none() {
         return None;
     }
-
-    // Live crowns from the registry cache, canonical scope strings.
-    let mut crowns: Vec<String> = Vec::new();
-    match load_registry(registry_path) {
-        Ok(Registry { entries: rows, .. }) => {
-            for r in &rows {
-                let scope = r.crown_scope.as_deref().unwrap_or("").trim();
-                if scope.is_empty() || !status_is_liveish(&r.status) {
-                    continue;
-                }
-                let mut members: Vec<String> = scope
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                members.sort();
-                members.dedup();
-                let canon = members.join(",");
-                if !canon.is_empty() && !crowns.contains(&canon) {
-                    crowns.push(canon);
-                }
-            }
-        }
+    let crowns = match crate::territory::live_crowns(registry_path) {
+        Ok(c) => c,
         Err(e) => {
-            warnings.push(format!("territory: registry unreadable ({e}); refusing"));
+            warnings.push(format!("{e}; refusing"));
             return None;
         }
-    }
-    crowns.sort();
-
-    let projects = match project_map(config_cwd) {
-        Ok(m) => m,
-        Err(_) => HashMap::new(),
     };
-    let mut crowned: HashSet<String> = HashSet::new();
-    for scope in &crowns {
-        let compiled = compile_territory(scope, &entries, &Ok(projects.clone()));
-        match compiled {
-            Ok((_, ids)) => {
-                if ids.contains(node) {
-                    return Some((scope.clone(), ids, false));
-                }
-                crowned.extend(ids);
-            }
-            Err(e) => {
-                warnings.push(format!("territory: crown {scope} uncompilable: {e}"));
-                return None;
-            }
-        }
+    let (owners, failures) = crate::territory::node_owners(
+        &crowns,
+        &entries,
+        &Ok(project_map(config_cwd).unwrap_or_default()),
+    );
+    if !failures.is_empty() {
+        warnings.extend(
+            failures
+                .iter()
+                .map(|(s, e)| format!("territory: crown {s} uncompilable: {e}")),
+        );
+        return None;
+    }
+    if let Some(owner) = owners.get(node) {
+        let members: HashSet<String> = owners
+            .iter()
+            .filter(|(_, s)| *s == owner)
+            .map(|(id, _)| id.clone())
+            .collect();
+        return Some((owner.clone(), members, false));
     }
     let project = row
         .and_then(|r| r.get("project").and_then(Value::as_str))
@@ -735,15 +699,15 @@ pub(crate) fn territory_of_node(
     if project.is_empty() {
         return None;
     }
-    let mut loose: HashSet<String> = HashSet::new();
-    for e in &entries {
-        if let Some(id) = e.get("id").and_then(Value::as_str) {
-            let p = e.get("project").and_then(Value::as_str).unwrap_or("");
-            if p == project && !crowned.contains(id) {
-                loose.insert(id.to_string());
-            }
-        }
-    }
+    let loose: HashSet<String> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id").and_then(Value::as_str)?;
+            (e.get("project").and_then(Value::as_str).unwrap_or("") == project
+                && !owners.contains_key(id))
+            .then(|| id.to_string())
+        })
+        .collect();
     Some((format!("loose:{project}"), loose, true))
 }
 
@@ -4539,6 +4503,85 @@ MemAvailable:    8000000 kB\n";
         assert!(loose.2, "a project no crown rules is kingless");
         assert_eq!(crowned.2, crown_row.kingless, "crowned leg diverges");
         assert_eq!(loose.2, loose_row.kingless, "loose leg diverges");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// AC6-HP: nested crowns split one project exclusively; an uncompilable
+    /// live crown blinds the whole read (None), the fail-closed posture.
+    #[test]
+    fn territory_of_node_attributes_nested_crowns_exclusively() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-nested-crowns-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-root", "project": "fno" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n\n[[work.workspaces.main.projects]]\nname = \"fno\"\npath = \"/repo/fno\"\n",
+                dir.join("graph.json").display()
+            ),
+        )
+        .unwrap();
+        let reg_row = |name: &str, scope: &str, level: i64| {
+            format!(
+                r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"{scope}","crown_level":{level}}}"#
+            )
+        };
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{},{}]}}"#,
+                reg_row("king-fno", "fno", 1),
+                reg_row("king-epic", "x-epic", 2)
+            ),
+        )
+        .unwrap();
+        let _env = EnvPin::take(&["FNO_HOME"]);
+        std::env::set_var("FNO_HOME", &dir);
+        let mut warnings = Vec::new();
+        let mut of =
+            |node: &str| territory_of_node(&dir, &reg, node, &mut warnings).expect("attributes");
+        let under_epic = of("x-1");
+        assert_eq!(under_epic.0, "x-epic");
+        assert!(!under_epic.1.contains("x-root"), "{:?}", under_epic.1);
+        let root = of("x-root");
+        assert_eq!(root.0, "fno");
+        assert!(
+            !root.1.contains("x-epic") && !root.1.contains("x-1"),
+            "{:?}",
+            root.1
+        );
+        // One uncompilable live crown refuses every node-bearing read.
+        let reg_bad = dir.join("registry-bad.json");
+        std::fs::write(
+            &reg_bad,
+            format!(
+                r#"{{"schema_version":1,"entries":[{}]}}"#,
+                reg_row("king-bad", "x-root", 2)
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        assert!(territory_of_node(&dir, &reg_bad, "x-1", &mut warnings).is_none());
+        assert!(
+            warnings.iter().any(|w| w.contains("uncompilable")),
+            "{warnings:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
