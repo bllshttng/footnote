@@ -41,7 +41,7 @@ fn epic_fixture() -> Vec<Value> {
         json!({"id": "x-c", "status": "ready", "priority": "p1", "parent": "x-e"}),
         json!({"id": "x-q", "status": "ready", "priority": "p2", "parent": "x-e", "queued_at": "t"}),
         json!({"id": "x-loose", "status": "ready", "priority": "p2"}),
-        json!({"id": "x-d", "status": "done", "priority": "p2", "completed_at": "2026-09-02"}),
+        json!({"id": "x-d", "status": "done", "priority": "p2", "parent": "x-e", "completed_at": "2026-09-02"}),
     ]
 }
 

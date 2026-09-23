@@ -1874,7 +1874,7 @@ mod tests {
             "Triage",
             "queued awaits ack, never inflates Now"
         );
-        assert_eq!(lane("x-held"), "Now", "a claimed node is underway");
+        assert_eq!(lane("x-held"), "In Progress", "a claimed node is underway");
         // The project half is the node's own, absent when unscoped.
         let project = |id: &str| cards.iter().find(|c| c.id == id).unwrap().project.clone();
         assert_eq!(project("x-now").as_deref(), Some("fno"));
@@ -1901,7 +1901,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hot.lanes,
-            vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
+            vec![("In Progress".to_string(), 1), ("Later".to_string(), 1)],
             "the claimed node moves lanes, count and all"
         );
         assert_eq!(hot.cards[0].state, CardState::InFlight);
@@ -1951,7 +1951,7 @@ mod tests {
         let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
         assert_eq!(
             epic.lane.as_deref(),
-            Some("Now"),
+            Some("In Progress"),
             "a p3 epic with a claimed child is underway, not long-tail"
         );
     }

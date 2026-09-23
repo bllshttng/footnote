@@ -1043,25 +1043,27 @@ mod tests {
         });
         let with = classify(&explicit).unwrap();
         assert_eq!(
-            without["flow"]["deliveries"]["ship"],
-            with["flow"]["deliveries"]["ship"]
+            without["flow"]["deliveries"]["code"],
+            with["flow"]["deliveries"]["code"]
         );
         assert_eq!(
             without["flow"]["deliveries"]["doc"],
             with["flow"]["deliveries"]["doc"]
         );
         assert_eq!(
-            without["flow"]["deliveries"]["ship"], 1,
-            "a merged DonePRGreen row is one ship delivery"
+            without["flow"]["deliveries"]["code"], 1,
+            "a merged DonePRGreen row is one confirmed code delivery"
         );
     }
 
     #[test]
     fn classify_explicit_lists_win_over_the_default() {
         // AC4-EDGE: lists that leave DonePRGreen out keep it out - the
-        // default is not mixed in behind them.
+        // default is not mixed in behind them. The observable is an inferred
+        // delivery: a node the graph lost, whose only evidence is the
+        // terminal's vocabulary membership.
         let params = json!({
-            "entries": [json!({"id": "x-1", "merge_status": "merged", "merged_at": "2026-09-02T12:00:00"})],
+            "entries": [],
             "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
             "doc_terminals": ["DoneAdvisory"],
             "delivery_terminals": ["DoneDelivery"],
@@ -1070,7 +1072,19 @@ mod tests {
             "since_days": 28
         });
         let out = classify(&params).unwrap();
-        assert_eq!(out["flow"]["deliveries"]["ship"], 0, "explicit lists won");
+        assert_eq!(
+            out["by_node"]["x-1"]["delivered"], false,
+            "explicit lists won: DonePRGreen is no vocabulary member"
+        );
+        // The same row under the default vocabulary (no lists) delivers.
+        let bare = json!({
+            "entries": [],
+            "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&bare).unwrap();
+        assert_eq!(out["by_node"]["x-1"]["delivered"], true);
     }
 
     #[test]
