@@ -369,21 +369,31 @@ def _crown_row(name: str, *, status: str = "busy", scope="epic-x"):
     )
 
 
-def test_settle_spawn_crown_outcomes() -> None:
-    """The four answers the plan-applier can give, with no spawn at all:
-    granted, succeeded, a race-backstop decline (the plan named a holder the
-    write no longer sees), and the terminal clear that rides a reclaim."""
-    from fno.agents.crown import settle_spawn_crown
+def test_settle_spawn_crown_outcomes(tmp_path: Path, monkeypatch, native_backlog_door) -> None:
+    """Exercise the Rust plan and apply stages against planted registry rows."""
+    from dataclasses import replace
 
-    granted_plan = {"outcome": "granted", "holders": [], "vacate": []}
-    rows, outcome, vacated = settle_spawn_crown(
-        [_crown_row("a", scope=None)], scope="epic-x", plan=granted_plan,
-    )
+    from fno.agents.crown import plan_spawn_crown, settle_spawn_crown
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+
+    def plan_for(rows, succession=False):
+        update_registry(lambda _: rows)
+        refusal, plan = plan_spawn_crown("epic-x", None, succession)
+        assert refusal is None
+        assert plan is not None
+        return plan
+
+    uncrowned = _crown_row("a", scope=None)
+    granted_plan = plan_for([uncrowned])
+    _, outcome, vacated = settle_spawn_crown([uncrowned], scope="epic-x", plan=granted_plan)
     assert outcome == "granted"
     assert vacated == []
 
     caller = _crown_row("caller")
-    succeeded_plan = {"outcome": "succeeded", "holders": ["caller"], "vacate": ["caller"]}
+    succeeded_plan = plan_for([caller], succession=True)
     rows, outcome, vacated = settle_spawn_crown([caller], scope="epic-x", plan=succeeded_plan)
     assert outcome == "succeeded"
     assert [r.crown_scope for r in rows] == [None]
@@ -393,16 +403,52 @@ def test_settle_spawn_crown_outcomes() -> None:
     # scope, but the write sees "stranger" instead - declines rather than
     # applying a plan for a holder that is no longer there.
     stranger = _crown_row("stranger")
-    rows, outcome, vacated = settle_spawn_crown([stranger], scope="epic-x", plan=succeeded_plan)
+    race_plan = plan_for([caller], succession=True)
+    rows, outcome, vacated = settle_spawn_crown([stranger], scope="epic-x", plan=race_plan)
     assert outcome == "declined"
     assert rows[0].crown_scope == "epic-x", "a declined spawn leaves the holder alone"
     assert vacated == []
 
     dead = _crown_row("dead", status="exited")
+    granted_plan = plan_for([dead])
     rows, outcome, vacated = settle_spawn_crown([dead], scope="epic-x", plan=granted_plan)
     assert outcome == "granted"
     assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
     assert rows[0].crown_scope is None
+
+    rebound_plan = plan_for([caller], succession=True)
+    rebound = replace(caller, harness_session_id="caller-sess-2")
+    rows, outcome, vacated = settle_spawn_crown([rebound], scope="epic-x", plan=rebound_plan)
+    assert outcome == "declined"
+    assert rows[0].crown_scope == "epic-x"
+    assert vacated == []
+
+
+def test_settle_spawn_crown_declines_when_rust_is_unavailable(
+    tmp_path: Path, monkeypatch, native_backlog_door,
+) -> None:
+    from dataclasses import asdict
+
+    from fno.agents import spawn_overlay_client
+    from fno.agents.crown import plan_spawn_crown, settle_spawn_crown
+    from fno.agents.registry import update_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    caller = _crown_row("caller")
+    update_registry(lambda _: [caller])
+    refusal, plan = plan_spawn_crown("epic-x", None, True)
+    assert refusal is None
+    assert plan is not None
+    before = asdict(caller)
+
+    def unavailable(*args, **kwargs):
+        raise spawn_overlay_client.SpawnOverlayUnavailable("not built")
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", unavailable)
+    rows, outcome, vacated = settle_spawn_crown([caller], scope="epic-x", plan=plan)
+    assert (outcome, vacated) == ("declined", [])
+    assert asdict(rows[0]) == before
 
 
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:
