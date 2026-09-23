@@ -630,11 +630,22 @@ pub fn attention_dir() -> Result<PathBuf, std::io::Error> {
 /// beat deadline are left for the next beat. AC3-HP, AC3-ERR.
 fn bounce_not_ready(items: &[AttentionItem], dir: &Path, deadline: std::time::Instant) -> u64 {
     bounce_not_ready_with(items, dir, deadline, &|asker, body| {
-        let mut cmd = crate::loop_dispatch::fno_cmd("fno");
-        cmd.args(["agents", "mail", "send", asker, body]);
+        // The command rebuilds per attempt: the bounded helper consumes it.
+        let build_cmd = || {
+            let mut cmd = crate::loop_dispatch::fno_cmd("fno");
+            cmd.args(["agents", "mail", "send", asker, body]);
+            cmd
+        };
+        // ETXTBSY keeps its spawn retry: a binary swap mid-beat must not
+        // cost the asker their one bounce under the save-on-attempt rule.
         matches!(
-            crate::bounded_cmd::output_with_timeout(cmd, ATTENTION_SEND_TIMEOUT_S),
-            Some(out) if out.status.success()
+            crate::loop_dispatch::retry_etxtbsy(|| {
+                crate::bounded_cmd::output_with_timeout_result(
+                    build_cmd(),
+                    ATTENTION_SEND_TIMEOUT_S,
+                )
+            }),
+            Ok(out) if out.status.success()
         )
     })
 }
