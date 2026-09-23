@@ -49,6 +49,7 @@ pub mod active_backlog;
 pub mod additional_prs;
 mod agent_lock;
 pub mod agents_config;
+pub(crate) mod agents_event;
 pub mod agy_ask;
 pub mod agy_hooks;
 pub mod agy_launch;

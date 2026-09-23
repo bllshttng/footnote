@@ -62,6 +62,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_BUS_DIR` | py+rs | unclear: cli/src/fno/paths.py:1204 |
 | `FNO_BUS_MAX_BYTES` | py | unclear: cli/src/fno/bus/log.py:50 |
 | `FNO_BUS_RETAIN` | py | unclear: cli/src/fno/bus/log.py:62 |
+| `FNO_CALLER_KIND` | rs | The surface that shelled this fno-agents verb; `mux` stamps `caller_kind` on its events. |
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
 | `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
