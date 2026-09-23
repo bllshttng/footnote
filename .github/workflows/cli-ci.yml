@@ -577,9 +577,9 @@ jobs:
     # finish in the time it was given, so main read red and every PR in the
     # queue waited on one job. Shard by crate, the x-5b73 smoke split, instead
     # of raising the number - a raised cap only hides the growth until the
-    # next PR pays it. The 2026-08-27 measurement still names the cost owner:
-    # the fno-agents real-process integration suite runs `--test-threads=1`
-    # for 1128s, 76 percent of the old whole-job time.
+    # next PR pays it. The real-process integration shard moved to its own
+    # job (test-agents-integration) the same way, after a green suite ran
+    # into this cap at 40.25m against a 34m median on passing runs.
     timeout-minutes: 40
 
     # The claim classifier parity harness needs the FULL oracle package
@@ -785,7 +785,7 @@ jobs:
       - name: Static source guards (fno-agents)
         # Guards that read source text and spawn nothing. They run before the
         # long shards so a size or owner red shows in minutes. The integration
-        # shard runs them again; that costs under a second.
+        # job's --test '*' leg reruns their assertions; that costs seconds.
         working-directory: crates/fno-agents
         run: |
           cargo test --test hook_latency hook_sources_stay_small
@@ -801,6 +801,88 @@ jobs:
           FNO_TEST_HERMETIC: "0"
         run: cargo test --lib --bins --no-fail-fast
 
+  test-agents-integration:
+    name: cargo test integration (fno-agents)
+    runs-on: ubuntu-latest
+    # The real-process integration shard moved out of test-agents after the
+    # FNO_BIN-fixed suite ran green into the 40-minute cap (40.25m here vs a
+    # 34m median on passing runs): a green run could not finish in the time
+    # it was given, the same shape that forced the 2026-09-17 (x-e8b1) crate
+    # split. The leg measured 1128s (76 percent of the pre-split whole job)
+    # on 2026-08-27, so it carries its own job and its own cap. Provisioning
+    # mirrors test-agents step for step: verify_evidence_parity and
+    # tests/common spawn bare python3 (yaml, psutil), the claim parity
+    # harness imports through cli/.venv, blueprint_judge shells rg, and the
+    # real-process tests spawn both built binaries. A lib red no longer
+    # hides this shard: the two jobs run independently and the aggregator
+    # collects both verdicts.
+    timeout-minutes: 40
+    env:
+      FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build the fno front for the truth probes
+        # On PATH, not in FNO_BIN: a job-level FNO_BIN leaks into
+        # `cargo test`, where fno_cmd prefers it over every test's
+        # stub binary and the whole stubbed-shellout suite fails for a
+        # provisioning reason. A bare "fno" has no PATH leg here otherwise.
+        run: |
+          cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+          echo "$PWD/crates/fno/target/debug" >> "$GITHUB_PATH"
+
+      - name: Set isolated FNO state roots
+        run: |
+          echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
+          echo "FNO_AGENTS_HOME=$RUNNER_TEMP/fno-agents" >> "$GITHUB_ENV"
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install ripgrep (gather_context's sibling-caller grep)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - name: Set up Python (for flock_interop.rs cross-language test)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + sync cli
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install fno Python package
+        working-directory: cli
+        run: uv sync
+
+      - name: Install PyYAML + psutil for the bare python3 (parity oracles)
+        run: python3 -m pip install "pyyaml>=6" "psutil>=5"
+
+      - name: Clean cached Rust package artifacts
+        run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build fno-agents binary
+        working-directory: crates/fno-agents
+        run: cargo build --bin fno-agents
+
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
         env:
@@ -808,11 +890,6 @@ jobs:
           CARGO_HOME: /home/runner/.cargo
           RUSTUP_HOME: /home/runner/.rustup
           FNO_TEST_HERMETIC: "0"
-        # A lib red must not hide the integration shard: this leg still runs
-        # when the lib step fails, so the grok and stop-hook tests report on
-        # every round instead of only on green rounds. A red in the build,
-        # parity or static-guard steps above skips it: those fail fast.
-        if: ${{ !cancelled() && (success() || steps.lib.outcome == 'failure') }}
         run: cargo test --test '*' --no-fail-fast -- --test-threads=1
 
   test-mux:
@@ -892,18 +969,19 @@ jobs:
 
   test:
     name: cargo test + schema parity
-    needs: [test-agents, test-mux]
+    needs: [test-agents, test-agents-integration, test-mux]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # The check name this workflow has always reported, now an aggregator over
-    # the two crate shards (the x-5b73 smoke shape: shards carry the work and
+    # the crate shards (the x-5b73 smoke shape: shards carry the work and
     # their own caps; this job exists so the world still reads one cargo
     # verdict). A cap this tight is a real alarm on a job that can only ever
     # hang; the reported check itself must not be the one job with no cap.
     timeout-minutes: 5
     steps:
-      - name: Both shards passed
+      - name: All shards passed
         run: |
-          echo "test-agents=${{ needs.test-agents.result }} test-mux=${{ needs.test-mux.result }}"
+          echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }}"
           [ "${{ needs.test-agents.result }}" = "success" ] || exit 1
+          [ "${{ needs.test-agents-integration.result }}" = "success" ] || exit 1
           [ "${{ needs.test-mux.result }}" = "success" ] || exit 1
