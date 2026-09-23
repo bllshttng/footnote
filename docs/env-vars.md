@@ -240,8 +240,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `TASK_LOCK_TTL_HOURS` | py+rs | unclear: cli/src/fno/graph/_constants.py:331 |
 | `TERM` | rs | Terminal type; a Rust front terminal capability check reads it. |
 | `TMPDIR` | py | unclear: cli/src/fno/events/__init__.py:1772 |
-| `USER` | py | unclear: cli/src/fno/adapters/providers/managed.py:185 |
-| `USERNAME` | py | unclear: cli/src/fno/adapters/providers/managed.py:185 |
+| `USER` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:185 |
+| `USERNAME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:185 |
 | `USERPROFILE` | rs | unclear: crates/fno-agents/src/publish_review.rs:195 |
 | `WORKTREE_STATUS_REGISTRY` | py | unclear: cli/src/fno/agents/registry.py:2525 |
 | `XDG_CACHE_HOME` | rs | unclear: crates/fno/src/bootstrap.rs:1395 |
