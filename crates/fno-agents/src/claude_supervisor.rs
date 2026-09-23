@@ -135,8 +135,15 @@ fn addressed_config_dir(overlay_dir: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude"))
 }
 
+fn is_temp_fixture_binary(path: &Path) -> bool {
+    // A PATH symlink is a fixture only when its resolved executable is in temp too.
+    std::fs::canonicalize(path)
+        .ok()
+        .is_some_and(|resolved| crate::paths::under_temp_dir(&resolved))
+}
+
 fn birth_allowed(hermetic: bool, config_dir: Option<&Path>, claude_bin: Option<&Path>) -> bool {
-    if claude_bin.is_some_and(crate::paths::under_temp_dir) {
+    if claude_bin.is_some_and(is_temp_fixture_binary) {
         return true;
     }
     !hermetic && !config_dir.is_some_and(crate::paths::under_temp_dir)
@@ -470,10 +477,28 @@ mod tests {
 
     #[test]
     fn a_temp_fixture_binary_still_births() {
-        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
-        let claude_bin = std::env::temp_dir().join("fno-supervisor-test/bin/claude");
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join(".claude");
+        let claude_bin = temp.path().join("bin/claude");
+        std::fs::create_dir_all(claude_bin.parent().unwrap()).unwrap();
+        std::fs::write(&claude_bin, "fixture").unwrap();
 
         assert!(birth_allowed(false, Some(&config_dir), Some(&claude_bin)));
+    }
+
+    #[test]
+    fn a_temp_symlink_to_a_real_binary_is_not_a_fixture() {
+        let _guard = crate::path_test_guard();
+        let config_dir = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let claude_bin = bin_dir.path().join("claude");
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &claude_bin).unwrap();
+
+        assert!(!birth_allowed(
+            false,
+            Some(config_dir.path()),
+            Some(&claude_bin)
+        ));
     }
 
     #[test]
@@ -495,7 +520,10 @@ mod tests {
     fn a_hermetic_run_refuses_a_real_binary_for_a_real_dir() {
         let config_dir = Path::new("/Users/someone/.claude");
         let claude_bin = Path::new("/usr/local/bin/claude");
-        let fixture_bin = std::env::temp_dir().join("fno-supervisor-test/bin/claude");
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_bin = temp.path().join("bin/claude");
+        std::fs::create_dir_all(fixture_bin.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_bin, "fixture").unwrap();
 
         assert!(!birth_allowed(true, Some(config_dir), Some(claude_bin)));
         assert!(birth_allowed(true, Some(config_dir), Some(&fixture_bin)));
