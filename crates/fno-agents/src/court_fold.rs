@@ -255,7 +255,7 @@ fn age_hours(entry: &Value, now_secs: u64) -> Value {
 
 /// Counts render in lifecycle order; a status outside the vocabulary keeps
 /// its place at the end. Both `counts` and `owned_counts` use this.
-fn ordered_counts(counts: &BTreeMap<String, i64>) -> Map {
+fn ordered_counts(counts: &BTreeMap<String, i64>) -> Map<String, Value> {
     let mut ordered = Map::new();
     for key in COUNT_ORDER {
         if let Some(v) = counts.get(key) {
