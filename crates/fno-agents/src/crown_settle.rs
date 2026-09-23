@@ -350,13 +350,13 @@ fn apply_with_projects(
     let planned_vacate = plan
         .get("vacate")
         .and_then(Value::as_array)
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<HashSet<_>>()
+        .ok_or_else(|| "crown-settle: plan needs vacate array".to_string())?
+        .iter()
+        .map(|name| {
+            name.as_str()
+                .ok_or_else(|| "crown-settle: vacate entries need names".to_string())
         })
-        .unwrap_or_default();
+        .collect::<Result<HashSet<_>, _>>()?;
     let (outcome, vacate_rows) = if !occupancy.rivals.is_empty() {
         ("declined", Vec::new())
     } else if current == expected {
@@ -762,6 +762,19 @@ mod tests {
             (
                 json!({"caller": {"kind": "human"}, "holder_ids": [], "outcome": "unknown"}),
                 "outcome",
+            ),
+            (
+                json!({
+                    "caller": {"kind": "human"},
+                    "holder_ids": [{"name": "king-a", "harness_session_id": "sess-a"}],
+                    "outcome": "succeeded",
+                }),
+                "vacate",
+            ),
+            (
+                json!({"caller": {"kind": "human"}, "holder_ids": [],
+                       "outcome": "granted", "vacate": "bad"}),
+                "vacate",
             ),
         ] {
             let error = resolve(&json!({
