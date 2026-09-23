@@ -53,6 +53,8 @@ pub const EXIT_TERRITORY_CAP: i32 = 86;
 /// `agents.profiles.blueprint.max_live` live `bp` threads, or more than one
 /// per territory, refuses the spawn and teaches the subagent path.
 pub const EXIT_BLUEPRINT_CAP: i32 = 88;
+/// A spawn whose seed or label names review is refused before every bypass.
+pub const EXIT_REVIEW_SESSION: i32 = 89;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
@@ -1268,6 +1270,34 @@ pub struct GateInput {
     pub account: Option<String>,
     pub caller_session: Option<String>,
     pub holder_pid: Option<u32>,
+    /// The spawn's seed message. Its first verb names the session phase.
+    pub seed: Option<String>,
+    /// An explicit `--session-phase` label.
+    pub session_phase: Option<String>,
+}
+
+const REVIEW_SESSION_REMEDY: &str = "run the review in the session that did the work: \
+     /fno:review <level> ($fno:review <level> on codex), or fno do target request-self-review";
+
+/// Refuse before `--force` and `FNO_SPAWN_GATE=0`: a review runs in the
+/// session that did the work, never in a new one.
+fn review_session_gate(input: &GateInput) -> Result<(), Refusal> {
+    let seeded = input
+        .seed
+        .as_deref()
+        .and_then(crate::spawn_phase::seed_phase);
+    if input.session_phase.as_deref() != Some("review") && seeded != Some("review") {
+        return Ok(());
+    }
+    Err(Refusal::with_receipt(
+        EXIT_REVIEW_SESSION,
+        serde_json::json!({
+            "status": "refused",
+            "reason": "review_session",
+            "remedy": REVIEW_SESSION_REMEDY,
+        }),
+    )
+    .ev("axis", serde_json::json!("review")))
 }
 
 /// The held keys of a [`GateGuard`], taken out before the guard drops so a
@@ -1309,6 +1339,7 @@ fn decide_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
+    review_session_gate(&input)?;
 
     // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     // precedent): test suites exercising spawn plumbing must not queue behind
@@ -2688,6 +2719,58 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_seed_or_label_is_refused_and_other_phases_pass() {
+        for seed in [
+            "$fno:review high --comment",
+            "/fno:review x",
+            "/code-review this diff",
+            "/review x-1",
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .expect_err(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+            let receipt = refusal.receipt.as_ref().unwrap();
+            assert_eq!(receipt["reason"], "review_session");
+            let remedy = receipt["remedy"].as_str().unwrap();
+            assert!(remedy.contains("/fno:review"));
+            assert!(remedy.contains("$fno:review"));
+            assert!(verdict_line(&refusal)
+                .starts_with("spawn-gate: refused on review (review_session, exit 89)"));
+        }
+
+        for (seed, phase) in [
+            ("/fno:triage deep", Some("review")),
+            ("/code-review this diff", Some("do")),
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                session_phase: phase.map(str::to_string),
+                ..Default::default()
+            })
+            .expect_err(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+        }
+
+        for seed in [
+            "/fno:think why",
+            "/fno:target x-1",
+            "review the diff",
+            "/Users/x/review",
+            "",
+        ] {
+            assert!(review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .is_ok());
+        }
+        assert!(review_session_gate(&GateInput::default()).is_ok());
+    }
 
     /// The no_wait specimen renders the verdict line the plan pins: axis and
     /// breach named, figures from the receipt in key order.

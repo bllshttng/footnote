@@ -178,6 +178,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-ref-{}", std::process::id()));
+        let prior_agents_home = std::env::var_os("FNO_AGENTS_HOME");
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
         std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
@@ -199,6 +203,10 @@ mod tests {
         );
 
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_agents_home {
+            Some(value) => std::env::set_var("FNO_AGENTS_HOME", value),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
