@@ -173,7 +173,7 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     let Some(tokens) = lex(command) else {
         return None; // unbalanced quotes: cannot tell command position, allow
     };
-    let (kind, shown) = refused_segment(&tokens, 0)?;
+    let (kind, shown) = refused_segment(&tokens, 0, false)?;
     let root = root?;
     if !is_footnote_checkout(root) {
         return None;
@@ -508,16 +508,21 @@ pub(super) fn stages(segment: &[String]) -> Vec<Vec<String>> {
 /// payload recurses as its own command text, bounded by depth. A pytest fed
 /// to `xargs` is a known fail-open: it is not in this shell's command
 /// position.
-fn refused_segment(tokens: &[String], depth: usize) -> Option<(Kind, String)> {
+fn refused_segment(
+    tokens: &[String],
+    depth: usize,
+    inherited_escape: bool,
+) -> Option<(Kind, String)> {
     if depth > 2 {
         return None;
     }
     for segment in segments(tokens) {
         for part in stages(&segment) {
             // The whole-suite escape rides the stage text: a `WholeRust`
-            // verdict is skipped when this stage carries the literal prefix,
-            // and the raw pytest/cargo refusals ignore the prefix.
-            let full_escape = part.iter().any(|t| t == "FNO_TEST_FULL=1");
+            // verdict is skipped when this stage carries the literal prefix
+            // (or inherited one from a wrapper shell, whose env reaches the
+            // payload), and the raw pytest/cargo refusals ignore the prefix.
+            let full_escape = inherited_escape || part.iter().any(|t| t == "FNO_TEST_FULL=1");
             for reading in [head_of(&part, false), head_of(&part, true)] {
                 let Some((head, argv, _wrappers)) = reading else {
                     continue;
@@ -532,7 +537,7 @@ fn refused_segment(tokens: &[String], depth: usize) -> Option<(Kind, String)> {
                     let Some(sub) = lex(&payload) else {
                         continue;
                     };
-                    if let Some(found) = refused_segment(&sub, depth + 1) {
+                    if let Some(found) = refused_segment(&sub, depth + 1, full_escape) {
                         return Some(found);
                     }
                 }
@@ -945,6 +950,14 @@ mod tests {
         assert!(
             decide("FNO_TEST_FULL=1 fno doctor test rust", root.path()).is_none(),
             "the prefix opens the blessed door"
+        );
+        assert!(
+            decide(
+                "FNO_TEST_FULL=1 bash -c 'fno doctor test rust'",
+                root.path()
+            )
+            .is_none(),
+            "the prefix on a wrapper shell reaches the payload"
         );
         let other = TempDir::new().expect("tempdir");
         assert!(
