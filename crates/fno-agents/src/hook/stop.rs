@@ -351,7 +351,7 @@ fn translate(
     let _ = std::fs::remove_file(&counter);
 
     // One control-plane arm row for this fire.
-    emit_tick(
+    super::emit_tick(
         hook_cwd,
         decision,
         &termination_reason,
@@ -524,7 +524,7 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
         .unwrap_or(0)
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
-    emit_tick(cwd, "blocked", "unavailable", driver, session_id);
+    super::emit_tick(cwd, "blocked", "unavailable", driver, session_id);
     if count <= MAX_UNAVAIL_RETRIES {
         return emit_block_for_harness(&format!(
             "checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running"
@@ -575,37 +575,6 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     }
     eprintln!("target stop-hook: {reason}");
     2
-}
-
-/// One control-plane arm row for this fire. The row carries the fire's
-/// session id: `emit_tick` writes one row per SPACE with no session key of
-/// its own, so a reader of `fno agents status` sees only the space's newest
-/// fire and cannot tell a king's own row from a neighbor's - the misread
-/// that once sent a drain-reserve fix chasing a driver=target
-/// misclassification for days.
-fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
-    let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
-    let mut detail = format!(
-        "driver={driver} decision={decision} reason={}",
-        if reason.is_empty() { "live" } else { reason }
-    );
-    if !session.is_empty() {
-        let short: String = session.chars().take(8).collect();
-        detail.push_str(&format!(" session={short}"));
-    }
-    let data = serde_json::json!({
-        "arm": "stop_hook",
-        "scheduler": "hook:target-stop-hook",
-        "acted": 1,
-        "skip_reason": Value::Null,
-        "detail": detail,
-        "interval_s": 0,
-    });
-    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
 }
 
 ///: the CARGO_BUILD_BUILD_DIR value, ported from
@@ -1311,7 +1280,7 @@ mod tests {
         std::env::set_var("HOME", dir.path());
         std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
 
-        emit_tick(
+        super::super::emit_tick(
             dir.path(),
             "block",
             "live",
@@ -1324,7 +1293,7 @@ mod tests {
             "{row}"
         );
 
-        emit_tick(dir.path(), "allow", "", "target", "");
+        super::super::emit_tick(dir.path(), "allow", "", "target", "");
         let row = std::fs::read_to_string(crate::paths::events_path(dir.path())).unwrap();
         let last = row.lines().last().unwrap_or_default();
         assert!(
