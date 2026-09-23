@@ -63,7 +63,10 @@ impl SuccessionFixture {
         let registry = crate::paths::AgentsHome::from_env().registry_json();
         std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
         let pid = std::process::id();
-        let pid_start = claims::process_create_time_ms(pid as i32).unwrap_or(0);
+        let pid_start: u64 = claims::process_create_time_ms(pid as i32)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(0);
         let fixture = Self {
             _lock: lock,
             dir,

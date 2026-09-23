@@ -1438,7 +1438,7 @@ fn decide_gate(
     let mut last_progress = Instant::now();
     let mut announced = false;
     let mut last_slots: usize = 0;
-    let mut last_succession_error: Option<&'static str> = None;
+    let mut last_succession_error: Option<&'static str>;
     // LD4: a fleet-over sample holds, and admission after a hold is
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
