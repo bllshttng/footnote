@@ -542,7 +542,7 @@ def test_the_grid_still_injects_nothing_when_config_declares_nothing():
 
 
 def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monkeypatch):
-    """The fallback bands `gpt-5.6-sol` from `max`, not from `high`.
+    """The fallback bands `codex-sol` from `max`, not from `high`.
 
     It sits in both. A regression guard on the rule, not the test that caught
     the bug - the duplicate-row test below is that one, and this assertion
@@ -551,12 +551,12 @@ def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monke
     """
     from fno.adapters.providers import benchmarks as _bm
 
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
+    assert "codex-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
+    assert "codex-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
 
     def _band_of(table):
         monkeypatch.setattr(_bm, "STATIC_TIERS", table)
-        return {r["name"]: r["band"] for r in rr._builtin_rows()}["gpt-5.6-sol"]
+        return {r["name"]: r["band"] for r in rr._builtin_rows()}["codex-sol"]
 
     forward = dict(_bm.STATIC_TIERS)
     reversed_table = dict(reversed(list(_bm.STATIC_TIERS.items())))
