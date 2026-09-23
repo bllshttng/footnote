@@ -1175,8 +1175,8 @@ def _merge_identity(state_file: str) -> Tuple[Optional[str], Optional[str]]:
     sid = _read_state_field(state_file, "session_id")
     if sid and sid != "null":
         return sid, _read_state_field(state_file, "harness") or None
-    from fno.harness_identity import resolve_harness_identity
-    ident = resolve_harness_identity()
+    from fno.claims.self_identity import resolve_self_identity
+    ident = resolve_self_identity()
     return ident.session_id or None, ident.harness or None
 
 

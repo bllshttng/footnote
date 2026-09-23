@@ -127,11 +127,19 @@ def test_the_manifest_session_still_wins_over_ambient(
     assert _rows(journal)[0]["data"]["session_id"] == "sess-42"
 
 
-def test_mixed_family_markers_degrade_to_unknown(
+def test_a_resolver_refusal_degrades_to_unknown(
     tmp_path: Path, journal: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
-    monkeypatch.setenv("CODEX_THREAD_ID", "thread-other")
+    """The owned resolver can refuse (no provable identity); the row then
+    carries the named sentinel, never a guessed id."""
+    from fno.harness_identity import OwnedHarnessIdentity
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None: OwnedHarnessIdentity(
+            session_id=None, harness=None, disposition="ambiguous"
+        ),
+    )
 
     _merge._emit_session_satisfied(
         "https://github.com/o/r/pull/1", str(tmp_path / ".fno" / "target-state.md")
