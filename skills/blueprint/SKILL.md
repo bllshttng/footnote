@@ -167,8 +167,8 @@ fi
   - Which case will the design leave out?
   - What can be deleted?
   - Which module implements this now, or can be extended?
-  - Ask the step 2-index `symbol` provider.
-  - If none exists, run `rg` for key symbols and read `docs/architecture/dual-implementation-inventory.md`.
+
+Ask the step 2-index `symbol` provider for that module. If no provider exists, search key symbols with `rg` and read `docs/architecture/dual-implementation-inventory.md`.
 
 The schema is in [references/quick-template.md](references/quick-template.md). The pass criteria stay in the judge's lens files. This skill does not link or copy those criteria. That keeps plans from being written to the judge.
 
