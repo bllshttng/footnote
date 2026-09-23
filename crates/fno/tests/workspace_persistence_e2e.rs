@@ -12,7 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use common::{
-    connect_with_retry, spawn_server, FakeClient, Scratch, ServerProc, ServerTermination,
+    connect_with_retry, connect_with_retry_for, spawn_server, FakeClient, Scratch, ServerProc,
+    ServerTermination,
 };
 use fno::proto::{Command, PanePlacement};
 
