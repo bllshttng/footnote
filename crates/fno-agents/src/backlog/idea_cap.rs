@@ -201,9 +201,10 @@ mod tests {
     #[test]
     fn idea_cap_judges_births_only() {
         let mut pre = full_rows();
-        pre[0]["status"] = json!("deferred");
+        pre.push(idea("deferred", "p", "2026-02-01T00:00:00Z"));
+        pre.last_mut().unwrap()["status"] = json!("deferred");
         let mut post = pre.clone();
-        post[0]["status"] = json!("idea");
+        post.last_mut().unwrap()["status"] = json!("idea");
         enforce(&pre, &post, Some(25)).unwrap();
     }
 
