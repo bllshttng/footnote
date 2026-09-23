@@ -276,6 +276,7 @@ use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
 mod bot_nudge;
 mod bot_verdict;
+mod gh_read;
 mod intent;
 mod posture;
 mod self_review_floor;
@@ -295,6 +296,14 @@ use bot_nudge::{
 pub(crate) use bot_verdict::bot_verdict;
 use bot_verdict::{clean_pass_review, usage_limit_comment_by};
 pub use coverage_receipt::coverage_receipt_line;
+#[cfg(test)]
+use gh_read::is_no_pr_stderr;
+use gh_read::{
+    attestation_in_scope, git_head_branch, git_head_sha, graphql_exhausted_reason, head_is_shipped,
+    internal_gh_adapter, pr_head_oid, probe_graphql_quota, read_pr_head_oid, read_pr_view,
+    refusal_is_secondary, stderr_smells_rate_limit, stderr_tail, GraphqlQuota,
+};
+pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
 pub(crate) use intent::parse_xml_attr;
 #[cfg(test)]
 use intent::INTENT_LOOKBACK_ENTRIES;
@@ -323,403 +332,6 @@ pub(crate) use settings::{parse_settings, value_as_probe_list};
 use settings::{scalar_as_singleton, MALFORMED_REVIEWERS_SENTINEL, UNPARSEABLE_SETTINGS_SENTINEL};
 pub(crate) use settings::{scan_manifest_field, Settings};
 use watch_lease::{harness_can_idle, watch_window_ms};
-
-/// Whether a `review_attestation` line is about the PR under evaluation.
-///
-/// The events journal is shared across every worktree of a repo
-/// (setup-worktree.sh links them to one canonical file), so an unscoped scan
-/// reads every branch's attestations into every PR's verdict list. That is
-/// noise in the common case and a false pass in the bad one: `review_freshness`
-/// grants CarriedBaseSync on a code-diff identity match, which two branches
-/// carrying the same delta (a cherry-pick, a duplicate-PR pair) satisfy - and
-/// that shape only exists at DIFFERENT shas, since equal shas return Fresh
-/// before any carry is computed.
-///
-/// Exact head equality is therefore admitted whatever branch the emitter stood
-/// on: a foreign branch cannot share this head sha without being this commit,
-/// and the spawned-reviewer lane depends on it (review-lanes.md) - the
-/// reviewer's worktree necessarily carries a branch of its own (git refuses
-/// two worktrees on one branch), so a branch-only match would read its
-/// exact-HEAD pass as out of scope. The branch arm is what survives a head
-/// move: a same-branch attestation can still carry, while a foreign
-/// branch at a different head stays out of scope - the cherry-pick shape.
-///
-/// Named, not closed: a shared sha proves COMMIT identity, not PR identity.
-/// The event carries no base ref or PR number, so a pass attested for one PR
-/// clears another PR at the same commit with a different base (a
-/// duplicate-PR pair). All PRs here share main as base, so the shape is
-/// exotic; closing it needs `base` in the attestation payload (schema +
-/// producer + this resolver), filed on the follow-up node.
-///
-/// `attested_branch` is empty for every event predating the field (a
-/// detached HEAD now refuses to emit at all). Those fall back to exact head
-/// equality only: a legacy attestation on a moved head is not scopeable and
-/// must not count.
-fn attestation_in_scope(
-    attested_branch: &str,
-    attested_head: &str,
-    head_branch: &str,
-    head_sha: &str,
-) -> bool {
-    if !attested_head.is_empty() && attested_head == head_sha {
-        return true;
-    }
-    !attested_branch.is_empty() && !head_branch.is_empty() && attested_branch == head_branch
-}
-
-fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
-    match git_bounded(git_bin, &["rev-parse", "HEAD"], cwd) {
-        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => "unknown".to_string(),
-    }
-}
-
-/// True when the working tree has no uncommitted change.
-///
-/// `merge-base --is-ancestor` sees committed history only, so without this a
-/// rebase onto a base that already holds the merge would read as shipped while
-/// uncommitted follow-up edits sat in the tree. Uncommitted work IS unshipped
-/// work, which is the same charter the #447 guard was written under.
-///
-/// A git that cannot answer reads as DIRTY, so an unreadable tree never
-/// widens what counts as shipped.
-fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
-    matches!(
-        git_bounded(git_bin, &["status", "--porcelain"], cwd),
-        Some(o) if o.status.success() && o.stdout.is_empty()
-    )
-}
-
-/// True when local HEAD carries nothing the base does not already have.
-///
-/// Resolves the base the same way [`classify_payload`] does, so the two cannot
-/// disagree about which remote branch is the mainline. That heuristic is
-/// `origin/main` then `origin/master` and nothing else: on a repo whose
-/// mainline is named anything else, NEITHER ref resolves and this returns
-/// false, so the post-merge wedge simply stays unfixed there rather than
-/// misfiring. The PR's own `baseRefName` would answer exactly, but it is a
-/// local in `read_pr_info` rather than a field on [`PrInfo`], and threading it
-/// through is unwarranted for a repo shape this project does not have.
-///
-/// A base that does not resolve, a git that errors, and a HEAD that is
-/// genuinely ahead all answer false, which is the conservative direction: see
-/// [`head_is_shipped`].
-fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
-    for base in ["origin/main", "origin/master"] {
-        match git_bounded(
-            git_bin,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{base}^{{commit}}"),
-            ],
-            cwd,
-        ) {
-            Some(v) if v.status.success() => {}
-            _ => continue,
-        }
-        // `--is-ancestor` exits 0 when HEAD is reachable from base, 1 when it
-        // is not, and >1 on a real error. Only a clean 0 counts, so an errored
-        // probe reads as "not shipped" rather than as consent to terminate.
-        return matches!(
-            git_bounded(git_bin, &["merge-base", "--is-ancestor", "HEAD", base], cwd),
-            Some(o) if o.status.success()
-        );
-    }
-    false
-}
-
-/// True when every local commit is already shipped.
-///
-/// Two ways that holds: the PR records this exact head, or local HEAD is
-/// already reachable from the base, which is what a post-merge rebase or
-/// fast-forward onto main produces.
-///
-/// The second disjunct cannot re-open the codex P1 on #447 that the first one
-/// guards. That defect was unpushed work terminating as DonePRGreen, and a
-/// genuine unpushed commit stacked on a merged PR is NOT an ancestor of the
-/// base, so it still reads as unshipped. The disjunct only ever releases a
-/// HEAD with no commits of its own left to ship.
-///
-/// The equality arm is checked first and makes no subprocess call, so the
-/// common path costs nothing. A git that cannot answer leaves the old
-/// behavior exactly as it was.
-fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> bool {
-    if pr.head_oid.is_empty() {
-        return false;
-    }
-    if pr.head_oid == local_head {
-        return true;
-    }
-    // The clean-tree condition applies to THIS arm only, deliberately. The
-    // equality arm above has always terminated on a dirty tree and changing
-    // that is a different decision with its own blast radius; the rule here is
-    // only that the new arm must not WIDEN what counts as shipped.
-    git_tree_clean(git_bin, cwd) && git_head_on_base(git_bin, cwd)
-}
-
-fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
-    let out = git_bounded(git_bin, &["branch", "--show-current"], cwd)?;
-    if !out.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!branch.is_empty()).then_some(branch)
-}
-
-/// `gh pr view` exits 1 both when no PR exists and when gh itself fails.
-/// "No PR" is real world-state - the fingerprint should record it and the
-/// NoProgress backstop should keep ticking - while an outage must freeze the
-/// streak (US4). Distinguish via gh's deterministic no-PR stderr message. If
-/// gh ever changes the message, no-PR fires degrade to outage semantics
-/// (freeze -> budget ceiling): safe, never a premature termination.
-fn is_no_pr_stderr(stderr: &[u8]) -> bool {
-    String::from_utf8_lossy(stderr)
-        .to_lowercase()
-        .contains("no pull requests found")
-}
-
-/// Capture the last ~200 bytes of stderr as a lossy UTF-8 string.
-fn stderr_tail(bytes: &[u8]) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    let s = s.trim();
-    if s.len() <= 200 {
-        s.to_string()
-    } else {
-        // Byte index must land on a char boundary or the slice panics
-        // (gemini HIGH on PR #447): walk forward to the next boundary.
-        let mut start = s.len() - 200;
-        while start < s.len() && !s.is_char_boundary(start) {
-            start += 1;
-        }
-        s[start..].to_string()
-    }
-}
-
-const PR_VIEW_FIELDS: &str =
-    "state,number,headRefName,headRefOid,mergeable,mergeStateStatus,baseRefName,author";
-
-fn pr_head_oid(pr_json: &Value) -> Option<String> {
-    pr_json
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .filter(|oid| !oid.is_empty())
-        .map(str::to_string)
-}
-
-fn read_pr_view(
-    gh_bin: &str,
-    cwd: &Path,
-    selector: Option<&str>,
-) -> Result<Option<Value>, GhReadError> {
-    let rest_adapter = internal_gh_adapter(gh_bin);
-    let metadata_read = if rest_adapter {
-        "pr_info_rest"
-    } else {
-        "pr_view"
-    };
-    let metadata_parse = if rest_adapter {
-        "pr_info_rest_parse"
-    } else {
-        "pr_view_parse"
-    };
-    let mut args = vec!["pr", "view"];
-    if let Some(selector) = selector {
-        args.push(selector);
-    }
-    args.extend(["--json", PR_VIEW_FIELDS]);
-    let out = bounded_read(
-        gh_bin.as_ref(),
-        &args,
-        cwd,
-        metadata_read,
-        stopgate_read_timeout(),
-    )?;
-    if !out.status.success() {
-        return if is_no_pr_stderr(&out.stderr_tail) {
-            Ok(None)
-        } else {
-            Err(GhReadError::failed(
-                metadata_read,
-                stderr_tail(&out.stderr_tail),
-            ))
-        };
-    }
-    serde_json::from_slice(&out.stdout)
-        .map(Some)
-        .map_err(|_| GhReadError::parse_failed(metadata_parse))
-}
-
-/// Resolve a numeric PR selector without consulting the checkout branch.
-/// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
-/// response and must not fall back to local HEAD. Returns the raw `pr_json`
-/// alongside the head, so a caller that goes on to build a full `PrInfo` can
-/// reuse this read instead of issuing a second `gh pr view` for the same
-/// selector.
-fn read_pr_head_oid(
-    gh_bin: &str,
-    cwd: &Path,
-    selector: &str,
-) -> Result<Option<(String, Value)>, GhReadError> {
-    let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
-        return Ok(None);
-    };
-    let head = pr_head_oid(&pr_json).ok_or_else(|| {
-        let read = if internal_gh_adapter(gh_bin) {
-            "pr_info_rest_parse"
-        } else {
-            "pr_view_parse"
-        };
-        GhReadError::failed(read, "missing headRefOid".to_string())
-    })?;
-    Ok(Some((head, pr_json)))
-}
-
-/// The GraphQL bucket's state, from `gh api rate_limit`.
-///
-/// That endpoint is REST and primary-exempt, so the probe is free even while
-/// GraphQL sits at 0 - which is its whole job: it distinguishes "the call
-/// cannot succeed for N minutes" from "gh blipped", the two outcomes a bare
-/// read failure conflates. None on any failure: a failed probe must never
-/// fabricate an exhaustion verdict (a false "resets in 40m" would stall a
-/// healthy session for no reason).
-struct GraphqlQuota {
-    remaining: i64,
-    reset_epoch: i64,
-    /// The CORE bucket from the same probe read. `refusal_is_secondary`
-    /// classifies a rate-limit refusal on it (a refusal with core still high
-    /// is the request-rate limit, not this bucket). Option because a payload
-    /// can name graphql and not core.
-    core_remaining: Option<i64>,
-}
-
-/// Below this GraphQL remaining count, a no-promise fire stands down entirely:
-/// the last of the budget belongs to the operation that
-/// ships. Code default, named in the PR body - never the operator's config.
-
-fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
-    // Advisory by contract: any failure (including a timeout kill) is None -
-    // a failed probe must never fabricate an exhaustion verdict.
-    let out = bounded_read(
-        gh_bin.as_ref(),
-        &["api", "rate_limit"],
-        cwd,
-        "graphql_quota",
-        stopgate_read_timeout(),
-    )
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let g = v.get("resources")?.get("graphql")?;
-    Some(GraphqlQuota {
-        remaining: g.get("remaining").and_then(|x| x.as_i64())?,
-        reset_epoch: g.get("reset").and_then(|x| x.as_i64())?,
-        core_remaining: v
-            .pointer("/resources/core/remaining")
-            .and_then(|x| x.as_i64()),
-    })
-}
-
-/// Whether a refusal's stderr smells like ANY rate limit. This is the wide
-/// TRIGGER only, never the verdict: GitHub controls the wording, and its
-/// measured 2026-08-24 secondary body says only "API rate limit exceeded for
-/// user ID ... (HTTP 403)" - no "secondary" anywhere - so a phrase gate
-/// missed the real refusal and read it as an unclassified blip.
-fn stderr_smells_rate_limit(stderr: &str) -> bool {
-    stderr.to_lowercase().contains("rate limit")
-}
-
-/// Whether a failed gh read's refusal is GitHub's SECONDARY (request-rate)
-/// limit, judged against the LIVE exempt bucket, never against wording.
-///
-/// `gh api rate_limit` is exempt from both limits and answered DURING the
-/// measured refusal with core 4980/5000, so the probe is the one signal
-/// GitHub cannot reword: a rate-limit refusal that no drained bucket
-/// explains IS the secondary limit. A drained bucket that does explain it
-/// (graphql at 0 on a graphql read, core at EXACTLY 0 - a low-but-positive
-/// core is not proof, a secondary refusal lands with core wherever it
-/// stood) is the primary quota, whose own reasons live elsewhere. No probe
-/// at all still says secondary: an unreadable instrument must not send the
-/// session to wait for a primary reset that never comes, while backing off
-/// is safe under either truth. Mirrors `fno.pr._rest`'s live-bucket
-/// classifier and its fail-safe. One deliberate difference: this fn also
-/// classifies GRAPHQL reads, so a drained graphql bucket on a graphql read
-/// names the primary quota here; the Python classifier sees REST reads only
-/// (whose primary quota is core) and needs no graphql arm.
-fn refusal_is_secondary(
-    stderr: &str,
-    probe: Option<&GraphqlQuota>,
-    failed_read_was_graphql: bool,
-) -> bool {
-    if !stderr_smells_rate_limit(stderr) {
-        return false;
-    }
-    let Some(q) = probe else {
-        return true;
-    };
-    if failed_read_was_graphql && q.remaining == 0 {
-        return false;
-    }
-    !matches!(q.core_remaining, Some(0))
-}
-
-fn internal_gh_adapter(gh_bin: &str) -> bool {
-    Path::new(gh_bin)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "fno-gh-loopcheck" | "fno-gh-coverage"))
-}
-
-pub(crate) fn coverage_adapter(gh_bin: &str) -> String {
-    let path = Path::new(gh_bin);
-    if path.file_name().and_then(|name| name.to_str()) != Some("fno-gh-loopcheck") {
-        return gh_bin.to_string();
-    }
-    match path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => parent
-            .join("fno-gh-coverage")
-            .to_string_lossy()
-            .into_owned(),
-        None => "fno-gh-coverage".to_string(),
-    }
-}
-
-pub(crate) fn is_graphql_read(read: &str) -> bool {
-    matches!(
-        read,
-        "pr_view"
-            | "pr_view_parse"
-            | "pr_checks"
-            | "pr_checks_parse"
-            | "pr_reviews"
-            | "pr_reviews_parse"
-            | "pr_commits"
-            | "pr_commits_parse"
-    )
-}
-
-/// The self-teaching exhaustion message. A session that reads it must stop
-/// retrying the GraphQL reads this window and know where the answer still
-/// lives - anything less and it burns a fire every tick on a call that
-/// cannot succeed until the reset.
-fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
-    let now = Utc::now().timestamp();
-    let mins = ((q.reset_epoch - now) / 60).max(0);
-    format!(
-        "GraphQL quota exhausted ({} remaining, resets in ~{}m). `gh pr view` / \
-         `gh pr checks` cannot succeed until the reset: stop retrying them this \
-         window. `fno do pr status <n>` still answers its CI verdict on the REST \
-         budget (the optional review-thread check inside it is still GraphQL, \
-         coalesced under its own TTL cache so a repeat poll costs nothing).",
-        q.remaining, mins
-    )
-}
 
 /// A configured local reviewer with no head-pinned `pass` attestation.
 #[derive(Debug, Clone, PartialEq)]
@@ -10166,11 +9778,13 @@ mod tests {
     // is shrink-only, and the tests were the code this change touched.
     mod bot_nudge_tests;
     mod bot_verdict_tests;
+    mod gh_read_tests;
     mod intent_tests;
     mod posture_tests;
     mod self_review_floor_tests;
     mod settings_tests;
     mod space_chokepoint_tests;
+    use gh_read_tests::shipped_pr;
     #[test]
     fn shadow_observer_rejects_short_run_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -10384,18 +9998,6 @@ mod tests {
             Some(FP),
             "carry-forward still reads the newest recorded fp"
         );
-    }
-
-    #[test]
-    fn stderr_tail_multibyte_boundary_no_panic() {
-        // gemini HIGH on #447: tail slice must land on a char boundary.
-        let mut payload = String::new();
-        while payload.len() < 300 {
-            payload.push('\u{00e9}'); // 2-byte char so len-200 can split one
-        }
-        let tail = stderr_tail(payload.as_bytes());
-        assert!(tail.len() <= 200);
-        assert!(!tail.is_empty());
     }
 
     #[test]
@@ -11625,121 +11227,6 @@ git_bounded();";
         assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
-    /// Shared fixture for the head_is_shipped cases: a PR recording `pr_head`.
-    fn shipped_pr(pr_head: &str, state: PrState) -> PrInfo {
-        PrInfo {
-            range_tiling: RangeTiling::default(),
-            head_oid: pr_head.to_string(),
-            state,
-            ..reviewers_gate_pr()
-        }
-    }
-
-    /// A git stub answering the three probes `head_is_shipped` can make: the
-    /// working-tree status, the base resolution, and `--is-ancestor`.
-    /// Mirrors the classify_payload stubs above.
-    fn git_stub(dir: &Path, ancestor: bool, clean: bool) -> std::path::PathBuf {
-        let verdict = if ancestor { "exit 0" } else { "exit 1" };
-        // A clean tree is empty stdout with exit 0; a dirty one names a file.
-        let status = if clean {
-            "exit 0"
-        } else {
-            "printf ' M src/lib.rs\\n'"
-        };
-        write_exec(
-            dir,
-            "git",
-            &format!(
-                "#!/bin/sh\ncase \"$*\" in\n  status*) {status} ;;\n  rev-parse*origin/main*) exit 0 ;;\n  *is-ancestor*) {verdict} ;;\n  *) exit 1 ;;\nesac\n"
-            ),
-        )
-    }
-
-    #[test]
-    fn head_is_shipped_takes_equality_without_touching_git() {
-        // The common path costs no subprocess: a git that would panic the test
-        // if invoked is never invoked, because equality answers first.
-        let pr = shipped_pr("abc", PrState::Open);
-        assert!(head_is_shipped(
-            &pr,
-            "abc",
-            "definitely-not-a-real-git-binary",
-            Path::new(".")
-        ));
-    }
-
-    #[test]
-    fn head_is_shipped_accepts_a_head_already_on_the_base() {
-        // The 2026-07-30 and 2026-08-22 repros: a merged PR, a local HEAD that
-        // differs because the branch moved past its own merge, and nothing left
-        // to ship.
-        let dir = tempfile::tempdir().unwrap();
-        let git = git_stub(dir.path(), true, true);
-        let pr = shipped_pr("23480a0e", PrState::Merged);
-        // Retry the spawn, for the same measured reason probe_graphql_quota
-        // does: this suite forks hundreds of fake `git` subprocesses in
-        // parallel, and a loaded runner intermittently fails one fork/exec.
-        // This arm reaches git twice (`git_tree_clean` then `git_head_on_base`)
-        // and both fail CLOSED, so a blip in either reads as "not shipped" and
-        // reds a PR that changed nothing here. Observed doing exactly that.
-        //
-        // The retry cannot hide a regression: the stub answers clean and
-        // ancestor unconditionally, so the only way to get `false` is a failed
-        // spawn, and a real regression fails all five attempts.
-        //
-        // Its sibling `head_is_shipped_still_refuses_a_commit_stacked_on_a_
-        // merged_pr` asserts the NEGATIVE, so a blip there passes it for the
-        // wrong reason rather than failing. That is a quieter defect and is
-        // left alone here; it needs a positive control on the stub, not a retry.
-        let mut shipped = false;
-        for _ in 0..5 {
-            shipped = head_is_shipped(&pr, "fe407c3b", git.to_str().unwrap(), Path::new("."));
-            if shipped {
-                break;
-            }
-        }
-        assert!(
-            shipped,
-            "the stub git kept failing to spawn across 5 retries - a real regression, not a blip"
-        );
-    }
-
-    /// THE #447 REGRESSION TEST. A change that makes this case pass as shipped
-    /// re-opens the defect the guard exists for: unpushed work terminating as
-    /// DonePRGreen without ever shipping. If this assertion is ever inverted to
-    /// make a wedge go away, the wedge was the wrong thing to fix.
-    #[test]
-    fn head_is_shipped_still_refuses_a_commit_stacked_on_a_merged_pr() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = git_stub(dir.path(), false, true);
-        let pr = shipped_pr("23480a0e", PrState::Merged);
-        assert!(!head_is_shipped(
-            &pr,
-            "deadbeef",
-            git.to_str().unwrap(),
-            Path::new(".")
-        ));
-    }
-
-    /// `--is-ancestor` sees committed history only. Without the clean-tree
-    /// condition, a rebase onto a base that already holds the merge would read
-    /// as shipped while uncommitted follow-up edits sat in the tree, and the
-    /// run would terminate DonePRGreen on work nobody had committed. The old
-    /// equality predicate blocked that state incidentally; this keeps it
-    /// blocked deliberately.
-    #[test]
-    fn head_is_shipped_refuses_a_dirty_tree_on_the_ancestor_arm() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = git_stub(dir.path(), true, false);
-        let pr = shipped_pr("23480a0e", PrState::Merged);
-        assert!(!head_is_shipped(
-            &pr,
-            "fe407c3b",
-            git.to_str().unwrap(),
-            Path::new(".")
-        ));
-    }
-
     /// A degraded `gh pr view` can return an open PR with no `headRefOid`.
     /// `head_is_shipped` answers false for that, so a bare `!head_shipped`
     /// would render the push message with a blank sha and hide the real
@@ -11753,30 +11240,6 @@ git_bounded();";
             "an empty recorded head must fall through to the real blocker: {reason}"
         );
         assert!(!reason.is_empty(), "a reason is still rendered: {reason}");
-    }
-
-    #[test]
-    fn head_is_shipped_falls_back_to_equality_when_git_cannot_answer() {
-        // A broken git leaves today's behavior exactly as it was, rather than
-        // failing open and letting unpushed work terminate.
-        let pr = shipped_pr("23480a0e", PrState::Merged);
-        assert!(!head_is_shipped(
-            &pr,
-            "fe407c3b",
-            "definitely-not-a-real-git-binary",
-            Path::new(".")
-        ));
-    }
-
-    #[test]
-    fn head_is_shipped_refuses_a_pr_with_no_recorded_head() {
-        let pr = shipped_pr("", PrState::Open);
-        assert!(!head_is_shipped(
-            &pr,
-            "abc",
-            "definitely-not-a-real-git-binary",
-            Path::new(".")
-        ));
     }
 
     #[test]
@@ -11833,32 +11296,6 @@ git_bounded();";
             out.is_empty(),
             "code-review should clear on a pass: {out:?}"
         );
-    }
-
-    #[test]
-    fn graphql_exhausted_reason_names_reset_and_rest_lane() {
-        // The message must make a session STOP retrying and say where the
-        // answer still lives; "retrying next fire" is the advice it replaces.
-        let q = GraphqlQuota {
-            remaining: 0,
-            reset_epoch: Utc::now().timestamp() + 40 * 60 + 5,
-            core_remaining: None,
-        };
-        let msg = graphql_exhausted_reason(&q);
-        assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
-        assert!(msg.contains("~40m"), "got: {msg}");
-        assert!(msg.contains("fno do pr status"), "got: {msg}");
-        assert!(!msg.contains("retrying next fire"), "got: {msg}");
-    }
-
-    #[test]
-    fn graphql_exhausted_reason_never_reports_a_past_reset() {
-        let q = GraphqlQuota {
-            remaining: 0,
-            reset_epoch: Utc::now().timestamp() - 120,
-            core_remaining: None,
-        };
-        assert!(graphql_exhausted_reason(&q).contains("~0m"));
     }
 
     fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -11949,48 +11386,6 @@ git_bounded();";
                 kind: std::io::ErrorKind::ExecutableFileBusy
             }
         );
-    }
-
-    #[test]
-    fn probe_graphql_quota_parses_the_graphql_bucket() {
-        let tmp = tempfile::tempdir().unwrap();
-        let gh = write_exec(
-            tmp.path(),
-            "gh",
-            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000},\
-             \"core\":{\"remaining\":4980,\"limit\":5000,\"reset\":1750000000}}}' && exit 0\n\
-             exit 1\n",
-        );
-        // Retry the spawn a few times: under a loaded CI runner (this crate's
-        // suite forks hundreds of fake `gh`/`git` subprocesses in parallel),
-        // `Command::output()` has measured an intermittent fork/exec failure
-        // that has nothing to do with the parser under test - probe_graphql_
-        // quota's own `.ok()?` already treats that as "unavailable, degrade
-        // gracefully" in production, so retrying here absorbs the same
-        // transient blip instead of failing the build on an infra hiccup.
-        let mut q = None;
-        for _ in 0..5 {
-            q = probe_graphql_quota(gh.to_str().unwrap(), tmp.path());
-            if q.is_some() {
-                break;
-            }
-        }
-        let q = q.expect("gh spawn kept failing across 5 retries - a real regression, not a blip");
-        assert_eq!(q.remaining, 0);
-        assert_eq!(q.reset_epoch, 1750000000);
-        // The core bucket from the SAME probe read feeds the secondary-limit
-        // classifier; a payload without it must degrade to None, not to 0.
-        assert_eq!(q.core_remaining, Some(4980));
-    }
-
-    #[test]
-    fn probe_graphql_quota_failure_is_none_not_a_false_exhaustion() {
-        // A failed probe must degrade to the transient wording, never
-        // fabricate an exhaustion verdict that stalls a healthy session.
-        let tmp = tempfile::tempdir().unwrap();
-        let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 1\n");
-        assert!(probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).is_none());
     }
 
     /// One stub gh for the pr_num > 0 failure-arm tests: `pr view` fails with a
@@ -12272,109 +11667,6 @@ git_bounded();";
     const VERBATIM_403: &str = "gh: API rate limit exceeded for user ID 4994564. If you reach \
          out to GitHub Support for help, please include the request ID \
          FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)";
-
-    fn quota_with(graphql_remaining: i64, core_remaining: Option<i64>) -> GraphqlQuota {
-        GraphqlQuota {
-            remaining: graphql_remaining,
-            reset_epoch: 1_750_000_000,
-            core_remaining,
-        }
-    }
-
-    #[test]
-    fn refusal_is_secondary_classifies_the_verbatim_body_by_the_live_bucket() {
-        // The p0 shape: the measured 403 says only "API rate limit exceeded"
-        // with both buckets healthy - that IS the secondary limit, whatever
-        // the prose says.
-        assert!(!VERBATIM_403.to_lowercase().contains("secondary"));
-        assert!(refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, Some(4980))),
-            true
-        ));
-        assert!(refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, Some(4980))),
-            false
-        ));
-    }
-
-    #[test]
-    fn refusal_is_secondary_names_the_drained_buckets_as_the_primary_quota() {
-        // A drained explaining bucket is primary exhaustion, not secondary -
-        // on either transport.
-        assert!(!refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(0, Some(4980))),
-            true
-        ));
-        assert!(!refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, Some(0))),
-            true
-        ));
-    }
-
-    #[test]
-    fn refusal_is_secondary_low_but_positive_core_is_not_proof_of_the_quota() {
-        // A secondary refusal lands with core wherever it stood; only 0
-        // names the core quota. Mislabeling 1..=20 as the primary quota
-        // sends the session to wait for a reset instead of backing off -
-        // the exact harm this classifier exists to prevent.
-        assert!(refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, Some(3))),
-            false
-        ));
-        assert!(refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, Some(20))),
-            true
-        ));
-    }
-
-    #[test]
-    fn refusal_is_secondary_fails_toward_back_off_on_an_unreadable_probe() {
-        // No probe (failed, or a caller with none), or a probe that names no
-        // core bucket: reading unknown as the primary quota sends the
-        // session to wait for a reset that never comes, so unknown still
-        // says secondary. This is the fail-safe the Python side ships.
-        assert!(refusal_is_secondary(VERBATIM_403, None, true));
-        assert!(refusal_is_secondary(
-            VERBATIM_403,
-            Some(&quota_with(4446, None)),
-            true
-        ));
-    }
-
-    #[test]
-    fn refusal_is_secondary_ignores_stderr_that_does_not_smell_of_a_rate_limit() {
-        // The wide wording is only the TRIGGER; without it there is nothing
-        // to classify and the transient wording stands.
-        assert!(!refusal_is_secondary(
-            "gh: Not Found (https://api.github.com/)",
-            Some(&quota_with(0, Some(0))),
-            true
-        ));
-        assert!(!refusal_is_secondary("", None, false));
-    }
-
-    #[test]
-    fn refusal_is_secondary_phrase_alone_does_not_classify_the_bucket_does() {
-        // Even stderr that DOES say "secondary rate limit" classifies by the
-        // bucket: wording is GitHub's to change, so it is never the verdict.
-        let phrase = "HTTP 403: You have exceeded a secondary rate limit";
-        assert!(!refusal_is_secondary(
-            phrase,
-            Some(&quota_with(0, Some(0))),
-            true
-        ));
-        assert!(refusal_is_secondary(
-            phrase,
-            Some(&quota_with(4890, Some(4922))),
-            true
-        ));
-    }
 
     #[test]
     fn unwatched_async_nudge_review_uses_review_aware_watcher() {
@@ -13896,18 +13188,6 @@ git_bounded();";
     }
 
     // ── step 2: outage vs no-PR discrimination (US4) ─────────────────────────
-
-    #[test]
-    fn no_pr_stderr_detected() {
-        assert!(is_no_pr_stderr(
-            b"no pull requests found for branch \"feat\""
-        ));
-        assert!(is_no_pr_stderr(b"No pull requests found for branch \"x\""));
-        // Outage shapes are NOT no-PR.
-        assert!(!is_no_pr_stderr(b"connect: network is unreachable"));
-        assert!(!is_no_pr_stderr(b"API rate limit exceeded"));
-        assert!(!is_no_pr_stderr(b""));
-    }
 }
 #[cfg(test)]
 #[path = "posture_self_lane_tests.rs"]
