@@ -21,7 +21,7 @@ PROMPT
 fno agents mail send <builder-handle> "$prompt" --from-self
 ```
 
-Follow the [minion delivery doctrine](minion-clause.md) in full, including its peek-before-resend guard. A `delivered (hosted)` or `delivered (woken)` receipt means the transport accepted the prompt. It does not prove the builder read it. Peek the builder's handle. Re-send only if the interview is absent. `queued (durable)` can mean a live inject whose confirmation timed out. Blind retries can duplicate the prompt. Resolve a live `<builder-handle>` from `fno agents discovered-json` or `top`. `fno agents mail send` wraps the body in `<fno_mail>`. The prompt below is body-only. Do not add a second envelope.
+Follow the [minion delivery doctrine](minion-clause.md) in full, including its peek-before-resend guard. A `delivered (hosted)` or `delivered (woken)` receipt means the transport accepted the prompt. It does not prove the builder read it. Peek the builder's handle. If the interview is absent, re-send. `queued (durable)` can mean a live inject whose confirmation timed out. Blind retries can duplicate the prompt. Resolve a live `<builder-handle>` from `fno agents discovered-json` or `top`. `fno agents mail send` wraps the body in `<fno_mail>`. The prompt below is body-only. Do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
