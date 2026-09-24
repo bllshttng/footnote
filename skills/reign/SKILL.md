@@ -48,7 +48,7 @@ With `--once` the crown rules one wave and expires. Run Who runs this and On cro
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, not raw prompt-line `/goal` or `/loop`; read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
 
 The daemon mails the settle push on every harness:
 
