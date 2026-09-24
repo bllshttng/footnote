@@ -1,3 +1,10 @@
+//! Five reign-hygiene checks judge order in a source-ordered transcript
+//! projection. Claude tool uses retain their command or path target; Codex
+//! calls share `codex_call_text`. Bash command text stays intact because a
+//! source path in Bash can prove a read. User and assistant text remain
+//! distinct, and injected skill/system user markers are not operator asks. An
+//! unreadable, malformed, or over-budget transcript is unmeasurable, never clean.
+
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,7 +20,6 @@ static RULING_TEXT_RE: OnceLock<Regex> = OnceLock::new();
 static RULING_MAIL_RE: OnceLock<Regex> = OnceLock::new();
 static DISPATCH_RE: OnceLock<Regex> = OnceLock::new();
 static CORONATION_RE: OnceLock<Regex> = OnceLock::new();
-static CROWN_SPAWN_RE: OnceLock<Regex> = OnceLock::new();
 static CROWN_READ_RE: OnceLock<Regex> = OnceLock::new();
 static PRWATCH_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_PROBE_RE: OnceLock<Regex> = OnceLock::new();
@@ -174,6 +180,85 @@ fn is_spawn(entry: &Entry) -> bool {
             || entry.target.contains("backlog advance"))
 }
 
+fn flush_shell_word(args: &mut Vec<String>, word: &mut String, started: &mut bool) {
+    if *started {
+        args.push(std::mem::take(word));
+        *started = false;
+    }
+}
+
+fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut args = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            word.push(character);
+            started = true;
+            escaped = false;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            } else if character == '\\' && active_quote == '"' {
+                escaped = true;
+            } else {
+                word.push(character);
+            }
+            started = true;
+            continue;
+        }
+        match character {
+            '\\' => {
+                escaped = true;
+                started = true;
+            }
+            '\'' | '"' => {
+                quote = Some(character);
+                started = true;
+            }
+            ';' | '|' | '&' | '\n' => {
+                flush_shell_word(&mut args, &mut word, &mut started);
+                if !args.is_empty() {
+                    segments.push(std::mem::take(&mut args));
+                }
+            }
+            character if character.is_whitespace() => {
+                flush_shell_word(&mut args, &mut word, &mut started);
+            }
+            _ => {
+                word.push(character);
+                started = true;
+            }
+        }
+    }
+    if escaped {
+        word.push('\\');
+    }
+    flush_shell_word(&mut args, &mut word, &mut started);
+    if !args.is_empty() {
+        segments.push(args);
+    }
+    segments
+}
+
+fn crown_spawn_command(target: &str) -> bool {
+    shell_command_segments(target).iter().any(|args| {
+        args.len() >= 3
+            && args[0] == "fno"
+            && args[1] == "agents"
+            && args[2] == "spawn"
+            && args
+                .iter()
+                .skip(3)
+                .any(|arg| arg == "--crown" || arg.starts_with("--crown="))
+    })
+}
+
 fn ruling_command(target: &str) -> bool {
     if target.contains("--help") || target.contains("--to-self") {
         return false;
@@ -320,10 +405,6 @@ fn check3_crown_before_ruling(entries: &[Entry]) -> CheckResult {
         );
     };
     let coronation = compiled(&CORONATION_RE, r"(^|[;|&\n])\s*fno agents crown\s");
-    let crown_spawn = compiled(
-        &CROWN_SPAWN_RE,
-        r"(?s)(^|[;|&\n])\s*fno agents spawn\b.*--crown",
-    );
     let crown_read = compiled(
         &CROWN_READ_RE,
         r"(^|[;|&\n])\s*fno (?:agents court\b|whoami(?:\s|$))",
@@ -336,7 +417,7 @@ fn check3_crown_before_ruling(entries: &[Entry]) -> CheckResult {
             continue;
         }
         if coronation.is_match(&entry.target)
-            || crown_spawn.is_match(&entry.target)
+            || crown_spawn_command(&entry.target)
             || crown_read.is_match(&entry.target)
         {
             return CheckResult::new(
@@ -895,6 +976,48 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn crown_mentioned_in_spawn_prompt_does_not_prove_crowning() {
+        let entries = vec![
+            entry(
+                0,
+                "tool_use",
+                Some("Bash"),
+                "fno agents spawn worker --prompt 'mention --crown in your answer'",
+                "",
+            ),
+            entry(
+                1,
+                "tool_use",
+                Some("Bash"),
+                "fno agents mail send ruling",
+                "",
+            ),
+        ];
+        assert_eq!(
+            check3_crown_before_ruling(&entries).status,
+            "violation",
+            "a flag mentioned inside quoted prompt text is not a crown"
+        );
+        let crowned = vec![
+            entry(
+                0,
+                "tool_use",
+                Some("Bash"),
+                "fno agents spawn worker --crown x-root",
+                "",
+            ),
+            entry(
+                1,
+                "tool_use",
+                Some("Bash"),
+                "fno agents mail send ruling",
+                "",
+            ),
+        ];
+        assert_eq!(check3_crown_before_ruling(&crowned).status, "clean");
     }
 
     #[test]
