@@ -762,7 +762,7 @@ def _parse_github_time(value: object) -> Optional[datetime]:
 
 def _force_supersede_dispatch_node(node_id: str, reason: str) -> bool:
     proc = subprocess.run(
-        ["fno", "backlog", "done", node_id, "--force", "--reason", reason],
+        ["fno", "backlog", "done", node_id, "--note", reason],
         check=False,
     )
     return proc.returncode == 0
