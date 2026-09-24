@@ -358,6 +358,12 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
 }
 
 fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String> {
+    if meta(connection, "backend")?.as_deref() == Some("json") {
+        return Err(format!(
+            "{} is named backend=json and was never imported; refusing to retire it",
+            graph.display()
+        ));
+    }
     if !graph.exists() {
         return Ok(());
     }
@@ -1155,6 +1161,28 @@ mod tests {
             !dir.path().join("backups").exists(),
             "refusal must not move or delete the file"
         );
+    }
+
+    #[test]
+    fn an_explicit_json_backend_refuses_and_preserves_its_anchor() {
+        let dir = TempDir::new().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        let connection = Connection::open(database_path(&graph)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO graph_meta(key, value) VALUES('backend', 'json');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = crate::graph_store::read_rows(&graph).unwrap_err();
+
+        assert!(error.to_string().contains("graph.json"), "{error}");
+        assert!(error.to_string().contains("never imported"), "{error}");
+        assert!(graph.exists(), "the named JSON backend remains untouched");
+        assert!(!dir.path().join("backups").exists());
     }
 
     #[test]
