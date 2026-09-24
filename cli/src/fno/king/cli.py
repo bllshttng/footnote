@@ -666,14 +666,10 @@ def history_cmd(
     ``fno agents court -n`` answers who rules NOW; this answers what
     happened across the reign. Contract: docs/architecture/reign.md.
     """
-    from fno.king.history import HistoryUnreadable, resolve_scope, run_native
+    from fno.king.history import run_native
     from fno.paths import event_journals
 
-    try:
-        crown = resolve_scope(scope)
-    except HistoryUnreadable as exc:
-        _refuse(f"king: {exc}")
-    code, out, err = run_native(event_journals(), crown, as_json)
+    code, out, err = run_native(event_journals(), scope, as_json)
     if out:
         typer.echo(out.rstrip("\n"))
     if err:
@@ -685,13 +681,13 @@ def checkin_cmd(ctx: typer.Context) -> None:
     """Run the reign check-in body: gather, print, diff, journal.
 
     Flags pass through to the native ``king-checkin`` beat: [--scope
-    <scope>] [--no-emit] [--json]. This shell resolves the caller's crown
-    and the paths Python owns; the beat never decides.
+    <scope>] [--no-emit] [--json]. The beat resolves the caller's crown
+    scope, level and board state natively; this shell supplies the paths
+    Python owns. The beat never decides.
     """
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
-    from fno.king.history import HistoryUnreadable, resolve_scope
     from fno.paths import (
         event_journals,
         graph_json,
@@ -702,13 +698,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
     from fno.rust_binary import resolve_binary
 
     passed = list(ctx.args)
-    explicit_scope = next(
-        (passed[i + 1] for i, t in enumerate(passed) if t == "--scope" and i + 1 < len(passed)), ""
-    )
-    try:
-        crown = resolve_scope(explicit_scope)
-    except HistoryUnreadable as exc:
-        _refuse(f"king: {exc}")
     binary = resolve_binary()
     if binary is None:
         _refuse(
@@ -720,8 +709,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
         str(binary),
         "king-checkin",
         *passed,
-        "--scope",
-        crown,
         "--graph",
         str(graph_json()),
         "--handoffs-dir",
@@ -733,30 +720,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
     ]
     for path in event_journals():
         argv += ["--events-path", str(path)]
-    state = None
-    try:
-        from fno.agents.crown import calling_agent_row
-        from fno.king.state import resolve_king_manifest_path
-
-        caller = calling_agent_row()
-        sid = getattr(caller, "harness_session_id", None) or ""
-        if sid:
-            state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
-    except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
-        state = None
-    if state is not None:
-        argv += ["--board-state", str(state)]
-    try:
-        from fno.agents.registry import load_registry
-
-        level = next(
-            r.crown_level
-            for r in load_registry()
-            if getattr(r, "crown_scope", None) == crown and r.crown_level is not None
-        )
-        argv += ["--level", str(level)]
-    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
-        pass
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.stdout:
         typer.echo(proc.stdout.rstrip("\n"))
