@@ -314,6 +314,7 @@ pub mod spawn_gate_verb;
 pub mod spawn_lineage;
 pub mod spawn_overlay;
 pub mod spawn_payload;
+pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;

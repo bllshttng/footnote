@@ -39,7 +39,7 @@ def gate_calls(monkeypatch):
 
     def fake_run_gate(
         name, substrate, *, force=False, no_wait=False, route_provider=None,
-        account=None, succession_scope=None,
+        account=None, seed=None, session_phase=None, succession_scope=None,
     ):
         calls.append(
             {
@@ -49,6 +49,8 @@ def gate_calls(monkeypatch):
                 "no_wait": no_wait,
                 "route_provider": route_provider,
                 "account": account,
+                "seed": seed,
+                "session_phase": session_phase,
                 "succession_scope": succession_scope,
             }
         )
@@ -94,6 +96,8 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
             "no_wait": False,
             "route_provider": None,
             "account": None,
+            "seed": "hi",
+            "session_phase": "",
             "succession_scope": None,
         }
     ]

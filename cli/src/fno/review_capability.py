@@ -664,9 +664,8 @@ def render_self_review_invocation(
     branch: Optional[str] = None,
     head_sha: Optional[str] = None,
     base_branch: Optional[str] = None,
-    raw_transport: bool = False,
 ) -> str:
-    """Render the native review request, pinned to one PR head or one local branch.
+    """Render the inline fno review request, pinned to one PR head or local branch.
 
     The render every refusal site names : a worker held at the stop
     gate reads THIS string, not a `<level>` placeholder it has no renderer for.
@@ -691,13 +690,7 @@ def render_self_review_invocation(
         # print "flag ignored" on every default run, so the pre-push payload
         # never carries it.
         with_comment = branch is None
-        if raw_transport and h == "codex":
-            # Raw Codex review routing reaches the app-server review/start RPC,
-            # whose payload grammar requires the native slash verb. `$fno:review`
-            # is the skill spelling for a model prompt, not a raw RPC payload.
-            rendered = f"/review {level or '<level>'}" + (" --comment" if with_comment else "")
-        else:
-            rendered = self_review_invocation(h, level=level, comment=with_comment)
+        rendered = self_review_invocation(h, level=level, comment=with_comment)
         if branch is not None or any(
             value is not None for value in (pr_number, head_sha, base_branch)
         ):

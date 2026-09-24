@@ -95,8 +95,8 @@ It runs the whole loop with or without you watching, and prints the PR URL when 
 **Loop harnesses together.** Spawn an agent on another provider and work alongside it:
 
 ```
-fno agents spawn "review the diff" -H codex --name reviewer   # a Codex agent on this repo
-fno agents ask reviewer "what did you find?"            # message it; it works on its own
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
+fno agents ask helper "what did you find?"
 ```
 
 Each agent runs its own loop and they coordinate over a message bus. Claude, Codex, and Gemini, one project.

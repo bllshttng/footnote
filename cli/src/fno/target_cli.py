@@ -1101,10 +1101,7 @@ def _send_self_review_payload(
         reason = (stderr.getvalue() or stdout.getvalue()).strip()
         return {"outcome": "refused", "transport": harness, "reason": reason}
     receipt = stdout.getvalue().strip()
-    if receipt.startswith("review/start"):
-        transport = "codex-daemon"
-        outcome = "started"
-    elif receipt.startswith("queued"):
+    if receipt.startswith("queued"):
         transport = "mux-pane"
         outcome = "queued"
     elif receipt.startswith("started"):
@@ -1236,7 +1233,6 @@ def request_self_review_cmd(
             branch=branch or None,
             head_sha=head_sha,
             base_branch=base_branch,
-            raw_transport=True,
         )
         receipt = _send_self_review_payload(
             payload=payload, harness=harness, session_id=session_id
