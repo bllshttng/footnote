@@ -17,8 +17,6 @@ static CLAIM_RE: OnceLock<Regex> = OnceLock::new();
 static LINE_SUFFIX_RE: OnceLock<Regex> = OnceLock::new();
 static ABDICATION_RE: OnceLock<Regex> = OnceLock::new();
 static RULING_TEXT_RE: OnceLock<Regex> = OnceLock::new();
-static RULING_MAIL_RE: OnceLock<Regex> = OnceLock::new();
-static DISPATCH_RE: OnceLock<Regex> = OnceLock::new();
 static CORONATION_RE: OnceLock<Regex> = OnceLock::new();
 static CROWN_READ_RE: OnceLock<Regex> = OnceLock::new();
 static PRWATCH_RE: OnceLock<Regex> = OnceLock::new();
@@ -187,6 +185,14 @@ fn flush_shell_word(args: &mut Vec<String>, word: &mut String, started: &mut boo
     }
 }
 
+fn args_start_with(args: &[String], expected: &[&str]) -> bool {
+    args.len() >= expected.len()
+        && args
+            .iter()
+            .zip(expected)
+            .all(|(arg, expected)| arg == expected)
+}
+
 fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut args = Vec::new();
@@ -274,19 +280,21 @@ fn crown_spawn_command(target: &str) -> bool {
 }
 
 fn ruling_command(target: &str) -> bool {
-    if target.contains("--help") || target.contains("--to-self") {
-        return false;
-    }
-    let mail_send =
-        compiled(&RULING_MAIL_RE, r"(^|[;|&\n])\s*fno agents mail send\b").is_match(target);
-    if mail_send {
-        return true;
-    }
-    compiled(
-        &DISPATCH_RE,
-        r"(^|[;|&\n])\s*fno backlog update\b.*--dispatch-(?:verb|brief)",
-    )
-    .is_match(target)
+    shell_command_segments(target).iter().any(|args| {
+        if args_start_with(args, &["fno", "agents", "mail", "send"]) {
+            return !args
+                .iter()
+                .skip(4)
+                .any(|arg| arg == "--help" || arg == "--to-self" || arg.starts_with("--to-self="));
+        }
+        args_start_with(args, &["fno", "backlog", "update"])
+            && args.iter().skip(3).any(|arg| {
+                arg == "--dispatch-verb"
+                    || arg.starts_with("--dispatch-verb=")
+                    || arg == "--dispatch-brief"
+                    || arg.starts_with("--dispatch-brief=")
+            })
+    })
 }
 
 fn is_ruling(entry: &Entry) -> bool {
@@ -470,7 +478,7 @@ fn check4_prwatch_before_dispatch(entries: &[Entry]) -> CheckResult {
     };
     let probe_re = compiled(
         &PRWATCH_RE,
-        r"(^|[;|&\n])\s*fno (?:do pr watch status|pr-watch status|doctor(?:\s|$))",
+        r"(^|[;|&\n])\s*fno (?:do pr watch status|pr-watch status)",
     );
     let probe = first(entries, |entry| {
         entry.kind == "tool_use" && probe_re.is_match(&entry.target)
@@ -990,6 +998,31 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn command_scanners_only_accept_real_flags_and_probes() {
+        let mail = entry(
+            0,
+            "tool_use",
+            Some("Bash"),
+            "fno agents mail send king 'The --help and --to-self options are confusing'",
+            "",
+        );
+        assert!(
+            is_ruling(&mail),
+            "flag mentions in message text are not options"
+        );
+
+        let entries = vec![
+            entry(0, "tool_use", Some("Bash"), "fno doctor update", ""),
+            entry(1, "tool_use", Some("Bash"), "fno agents spawn worker", ""),
+        ];
+        assert_eq!(
+            check4_prwatch_before_dispatch(&entries).status,
+            "violation",
+            "generic doctor commands do not prove a PR-watch liveness probe"
+        );
     }
 
     #[test]
