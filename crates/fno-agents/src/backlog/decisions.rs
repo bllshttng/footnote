@@ -1,5 +1,9 @@
 //! Decision records and their node join rows, owned by the graph store.
+//! Schema 4: an event's time is its row's creation time, so the schema-3
+//! `ts` column is `created_at` now (user ruling 2026-09-23). The flattened
+//! rows keep `ts`, the event envelope key every reader parses.
 
+use super::schema_v4::{iso, norm_sql, stamps, touch, updated, NOW};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::path::Path;
@@ -7,27 +11,66 @@ use std::path::Path;
 const DECISION_EVENT: &str = "operator_decision";
 const RETRACTION_EVENT: &str = "decision_retracted";
 
-pub const DDL: &str = "CREATE TABLE IF NOT EXISTS decisions (
+pub fn ddl() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS decisions (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL UNIQUE,
   event_type TEXT NOT NULL,
-  ts TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT ({NOW}),
   source TEXT,
-  data TEXT NOT NULL
+  data TEXT NOT NULL{},
+  {}
 );
 CREATE INDEX IF NOT EXISTS decisions_event_id ON decisions(event_id);
 CREATE TABLE IF NOT EXISTS node_decisions (
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   event_id TEXT NOT NULL REFERENCES decisions(event_id) ON DELETE CASCADE,
-  seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL{},
   PRIMARY KEY (node_id, event_id)
 );
-CREATE INDEX IF NOT EXISTS node_decisions_order ON node_decisions(node_id, seq);";
+CREATE INDEX IF NOT EXISTS node_decisions_order ON node_decisions(node_id, seq);",
+        updated("decisions"),
+        iso("decisions", "created_at"),
+        stamps("node_decisions"),
+    )
+}
+
+pub fn triggers() -> String {
+    format!("{}{}", touch("decisions"), touch("node_decisions"))
+}
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
-        .execute_batch(DDL)
+        .execute_batch(&ddl())
         .map_err(|error| error.to_string())
+}
+
+/// Schema-4 migration copy from `decisions_v3` (and `node_decisions_v3`
+/// when the store has one): seq, and so journal order, is kept, and the
+/// AUTOINCREMENT high-water mark carries over.
+pub(crate) fn copy_from_v3(connection: &Connection, with_joins: bool) -> Result<(), String> {
+    let mut sql = format!(
+        "INSERT INTO decisions (seq, event_id, event_type, created_at, source, data, updated_at)
+         SELECT seq, event_id, event_type, ts, source, data, COALESCE({}, {NOW})
+         FROM decisions_v3;
+         UPDATE sqlite_sequence
+         SET seq = MAX(seq, COALESCE((SELECT seq FROM sqlite_sequence
+                                      WHERE name = 'decisions_v3'), 0))
+         WHERE name = 'decisions';",
+        norm_sql("ts"),
+    );
+    if with_joins {
+        let stamp = format!("COALESCE({}, {NOW})", norm_sql("d.ts"));
+        sql.push_str(&format!(
+            "INSERT INTO node_decisions (node_id, event_id, seq, created_at, updated_at)
+             SELECT j.node_id, j.event_id, j.seq, {stamp}, {stamp}
+             FROM node_decisions_v3 j LEFT JOIN decisions_v3 d ON d.event_id = j.event_id;"
+        ));
+    }
+    connection
+        .execute_batch(&sql)
+        .map_err(|error| format!("schema v4 decisions copy: {error}"))
 }
 
 /// Import the durable machine-wide decision journal once, then validate every
@@ -143,7 +186,7 @@ pub fn record_connected(
 /// Return flattened event rows in journal order and a count of malformed rows.
 pub fn read_rows(connection: &Connection) -> Result<(Vec<Value>, usize), String> {
     let mut statement = connection
-        .prepare("SELECT event_type, ts, data FROM decisions ORDER BY seq")
+        .prepare("SELECT event_type, created_at, data FROM decisions ORDER BY seq")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -176,7 +219,7 @@ pub fn read_rows(connection: &Connection) -> Result<(Vec<Value>, usize), String>
 pub fn node_decisions(connection: &Connection, node_id: &str) -> Result<Vec<Value>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT d.event_type, d.ts, d.data
+            "SELECT d.event_type, d.created_at, d.data
              FROM node_decisions nd
              JOIN decisions d ON d.event_id = nd.event_id
              WHERE nd.node_id = ?1
@@ -238,13 +281,22 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
             .ok_or_else(|| "decision_retracted has no retraction_id".to_string())?,
         _ => unreachable!(),
     };
-    let ts = event.get("ts").and_then(Value::as_str).unwrap_or_default();
+    // An event with no ts takes the row's own write time. DO NOTHING names
+    // the event_id conflict alone: OR IGNORE would also skip a row its
+    // timestamp CHECK refuses, a silent loss.
+    let ts = event
+        .get("ts")
+        .and_then(Value::as_str)
+        .filter(|ts| !ts.is_empty());
     let source = event.get("source").and_then(Value::as_str);
     let data_json = serde_json::to_string(data).map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT OR IGNORE INTO decisions (event_id, event_type, ts, source, data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            &format!(
+                "INSERT INTO decisions (event_id, event_type, created_at, source, data)
+                 VALUES (?1, ?2, COALESCE(?3, {NOW}), ?4, ?5)
+                 ON CONFLICT(event_id) DO NOTHING"
+            ),
             params![event_id, event_type, ts, source, data_json],
         )
         .map_err(|error| error.to_string())?;
@@ -296,8 +348,8 @@ fn attach_node(connection: &Connection, node_id: &str, event_id: &str) -> Result
         .map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT OR IGNORE INTO node_decisions (node_id, event_id, seq)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO node_decisions (node_id, event_id, seq) VALUES (?1, ?2, ?3)
+             ON CONFLICT(node_id, event_id) DO NOTHING",
             params![node_id, event_id, next_seq],
         )
         .map_err(|error| error.to_string())?;
@@ -312,7 +364,7 @@ mod tests {
     fn connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .execute_batch(&crate::backlog::graph_meta_ddl())
             .unwrap();
         ensure_table(&connection).unwrap();
         connection

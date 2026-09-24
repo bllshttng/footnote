@@ -798,7 +798,8 @@ fn node_has_movement(entry: &Value, now_ms: i64, staleness_days: i64) -> bool {
     // time recently (`demand.recent_encounter`).
     if let Some(encounters) = entry.get("encounters").and_then(Value::as_array) {
         for r in encounters {
-            if let Some(ts) = r.get("ts").and_then(parse_iso_ms) {
+            let stamp = r.get("created_at").or_else(|| r.get("ts"));
+            if let Some(ts) = stamp.and_then(parse_iso_ms) {
                 if days_between(now_ms, ts) <= staleness_days {
                     return true;
                 }

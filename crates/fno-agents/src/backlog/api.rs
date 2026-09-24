@@ -1309,7 +1309,7 @@ pub fn encounter_create(
                 .encounters
                 .get_or_insert_with(Vec::new)
                 .push(Encounter {
-                    ts: crate::graph_store::now_isoformat(),
+                    created_at: crate::graph_store::now_isoformat(),
                     evidence: input.evidence.clone(),
                     session_id: input.session_id.clone(),
                     voter_key: None,

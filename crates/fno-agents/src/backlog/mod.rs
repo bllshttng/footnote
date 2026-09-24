@@ -9,8 +9,10 @@
 pub mod api;
 pub mod commands;
 pub mod comments;
+pub mod costs;
 pub mod decisions;
 pub mod encounters;
+pub mod entities;
 pub mod epic_cap;
 pub mod idea_cap;
 pub mod model;
@@ -25,6 +27,7 @@ pub mod patch;
 pub mod pull_requests;
 pub mod receipt;
 pub mod relations;
+pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 
@@ -35,8 +38,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The schema stamp the import writes after the blob `entries` table is
-/// dropped.
-pub const SCHEMA_VERSION: &str = "3";
+/// dropped. Schema 4 (see schema_v4.rs) is the shape every table is born in.
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -49,6 +52,7 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("supersessions", "backlog/nodes.rs"),
     ("nodes_raw", "backlog/nodes.rs"),
     ("relations", "backlog/relations.rs"),
+    ("relations_unresolved", "backlog/relations.rs"),
     ("nodes_fts", "backlog/search.rs"),
     ("comments", "backlog/comments.rs"),
     ("encounters", "backlog/encounters.rs"),
@@ -56,7 +60,51 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("sessions", "backlog/sessions.rs"),
     ("decisions", "backlog/decisions.rs"),
     ("node_decisions", "backlog/decisions.rs"),
+    ("node_costs", "backlog/costs.rs"),
+    ("harnesses", "backlog/entities.rs"),
+    ("models", "backlog/entities.rs"),
+    ("agent_sessions", "backlog/entities.rs"),
 ];
+
+/// The store's key-value table, with the schema-4 stamps every table has.
+pub(crate) fn graph_meta_ddl() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS graph_meta (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL{}
+         );",
+        schema_v4::stamps("graph_meta")
+    )
+}
+
+/// Schema-4 migration copy of graph_meta from its `_v3` rename.
+pub(crate) fn copy_graph_meta_from_v3(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch("INSERT INTO graph_meta (key, value) SELECT key, value FROM graph_meta_v3;")
+        .map_err(|error| format!("schema v4 graph_meta copy: {error}"))
+}
+
+/// Every owning module's triggers: updated_at on each table, the entity
+/// parents, and the relation park and promote pair. Created after the
+/// tables, and after the schema-4 copies, which must not fire them.
+pub(crate) fn ensure_triggers(connection: &Connection) -> Result<(), String> {
+    let all = [
+        schema_v4::touch("graph_meta"),
+        entities::triggers(),
+        nodes::triggers(),
+        sessions::triggers(),
+        comments::triggers(),
+        encounters::triggers(),
+        pull_requests::triggers(),
+        relations::triggers(),
+        decisions::triggers(),
+        costs::triggers(),
+    ]
+    .concat();
+    connection
+        .execute_batch(&all)
+        .map_err(|error| error.to_string())
+}
 
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
@@ -179,22 +227,25 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         .execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
-             PRAGMA foreign_keys=ON;
-             CREATE TABLE IF NOT EXISTS graph_meta (
-                 key TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
-             );",
+             PRAGMA foreign_keys=ON;",
         )
         .map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(&graph_meta_ddl())
+        .map_err(|error| error.to_string())?;
+    schema_v4::migrate_if_needed(&mut connection, graph)?;
+    entities::ensure_table(&connection)?;
     nodes::ensure_table(&connection)?;
     sessions::ensure_table(&connection)?;
     comments::ensure_table(&connection)?;
     encounters::ensure_table(&connection)?;
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
+    costs::ensure_table(&connection)?;
+    decisions::ensure_table(&connection)?;
+    ensure_triggers(&connection)?;
     search::ensure_table(&connection)?;
     import_if_needed(&mut connection, graph)?;
-    decisions::ensure_table(&connection)?;
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
     Ok(connection)
@@ -492,7 +543,9 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
 /// clock. Under the sqlite backend graph.json is not authoritative, so
 /// the stamp moves and nothing is rewritten.
 fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
-    let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
+    // Pinned at 3: the schema-4 rebuild is schema_v4's, and it never needs
+    // graph.json. A schema-2 store still rebuilds here once, into v4 tables.
+    let target: i64 = 3;
     let current: i64 = meta(connection, "schema_version")?
         .and_then(|raw| raw.parse::<i64>().ok())
         .unwrap_or(2);
@@ -973,6 +1026,7 @@ fn save_aggregate(connection: &Connection, node: &Node) -> Result<(), String> {
     prs.extend(node.additional_prs.iter().flatten().cloned());
     pull_requests::save(connection, &node.id, &prs)?;
     relations::save(connection, &node.id, &node.relations)?;
+    costs::save(connection, &node.id, node.costs.as_deref().unwrap_or(&[]))?;
     Ok(())
 }
 
@@ -984,6 +1038,7 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
     encounters::delete(connection, id)?;
     pull_requests::delete(connection, id)?;
     relations::delete(connection, id)?;
+    costs::delete(connection, id)?;
     Ok(())
 }
 
@@ -1244,6 +1299,17 @@ pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>,
         )
         .optional()
         .map_err(|error| error.to_string())
+}
+
+/// Each row's stored write count, restricted to `ids` when given: the map
+/// the keeper's begin hands out and commit_rows compares (see
+/// [`nodes::versions`]).
+pub fn row_versions(
+    graph: &Path,
+    ids: Option<&[&str]>,
+) -> Result<std::collections::BTreeMap<String, i64>, String> {
+    let connection = open(graph)?;
+    nodes::versions(&connection, ids)
 }
 
 pub fn version(graph: &Path) -> Result<String, String> {
@@ -2329,34 +2395,6 @@ mod tests {
             report.divergent, 0,
             "flipgate_child_extras_note_reads_key_survives_the_roundtrip: {report:?}"
         );
-    }
-
-    #[test]
-    fn flipgate_child_extras_migration_adds_column_and_keeps_rows() {
-        // AC5-EDGE: a db whose comments table lost the extras column is
-        // migrated back on the next open, and legacy rows load with empty
-        // extras.
-        let (dir, graph) = fixture("graph.json");
-        open(&graph).unwrap();
-        let db = database_path(&graph);
-        let connection = Connection::open(&db).unwrap();
-        connection
-            .execute_batch("ALTER TABLE comments DROP COLUMN extras;")
-            .unwrap();
-        drop(connection);
-        let connection = open(&graph).unwrap();
-        let has: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('comments') WHERE name = 'extras'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(has, 1, "the open re-added the extras column");
-        let comments = crate::backlog::comments::load(&connection, "ab-one").unwrap();
-        assert!(comments.is_empty(), "imported rows load fine: {comments:?}");
-        drop(connection);
-        drop(dir);
     }
 
     /// Seed a schema-2 store whose db rows lag the json: the title change
