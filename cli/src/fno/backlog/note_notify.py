@@ -87,11 +87,9 @@ def pointer(node_id: str, text: str) -> str:
 
 def finding_pointer(node_id: str, finding_id: str) -> str:
     """One line naming the node, the finding id and the resolve command."""
-    return (
-        f"finding {finding_id} on {node_id}: blocking. "
-        f"Read: fno backlog notes findings {node_id}. "
-        f"Clear: fno backlog note --resolve {finding_id}"
-    )
+    return (f"finding {finding_id} on {node_id}: blocking. "
+            f"Read: fno backlog notes findings {node_id}. "
+            f"Clear: fno backlog note --resolve {finding_id}")
 
 
 def note_readers(
@@ -251,18 +249,18 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
     return readers
 
 
-def send_note(readers: NoteReaders, text: str) -> list[tuple[str, bool]]:
+def send_note(
+    readers: NoteReaders, text: str, *, body: Optional[str] = None
+) -> list[tuple[str, bool]]:
     """Receipt lines for one delivery, each flagged when it is not a delivery."""
-    return _send(readers, pointer(readers.node_id, text))
-
-
-def _send(readers: NoteReaders, body: str) -> list[tuple[str, bool]]:
-    """The delivery half over one prebuilt body."""
+    body = body or pointer(readers.node_id, text)
     lines = [_one_receipt(address, why, body) for address, why in readers.recipients]
     return [(line, line.startswith(_UNDELIVERED)) for line in lines]
 
 
-def deliver(readers: NoteReaders, text: str, *, json_output: bool, body: Optional[str] = None) -> int:
+def deliver(
+    readers: NoteReaders, text: str, *, json_output: bool, finding_id: Optional[str] = None
+) -> int:
     """Send to every bound reader; the exit code reports confirmed delivery."""
     if not readers.recipients:
         typer.echo(
@@ -271,7 +269,11 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool, body: Optiona
             err=json_output,
         )
         return 0
-    receipts = _send(readers, body) if body else send_note(readers, text)
+    receipts = send_note(
+        readers,
+        text,
+        body=finding_pointer(readers.node_id, finding_id) if finding_id else None,
+    )
     for line, undelivered in receipts:
         typer.echo(line, err=undelivered or json_output)
     if any(line.startswith("notified ") for line, _ in receipts):
@@ -285,13 +287,6 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool, body: Optiona
         err=True,
     )
     return 4
-
-
-def deliver_finding(readers: NoteReaders, finding_id: str, *, json_output: bool) -> int:
-    """The finding pointer is the whole delivered body."""
-    return deliver(
-        readers, "", json_output=json_output, body=finding_pointer(readers.node_id, finding_id)
-    )
 
 
 def _one_receipt(address: str, why: str, body: str) -> str:

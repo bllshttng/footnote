@@ -1,7 +1,6 @@
-"""`fno backlog annotate`: one-release forwarding shim (x-26bd).
-
-Each action rewrites its argv to the `note` spelling and execs this same
-entrypoint; one stderr line names the replacement.
+"""`fno backlog annotate` - one-release forwarding shim (x-26bd): each action
+rewrites its argv to the `note` spelling, execs this same entrypoint, and one
+stderr line names the replacement.
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ annotate_app = typer.Typer(
 
 
 def _forward(new: list[str]) -> None:
-    """Exec the rewritten argv through this same entrypoint; the exit code rides."""
     os.execvp(sys.argv[0], [sys.argv[0], *new])
 
 
