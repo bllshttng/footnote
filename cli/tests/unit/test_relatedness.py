@@ -11,7 +11,9 @@ from fno.graph import relatedness as R
 
 
 def _node(nid, title="", domain=None, details="", slug="", **extra):
-    e = {"id": nid, "title": title, "slug": slug, "details": details}
+    e = {"id": nid, "title": title, "slug": slug}
+    if details:
+        e["details"] = details
     if domain is not None:
         e["domain"] = domain
     e.update(extra)

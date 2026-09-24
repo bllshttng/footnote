@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import fno.graph.cli as graph_cli
 from fno.cli import app
+from fno.graph.store import read_graph_strict, store_export_status
 
 runner = CliRunner()
 
@@ -66,6 +67,7 @@ def test_tracker_owned_verbs_refuse_under_external(argv, tmp_path, monkeypatch):
     write happens (the contradictory file is byte-identical after)."""
     g = tmp_path / "graph.json"
     seed_graph(g, json.dumps({"entries": []}))
+    before = (read_graph_strict(g), store_export_status(g))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: None)
@@ -75,7 +77,7 @@ def test_tracker_owned_verbs_refuse_under_external(argv, tmp_path, monkeypatch):
     r = runner.invoke(app, argv, catch_exceptions=False)
     assert r.exit_code == 1, r.output
     assert "github" in r.output and "refused" in r.output
-    assert g.read_text() == json.dumps({"entries": []})
+    assert (read_graph_strict(g), store_export_status(g)) == before
 
 
 def test_footnote_owned_read_verb_still_works_under_external(tmp_path, monkeypatch):

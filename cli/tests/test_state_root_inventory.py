@@ -25,11 +25,17 @@ def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch)
     from fno.graph.store import commit_rows_via_store
 
     root = Path(paths.state_dir())
+    seed_graph(root / "graph.json", '{"entries": []}\n')
     for pattern in top_level_patterns(DOC):
-        (root / pattern).touch()
+        path = root / pattern
+        if pattern == "backups":
+            path.mkdir(exist_ok=True)
+        elif pattern in {"graph.db", "graph.db-wal", "graph.db-shm"}:
+            continue  # SQLite creates and owns these files.
+        elif not path.exists():
+            path.touch()
     # A real writer's output must also read as documented, not just the
     # materialized mirror: the mutation emits the graph, its render, and the
     # backups/ rotation beside it.
-    seed_graph(root / "graph.json", '{"entries": []}\n')
     commit_rows_via_store(root / "graph.json", lambda entries: entries)
     assert undocumented(root, DOC) == []

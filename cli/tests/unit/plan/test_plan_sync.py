@@ -8,7 +8,6 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -44,8 +43,6 @@ def env(tmp_path, monkeypatch):
 
 def _seed(g: Path, entries: list[dict]) -> None:
     seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
-    # Bump graph mtime so the watermark gate sees "changed" between edits.
-    os.utime(g, None)
 
 
 def _doc(tmp_path: Path, name: str, node: str, prio: str) -> Path:

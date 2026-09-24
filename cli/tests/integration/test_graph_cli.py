@@ -447,12 +447,12 @@ def test_legacy_id_resolves_under_configured_install(tmp_graph, monkeypatch):
     legacy prefix."""
     # Seed a legacy 8-hex node directly.
     g = tmp_graph
-    data = json.loads(g.read_text())
-    data["entries"].append({
+    data = _read_graph(g)
+    data.append({
         "id": "ab-55ba9adb", "title": "Legacy node", "priority": "p2",
         "status": "ready", "blocked_by": [], "type": "feature",
     })
-    g.write_text(json.dumps(data))
+    seed_graph(g, data)
 
     from fno.config import SettingsModel
     model = SettingsModel(config={"backlog": {"id_prefix": "xy-", "id_hex_width": 4}})
@@ -536,7 +536,6 @@ def test_ac1_hp_undispatched_external_backend_uses_tracker_join(tmp_graph, monke
 
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
-    tmp_graph.write_text('{"nodes": []}\n')
     monkeypatch.setattr(
         graph_cli,
         "_joined_open_candidates",
@@ -2370,22 +2369,22 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
     plan = _write_plan(tmp_graph.parent, "epic-progress.md", "Epic progress")
     entries = [
         # Epic: ready, p0 -> would rank ahead of everything if selectable.
-        {"id": "ab-epic", "title": "Epic", "status": "ready", "priority": "p0",
-             "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": str(plan)},
+        {"id": "ab-e0100001", "title": "Epic", "status": "ready", "priority": "p0",
+             "created_at": _recent_iso(1), "project": "p", "blocked_by": [], "plan_path": str(plan)},
         # One child done, one still pending -> the epic is IN PROGRESS.
-        {"id": "ab-cdone", "title": "Done child", "status": "done", "priority": "p2",
-         "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
+        {"id": "ab-cd000001", "title": "Done child", "status": "done", "priority": "p2",
+         "created_at": _recent_iso(1), "project": "p", "parent": "ab-e0100001",
              "completed_at": "2026-01-03", "blocked_by": [], "plan_path": str(plan)},
-        {"id": "ab-cpend", "title": "Pending child", "status": "ready", "priority": "p3",
-         "created_at": _recent_iso(1), "project": "p", "parent": "ab-epic",
+        {"id": "ab-cf000001", "title": "Pending child", "status": "ready", "priority": "p3",
+         "created_at": _recent_iso(1), "project": "p", "parent": "ab-e0100001",
              "blocked_by": [], "plan_path": str(plan)},
     ]
     seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
-    assert out["id"] != "ab-epic"      # the in-progress container is skipped
-    assert out["id"] == "ab-cpend"     # its buildable pending leaf is picked
+    assert out["id"] != "ab-e0100001"  # the in-progress container is skipped
+    assert out["id"] == "ab-cf000001"  # its buildable pending leaf is picked
 
 
 def _by_id(tmp_graph):
@@ -2610,10 +2609,9 @@ def test_resolved_cwd_never_persisted_to_graph_json(tmp_graph):
     ):
         _invoke("backlog", "get", "ab-resolvetest")
 
-    disk_data = json.loads(tmp_graph.read_text())
-    entry = disk_data["entries"][0]
+    entry = _read_graph(tmp_graph)[0]
     assert "_resolved_cwd" not in entry, (
-        "cmd_get must not persist _resolved_cwd to graph.json"
+        "cmd_get must not persist _resolved_cwd to the graph store"
     )
 
 
@@ -3016,14 +3014,14 @@ def test_next_excludes_stale_ready_with_receipt(tmp_graph):
     plan = _write_plan(tmp_graph.parent, "stale.md", "Stale")
     os.utime(plan, (0, 0))
     _seed(tmp_graph, [{
-        "id": "ab-stale", "title": "abandoned", "project": "fno",
+        "id": "ab-57a1e000", "title": "abandoned", "project": "fno",
         "status": "ready",
         "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-01-01T00:00:00+00:00",  # ~200d before real now -> stale
     }])
     r = _invoke("backlog", "next", "--project", "fno")
     assert "null" in r.output
-    assert "excluded ab-stale: quarantined" in r.output
+    assert "excluded ab-57a1e000: quarantined" in r.output
 
 
 def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
@@ -3032,15 +3030,15 @@ def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
     recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     plan = _write_plan(tmp_graph.parent, "dead-child.md", "Dead child")
     _seed(tmp_graph, [
-        {"id": "ab-epic", "title": "epic", "project": "fno",
-         "superseded_by": "ab-new"},
-        {"id": "ab-child", "title": "child", "project": "fno",
-         "parent": "ab-epic", "plan_path": str(plan),
+        {"id": "ab-e0100001", "title": "epic", "project": "fno",
+         "superseded_by": "ab-e0100002"},
+        {"id": "ab-cf000001", "title": "child", "project": "fno",
+         "parent": "ab-e0100001", "plan_path": str(plan),
          "created_at": recent, "priority": "p2"},
     ])
     r = _invoke("backlog", "next", "--project", "fno")
     assert "null" in r.output
-    assert "excluded ab-child: dead-ancestor" in r.output
+    assert "excluded ab-cf000001: dead-ancestor" in r.output
 
 
 def test_next_selects_healthy_ready_node(tmp_graph):
@@ -3050,12 +3048,12 @@ def test_next_selects_healthy_ready_node(tmp_graph):
     plan = tmp_graph.parent / "p.md"
     plan.write_text("---\ntitle: t\n---\n")
     _seed(tmp_graph, [{
-        "id": "ab-live", "title": "live", "project": "fno",
+        "id": "ab-11ae0001", "title": "live", "project": "fno",
         "status": "ready",
         "plan_path": str(plan), "created_at": recent, "priority": "p2",
     }])
     r = _invoke("backlog", "next", "--project", "fno")
-    assert '"id": "ab-live"' in r.output
+    assert '"id": "ab-11ae0001"' in r.output
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

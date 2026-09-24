@@ -56,6 +56,12 @@ def _sessions(g: Path, node_id: str) -> list[dict]:
     return next(e for e in read_graph_strict(g) if e["id"] == node_id).get("sessions", [])
 
 
+def _store_state(g: Path):
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    return read_graph_strict(g), store_export_status(g)
+
+
 # --- fno do pr merge closes its own node (baked-in reconcile, no memory) ---------
 
 _FOOT = "https://github.com/bllshttng/footnote/pull"
@@ -447,9 +453,9 @@ def test_on_confirmed_merge_leaves_graph_untouched_under_external(
         ),
     )
 
-    before = g.read_bytes()
+    before = _store_state(g)
     M._on_confirmed_merge(888, str(tmp_path))
-    assert g.read_bytes() == before  # no graph write anywhere in the flow
+    assert _store_state(g) == before
 
 
 # --- the merge mints its own cleanup request (the machine's reap order) ----------

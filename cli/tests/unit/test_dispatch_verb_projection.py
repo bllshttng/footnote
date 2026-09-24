@@ -23,6 +23,7 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 import subprocess as real_subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +49,7 @@ def _no_native_claim_verdicts(monkeypatch):
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
 
 BRIEF_SENTINEL = "brief-sentinel-7f31 blueprint-not-target"
+_RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 class Iso:
@@ -119,10 +121,10 @@ def _write_graph(
     ``difficulty`` defaults low so the planless child is the law's
     straight-to-/target intake; the blueprint cases pass medium."""
     child: dict = {
-        "id": "x-BP01",
+        "id": "x-00000002",
         "slug": "bp-declared",
         "title": "declares its verb",
-        "parent": "x-EPIC",
+        "parent": "x-00000001",
         "project": "web",
         "status": "ready",
         "domain": "code",
@@ -133,14 +135,14 @@ def _write_graph(
         # pin must ride the node itself.
         "model": "glm-5.3-flash[1m]",
         "cwd": cwd,
-        "created_at": "2026-09-07T00:00:00+00:00",
-        "touched_at": "2026-09-07T00:00:00+00:00",
+        "created_at": _RECENT_CREATED,
+        "touched_at": _RECENT_CREATED,
     }
     if verb is not None:
         child["dispatch_verb"] = verb
     if brief is not None:
         child["dispatch_brief"] = brief
-    epic = {"id": "x-EPIC", "title": "verb mission", "project": "fno"}
+    epic = {"id": "x-00000001", "title": "verb mission", "project": "fno"}
     # Rows the way the store writes them: the typed api drops a row the
     # model cannot parse, so seeds carry the stamped fields.
     for row in (epic, child):
@@ -240,13 +242,13 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
     calls = _record_spawns(monkeypatch)
 
-    res = adv.advance_epic("x-EPIC", events_path=iso.events)
+    res = adv.advance_epic("x-00000001", events_path=iso.events)
 
     assert calls, "positive control: the spawn instrument ran and recorded"
-    assert res.dispatched == ("x-BP01",)
+    assert res.dispatched == ("x-00000002",)
     # /fno:blueprint canonicalizes to /blueprint for the allowlist; the
     # claude command surface renders it verbatim, {id} substituted.
-    assert calls[0]["argv"][-1] == "/blueprint x-BP01", calls[0]["argv"]
+    assert calls[0]["argv"][-1] == "/blueprint x-00000002", calls[0]["argv"]
     assert calls[0]["env"].get("TARGET_BRIEF") == BRIEF_SENTINEL
     # AC7-HP: the receipt names the resolved verb and its source.
     disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
@@ -254,7 +256,7 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     assert disp[0]["data"]["verb_source"] == "declared"
     # AC10-HP: the worker-to-node join rides the spawn argv.
     argv = calls[0]["argv"]
-    assert argv[argv.index("--node") + 1] == "x-BP01"
+    assert argv[argv.index("--node") + 1] == "x-00000002"
     assert argv[argv.index("--slug") + 1] == "bp-declared"
     # The --node door refuses a foreign dispatch reservation, so the wrapper
     # must have released the caller's before shelling it.
@@ -279,11 +281,11 @@ def test_epic_advance_undeclared_node_derives_the_target_intake(iso, monkeypatch
     monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
     calls = _record_spawns(monkeypatch)
 
-    res = adv.advance_epic("x-EPIC", events_path=iso.events)
+    res = adv.advance_epic("x-00000001", events_path=iso.events)
 
     assert calls, "positive control: the spawn instrument ran and recorded"
-    assert res.dispatched == ("x-BP01",)
-    assert calls[0]["argv"][-1] == "/target --no-merge x-BP01", calls[0]["argv"]
+    assert res.dispatched == ("x-00000002",)
+    assert calls[0]["argv"][-1] == "/target --no-merge x-00000002", calls[0]["argv"]
     assert "TARGET_BRIEF" not in calls[0]["env"]
     # AC8-HP: the derived intake is named, never guessed.
     disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
@@ -302,7 +304,7 @@ def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
     # dispatch_verb. _converge_one is called directly because every shipped
     # selection surface now carries the key.
     node_meta = {
-        "id": "x-BP01",
+        "id": "x-00000002",
         "slug": "bp-declared",
         "title": "t",
         "project": "web",
@@ -334,5 +336,5 @@ def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
 
     assert calls, "positive control: the spawn instrument ran and recorded"
     assert [r["status"] for r in receipts] == ["dispatched"], receipts
-    assert calls[0]["argv"][-1] == "/blueprint x-BP01", calls[0]["argv"]
+    assert calls[0]["argv"][-1] == "/blueprint x-00000002", calls[0]["argv"]
     assert calls[0]["env"].get("TARGET_BRIEF") == BRIEF_SENTINEL

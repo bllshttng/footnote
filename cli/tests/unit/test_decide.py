@@ -542,12 +542,18 @@ def _write_decision_index(index: Path, *rows: dict) -> None:
     )
 
 
+def _graph_entries(graph: Path) -> list[dict]:
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(graph)
+
+
 def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
     root: Path, tmp_graph: Path, index: Path
 ):
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
-    tmp_graph.write_text(json.dumps(entries) + "\n")
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -586,8 +592,9 @@ def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
 ):
     from fno.decide import list_decisions
 
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -839,9 +846,9 @@ def test_default_decision_read_retains_history_for_replay(
     from fno.events import decision_retracted
     from fno.decide import list_decisions
 
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
-    tmp_graph.write_text(json.dumps(entries) + "\n")
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -1205,7 +1212,7 @@ def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, ind
     archived row stays in the same store, stamped, so the read needs no
     sidecar."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = _graph_entries(tmp_graph)
     entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
     seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
@@ -1923,7 +1930,7 @@ def test_reindex_folds_every_project_root_the_graph_names(
 
     sibling = tmp_path / "other-repo"
     (sibling / ".fno").mkdir(parents=True)
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = _graph_entries(tmp_graph)
     entries.append(_node("x-9999", cwd=str(sibling)))
     seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
@@ -2409,7 +2416,7 @@ def test_reindex_refuses_to_report_done_on_an_unreadable_graph(
 ):
     """A query can answer usefully without the graph. A backfill cannot: it
     would fold zero projection rows and still print "+0 decisions" on exit 0."""
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    tmp_graph.with_suffix(".db").write_bytes(b"not sqlite")
 
     res = runner.invoke(decide_app, ["reindex"])
     assert res.exit_code == 1, res.output
@@ -2851,7 +2858,7 @@ def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
 ):
     """The write path's pre-check used the soft reader, so a real node read as
     "names no graph node" with no hint that the graph was unreadable."""
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    tmp_graph.with_suffix(".db").write_bytes(b"not sqlite")
 
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold"])
     assert res.exit_code == 0, res.output

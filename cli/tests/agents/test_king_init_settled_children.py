@@ -28,7 +28,14 @@ def court(tmp_path, monkeypatch):
 
 
 def _seed(rows: list[dict]) -> None:
-    seed_graph(graph_json(), json.dumps({"entries": rows}))
+    complete = []
+    for row in rows:
+        entry = {"priority": "p2", "domain": "code", **row}
+        entry.setdefault("slug", entry["id"])
+        if entry.get("status") == "done":
+            entry.setdefault("completed_at", "2026-09-01T00:00:00Z")
+        complete.append(entry)
+    seed_graph(graph_json(), complete)
 
 
 def _init(court, scope: str):
@@ -43,35 +50,35 @@ def _init(court, scope: str):
 def test_crowning_output_names_the_settled_children(court) -> None:
     _seed(
         [
-            {"id": "epic-1", "type": "epic", "title": "the epic"},
+            {"id": "x-00000001", "type": "epic", "title": "the epic"},
             {
-                "id": "kid-1",
-                "parent": "epic-1",
+                "id": "x-00000002",
+                "parent": "x-00000001",
                 "status": "done",
                 "title": "drain cost measured at 11 seconds per call",
             },
             {
-                "id": "kid-2",
-                "parent": "epic-1",
+                "id": "x-00000003",
+                "parent": "x-00000001",
                 "status": "superseded",
                 "title": "megawalk dispatch, moved to compose",
             },
             {
-                "id": "kid-3",
-                "parent": "epic-1",
+                "id": "x-00000004",
+                "parent": "x-00000001",
                 "status": "ready",
                 "title": "open work the board already shows",
             },
             {
-                "id": "kid-4",
-                "parent": "epic-2",
+                "id": "x-00000005",
+                "parent": "x-00000006",
                 "status": "done",
                 "title": "another epic's settled row",
             },
         ]
     )
 
-    result = _init(court, "epic-1")
+    result = _init(court, "x-00000001")
 
     assert result.exit_code == 0, result.output
     assert "Settled findings" in result.output
@@ -84,17 +91,17 @@ def test_crowning_output_names_the_settled_children(court) -> None:
 def test_no_settled_children_prints_no_section(court) -> None:
     _seed(
         [
-            {"id": "epic-1", "type": "epic", "title": "the epic"},
+            {"id": "x-00000001", "type": "epic", "title": "the epic"},
             {
-                "id": "kid-1",
-                "parent": "epic-1",
+                "id": "x-00000002",
+                "parent": "x-00000001",
                 "status": "ready",
                 "title": "open work",
             },
         ]
     )
 
-    result = _init(court, "epic-1")
+    result = _init(court, "x-00000001")
 
     assert result.exit_code == 0, result.output
     assert "Settled findings" not in result.output

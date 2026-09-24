@@ -14,10 +14,13 @@ from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+
+_RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 def _node(node_id: str, **overrides) -> dict:
@@ -36,7 +39,7 @@ def _node(node_id: str, **overrides) -> dict:
         "pr_url": None,
         "status": "ready",
         "plan_path": "plans/x.md",
-        "created_at": "2026-01-01T00:00:00+00:00",
+        "created_at": _RECENT_CREATED,
     }
     base.update(overrides)
     if base["status"] == "done":

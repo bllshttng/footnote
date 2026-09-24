@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.paths_testing import use_tmpdir
 
@@ -101,13 +102,7 @@ def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> Non
         if i < done_children:
             child["status"] = "done"
         entries.append(child)
-    # A stale store never re-reads a rewritten seed: drop the db first so
-    # the next open imports the fresh rows (the rust stage_graph contract).
-    for suffix in ("db", "db-wal", "db-shm"):
-        stale = path.with_suffix(f".{suffix}")
-        if stale.exists():
-            stale.unlink()
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(path, entries)
 
 
 def _invoke_drain() -> tuple[int, dict, float]:

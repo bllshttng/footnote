@@ -93,9 +93,9 @@ def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
     # W4 signals present: a human_touch event + a graph node carrying a causal
     # field. The ship is 20 days old, so it has completed the observation
     # window and survival may judge it.
-    rows = [{"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
+    rows = [{"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-00000001", "cost_usd": 5.0}]
     (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": _days_ago(1, hour=9)}) + "\n")
-    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)}]}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-00000001", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)}]}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
     sb = json.loads(res.output)

@@ -99,6 +99,12 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     return tracker, sidecar_dir
 
 
+def _graph_state(path: Path):
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    return read_graph_strict(path), store_export_status(path)
+
+
 def _gh_state(state, url="https://github.com/o/r/pull/7"):
     from fno.graph._reconcile import PrMergeState
 
@@ -258,9 +264,9 @@ def test_backfill_sweep_refused_externally_without_touching_graph(
     rows = [{"id": "EXT-1", "state": "closed", "title": "Done thing"}]
     _wire(monkeypatch, tmp_path, rows, {"EXT-1": {}})
     g = tmp_path / "graph.json"
-    before = g.read_bytes()
+    before = _graph_state(g)
 
     r = runner.invoke(app, ["done", "--backfill"], catch_exceptions=False)
     assert r.exit_code == 1
     assert "refused" in r.output
-    assert g.read_bytes() == before
+    assert _graph_state(g) == before

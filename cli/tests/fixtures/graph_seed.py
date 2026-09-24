@@ -21,6 +21,8 @@ def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list
         entries = json.loads(entries)
     if isinstance(entries, dict):
         entries = entries.get("entries")
+    if isinstance(entries, Iterable) and not isinstance(entries, (str, bytes, dict, list)):
+        entries = list(entries)
     if not isinstance(entries, list):
         raise TypeError("graph seed must be an entries list or an entries document")
     rows = [dict(entry) for entry in entries]

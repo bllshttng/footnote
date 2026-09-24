@@ -107,6 +107,12 @@ def _node_row(graph: Path, node_id: str, task_id: str) -> dict:
     return next(r for r in node["tasks"] if r["id"] == task_id)
 
 
+def _store_state(graph: Path):
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    return read_graph_strict(graph), store_export_status(graph)
+
+
 def _live_pid() -> int:
     """This test process's pid: provably live for the claim's duration."""
     return os.getpid()
@@ -167,12 +173,12 @@ def test_task_list_no_plan_refuses_and_writes_nothing(
     """
     from fno.graph import cli as graph_cli
 
-    before = tmp_graph.read_text(encoding="utf-8")
+    before = _store_state(tmp_graph)
     result = runner.invoke(graph_cli.task_app, ["list", "x-t2"])
     assert result.exit_code == graph_cli.TASK_NO_GRAIN_EXIT
     assert result.exit_code != 2, "2 halts the wave"
     assert "no plan bound to x-t2" in result.output
-    assert tmp_graph.read_text(encoding="utf-8") == before
+    assert _store_state(tmp_graph) == before
 
     ok = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
     assert ok.exit_code == 0, ok.output
@@ -301,15 +307,17 @@ def test_unreadable_plan_is_a_named_refusal(
     FileNotFoundError traceback; the graph is untouched."""
     from fno.graph import cli as graph_cli
 
-    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    entries = read_graph_strict(tmp_graph)
     entries[0]["plan_path"] = str(tmp_path / "gone.md")
     seed_graph(tmp_graph, json.dumps({"entries": entries}))
-    before = tmp_graph.read_text(encoding="utf-8")
+    before = _store_state(tmp_graph)
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
     assert result.exit_code == 1
     assert "not readable" in result.output and "gone.md" in result.output
-    assert tmp_graph.read_text(encoding="utf-8") == before
+    assert _store_state(tmp_graph) == before
 
 
 def test_second_list_read_is_read_only(
@@ -321,12 +329,12 @@ def test_second_list_read_is_read_only(
 
     first = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
     assert first.exit_code == 0, first.output
-    settled = tmp_graph.read_text(encoding="utf-8")
+    settled = _store_state(tmp_graph)
 
     second = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
     assert second.exit_code == 0, second.output
     assert json.loads(second.output) == json.loads(first.output)
-    assert tmp_graph.read_text(encoding="utf-8") == settled
+    assert _store_state(tmp_graph) == settled
 
 
 # -- AC3: dead-pid recovery --
@@ -486,7 +494,9 @@ def test_malformed_plan_is_a_named_refusal(
         "## Execution Strategy\n\n```yaml\ntasks: [oops\n```\n",
         encoding="utf-8",
     )
-    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    entries = read_graph_strict(tmp_graph)
     entries[0]["plan_path"] = str(plan)
     seed_graph(tmp_graph, json.dumps({"entries": entries}))
 
@@ -513,16 +523,18 @@ def test_idless_plan_poll_never_takes_the_lock(
     plan.write_text(
         "---\ntitle: empty\nstatus: ready\n---\n\n# empty\n", encoding="utf-8"
     )
-    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    entries = read_graph_strict(tmp_graph)
     entries[0]["plan_path"] = str(plan)
     seed_graph(tmp_graph, json.dumps({"entries": entries}))
-    before = tmp_graph.read_text(encoding="utf-8")
+    before = _store_state(tmp_graph)
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
     assert result.exit_code == graph_cli.TASK_NO_GRAIN_EXIT
     assert result.exit_code != 2, "2 halts the wave"
     assert "no tasks declared" in result.output
-    assert tmp_graph.read_text(encoding="utf-8") == before
+    assert _store_state(tmp_graph) == before
 
 
 def test_overlong_task_key_refused_at_validation(
@@ -566,11 +578,13 @@ def test_overlong_task_key_refused_at_validation(
 
 def _rebind_plan(graph: Path, node_id: str, plan_path: str) -> None:
     """Rewrite one node's stored plan_path, leaving the rest of the graph."""
-    data = json.loads(graph.read_text(encoding="utf-8"))
-    for e in data["entries"]:
+    from fno.graph.store import read_graph_strict
+
+    data = read_graph_strict(graph)
+    for e in data:
         if e.get("id") == node_id:
             e["plan_path"] = plan_path
-    graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    seed_graph(graph, data)
 
 
 def test_tilde_plan_path_resolves(
@@ -650,7 +664,7 @@ def test_unreadable_graph_does_not_collide_with_held(tmp_graph: Path):
     that does not exist."""
     from fno.graph import cli as graph_cli
 
-    tmp_graph.write_text("{ not json", encoding="utf-8")
+    tmp_graph.with_suffix(".db").write_bytes(b"not sqlite")
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
     assert result.exit_code == graph_cli.TASK_GRAPH_UNREADABLE_EXIT
     assert result.exit_code != 3, "3 means a peer holds the task"
@@ -1084,4 +1098,3 @@ def test_takeover_give_back_over_a_gone_owner_row(
     assert non_holder.exit_code == 3
     assert "--takeover" in non_holder.output
     assert "re-run with --owner" not in non_holder.output
-

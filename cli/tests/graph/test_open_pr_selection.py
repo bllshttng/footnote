@@ -69,21 +69,14 @@ def graph_file(tmp_path, monkeypatch):
     path = tmp_path / "graph.json"
 
     def write(entries):
-        # graph.json on disk is a JSON object keyed by "entries" (a bare list
-        # is treated as corrupt by _read_json -> []), so wrap accordingly.
-        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(path, entries)
         return path
 
-    # The selection decision is served by the keeper now: the graph is pinned
-    # through FNO_CONFIG (the client seam), and claims resolve under a
+    # The selection decision is served by the keeper; claims resolve under a
     # redirected root - never the operator's real claims.
-    config = tmp_path / "config.toml"
-    config.write_text(
-        f'[paths]\ngraph_json = "{path}"\n', encoding="utf-8"
-    )
     (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("FNO_CONFIG", str(config))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: path)
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: path)
     monkeypatch.setattr(
         "fno.graph.cli._live_claimed_node_ids", lambda **_kwargs: set()
