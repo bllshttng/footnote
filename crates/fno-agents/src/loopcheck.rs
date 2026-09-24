@@ -2021,8 +2021,7 @@ pub(crate) fn event_lines(journal: &Path) -> Result<Vec<String>, String> {
 /// attestations. A torn write leaves a corrupt `review_attestation` in the file
 /// and the gate then reports "no head-pinned review_attestation", which is the
 /// same class of lie this node exists to delete - so the count is surfaced in
-/// the reason. Mirrors `open_review_findings`, which already does this for
-/// `review_finding`.
+/// the reason.
 pub fn unattested_reviewers_scan(
     events_path: &Path,
     reviewers: &[String],
@@ -2065,101 +2064,43 @@ struct OpenFinding {
     first_line: String,
 }
 
-/// Scan events.jsonl for OPEN operator review findings scoped to `node`.
-///
-/// Returns `(open findings sorted by id, malformed-line count)`. A finding is
-/// open until an explicit `review_finding_resolved` clears it - node-scoped and
-/// NOT head-pinned, so a new commit never auto-clears an operator's comment
-/// (Locked Decision 2). Malformed finding lines notice-not-block (AC3-FR): a
-/// line that is unparseable JSON but carries the literal `review_finding`, or a
-/// parsed `review_finding` missing its id, is our own writer's corrupted output;
-/// it is counted for the deny/audit notice but NEVER holds the gate. Any read
-/// failure yields no findings (the gate is only ADDED by evidence, never
-/// invented from an unreadable file).
-fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
-    // Any read failure yields no findings (the gate is only ADDED by
-    // evidence, never invented from an unreadable store).
-    let content = match event_lines(events_path) {
-        Ok(lines) => lines.join("\n"),
-        Err(_) => return (Vec::new(), 0),
-    };
-    // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
-    // id (shouldn't happen - ids are minted) just refreshes the first_line.
-    let mut findings: Vec<(String, String)> = Vec::new();
-    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut malformed = 0usize;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+/// Open review findings for `node` from the findings store: the typed rows
+/// map to the gate's view, a store read error is named (never read as zero).
+fn open_findings_from_store(
+    graph: &std::path::Path,
+    node: &str,
+) -> (Vec<OpenFinding>, Option<String>) {
+    match crate::backlog::api::findings(&crate::backlog::api::Store::new(graph), Some(node), false)
+    {
+        Ok(rows) => {
+            let mut open: Vec<OpenFinding> = rows
+                .iter()
+                .filter(|f| f.resolved_at.is_none())
+                .map(|f| OpenFinding {
+                    id: f.finding_id.clone(),
+                    first_line: f.body.lines().next().unwrap_or("").to_string(),
+                })
+                .collect();
+            open.sort_by(|a, b| a.id.cmp(&b.id)); // deterministic deny reason
+            (open, None)
         }
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            // Only OUR corrupted output counts toward the notice; unrelated
-            // corruption from another writer is not a finding concern.
-            if line.contains("review_finding") {
-                malformed += 1;
-            }
-            continue;
-        };
-        match val.get("type").and_then(|v| v.as_str()) {
-            Some("review_finding") => {
-                if val.pointer("/data/node").and_then(|v| v.as_str()) != Some(node) {
-                    continue;
-                }
-                match val.pointer("/data/finding_id").and_then(|v| v.as_str()) {
-                    Some(id) => {
-                        let first = val
-                            .pointer("/data/text")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
-                        if let Some(slot) = findings.iter_mut().find(|(fid, _)| fid == id) {
-                            slot.1 = first;
-                        } else {
-                            findings.push((id.to_string(), first));
-                        }
-                    }
-                    None => malformed += 1, // review_finding without an id
-                }
-            }
-            Some("review_finding_resolved") => {
-                if let Some(id) = val.pointer("/data/finding_id").and_then(|v| v.as_str()) {
-                    resolved.insert(id.to_string());
-                }
-            }
-            _ => {}
-        }
+        Err(e) => (Vec::new(), Some(e.0)),
     }
-    let mut open: Vec<OpenFinding> = findings
-        .into_iter()
-        .filter(|(id, _)| !resolved.contains(id))
-        .map(|(id, first_line)| OpenFinding { id, first_line })
-        .collect();
-    open.sort_by(|a, b| a.id.cmp(&b.id)); // deterministic deny reason
-    (open, malformed)
 }
 
 /// Deny reason for an open-finding gate: quote the first finding (id + first
-/// line) + the resolve remedy, plus a `[+N more]` count and any malformed-line
-/// notice so nothing vanishes silently.
-fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String {
+/// line) + the resolve remedy, plus a `[+N more]` count so nothing vanishes
+/// silently.
+fn build_findings_block_reason(open: &[OpenFinding]) -> String {
     let f = &open[0];
     let more = if open.len() > 1 {
         format!(" [+{} more]", open.len() - 1)
     } else {
         String::new()
     };
-    let notice = if malformed > 0 {
-        format!(" ({malformed} malformed finding line(s) ignored)")
-    } else {
-        String::new()
-    };
     format!(
-        "open review finding {}: {} - address it, then `fno backlog annotate resolve {}`{}{}",
-        f.id, f.first_line, f.id, more, notice
+        "open review finding {}: {} - address it, then `fno backlog note --resolve {}`{}",
+        f.id, f.first_line, f.id, more
     )
 }
 
@@ -5771,7 +5712,7 @@ fn local_latest_attestations(
         // Under the pair key a peer's `fail` revokes only the peer's own pass;
         // the author's `pass` still counts toward coverage. Coverage counts
         // reviews performed, not approvals granted - the hold on a bad review
-        // lives on `open_review_findings` and on `unattested_reviewers_scan`,
+        // lives on the findings store gate and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
         // A retraction names ONE pass, by head. When the pair's entry already
         // describes a different (newer) head, the named pass is superseded and
@@ -8237,17 +8178,20 @@ pub(crate) fn decide_with_payload(
     }
 
     // node_id is resolved once above, beside the <help> distress emit.
-    let (open_findings, malformed_findings) = match node_id.as_deref() {
-        Some(n) => open_review_findings(&project_events, n),
-        None => (Vec::new(), 0),
+    // Findings live in the store, not a rotating journal: the reader names a
+    // read error instead of reading it as zero (AC5 - could-not-read is not
+    // zero).
+    let (open_findings, findings_read_error) = match node_id.as_deref() {
+        Some(n) => open_findings_from_store(&crate::graph_get::default_graph_path(), n),
+        None => (Vec::new(), None),
     };
-    if malformed_findings > 0 {
+    if let Some(error) = &findings_read_error {
         emit(
-            "loop_check_malformed_finding",
+            "loop_check_finding_store_error",
             serde_json::json!({
                 "session_id": session_id,
                 "node": node_id,
-                "malformed_lines": malformed_findings
+                "error": error
             }),
         );
     }
@@ -8376,11 +8320,17 @@ pub(crate) fn decide_with_payload(
         // the session gives up rather than looping forever on an unresolved
         // finding. Fires on a promise OR a mute-probe (the paths that would
         // otherwise terminate-allow), never on an ordinary working fire.
-        if !open_findings.is_empty()
+        if (!open_findings.is_empty() || findings_read_error.is_some())
             && !backstop_tripped
             && (intent == Intent::Promise || consecutive_after >= MUTE_PROBE_N)
         {
-            let reason = build_findings_block_reason(&open_findings, malformed_findings);
+            let reason = match &findings_read_error {
+                Some(error) => format!(
+                    "finding store unreadable for {}: {error} - the gate refuses to read it as zero",
+                    node_id.as_deref().unwrap_or("?")
+                ),
+                None => build_findings_block_reason(&open_findings),
+            };
             fire_row(
                 "block",
                 if intent == Intent::Promise {
@@ -8394,7 +8344,7 @@ pub(crate) fn decide_with_payload(
                     "ci": last_ci,
                     "reviewed": false,
                     "open_findings": open_findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
-                    "malformed_findings": malformed_findings
+                    "finding_store_error": findings_read_error
                 }),
             );
             return (
@@ -9047,8 +8997,11 @@ pub(crate) fn decide_with_payload(
                 // session whose lease renewal succeeds and whose harness can
                 // idle; a fall-through there must not reach a terminal built
                 // from absence.
-                let observed_async_wait =
-                    async_wait_class(&pr_info, open_findings.is_empty(), head_shipped);
+                let observed_async_wait = async_wait_class(
+                    &pr_info,
+                    open_findings.is_empty() && findings_read_error.is_none(),
+                    head_shipped,
+                );
 
                 //: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
@@ -9201,7 +9154,7 @@ pub(crate) fn decide_with_payload(
                         build_block_reason(
                             &pr_info,
                             &head_sha,
-                            open_findings.is_empty(),
+                            open_findings.is_empty() && findings_read_error.is_none(),
                             head_shipped,
                         )
                     });
@@ -16975,67 +16928,53 @@ git_bounded();";
         );
     }
 
-    // ── operator review-finding gate ────────────────────────────────
-
     #[test]
-    fn review_finding_open_then_resolved_clears() {
-        // AC2-HP: an open review_finding gates; an explicit resolve clears it.
+    fn store_findings_open_blocks_and_resolved_does_not() {
         let tmp = tempfile::tempdir().unwrap();
-        let open = write_events(
-            tmp.path(),
-            &[
-                r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one in the loop\nsecond line"}}"#,
-            ],
-        );
-        let (findings, malformed) = open_review_findings(&open, "x-1");
-        assert_eq!(malformed, 0);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].id, "f1");
-        assert_eq!(findings[0].first_line, "off-by-one in the loop"); // first line only
+        let graph = tmp.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({"entries": [
+                {"id": "x-1", "slug": "x-1", "title": "n", "type": "feature",
+                 "status": "ready", "priority": "p1"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let store = crate::backlog::api::Store::new(&graph);
+        let receipt = crate::backlog::api::finding_create(
+            &store,
+            "x-1",
+            crate::backlog::api::FindingInput {
+                body: "off-by-one in the loop\nsecond line".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (open, error) = open_findings_from_store(&graph, "x-1");
+        assert!(error.is_none());
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, receipt.finding_id);
+        assert_eq!(open[0].first_line, "off-by-one in the loop");
 
-        // resolve clears it (node-scoped, only an explicit resolve).
-        let resolved = write_events(
-            tmp.path(),
-            &[
-                r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one"}}"#,
-                r#"{"ts":"t2","type":"review_finding_resolved","source":"observer","data":{"finding_id":"f1"}}"#,
-            ],
-        );
-        assert!(open_review_findings(&resolved, "x-1").0.is_empty());
+        crate::backlog::api::finding_resolve(&store, &receipt.finding_id, Some("s1")).unwrap();
+        let (open, error) = open_findings_from_store(&graph, "x-1");
+        assert!(error.is_none());
+        assert!(open.is_empty(), "a resolved finding never gates");
     }
 
     #[test]
-    fn review_finding_is_node_scoped() {
-        // A finding for a different node must not gate this node.
+    fn store_findings_read_error_is_named_not_zero() {
+        // A graph path whose db is an unwritable directory: the read fails
+        // and the helper surfaces the error instead of an empty list.
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_events(
-            tmp.path(),
-            &[
-                r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-OTHER","text":"not mine"}}"#,
-            ],
-        );
-        assert!(open_review_findings(&p, "x-mine").0.is_empty());
-        assert_eq!(open_review_findings(&p, "x-OTHER").0.len(), 1);
-    }
-
-    #[test]
-    fn review_finding_malformed_notices_not_blocks() {
-        // AC3-FR: a structurally-unparseable review_finding line does NOT block
-        // (no open finding), but is counted for the audit notice. A review_finding
-        // missing its id is likewise a malformed notice, never a gating finding.
-        let tmp = tempfile::tempdir().unwrap();
-        // A truncated (unparseable) line that still carries the review_finding marker.
-        let truncated = r#"{"ts":"t","type":"review_finding","data":{"finding_id":"f1"#;
-        let id_less = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"node":"x-1","text":"no id"}}"#;
-        let good = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"good","node":"x-1","text":"real one"}}"#;
-        let p = write_events(tmp.path(), &[truncated, id_less, good]);
-        let (findings, malformed) = open_review_findings(&p, "x-1");
-        assert_eq!(findings.len(), 1, "only the well-formed finding gates");
-        assert_eq!(findings[0].id, "good");
-        assert_eq!(
-            malformed, 2,
-            "the truncated line + the id-less line are noticed"
-        );
+        let graph = tmp.path().join("graph.json");
+        let db = tmp.path().join("graph.db");
+        std::fs::create_dir(&db).unwrap();
+        std::fs::write(&graph, serde_json::json!({"entries": []}).to_string()).unwrap();
+        let (open, error) = open_findings_from_store(&graph, "x-1");
+        assert!(open.is_empty());
+        assert!(error.is_some(), "could-not-read must not read as zero");
     }
 
     #[test]
@@ -17050,12 +16989,11 @@ git_bounded();";
                 first_line: "another".into(),
             },
         ];
-        let r = build_findings_block_reason(&open, 1);
+        let r = build_findings_block_reason(&open);
         assert!(r.contains("aaa"));
         assert!(r.contains("the bug"));
-        assert!(r.contains("fno backlog annotate resolve aaa"));
+        assert!(r.contains("fno backlog note --resolve aaa"));
         assert!(r.contains("[+1 more]"));
-        assert!(r.contains("1 malformed"));
     }
 
     #[test]

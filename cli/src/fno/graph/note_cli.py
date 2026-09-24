@@ -23,7 +23,7 @@ from fno.graph.cli import cli
 # `monkeypatch.setattr("fno.graph.cli._graph_path", ...)` seam keeps working.
 @cli.command("note")
 def cmd_note(
-    task_id: str = typer.Argument(..., help="Node id (or slug) whose current state the note replaces."),
+    task_id: Optional[str] = typer.Argument(None, help="Node id (or slug) whose current state the note replaces."),
     text: Optional[str] = typer.Argument(None, help="The note body (replaces current state)."),
     body_file: Optional[Path] = typer.Option(
         None,
@@ -36,12 +36,29 @@ def cmd_note(
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the state receipt as JSON."),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
+    blocking: bool = typer.Option(
+        False, "--blocking",
+        help="Record the note as a blocking review finding: it holds the loop gate until resolved.",
+    ),
+    resolve: Optional[str] = typer.Option(
+        None, "--resolve", help="Resolve the finding id instead of writing a note.",
+    ),
+    block_cmd: Optional[str] = typer.Option(
+        None, "--block-cmd", help="With --blocking: the annotated block's command line.",
+    ),
+    block_excerpt_file: Optional[str] = typer.Option(
+        None, "--block-excerpt-file",
+        help="With --blocking: path to the block excerpt, or '-' to read it from stdin.",
+    ),
 ) -> None:
     """Record progress on a node by REPLACING its current state.
 
     The prior state lands in permanent history. Read it with
     `fno backlog notes history <id>`. Nobody bound refuses BEFORE
     the write: exit 3. No send confirmed: exit 4. ``--quiet`` writes anyway.
+
+    ``--blocking`` records the body as a review finding that holds the loop
+    gate; clear it with ``fno backlog note --resolve <finding-id>``.
     """
     from fno.decide import (
         UnmeasuredClaimError,
@@ -53,6 +70,32 @@ def cmd_note(
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
+    if resolve is not None and blocking:
+        typer.echo("Error: --blocking and --resolve are separate routes", err=True)
+        raise typer.Exit(code=2)
+    if resolve is None and not task_id:
+        typer.echo("Error: a node id is required (or pass --resolve <finding-id>)", err=True)
+        raise typer.Exit(code=2)
+
+    graph_path = graph_cli._graph_path()
+
+    try:
+        identity = resolve_self_identity()
+    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
+        identity = None
+    session_id = identity.session_id if identity is not None and identity.session_id else None
+
+    if resolve is not None:
+        code, receipt = _write_resolve(resolve, session_id=session_id, graph_path=graph_path)
+        if code != 0:
+            raise typer.Exit(code=code)
+        if receipt is None:
+            typer.echo("Error: the note action returned no receipt", err=True)
+            raise typer.Exit(code=1)
+        shown = json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
+        _echo_receipt(shown)
+        return
+
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
 
@@ -63,14 +106,6 @@ def cmd_note(
     except (UnresolvableCitationError, UnmeasuredClaimError) as exc:
         typer.echo(f"Error: note refused: {exc}", err=True)
         raise typer.Exit(code=1)
-
-    try:
-        identity = resolve_self_identity()
-    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
-        identity = None
-    session_id = identity.session_id if identity is not None and identity.session_id else None
-
-    graph_path = graph_cli._graph_path()
 
     # Archived refusal BEFORE the write, exact PR 1871 remedy (AC16); quiet
     # mode never bypasses it (it guards the write, not the delivery). Live
@@ -88,16 +123,34 @@ def cmd_note(
         raise typer.Exit(code=1)
 
     # Refuse BEFORE the write: an unread note is a silent drop wearing a
-    # receipt. The shipped walk answers for the non-quiet path.
-    from fno.backlog.note_notify import Refused, NoteReaders, deliver, readers_before_append
+    # receipt. The shipped walk answers for the non-quiet path. A blocking
+    # finding skips the nobody-bound refusal: with no live reader it still
+    # writes and gates the next worker (AC6).
+    from fno.backlog.note_notify import (
+        Refused,
+        NoteReaders,
+        deliver,
+        deliver_finding,
+        readers_before_append,
+    )
 
     resolved = None if quiet else readers_before_append(task_id, graph_path)
     if isinstance(resolved, Refused):
-        typer.echo(resolved.message, err=True)
-        raise typer.Exit(code=resolved.exit_code)
-    readers = resolved
+        if not (blocking and resolved.exit_code == 3):
+            typer.echo(resolved.message, err=True)
+            raise typer.Exit(code=resolved.exit_code)
+        readers = None
+    else:
+        readers = resolved
 
     node_target = readers.node_id if readers is not None else task_id
+    extra: list[str] = []
+    if blocking:
+        extra.append("--blocking")
+        if block_cmd:
+            extra.extend(["--block-cmd", block_cmd])
+        if block_excerpt_file:
+            extra.extend(["--block-excerpt-file", block_excerpt_file])
     code, receipt = _write_state(
         node_target,
         text,
@@ -105,6 +158,7 @@ def cmd_note(
         session_id=session_id,
         graph_path=graph_path,
         reads=read_rows,
+        extra=extra,
     )
     if code != 0:
         # 1 = budget refusal, 3 = a stale revision conflict; the child
@@ -119,6 +173,15 @@ def cmd_note(
         raise typer.Exit(code=1)
     shown = json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
     _echo_receipt(shown)
+    if blocking:
+        finding_id = receipt.get("finding_id")
+        if receipt.get("routed") != "finding" or not finding_id:
+            typer.echo("Error: the finding write returned no finding id", err=True)
+            raise typer.Exit(code=1)
+        if readers is None:
+            typer.echo(f"recorded {finding_id}; no live reader, it gates the next worker")
+            return
+        raise typer.Exit(code=deliver_finding(readers, str(finding_id), json_output=json_output))
     warn_if_note_is_long(text)
     # Terminal-routed notes delivered too: the write went to history, but the
     # bound readers are still the people to tell.
@@ -199,6 +262,7 @@ def _write_state(
     session_id: Optional[str],
     graph_path,
     reads=None,
+    extra: Optional[list[str]] = None,
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -216,7 +280,34 @@ def _write_state(
         argv.extend(["--self-session", session_id])
     if quiet:
         argv.append("--quiet")
+    argv.extend(extra or [])
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
+    if proc.returncode != 0:
+        import sys
+
+        sys.stderr.write(proc.stderr or "")
+        return proc.returncode, None
+    return 0, _receipt(proc.stdout)
+
+
+def _write_resolve(
+    finding_id: str,
+    *,
+    session_id: Optional[str],
+    graph_path,
+) -> "tuple[int, Optional[dict]]":
+    """One native `backlog-note --resolve` invocation: no node, no body."""
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
+        raise typer.Exit(code=1)
+    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--json",
+            "--resolve", finding_id]
+    if session_id:
+        argv.extend(["--self-session", session_id])
+    proc = subprocess.run(argv, text=True, check=False, capture_output=True)
     if proc.returncode != 0:
         import sys
 

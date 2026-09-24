@@ -85,6 +85,15 @@ def pointer(node_id: str, text: str) -> str:
     return f"note on {node_id}: {head} Read: fno backlog get {node_id}"
 
 
+def finding_pointer(node_id: str, finding_id: str) -> str:
+    """One line naming the node, the finding id and the resolve command."""
+    return (
+        f"finding {finding_id} on {node_id}: blocking. "
+        f"Read: fno backlog notes findings {node_id}. "
+        f"Clear: fno backlog note --resolve {finding_id}"
+    )
+
+
 def note_readers(
     entry: dict,
     *,
@@ -251,6 +260,19 @@ def send_note(readers: NoteReaders, text: str) -> list[tuple[str, bool]]:
 
 def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
     """Send to every bound reader; the exit code reports confirmed delivery."""
+    return _deliver(readers, pointer(readers.node_id, text), json_output=json_output)
+
+
+def deliver_finding(readers: NoteReaders, finding_id: str, *, json_output: bool) -> int:
+    """Send the finding pointer to every bound reader; the exit code reports
+    confirmed delivery."""
+    return _deliver(
+        readers, finding_pointer(readers.node_id, finding_id), json_output=json_output
+    )
+
+
+def _deliver(readers: NoteReaders, body: str, *, json_output: bool) -> int:
+    """Send one prebuilt body to every bound reader."""
     if not readers.recipients:
         typer.echo(
             f"notify: you are the only reader bound to {readers.node_id} "
@@ -258,7 +280,8 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
             err=json_output,
         )
         return 0
-    receipts = send_note(readers, text)
+    lines = [_one_receipt(address, why, body) for address, why in readers.recipients]
+    receipts = [(line, line.startswith(_UNDELIVERED)) for line in lines]
     for line, undelivered in receipts:
         typer.echo(line, err=undelivered or json_output)
     if any(line.startswith("notified ") for line, _ in receipts):

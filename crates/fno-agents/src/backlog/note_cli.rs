@@ -29,6 +29,10 @@ struct NoteArgs {
     graph: Option<PathBuf>,
     self_session: Option<String>,
     reads: Option<String>,
+    blocking: bool,
+    resolve: Option<String>,
+    block_cmd: Option<String>,
+    block_excerpt_file: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
@@ -48,6 +52,10 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         graph: None,
         self_session: None,
         reads: None,
+        blocking: false,
+        resolve: None,
+        block_cmd: None,
+        block_excerpt_file: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -104,6 +112,31 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
                     .clone()
                     .into();
             }
+            "--blocking" => out.blocking = true,
+            "--resolve" => {
+                i += 1;
+                out.resolve = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--resolve needs a finding id".to_string())?
+                        .clone(),
+                );
+            }
+            "--block-cmd" => {
+                i += 1;
+                out.block_cmd = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--block-cmd needs text".to_string())?
+                        .clone(),
+                );
+            }
+            "--block-excerpt-file" => {
+                i += 1;
+                out.block_excerpt_file = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--block-excerpt-file needs a path or -".to_string())?
+                        .clone(),
+                );
+            }
             "--self-session" => {
                 i += 1;
                 out.self_session = Some(
@@ -140,6 +173,11 @@ pub fn run_note(args: &[String]) -> i32 {
         }
     };
     let graph = parsed.graph.clone().unwrap_or_else(default_graph_path);
+    // Finding routes. `--resolve` needs no node and no body; `--blocking`
+    // is routed after entry resolution below. Neither touches current state.
+    if let Some(finding_id) = parsed.resolve.clone() {
+        return run_finding_resolve(&parsed, &graph, &finding_id);
+    }
     let body = match read_body(&parsed) {
         Ok(b) => b,
         Err(e) => {
@@ -169,6 +207,15 @@ pub fn run_note(args: &[String]) -> i32 {
         .to_string();
 
     // Machine and wave producers: history-only, no recipients, no state.
+    if parsed.blocking {
+        let Some(body) = body else {
+            eprintln!(
+                "fno-agents backlog-note: a blocking finding needs a body (positional, --body-file, or --stdin)"
+            );
+            return 2;
+        };
+        return run_finding_create(&parsed, &graph, &node_id, body);
+    }
     if parsed.machine.is_some() || parsed.wave {
         return run_machine(&parsed, &graph, &node_id, body);
     }
@@ -250,6 +297,119 @@ fn run_machine(
         crate::backlog::receipt::emit_line(&format!("recorded {node_id}: history"));
     }
     0
+}
+
+/// The --resolve route: stamp resolved_at through the findings API and emit
+/// the telemetry event after commit. Exit 0 resolved, 1 unknown id or store
+/// error, 2 usage.
+fn run_finding_resolve(parsed: &NoteArgs, graph: &std::path::Path, finding_id: &str) -> i32 {
+    if parsed.blocking {
+        eprintln!("fno-agents backlog-note: --blocking and --resolve are separate routes");
+        return 2;
+    }
+    let receipt = crate::backlog::api::finding_resolve(
+        &crate::backlog::api::Store::new(graph),
+        finding_id,
+        parsed.self_session.as_deref(),
+    );
+    match receipt {
+        Ok(r) => {
+            emit_finding_event(
+                "review_finding_resolved",
+                json!({ "finding_id": r.finding_id, "status": r.status }),
+            );
+            let out = json!({
+                "status": "ok", "routed": "resolve", "finding_id": r.finding_id,
+                "resolve_status": r.status, "resolved_at": r.resolved_at, "version": r.version,
+                "line": format!("resolved {}: {} (at {})", r.finding_id, r.status, r.resolved_at),
+            });
+            emit_human(parsed.json_out, &out);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {}", e.0);
+            1
+        }
+    }
+}
+
+/// The --blocking route: create the finding through the findings API, emit
+/// the telemetry event after commit, print the receipt. Exit 0 written,
+/// 1 refused or failed, 2 usage.
+fn run_finding_create(
+    parsed: &NoteArgs,
+    graph: &std::path::Path,
+    node_id: &str,
+    body: String,
+) -> i32 {
+    let excerpt = read_excerpt(&parsed.block_excerpt_file);
+    let excerpt = match excerpt {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            return 1;
+        }
+    };
+    let receipt = crate::backlog::api::finding_create(
+        &crate::backlog::api::Store::new(graph),
+        node_id,
+        crate::backlog::api::FindingInput {
+            body,
+            block_cmd: parsed.block_cmd.clone(),
+            block_excerpt: excerpt,
+            source_session_id: parsed.self_session.clone(),
+            source_harness: None,
+        },
+    );
+    match receipt {
+        Ok(r) => {
+            emit_finding_event(
+                "review_finding",
+                json!({ "finding_id": r.finding_id, "node_id": r.node_id }),
+            );
+            let out = json!({
+                "status": "ok", "routed": "finding", "finding_id": r.finding_id,
+                "node_id": r.node_id, "version": r.version,
+                "line": format!("recorded {} on {}", r.finding_id, r.node_id),
+            });
+            emit_human(parsed.json_out, &out);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {}", e.0);
+            1
+        }
+    }
+}
+
+/// The excerpt source: `-` reads stdin, a path reads the file, absent is None.
+fn read_excerpt(source: &Option<String>) -> Result<Option<String>, String> {
+    match source.as_deref() {
+        None => Ok(None),
+        Some("-") => {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("excerpt stdin read failed: {e}"))?;
+            Ok(Some(s))
+        }
+        Some(path) => Ok(Some(
+            std::fs::read_to_string(path).map_err(|e| format!("excerpt file read failed: {e}"))?,
+        )),
+    }
+}
+
+/// Telemetry after commit, best-effort: both journals, pointer payload only
+/// (the store holds the body).
+fn emit_finding_event(event_type: &str, data: Value) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = crate::paths::events_path(&cwd);
+    let global = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.clone())
+        .join(".fno/events.jsonl");
+    crate::loopcheck::emit_to_both(&project, &global, event_type, data);
 }
 
 /// Set the bounded `state_needs_refresh` marker in the row extras. Runs the
