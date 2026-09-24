@@ -7,11 +7,9 @@ session and do not create review-worker rows. Coverage:
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
     row carrying the WORKER's harness session id (never the spawner's, never
     the 8-hex short id). Phase: the message's verb labels the row via the
-    spawn_phase.toml table - do, review, blueprint, think, ship all stamp
-    their spellings; an unlabeled --node spawn is refused (x-007c), so no
-    row is ever born mislabeled or driverless.
-  - Review labels and review seeds refuse before launch; invalid phases also
-    refuse before launch.
+    spawn_phase.toml table - do, blueprint, think, ship stamp their
+    spellings. Review labels and seeds refuse before any worker launches.
+    An unlabeled --node spawn is refused (x-007c), so rows stay labeled.
   - AC2: `session add --phase review` stamps (exit 2 before the enum gained
     review), and the roster renders the review slot between do and ship.
   - Closing: `session reap-open --phase review` fills ended_at and KEEPS the
