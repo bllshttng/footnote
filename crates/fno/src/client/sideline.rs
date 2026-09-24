@@ -761,7 +761,9 @@ impl View {
     ) -> bool {
         match display.get(i) {
             Some(DisplayRow::CardDetail(_)) => {
-                base || self.selector == Some(i.saturating_sub(1))
+                base || self.selector == Some(i)
+                    || self.hover_row == Some(i)
+                    || self.selector == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
             }
             Some(DisplayRow::Agent(_)) => {
