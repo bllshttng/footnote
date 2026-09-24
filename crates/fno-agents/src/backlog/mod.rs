@@ -2003,10 +2003,19 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
-        raw[0].as_object_mut().unwrap().remove("tags");
+        let one = raw[0].as_object_mut().unwrap();
+        for key in [
+            "tags",
+            "locked_by",
+            "locked_at",
+            "dispatch_verb",
+            "sessions",
+        ] {
+            one.remove(key);
+        }
         std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
-        // Seed the store from the raw file: the db now holds ab-one with no
-        // tags key, exactly what the last publish wrote.
+        // Seed from an unlocked raw row so ownership normalization cannot
+        // change its status while this test isolates the missing tags key.
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
