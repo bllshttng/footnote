@@ -2120,7 +2120,7 @@ pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 /// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
 /// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
 /// arm; every other arm already returns `Err` before this is checked.
-fn should_delegate_claude_live_attach(
+pub(crate) fn should_delegate_claude_live_attach(
     harness: &str,
     claim_uuid: &Option<String>,
     mux_session: &Option<String>,
@@ -2141,6 +2141,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         name,
         print_command,
         message,
+        message_already_queued,
         cross_project,
         cwd: cwd_override,
         account,
@@ -2477,7 +2478,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     }
 
     // Live claude rows are read from the account's roster and resumed over
-    // control.sock; the Python wake and its supervisor-birth leg are retired.
+    // control.sock. The Working-row mail intercept runs inside the same Rust
+    // route, before idle-row delivery.
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
         return crate::resume_wake::claude_live_route(
             entry,
@@ -2485,6 +2487,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             &row_name,
             cwd,
             message.as_deref(),
+            message_already_queued,
             reentry_plan.as_ref(),
             cross_project,
             home,

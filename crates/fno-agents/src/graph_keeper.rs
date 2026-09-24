@@ -1481,7 +1481,7 @@ fn handle_write_status(state: &StoreState, params: &Value) -> Result<Value, Stor
 /// the external-backend path), `claimed` (optional - live claim ids; when
 /// absent the keeper resolves them from the claims store itself).
 fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    use crate::backlog_ready::{select, NoSuchParent, ReadyOpts};
+    use crate::backlog_ready::{date_filter_from_params, select, NoSuchParent, ReadyOpts};
     use std::collections::BTreeSet;
 
     let opt_str_owned = |k: &str| -> Option<String> {
@@ -1550,15 +1550,19 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             &cached
         }
     };
+    let window = date_filter_from_params(params, opts.now_ms).map_err(StoreError::Invalid)?;
     match select(entries, &opts) {
-        Ok(reply) => Ok(json!({
-            "rows": reply.rows,
-            "drops": reply
-                .drops
-                .iter()
-                .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
-                .collect::<Vec<_>>(),
-        })),
+        Ok(mut reply) => {
+            window.apply(&mut reply.rows);
+            Ok(json!({
+                "rows": reply.rows,
+                "drops": reply
+                    .drops
+                    .iter()
+                    .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
         Err(NoSuchParent(parent)) => Err(StoreError::Invalid(format!("no such node '{parent}'"))),
     }
 }
