@@ -110,12 +110,22 @@ publish = load(".github/workflows/crates-publish.yml")
 publish_jobs = publish["jobs"]
 check(publish_jobs.get("dry-run", {}).get("if") == "github.event_name == 'pull_request'",
       "crate dry-runs remain PR-only")
-publish_if = str(publish_jobs.get("publish", {}).get("if", ""))
-check("github.event_name == 'push'" in publish_if and
-      "startsWith(github.ref, 'refs/tags/v')" in publish_if and
-      "github.event_name == 'workflow_dispatch'" in publish_if and
-      "inputs.confirm == true" in publish_if,
-      "crate publishing remains tag/manual-confirm gated")
+check("publish" not in publish_jobs,
+      "crates-publish.yml carries no publish job; publishing lives in release.yml")
+
+# Build workflows are callable and build-only: release.yml calls them and owns
+# every publish leg behind the release-environment approval.
+for wf_name in ("release-binaries.yml", "release-wheels.yml"):
+    wf = load(f".github/workflows/{wf_name}")
+    wf_events = event_map(wf)
+    call_inputs = (wf_events.get("workflow_call") or {}).get("inputs") or {}
+    check("version" in call_inputs and "ref" in call_inputs,
+          f"{wf_name} is callable with version and ref inputs")
+    check("push" not in wf_events,
+          f"{wf_name} never fires on a tag or branch push")
+    wf_jobs = wf["jobs"]
+    check(not any(j in wf_jobs for j in ("release", "publish-pypi", "update-homebrew-tap", "publish")),
+          f"{wf_name} carries no publish leg; publishing lives in release.yml")
 
 if fails:
     print(f"{len(fails)} workflow contract assertion(s) failed", file=sys.stderr)
