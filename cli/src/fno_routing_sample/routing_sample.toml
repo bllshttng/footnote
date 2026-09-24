@@ -74,10 +74,14 @@ effort = "high"
 
 [[routing.models]]
 # Lane 2: the codex overflow when the cheap lane is capped. effort is
-# harness-shaped and validated against the harness's own surface.
+# harness-shaped and validated against the harness's own surface. A codex
+# row can name a family (sol, astra, terra, luna): route-slot picks the
+# newest listed gpt-<version>-<family> from codex's models_cache.json at
+# spawn. A claude row can name the alias (opus, sonnet, haiku, fable), and
+# claude resolves it. A full id is a pin and never rewritten.
 name = "luna-codex"
 harness = "codex"
-model = "gpt-5.6-luna"
+model = "luna"
 effort = "xhigh"
 
 [[routing.models]]

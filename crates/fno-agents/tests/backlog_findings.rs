@@ -130,7 +130,7 @@ fn findings_survive_backend_flips() {
 fn findings_table_rows_carry_the_typed_columns() {
     let (_dir, graph) = temp_graph("table");
     let store = Store::new(&graph);
-    let receipt = api::finding_create(
+    let _receipt = api::finding_create(
         &store,
         "x-f1",
         FindingInput {
