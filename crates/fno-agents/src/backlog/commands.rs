@@ -214,7 +214,7 @@ pub fn catalog_json() -> Value {
         "groups": groups,
         "group_count": GROUPS.len(),
         "mapped_names": GROUPS.iter().map(|g| g.actions.len()).sum::<usize>(),
-        "exception": "annotate remains callable one release as a forwarding shim; note --blocking replaced it",
+        "exception": "annotate is retired: its spellings refuse, naming note --blocking as the replacement",
     })
 }
 

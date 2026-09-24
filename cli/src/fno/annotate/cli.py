@@ -1,32 +1,23 @@
-"""`fno backlog annotate` - one-release forwarding shim (x-26bd): each action
-rewrites its argv to the `note` spelling, execs this same entrypoint, and one
-stderr line names the replacement.
+"""`fno backlog annotate` - retired (x-26bd): every spelling refuses, naming
+its `note` replacement.
 """
 from __future__ import annotations
-
-import os
-import sys
 
 import typer
 
 from fno.tombstones import tombstone_group_cls
 
-# Three commands from the start (single-command sub-app collapse gotcha: a
-# 1-command Typer flattens the verb away).
+# retired-ok: refusal messages naming the replacement are the gate's own
+# sanctioned shape (scripts/ci/check-retired-command-strings.sh, narrowing 3).
 annotate_app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Record an operator review finding against a node. The finding is a "
-        "durable review_finding event loop-check gates on (blocks terminal-allow "
-        "until resolved) AND a best-effort live-inject to the claim-holding "
-        "session. add | list | resolve."
+        "Retired: `fno backlog note <node> \"<text>\" --blocking` records a "
+        "finding, `fno backlog notes findings [<node>]` reads them, `fno "
+        "backlog note --resolve <id>` clears one."
     ),
     cls=tombstone_group_cls("annotate"),
 )
-
-
-def _forward(new: list[str]) -> None:
-    os.execvp(sys.argv[0], [sys.argv[0], *new])
 
 
 @annotate_app.command("add")
@@ -40,14 +31,9 @@ def add(
         help="Path to a file holding the block excerpt, or '-' to read it from stdin.",
     ),
 ) -> None:
-    """Forward: `fno backlog note <node> "<text>" --blocking`."""
-    typer.echo("annotate is retiring: use fno backlog note <node> \"<text>\" --blocking", err=True)
-    extra = [node, text, "--blocking"]
-    if block_cmd:
-        extra += ["--block-cmd", block_cmd]
-    if block_excerpt_file:
-        extra += ["--block-excerpt-file", block_excerpt_file]
-    _forward(["backlog", "note", *extra])
+    """Refuse: `fno backlog note <node> "<text>" --blocking` replaced this."""
+    typer.echo("annotate is retired: use fno backlog note <node> \"<text>\" --blocking", err=True)
+    raise typer.Exit(code=2)
 
 
 @annotate_app.command("list")
@@ -57,20 +43,15 @@ def list_cmd(
         False, "--json", "-J", help="Emit one JSON object per line instead of a summary."
     ),
 ) -> None:
-    """Forward: `fno backlog notes findings [<node>]`."""
-    typer.echo("annotate is retiring: use fno backlog notes findings [<node>]", err=True)
-    extra = ["backlog", "notes", "findings"]
-    if node:
-        extra += ["--node", node]
-    if as_json:
-        extra.append("--json")
-    _forward(extra)
+    """Refuse: `fno backlog notes findings [<node>]` replaced this."""
+    typer.echo("annotate is retired: use fno backlog notes findings [<node>]", err=True)
+    raise typer.Exit(code=2)
 
 
 @annotate_app.command("resolve")
 def resolve(
     finding_id: str = typer.Argument(..., help="The finding id to resolve."),
 ) -> None:
-    """Forward: `fno backlog note --resolve <finding-id>`."""
-    typer.echo("annotate is retiring: use fno backlog note --resolve <finding-id>", err=True)
-    _forward(["backlog", "note", "--resolve", finding_id])
+    """Refuse: `fno backlog note --resolve <finding-id>` replaced this."""
+    typer.echo("annotate is retired: use fno backlog note --resolve <finding-id>", err=True)
+    raise typer.Exit(code=2)

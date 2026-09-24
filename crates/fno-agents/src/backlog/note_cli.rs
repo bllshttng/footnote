@@ -367,10 +367,19 @@ fn run_finding_create(
                 "review_finding",
                 json!({ "finding_id": r.finding_id, "node_id": r.node_id }),
             );
+            let pointer = finding_pointer_line(&r.node_id, &r.finding_id);
+            let delivery = notice_holder(&r.node_id, &pointer);
+            let line = match &delivery {
+                Some(note) => format!("recorded {} on {}; {note}", r.finding_id, r.node_id),
+                None => format!(
+                    "recorded {} on {}; no live reader, it gates the next worker",
+                    r.finding_id, r.node_id
+                ),
+            };
             let out = json!({
                 "status": "ok", "routed": "finding", "finding_id": r.finding_id,
                 "node_id": r.node_id, "version": r.version,
-                "line": format!("recorded {} on {}", r.finding_id, r.node_id),
+                "delivery": delivery, "pointer": pointer, "line": line,
             });
             emit_human(parsed.json_out, &out);
             0
@@ -380,6 +389,55 @@ fn run_finding_create(
             1
         }
     }
+}
+
+/// The finding pointer: node, id, read and resolve commands - the whole
+/// delivered body, never the finding text.
+fn finding_pointer_line(node_id: &str, finding_id: &str) -> String {
+    format!(
+        "finding {finding_id} on {node_id}: blocking. \
+         Read: fno backlog notes findings {node_id}. \
+         Clear: fno backlog note --resolve {finding_id}"
+    )
+}
+
+/// Best-effort holder notice after a finding lands: one pointer line to the
+/// live claim holder, injected detached through this binary's own
+/// mail-inject lane. A miss only degrades the receipt line; the durable
+/// record gates regardless.
+fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
+    let (state, record) = crate::claims::status(&format!("node:{node_id}"), None);
+    if !matches!(
+        state,
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+    ) {
+        return None;
+    }
+    let record = record?;
+    let sid = record.holder.rsplit(':').next()?.to_string();
+    let harness = record.harness.clone().unwrap_or_else(|| "claude".into());
+    let mut child = std::process::Command::new(std::env::current_exe().ok()?)
+        .args([
+            "mail-inject",
+            "--session",
+            &sid,
+            "--harness",
+            &harness,
+            "--sender",
+            "note",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    use std::io::Write;
+    let _ = child
+        .stdin
+        .take()
+        .and_then(|mut stdin| stdin.write_all(pointer.as_bytes()).ok());
+    let _ = child.wait();
+    Some(format!("delivered to {}", record.holder))
 }
 
 /// The excerpt source: `-` reads stdin, a path reads the file, absent is None.

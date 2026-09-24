@@ -975,45 +975,39 @@ def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
     assert written == ["x-0d08"]
 
 
-def test_finding_pointer_names_node_id_and_resolve() -> None:
-    """The finding pointer is one line: node, id, read command, clear command."""
-    from fno.backlog.note_notify import finding_pointer
-
-    line = finding_pointer("x-5a62", "abcd1234")
-    assert "finding abcd1234 on x-5a62" in line
-    assert "fno backlog notes findings x-5a62" in line
-    assert "fno backlog note --resolve abcd1234" in line
-
-
-def test_blocking_note_with_no_live_reader_still_writes(monkeypatch) -> None:
-    """AC6: the nobody-bound refusal is a note-only rule. A blocking finding
-    with no live reader writes and says it gates the next worker."""
+def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
+    """The finding flags never touch the note machinery in Python: the bridge
+    is a passthrough and Rust owns routing, delivery and the receipt."""
     from typer.testing import CliRunner
 
-    from fno.backlog.note_notify import Refused
     from fno.graph import cli as graph_cli
     from fno.graph import note_cli as note_bridge
 
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
-    written: list[tuple[str, list[str]]] = []
+    calls: list[list[str]] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None, extra=None):
-        written.append((node_id, extra or []))
-        return 0, {
-            "status": "ok", "routed": "finding", "finding_id": "abcd1234",
-            "node_id": node_id, "version": 1, "line": f"recorded abcd1234 on {node_id}",
-        }
+    class Proc:
+        returncode = 0
 
-    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
+    def fake_run(argv, check=False):
+        calls.append(argv)
+        return Proc()
 
-    def nobody_bound(task_id, graph_path):
-        return Refused("note refused: nobody bound would be told.", 3)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
+    monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
 
-    monkeypatch.setattr(note_notify, "readers_before_append", nobody_bound)
+    def must_not_run(*a, **k):
+        raise AssertionError("the note machinery must not run for a blocking finding")
+
+    monkeypatch.setattr(note_bridge, "readers_before_append", must_not_run)
+    monkeypatch.setattr(note_bridge, "_write_state", must_not_run)
     result = CliRunner().invoke(
         graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
     )
     assert result.exit_code == 0, result.output
-    assert "recorded abcd1234 on x-5a62" in result.output, "the native receipt line passes through"
-    assert written[0][0] == "x-5a62"
-    assert "--blocking" in written[0][1]
+    assert calls, "the native action must run"
+    assert calls[0][1:2] == ["backlog-note"]
+    assert calls[0][-1] == "--blocking"
+    assert "x-5a62" in calls[0] and "the gate leak" in calls[0], (
+        "the positionals ride through verbatim"
+    )

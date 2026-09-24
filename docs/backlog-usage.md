@@ -126,7 +126,7 @@ Pass `--quiet` to note without mailing. Delivery is the default on purpose. A fo
 
 ### Blocking findings hold the gate
 
-`fno backlog note <id> "<finding>" --blocking` records the body as a review finding instead of a progress note. An open finding denies the session's terminal-allow until someone runs `fno backlog note --resolve <finding-id>`. With no live reader the finding still writes: the receipt says it gates the next worker. `fno backlog notes findings [<id>] [--open]` reads them back: one count line first, then one line per finding, and a store read error exits 1 instead of printing zero. `fno backlog annotate add|list|resolve` still works for one release as a forwarding shim.
+`fno backlog note <id> "<finding>" --blocking` records the body as a review finding instead of a progress note. An open finding denies the session's terminal-allow until someone runs `fno backlog note --resolve <finding-id>`. With no live reader the finding still writes: the receipt says it gates the next worker. `fno backlog notes findings [<id>] [--open]` reads them back: one count line first, then one line per finding, and a store read error exits 1 instead of printing zero. The retired `fno backlog annotate` spellings refuse with one line naming these replacements.
 
 ## Moving cards
 

@@ -51,23 +51,25 @@ def cmd_note(
         unmeasured_note_warning,
         warn_if_note_is_long,
     )
-    from fno.backlog.note_notify import own_session
+    from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
-    # Finding flags ride ctx.args to the native action unparsed (d-b6cc1a2a);
-    # no node id is a pure passthrough and Rust owns the refusal.
+    # Finding flags ride ctx.args straight to the native action (d-b6cc1a2a):
+    # reader resolution, delivery, and the receipt live in Rust.
     extra = list(ctx.args)
     graph_path = graph_cli._graph_path()
-    if not task_id:
-        code, receipt = _write_state(
-            None, None, quiet=quiet, session_id=own_session(), graph_path=graph_path, extra=extra
-        )
-        if code != 0:
-            raise typer.Exit(code=code)
-        _echo_receipt(
-            json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
-        )
-        return
+    if not task_id or "--blocking" in extra or "--resolve" in extra:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
+            raise typer.Exit(code=1)
+        argv = [str(binary), "backlog-note", "--graph", str(graph_path)]
+        argv += [a for a in (task_id, text) if a]
+        argv += extra
+        proc = subprocess.run(argv, check=False)
+        raise typer.Exit(code=proc.returncode)
 
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
@@ -80,7 +82,13 @@ def cmd_note(
         typer.echo(f"Error: note refused: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    session_id = own_session()
+    try:
+        identity = resolve_self_identity()
+    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
+        identity = None
+    session_id = identity.session_id if identity is not None and identity.session_id else None
+
+    graph_path = graph_cli._graph_path()
 
     # Archived refusal BEFORE the write, exact PR 1871 remedy (AC16); quiet
     # mode never bypasses it (it guards the write, not the delivery). Live
@@ -103,14 +111,9 @@ def cmd_note(
 
     resolved = None if quiet else readers_before_append(task_id, graph_path)
     if isinstance(resolved, Refused):
-        # A blocking finding skips only the nobody-bound refusal: with no
-        # live reader it still writes and gates the next worker.
-        if not ("--blocking" in extra and resolved.exit_code == 3):
-            typer.echo(resolved.message, err=True)
-            raise typer.Exit(code=resolved.exit_code)
-        readers = None
-    else:
-        readers = resolved
+        typer.echo(resolved.message, err=True)
+        raise typer.Exit(code=resolved.exit_code)
+    readers = resolved
 
     node_target = readers.node_id if readers is not None else task_id
     code, receipt = _write_state(
@@ -120,7 +123,6 @@ def cmd_note(
         session_id=session_id,
         graph_path=graph_path,
         reads=read_rows,
-        **({"extra": extra} if extra else {}),
     )
     if code != 0:
         # 1 = budget refusal, 3 = a stale revision conflict; the child
@@ -140,9 +142,7 @@ def cmd_note(
     # bound readers are still the people to tell.
     if not isinstance(readers, NoteReaders):
         return
-    raise typer.Exit(
-        code=deliver(readers, text, json_output=json_output, finding_id=receipt.get("finding_id"))
-    )
+    raise typer.Exit(code=deliver(readers, text, json_output=json_output))
 
 
 def _echo_receipt(line: str) -> None:
@@ -210,28 +210,24 @@ def native_update(
 
 
 def _write_state(
-    node_id: Optional[str],
-    text: Optional[str],
+    node_id: str,
+    text: str,
     *,
     quiet: bool,
     session_id: Optional[str],
     graph_path,
     reads=None,
-    extra: Optional[list[str]] = None,
 ) -> "tuple[int, Optional[dict]]":
-    """One native `backlog-note` invocation; `node_id is None` rides the
-    finding flags through unparsed. Returns `(exit, receipt)`; the receipt
-    is parsed from the child's stdout when the exit is 0."""
+    """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
+    receipt is parsed from the child's stdout when the exit is 0."""
     from fno.rust_binary import resolve_binary
 
     binary = resolve_binary()
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--json"]
-    if node_id is not None:
-        argv += ["--stdin", "--node", node_id]
-    argv.extend(extra or [])
+    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
+            "--json", "--node", node_id]
     if reads:
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
     if session_id:

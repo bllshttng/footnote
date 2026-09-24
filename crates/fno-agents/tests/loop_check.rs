@@ -2572,7 +2572,7 @@ fn operator_review_finding_blocks_until_resolved() {
     );
     assert!(d.termination_reason.is_none());
     assert!(
-        d.message.contains("f9") && d.message.contains("fno backlog annotate resolve f9"),
+        d.message.contains("f9") && d.message.contains("fno backlog note --resolve f9"),
         "reason must quote the finding id + resolve remedy; got: {}",
         d.message
     );
