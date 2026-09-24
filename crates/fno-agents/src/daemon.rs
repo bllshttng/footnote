@@ -6705,33 +6705,14 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread, which carries neither a
-    // footnote pid nor a worker socket: claude's own daemon roster is the only
-    // truth. Read once per sweep, not per row. A MISSING roster parses as zero
-    // workers (no claude daemon ever ran) and reaps as before; an UNREADABLE one
-    // is unknown liveness, where we refuse to declare death -- a false `exited`
-    // on a working teammate costs a duplicate spawn, a stale `live` costs a
-    // waiter its timeout.
-    let roster = crate::claude_roster::ClaudeRoster::load_default();
-    // The zombie flip fires only when the roster read SUCCEEDED: an
-    // unreadable roster is unknown liveness (the fail-closed branch below),
-    // and orphaning a live worker on a transient instrumentation failure is
-    // the exact false positive the flip must not produce (codex P1, PR 1329).
-    let roster_readable = roster.is_ok();
-    let bg_live = |e: &RegistryEntry| -> bool {
-        if e.harness_name() != "claude" {
-            return false;
-        }
-        match &roster {
-            Ok(r) => {
-                r.find(&e.short_id).is_some()
-                    || e.harness_session_id
-                        .as_deref()
-                        .is_some_and(|sid| r.find(sid).is_some())
-            }
-            Err(_) => true,
-        }
-    };
+    // Liveness for a `claude --substrate bg` thread reads the daemon roster:
+    // presence for the zombie flip, a live-pid listing for the crown
+    // revival. See liveness_sweep::BgRoster - the witness moved there with
+    // the crown-revival work (this file is shrink-only). A MISSING roster
+    // parses as zero workers and reaps as before; an UNREADABLE one is
+    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    let witness = crate::liveness_sweep::BgRoster::load();
+    let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
     // (docs/architecture/codex-thread-driver.md); its existence is what makes
     // an unhosted thread Orphaned (resumable) instead of Exited.
@@ -6778,17 +6759,33 @@ pub(crate) fn run_reconcile_sweep(
     // (24s wall, 0 probed). The probe loop and the roster-progress loop
     // below share this one clock.
     let start = Instant::now();
-    let (changes, outcome) = plan_reconcile(
+    // The reboot arm plans FIRST, before `prober` moves into plan_reconcile:
+    // its changes append after the main plan's, so a revived row's Live is
+    // the last status the batch applies. Full sweeps only: the serve-only
+    // tick writes no probe inference, so planning revivals there is waste.
+    let (mut revivals, revived) = if matches!(mode, SweepMode::Full) {
+        crate::liveness_sweep::plan_crown_revivals(
+            &entries,
+            roster_readable,
+            |e| witness.crown_running(e),
+            &prober,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let (mut changes, mut outcome) = plan_reconcile(
         &entries,
         probe,
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
-        bg_live,
+        |e| witness.bg_live(e),
         thread_hosted,
         rollout_exists,
         prober,
         roster_readable,
     );
+    changes.append(&mut revivals);
+    outcome.recovered.extend(revived);
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
     // Exited that still carries an inside-leg report, publish its completion
