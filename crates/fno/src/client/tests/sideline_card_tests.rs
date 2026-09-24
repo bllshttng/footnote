@@ -262,6 +262,15 @@ fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
         + 2;
 
     assert_eq!(pr_end, age_end, "the two line snapshots share a right edge");
+    let pr_tail = agent_cells[width - 6..]
+        .iter()
+        .map(|cell| cell.c)
+        .collect::<String>();
+    let age_tail = detail_cells[width - 6..]
+        .iter()
+        .map(|cell| cell.c)
+        .collect::<String>();
+    assert_eq!(format!("{pr_tail}\n{age_tail}"), "   #42\n   42s");
 }
 
 #[test]
@@ -278,6 +287,11 @@ fn regular_card_snapshot_shows_a_pr_when_it_fits() {
     let line = row_text(&frame, row, width);
 
     assert!(line.ends_with("#42"), "Regular card snapshot: {line:?}");
+    assert_eq!(
+        line.chars().skip(width - 6).collect::<String>(),
+        "   #42",
+        "PR occupies the same six-column right-edge slot as age"
+    );
 }
 
 #[test]
