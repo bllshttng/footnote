@@ -1,64 +1,51 @@
 use super::*;
 
 #[test]
-fn review_finding_open_then_resolved_clears() {
-    // AC2-HP: an open review_finding gates; an explicit resolve clears it.
+fn store_findings_open_blocks_and_resolved_does_not() {
+    // AC4: an open finding reaches the gate's view; a resolve clears it.
     let tmp = tempfile::tempdir().unwrap();
-    let open = write_events(
-        tmp.path(),
-        &[
-            r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one in the loop\nsecond line"}}"#,
-        ],
-    );
-    let (findings, malformed) = open_review_findings(&open, "x-1");
-    assert_eq!(malformed, 0);
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].id, "f1");
-    assert_eq!(findings[0].first_line, "off-by-one in the loop"); // first line only
+    let graph = tmp.path().join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::json!({"entries": [
+            {"id": "x-1", "slug": "x-1", "title": "n", "type": "feature",
+             "status": "ready", "priority": "p1"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let store = crate::backlog::api::Store::new(&graph);
+    let receipt = crate::backlog::api::finding_create(
+        &store,
+        "x-1",
+        crate::backlog::api::FindingInput {
+            body: "off-by-one in the loop\nsecond line".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (open, error) = open_findings_from_store(&graph, "x-1");
+    assert!(error.is_none());
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].id, receipt.finding_id);
+    assert_eq!(open[0].first_line, "off-by-one in the loop"); // first line only
 
-    // resolve clears it (node-scoped, only an explicit resolve).
-    let resolved = write_events(
-        tmp.path(),
-        &[
-            r#"{"ts":"t1","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-1","text":"off-by-one"}}"#,
-            r#"{"ts":"t2","type":"review_finding_resolved","source":"observer","data":{"finding_id":"f1"}}"#,
-        ],
-    );
-    assert!(open_review_findings(&resolved, "x-1").0.is_empty());
+    crate::backlog::api::finding_resolve(&store, &receipt.finding_id, Some("s1")).unwrap();
+    let (open, error) = open_findings_from_store(&graph, "x-1");
+    assert!(error.is_none());
+    assert!(open.is_empty(), "a resolved finding never gates");
 }
 
 #[test]
-fn review_finding_is_node_scoped() {
-    // A finding for a different node must not gate this node.
+fn store_findings_read_error_is_named_not_zero() {
+    // AC5: a store whose JSON leg is unparseable (and no db to answer
+    // instead) reads as an ERROR, never as a clean node.
     let tmp = tempfile::tempdir().unwrap();
-    let p = write_events(
-        tmp.path(),
-        &[
-            r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"f1","node":"x-OTHER","text":"not mine"}}"#,
-        ],
-    );
-    assert!(open_review_findings(&p, "x-mine").0.is_empty());
-    assert_eq!(open_review_findings(&p, "x-OTHER").0.len(), 1);
-}
-
-#[test]
-fn review_finding_malformed_notices_not_blocks() {
-    // AC3-FR: a structurally-unparseable review_finding line does NOT block
-    // (no open finding), but is counted for the audit notice. A review_finding
-    // missing its id is likewise a malformed notice, never a gating finding.
-    let tmp = tempfile::tempdir().unwrap();
-    // A truncated (unparseable) line that still carries the review_finding marker.
-    let truncated = r#"{"ts":"t","type":"review_finding","data":{"finding_id":"f1"#;
-    let id_less = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"node":"x-1","text":"no id"}}"#;
-    let good = r#"{"ts":"t","type":"review_finding","source":"observer","data":{"finding_id":"good","node":"x-1","text":"real one"}}"#;
-    let p = write_events(tmp.path(), &[truncated, id_less, good]);
-    let (findings, malformed) = open_review_findings(&p, "x-1");
-    assert_eq!(findings.len(), 1, "only the well-formed finding gates");
-    assert_eq!(findings[0].id, "good");
-    assert_eq!(
-        malformed, 2,
-        "the truncated line + the id-less line are noticed"
-    );
+    let graph = tmp.path().join("graph.json");
+    std::fs::write(&graph, "{ not json at all").unwrap();
+    let (open, error) = open_findings_from_store(&graph, "x-1");
+    assert!(open.is_empty());
+    assert!(error.is_some(), "could-not-read must not read as zero");
 }
 
 #[test]
@@ -73,10 +60,9 @@ fn review_finding_block_reason_quotes_first_plus_count() {
             first_line: "another".into(),
         },
     ];
-    let r = build_findings_block_reason(&open, 1);
+    let r = build_findings_block_reason(&open);
     assert!(r.contains("aaa"));
     assert!(r.contains("the bug"));
-    assert!(r.contains("fno backlog annotate resolve aaa"));
+    assert!(r.contains("fno backlog note --resolve aaa"));
     assert!(r.contains("[+1 more]"));
-    assert!(r.contains("1 malformed"));
 }
