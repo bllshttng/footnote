@@ -8,6 +8,8 @@ and the stdout-vs-stderr routing the bash used.
 from __future__ import annotations
 
 import json
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -866,6 +868,56 @@ def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_pat
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_merge_lock_holder_names_the_pr(monkeypatch, tmp_path):
+    # Hermetic: stub the claims seam (the real acquire_claim rides the event
+    # store, which the `enabled` fixture's gh stub breaks on machines without
+    # /usr/bin/gh). The holder format is what this pins.
+    seen = {}
+
+    def _spy(key, holder, reason=None, **_kw):
+        seen["holder"] = holder
+        seen["key"] = key
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", _spy)
+    monkeypatch.setattr(
+        "fno.paths.resolve_canonical_repo_root", lambda: str(tmp_path)
+    )
+    with _merge._merge_lock(2464) as (state, release_now, held_detail):
+        assert state == "acquired" and release_now is not None
+        assert held_detail is None
+    assert seen["holder"].startswith("pr-merge:pr2464:")
+    assert seen["key"] == f"merge:{tmp_path}"
+
+
+def test_held_receipt_names_holder_age_and_wait(monkeypatch, capsys, tmp_path):
+    from fno.claims.core import ClaimHeldByOther
+
+    def _held(*_a, **_k):
+        raise ClaimHeldByOther(
+            holder="pr-merge:pr2049:999", pid=999, host="h", key="merge:x"
+        )
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", _held)
+    monkeypatch.setattr(
+        "fno.paths.resolve_canonical_repo_root", lambda: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "fno.claims.io.read_claim_file",
+        lambda _p: SimpleNamespace(acquired_at=int(time.time() * 1000) - 94_000),
+    )
+    monkeypatch.setattr("fno.claims.io.claim_path", lambda _k, root=None: tmp_path / "x.lock")
+    monkeypatch.setattr(_merge, "_MERGE_LOCK_WAIT_S", 0)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["2049"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "held by pr-merge:pr2049:999" in obj["reason"]
+    assert "(live at last poll, held 94s; waited 0s)" in obj["reason"]
+    # the gh merge was never attempted while a peer holds the lock
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
 
 
 def _point_lane_read_at(monkeypatch, **fields):
@@ -3097,8 +3149,9 @@ def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_
     from fno.claims.core import acquire_claim
     from fno.claims.io import claim_path
 
-    with _merge._merge_lock() as (state, release_now):
+    with _merge._merge_lock(42) as (state, release_now, held_detail):
         assert state == "acquired" and release_now is not None
+        assert held_detail is None
         release_now()
         # the freed lock is takeable right now, before the merge verb returns
         acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
