@@ -4378,6 +4378,9 @@ mod tests {
         let sock = dir.path().join("backend.store.sock");
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        // The keeper opens the store before it serves, and an unnamed store
+        // is sqlite from birth: the json leg answers only the explicit name.
+        crate::backlog::set_backend(&graph, Backend::Json).unwrap();
         let cfg = KeeperConfig {
             sock: sock.clone(),
             graph: graph.clone(),
@@ -4397,7 +4400,11 @@ mod tests {
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
         };
-        assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
+        assert_eq!(
+            identify_backend(&mut stream),
+            "json",
+            "named json reads json"
+        );
         crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
         assert_eq!(
             identify_backend(&mut stream),
