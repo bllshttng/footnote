@@ -490,10 +490,16 @@ def _candidate_repo_roots():
     return roots
 
 
+_PR_WORKTREE_CACHE = {}
+
+
 def _pr_worktree_root(pr_number):
     """Resolve the PR worktree through the Rust-owned branch selector."""
     if not str(pr_number).isdigit():
         return None
+    key = (os.getcwd(), str(pr_number))
+    if key in _PR_WORKTREE_CACHE:
+        return _PR_WORKTREE_CACHE[key]
     try:
         proc = subprocess.run(
             [os.environ.get("FNO_AGENTS_BIN", "fno-agents"), "pr-worktree"],
@@ -505,12 +511,14 @@ def _pr_worktree_root(pr_number):
             timeout=2,
         )
         if proc.returncode != 0:
-            return None
-        value = json.loads(proc.stdout)
-        worktree = Path(value["worktree"])
-        return worktree.resolve() if worktree.is_dir() else None
+            _PR_WORKTREE_CACHE[key] = None
+        else:
+            value = json.loads(proc.stdout)
+            worktree = Path(value["worktree"])
+            _PR_WORKTREE_CACHE[key] = worktree.resolve() if worktree.is_dir() else None
     except Exception:
-        return None
+        _PR_WORKTREE_CACHE[key] = None
+    return _PR_WORKTREE_CACHE[key]
 
 
 def _parse_active_state(state_file, freshness_limit=3600):
@@ -794,7 +802,10 @@ def _inprocess_dispatch_hold_reason(pr_number):
         # only route to a slower reader, never a weaker verdict.
         return False, None
     try:
-        return True, merge_hold_reason(int(pr_number), os.getcwd())
+        repo = _pr_worktree_root(pr_number)
+        if repo is None:
+            return True, "PR worktree lookup unavailable; refusing to assume no dispatch hold"
+        return True, merge_hold_reason(int(pr_number), str(repo))
     except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
         return True, (
             f"dispatch hold check unavailable ({type(exc).__name__}); "

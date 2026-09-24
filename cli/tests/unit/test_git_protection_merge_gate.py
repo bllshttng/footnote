@@ -84,6 +84,40 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
     assert seen == [(["fno-agents", "pr-worktree"], canonical)]
 
 
+def test_dispatch_hold_from_canonical_reads_the_pr_branch_worktree(
+    gp, monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical"
+    feature = tmp_path / "feature-worktree"
+    canonical.mkdir()
+    feature.mkdir()
+    monkeypatch.chdir(canonical)
+    gp._PR_WORKTREE_CACHE.clear()
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["fno-agents", "pr-worktree"]
+        assert json.loads(kwargs["input"]) == {
+            "cwd": str(canonical),
+            "pr": 42,
+            "timeout_secs": 1,
+        }
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"worktree": str(feature)}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gp.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.pr._hold.merge_hold_reason",
+        lambda pr, repo: seen.append((pr, Path(repo))) or None,
+    )
+
+    assert gp._inprocess_dispatch_hold_reason("42") == (True, None)
+    assert seen == [(42, feature)]
+
+
 def test_live_switch_arms_from_project_config(gp, tmp_path):
     _arm(tmp_path, True)
     assert gp._live_merge_switch_armed(tmp_path, _fm()) is True

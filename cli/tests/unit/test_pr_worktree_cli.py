@@ -19,6 +19,7 @@ from fno.pr.cli import pr_app
         ("merge-result-check", ["42"], "fno.pr._merge_result.run_merge_result_check"),
         ("coverage-check", ["42"], "fno.pr._coverage_gate.run_coverage_check"),
         ("status", ["42"], "fno.pr._status.main"),
+        ("hold-check", ["42"], "fno.pr._hold.merge_hold_reason"),
     ],
 )
 def test_pr_commands_from_canonical_use_the_pr_worktree(
