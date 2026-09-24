@@ -140,9 +140,8 @@ fn write_graph(tag: &str) -> (PathBuf, PathBuf, PathBuf, Keeper) {
 }
 
 fn read_rows(graph: &Path) -> Vec<Value> {
-    let body = std::fs::read_to_string(graph).unwrap();
-    let parsed: Value = serde_json::from_str(&body).unwrap();
-    parsed["entries"].as_array().unwrap().clone()
+    // graph.db is the only store; the json file is a frozen mirror under it.
+    fno_agents::graph_store::read_rows(graph).unwrap()
 }
 
 fn row_title<'a>(rows: &'a [Value], id: &str) -> &'a str {
