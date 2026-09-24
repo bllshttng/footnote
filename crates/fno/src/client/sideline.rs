@@ -88,6 +88,7 @@ impl View {
         // Full-screen sideline forces the Extended table (the full column
         // list) for this paint; the stored density returns untouched on exit.
         let full = self.sideline_full;
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
         let density = if full {
             Density::Extended
         } else {
@@ -145,9 +146,12 @@ impl View {
                     self.sideline_table_row(drow, depth, name_w, now)
                 })
                 .collect();
-            let table = RtTable::new(table_rows, SIDELINE_COLUMNS)
+            let mut table = RtTable::new(table_rows, SIDELINE_COLUMNS)
                 .flex(Flex::Start)
                 .highlight_spacing(HighlightSpacing::Never);
+            if card {
+                table = table.row_highlight_style(RtStyle::new());
+            }
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, table_area, &mut buf, &mut st);
             off = st.offset();
@@ -173,10 +177,9 @@ impl View {
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret
         // accent, the row-scoped outcome stamp, and the selector / hover
-        // bar. The bar XORs INVERSE - a focused row's standing band
-        // de-inverts under the cursor - and ratatui's patch-based highlight
-        // can only add a modifier, never subtract one, so the bar lands
-        // here, after the blit, on the same cells the old painter wrote.
+        // bar. The list bar XORs INVERSE so a focused row's standing band
+        // de-inverts under the cursor. Card mode clears the Table's selection
+        // style and applies one paired, full-width overlay here after the blit.
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off;
             if r >= table_rows_n {
@@ -263,17 +266,26 @@ impl View {
             if matches!(drow, DisplayRow::NewSquad) {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
             }
+            let row_stamp = self.row_stamp_for(drow);
+            if card && row_stamp.is_none() {
+                if let DisplayRow::Agent(a) = drow {
+                    self.paint_card_pr(cells, r, cols, text_w, rects[4].width as usize, a);
+                }
+            }
             let mut highlit =
                 !row_is_inert(drow) && (self.selector == Some(i) || self.hover_row == Some(i));
-            if self.sideline_layout == sideline_color::SidelineLayout::Card {
+            if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
             if highlit {
-                for j in 0..text_w {
-                    cells[r * cols + j].flags ^= cell_flags::INVERSE;
+                for cell in &mut cells[r * cols..r * cols + text_w] {
+                    if card {
+                        cell.flags |= cell_flags::INVERSE;
+                    } else {
+                        cell.flags ^= cell_flags::INVERSE;
+                    }
                 }
             }
-            let row_stamp = self.row_stamp_for(drow);
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
         }
         // The density button, painted LAST over the sideline's top row.
@@ -510,7 +522,12 @@ impl View {
                             quiet | focus_bit,
                             false,
                         ),
-                        rt_cell(pr, cell_fg, quiet | focus_bit, true),
+                        rt_cell(
+                            if card { String::new() } else { pr },
+                            cell_fg,
+                            quiet | focus_bit,
+                            true,
+                        ),
                         rt_cell(
                             if card { String::new() } else { age },
                             cell_fg,
@@ -682,6 +699,31 @@ impl View {
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
     }
 
+    /// Put a card's PR in the age cell's right-edge slot. Omit a value that
+    /// cannot fit instead of overwriting the card identity or status.
+    fn paint_card_pr(
+        &self,
+        cells: &mut [Cell],
+        r: usize,
+        cols: usize,
+        text_w: usize,
+        slot_w: usize,
+        a: &AgentRow,
+    ) {
+        let text =
+            a.pr.map(|n| format!("#{n}"))
+                .unwrap_or_else(|| "\u{2014}".to_string());
+        let width = text.width();
+        if width > slot_w || width > text_w {
+            return;
+        }
+        let mut col = text_w - width;
+        for ch in text.chars() {
+            cells[r * cols + col].c = ch;
+            col += glyph_cols(ch);
+        }
+    }
+
     /// Line 2 of a card: two spaces, then `harness · king · message`, with
     /// the age right-aligned to the panel edge. Segments that are `None`
     /// drop out of the join; a worker with no harness, king or message
@@ -724,7 +766,7 @@ impl View {
             }
             Some(DisplayRow::Agent(_)) => {
                 base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(_)))
-                    && self.hover_row == Some(i + 1)
+                    && (self.selector == Some(i + 1) || self.hover_row == Some(i + 1))
             }
             _ => base,
         }
