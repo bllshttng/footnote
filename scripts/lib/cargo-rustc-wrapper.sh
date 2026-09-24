@@ -9,8 +9,9 @@ fi
 # One cargo builds at a time on this machine: two concurrent builds from
 # separate worktrees took load to 508 on 12 cores. Probes never wait, and
 # admission fails open, so CI, a clone without fno, and an older fno-agents
-# that lacks build-admit all build normally. See
-# docs/architecture/test-run-lifecycle.md "Build admission" / "Run admission".
+# that lacks build-admit all build normally. The fail-open is not silent: a
+# missing verb is named on stderr with its remedy and journaled as an event.
+# See docs/architecture/test-run-lifecycle.md "Build admission" / "Run admission".
 admit() {
     local mode="$1"
     # A failed admission is said once per cargo, not once per crate. A
@@ -27,10 +28,30 @@ admit() {
             # run nothing.
             exit "$rc"
         elif [[ "$rc" -ne 0 ]]; then
-            if [[ "$mode" == "build" ]]; then
-                echo "cargo-rustc-wrapper: build admission unavailable (exit $rc); building unadmitted" >&2
+            # A binary that has the verb refuses a bare call with
+            # "--cargo-pid is required". An older one that lacks the verb
+            # says something else: the line then names the remedy and an
+            # event lands in the journal. The usage output is captured, not
+            # piped: the bare call exits nonzero, and pipefail would turn a
+            # matched grep into a nonzero pipeline.
+            usage="$(fno-agents test-run ${mode}-admit 2>&1 || true)"
+            if grep -q -- "--cargo-pid" <<<"$usage"; then
+                reason=error
+                if [[ "$mode" == "build" ]]; then
+                    echo "cargo-rustc-wrapper: build admission unavailable (exit $rc); building unadmitted" >&2
+                else
+                    echo "cargo-rustc-wrapper: run admission unavailable (exit $rc); running unadmitted" >&2
+                fi
             else
-                echo "cargo-rustc-wrapper: run admission unavailable (exit $rc); running unadmitted" >&2
+                reason=verb_missing
+                if [[ "$mode" == "build" ]]; then
+                    echo "cargo-rustc-wrapper: the deployed fno-agents ($(command -v fno-agents)) has no build-admit; building unadmitted. Run: fno doctor update" >&2
+                else
+                    echo "cargo-rustc-wrapper: the deployed fno-agents ($(command -v fno-agents)) has no run-admit; running unadmitted. Run: fno doctor update" >&2
+                fi
+            fi
+            if command -v fno >/dev/null 2>&1; then
+                ( fno doctor event emit "${mode}_admission_unavailable" --json "{\"reason\":\"$reason\",\"exit\":$rc,\"mode\":\"$mode\"}" >/dev/null 2>&1 & )
             fi
             : >"$unadmitted" 2>/dev/null || true
         fi
@@ -83,7 +104,12 @@ esac
 case " $* " in
     *" -vV "* | *" --print"*) ;;
     *)
-        admit build
+        # Cargo sets CARGO_CFG_* only when it runs a build script, so a
+        # rustc started by a build script (thiserror's or autocfg's probe)
+        # sees the variable and a rustc started by cargo does not. That
+        # cargo is already admitted; a probe that asked again waited on it
+        # for 1h49m on 2026-09-23.
+        [[ -n "${CARGO_CFG_TARGET_ARCH:-}" ]] || admit build
         ;;
 esac
 

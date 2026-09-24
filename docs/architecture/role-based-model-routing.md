@@ -1,6 +1,6 @@
 # Role-based model routing
 
-fno spawns every claude worker on the primary model (Anthropic Opus, billed to the Max/coding pool). There was no per-task model selection, so auxiliary coordination work (backlog tidying, node orientation, memory consolidation) burned expensive coding usage. Role-based routing sends low-stakes coordination to a secondary provider (z.ai GLM by default, DeepSeek or others by config) while production work (writing the diff, the correctness verdict) stays on the primary model, without replacing the main models and without a proxy in the critical path.
+fno spawns every claude worker on the primary model (Anthropic Opus, billed to the Max/coding pool). There was no per-task model selection, so auxiliary coordination work (backlog tidying, node orientation, memory consolidation) burned expensive coding usage. Role-based routing sends low-stakes coordination to a secondary provider (z.ai GLM by default, DeepSeek or others by config). Inline self-review uses the model already routed to the authoring session; independent review follows an explicitly configured peer or external-review policy.
 
 ## Why route by role, not task
 
@@ -58,7 +58,7 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 
 **It does not keep the diff on the primary model.** `build` is a routable lane carrying exactly the payload `implement` names: `skills/target/scripts/dispatch-node.sh` attaches `--role build` to claude node dispatch, so a configured `build` route sends the worker that writes the diff to a secondary provider. That is deliberate, and config presence is the consent, but it means "no settings edit can route the diff" is false. `implement` is guarded; the lane that actually delivers is not.
 
-**It does not decide the reviewer's model.** No dispatch surface anywhere passes `--role review-verdict`; the name resolves nothing because nothing declares it. The model that renders a correctness verdict is the model of the session that runs the review, and routing sets every entry in `MODEL_ENV_KEYS` for the whole worker process. So a worker routed by `build` renders its own `/code-review` verdict on the routed model, and no per-spawn role guard can see that, because the verdict is a later activity inside an already-routed process. Keep the reviewer off the authoring worker (see [review lanes](review-lanes.md)); a role table cannot enforce it.
+**It does not decide the review model.** No dispatch surface passes `--role review-verdict`; the name resolves nothing because nothing declares it. The fno self-review lane runs inline in the authoring session, so it uses that session's routed model. A role table does not select a separate reviewer. See [review lanes](review-lanes.md) for the inline and configured peer paths.
 
 `review_attestation` records the `model` and `provider` in effect when a local verdict was emitted, so this is auditable after the fact rather than assumed. Both fields are optional and best-effort: they report what the worker's environment *claimed*, which is not proof of the model that answered. Empty means *not observable*, not "primary" - `resolve_codex_route` carries a codex worker's route in `-c model=...` config args and puts only the API key in the environment, so a routed codex verdict records empty on both fields.
 
@@ -123,17 +123,9 @@ fno config route set build zai/glm-5.3[1m]        # atomic config write; effect:
 
 For a one-off "just this node on GLM" without flipping the lane default, `dispatch-node.sh <node> --route provider/model` (or `fno agents spawn --route ...`) forwards an explicit route. Unlike the role lane, an explicit `--route` **fails closed**: an unknown provider, non-anthropic protocol, or missing key refuses the spawn (you asked for GLM by name; billing Anthropic instead would violate intent). `--route` wins over a configured `build` lane on the same spawn.
 
-## The `pr-create` lane
+## PR creation runs inline
 
-`/pr create` dispatches its worker on the `pr-create` role, not a hardcoded model tier. The role used to be a `model: haiku` literal baked into the agent; it now flows from `config.model_routing` so a Codex session opens its PR on its own model and an operator can route the cheap mechanical worker to a secondary provider without forking the skill.
-
-`pr-create` is **opt-in by config presence**, exactly like `build`: it ships unconfigured and routes nothing (fail-safe `None`, so the worker runs on the invoking harness's primary model - no model literal in the skill). Writing the roles line IS the consent:
-
-```bash
-fno config route set pr-create zai/glm-4.7      # atomic config write; effect: next /pr create
-```
-
-The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` override) at the spawn boundary, so the fail-safe makes the role a no-op until the lane is configured. The worker keeps its fresh, minimal context - branch, base, a one-line summary, and merge posture only - regardless of which model the role resolved to, because the small-context property is what makes the worker cheap, not the tier name.
+`/fno:pr create` loads `skills/pr/references/create.md` in the invoking context. It does not dispatch the `pr-create` role. A configured `config.model_routing.roles.pr-create` value does not affect the PR lifecycle.
 
 ## The stage table: per-verb profile overlay
 
@@ -168,7 +160,7 @@ effort = "high"
 [[routing.models]]
 name = "luna-codex"
 harness = "codex"
-model = "gpt-5.6-luna"
+model = "luna"
 effort = "xhigh"
 ```
 
@@ -219,7 +211,9 @@ A small built-in table sits under this key as a **fallback**, never the authorit
 
 The fallback keeps a tier request answerable where nothing is declared. Review level names a model for every level. Answering nothing drops `/code-review` to the provider default everywhere. The grid is unaffected and stays config-first. A virgin install records `grid=no-inventory-declared` and injects nothing. The grid asks whether config declared a row, not whether any row exists.
 
-`cli/src/fno_routing_sample/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config route init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+`cli/src/fno_routing_sample/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config route init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr. The row table itself is rendered by the route-slot binary. With that binary unavailable the command prints a `route-slot-unavailable` refusal instead of a table.
+
+A codex row's `model` can name a family instead of a version: `sol`, `astra`, `terra`, or `luna`. At spawn, route-slot resolves the family to the newest `gpt-<version>-<family>` in codex's own `models_cache.json`. Codex refreshes that list without an fno release. The resolution prints a `slot family` chain line. A claude row can name the alias (`opus`, `sonnet`, `haiku`, `fable`), and the claude harness resolves it. A value that is already a full id is a pin: route-slot never rewrites it. A codex row pinned below the newest listed version of its family prints one `drift` line under `fno doctor route`.
 
 ## The strict inventory policy
 

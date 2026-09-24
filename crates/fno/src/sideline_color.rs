@@ -65,6 +65,8 @@ pub struct SidelinePalette {
     /// routing-row NAME -> color (the `[sideline.colors.row]` table).
     pub row: Vec<(String, String)>,
     pub routing_rows: Vec<RoutingRow>,
+    /// The `[sideline] layout` switch: which row shape the sideline paints.
+    pub layout: SidelineLayout,
 }
 
 impl SidelinePalette {
@@ -73,6 +75,26 @@ impl SidelinePalette {
             .iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, c)| parse_color(c))
+    }
+}
+
+/// The sideline's row shape: today's one-line table row (`List`), or the
+/// padded two-line card (`Card`). Read once with the colors; an unknown or
+/// missing value reads as `List`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidelineLayout {
+    #[default]
+    List,
+    Card,
+}
+
+/// Parse the `[sideline] layout` value: `"card"` selects the card layout;
+/// any other value - including no value - stays on the list. A standalone
+/// mapping so a unit test can call it without a config file.
+pub fn parse_layout(v: Option<&str>) -> SidelineLayout {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("card") => SidelineLayout::Card,
+        _ => SidelineLayout::List,
     }
 }
 
@@ -148,6 +170,11 @@ fn read_palette() -> SidelinePalette {
             continue;
         };
         let mut pal = SidelinePalette::default();
+        pal.layout = parse_layout(
+            doc.get("sideline")
+                .and_then(|s| s.get("layout"))
+                .and_then(|v| v.as_str()),
+        );
         if let Some(colors) = doc.get("sideline").and_then(|s| s.get("colors")) {
             let pairs = |table: Option<&toml::Value>| -> Vec<(String, String)> {
                 table
@@ -491,6 +518,7 @@ mod tests {
             route: pairs(route),
             harness: pairs(harness),
             row: pairs(row),
+            layout: SidelineLayout::default(),
         }
     }
 
@@ -777,6 +805,28 @@ mod tests {
         assert!(
             PAL.read().unwrap().is_some(),
             "the next palette() re-primes"
+        );
+    }
+
+    #[test]
+    fn parse_layout_reads_card() {
+        assert_eq!(parse_layout(Some("card")), SidelineLayout::Card);
+        assert_eq!(parse_layout(Some(" card ")), SidelineLayout::Card);
+        assert_eq!(parse_layout(Some("CARD")), SidelineLayout::Card);
+    }
+
+    #[test]
+    fn parse_layout_missing_key_is_list() {
+        assert_eq!(parse_layout(None), SidelineLayout::List, "no key is list");
+        assert_eq!(parse_layout(Some("")), SidelineLayout::List);
+    }
+
+    #[test]
+    fn parse_layout_unknown_value_is_list() {
+        assert_eq!(
+            parse_layout(Some("grid")),
+            SidelineLayout::List,
+            "an unknown value reads as list"
         );
     }
 }

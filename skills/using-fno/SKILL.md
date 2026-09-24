@@ -14,7 +14,7 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 Agent-authored `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer. `--raw` runs a command only: the payload starts `/` or `$`. A message goes wrapped so the sender shows.
 
-Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
+Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. User text stays exact.
 
 Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
 
@@ -29,7 +29,7 @@ Invoke plugin-qualified per harness: `/fno:<verb>` on claude/opencode, `$fno:<ve
 | `target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
 | `think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
 | `review` | Review a diff. Routes: `default` (inline lane), `peer` (cross-model), `prove-it`, `cleanup`. |
-| `pr` | PR lifecycle: create, check, merged (routed create worker). |
+| `pr` | PR lifecycle: create inline, check, merged. |
 | `fix` | Repair. Routes: `fix` (default), `investigate`. |
 
 Everything else stays invocable by full name: `blueprint`, `execute` (`execute waves` for orchestration), `ship` (`ship pr` = `pr`, `ship doc`), `setup`, `triage`, `agent`, `mail`, `law`, `ship-docs`, `audit`, `speculate`. The session skill list enumerates them; this set is the entry point, not an access boundary.
@@ -103,8 +103,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Is this PR ready to merge?" | `fno do pr status <n>` |
 | "Merge an approved PR" | `fno do pr merge` |
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
-| "Send my questions to my notes file" | set `[[attention]]` |
 
-Prefer the smaller surface: skills run inline by default (think, review); dispatched flows spawn.
+Skills run inline by default. When a skill's instructions require dispatch, it dispatches work.
 
 In a worktree Bash refuses heredocs, command substitution and loops, so write the script with Write and run `bash <file>`; use Read, Grep and Glob for every read; never lead a command with `cd`, the cwd persists.

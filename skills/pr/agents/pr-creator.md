@@ -1,6 +1,6 @@
 ---
 name: pr-creator
-description: 'Mechanical PR creation worker dispatched by /pr create. Pushes the branch, generates a PR description from the commits, opens the PR via gh. Spawned with minimal fresh context (not fork). Returns RESULT: SUCCESS with the PR number + URL, or RESULT: FAILED with the error.'
+description: 'Standalone PR creation agent for explicit dispatch. The /pr create workflow runs skills/pr/references/create.md inline and does not dispatch this agent.'
 tools:
 - Read
 - Write
@@ -12,7 +12,7 @@ tools:
 
 Create a PR using `gh` CLI.
 
-**Model routing:** This worker runs on the declared `pr-create` role, resolved through `config.model_routing` (`config.model_routing.roles.pr-create`). An explicit configured route wins; with no route configured it runs on the invoking harness's primary model - no tier or model literal is hardcoded. Declare the role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override so the resolved route selects the model). Do NOT use `context: fork` - forking passes the parent's full context into the worker; instead spawn a fresh agent with only the gathered context from Step 1 below.
+**Explicit model routing:** Manual dispatch can declare the `pr-create` role. The route comes from `config.model_routing.roles.pr-create`. The `/pr create` skill does not dispatch this agent or use that route.
 
 ## Process
 
@@ -197,7 +197,7 @@ For each item line under that heading, in order:
      NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
      ```
      If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to step 3 - never append an empty ` - tracked as `.
-3. If `fno backlog idea` fails or yields no usable id, leave it untracked and print a `warn:` line naming it. State that no tracking object was created and name the failure mode (lock contention, missing CLI). Degrade loud, not silent, and continue. Do NOT mint a carveout to repair the citation: `fno backlog carveout add` records an operator's deliberate decision to defer substantial work. Filing one because a command failed mutates graph state purely to make prose pass validation. The CI gate is the backstop and will red the check for a human. That human fixes the work inline, cuts the line, or creates and cites tracking deliberately. NEVER write an `oos-ok:` waiver to route around a tooling failure. A waiver asserts "nothing to track" - a judgment a tooling error cannot establish. That call is a human's, never the worker's.
+3. If `fno backlog idea` fails or yields no usable id, leave it untracked and print a `warn:` line naming it. State that no tracking object was created and name the failure mode (lock contention, missing CLI). Degrade loud, not silent, and continue. Do NOT mint a carveout to repair the citation: `fno backlog carveout add` records a superuser's deliberate decision to defer substantial work. Filing one because a command failed mutates graph state purely to make prose pass validation. The CI gate is the backstop and will red the check for a human. That human fixes the work inline, cuts the line, or creates and cites tracking deliberately. NEVER write an `oos-ok:` waiver to route around a tooling failure. A waiver asserts "nothing to track" - a judgment a tooling error cannot establish. That call is a human's, never the worker's.
 
 **Idempotent by construction:** step 1 skips any item that already carries a tracked reference, so a re-run over a body whose items already read `- tracked as <id>` files nothing.
 
@@ -386,7 +386,7 @@ gh pr view --json number,url
 ```
 
 **Flow:**
-1. `/pr create` runs as a fresh, role-routed `pr-create` worker with targeted context (branch, commits, plan summary)
+1. The `/pr create` skill runs `skills/pr/references/create.md` inline. This agent is a separate explicit-dispatch path.
 2. `/pr check` polls for external review and processes feedback
 3. Human reviewer merges
 

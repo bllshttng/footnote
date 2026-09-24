@@ -72,7 +72,7 @@ pub struct IntakeAnswer {
     pub lines: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qid: Option<String>,
-    /// `law` | `node_pointer` | `dedup` | `write` | `index`.
+    /// `law` | `node_pointer` | `context` | `decide_yourself` | `dedup` | `write` | `index`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,6 +323,76 @@ One line plus a node pointer (law d-59af3235)."
         answer.refusal = Some("node_pointer".to_string());
         answer.exit_code = 2;
         return answer;
+    }
+
+    // The context refusal (user design 2026-09-22): the page writer cannot
+    // invent context, so a question carries what, why, two options and a
+    // recommendation with its reason. One action with no choice is a pin
+    // and passes.
+    let is_pin = !has_options && req.ask.as_deref().is_some_and(|a| !a.trim().is_empty());
+    if !is_pin {
+        let mut missing: Vec<&str> = Vec::new();
+        if title_of(&req.question, &parsed.title).trim().is_empty() {
+            missing.push("what");
+        }
+        if parsed.blocked_because.trim().is_empty() {
+            missing.push("why");
+        }
+        if parsed.options.len() < 2 && req.options.len() < 2 {
+            missing.push("two options");
+        }
+        let recommendation_ok = parsed
+            .recommend
+            .is_some_and(|r| (1..=parsed.options.len()).contains(&r))
+            && !parsed.recommendation.trim().is_empty();
+        if !recommendation_ok {
+            missing.push("a recommendation");
+        }
+        if !missing.is_empty() {
+            answer.lines.push(format!(
+                "outstanding: refused: a question needs {}. Write a question file \
+(docs/architecture/attention-items.md, \"Asking with context\") and pass \
+--question-file. One action with no choice is a pin: pass --ask \"<the action>\".",
+                missing.join(", ")
+            ));
+            answer.refusal = Some("context".to_string());
+            answer.exit_code = 2;
+            return answer;
+        }
+        // The asker-must-decide refusal (user ruling 2026-09-22): a
+        // reversible question with a recommendation is one the asker or its
+        // king settles itself; it reaches the user only with a user-only
+        // reason in why_user.
+        if parsed.reversible.trim().eq_ignore_ascii_case("yes") {
+            let why = parsed.why_user.to_ascii_lowercase();
+            let user_only = [
+                "irreversible",
+                "money",
+                "credential",
+                "outside",
+                "product",
+                "taste",
+            ]
+            .iter()
+            .any(|k| why.contains(k));
+            if !user_only {
+                let decide = match node {
+                    Some(n) => format!("fno backlog decide {n} \"<ruling>\""),
+                    None => "fno backlog decide <node> \"<ruling>\"".to_string(),
+                };
+                answer.lines.push(format!(
+                    "outstanding: refused: you can decide this one: it carries a \
+recommendation and marks itself reversible. Record the ruling yourself or \
+hand it to your king: {decide} (--authority crown or agent), then continue. \
+The user answers only what only a user can: irreversible, spends money or a \
+credential, reaches outside the machine, or a product or taste call - name it \
+with why_user: in the question file."
+                ));
+                answer.refusal = Some("decide_yourself".to_string());
+                answer.exit_code = 2;
+                return answer;
+            }
+        }
     }
 
     // Dedup: an open question on the same subject and node already waits.
@@ -621,6 +691,9 @@ the three readings kings have acted on
 ## Downside
 a repair can hide a feature
 
+## Recommendation
+Option 1, the narrowest door: every later fix needs it.
+
 ## Not thought through
 whether a net-zero move between files counts
 
@@ -698,25 +771,111 @@ stops
     }
 
     #[test]
-    fn ac7_edge_plain_flags_ask_still_records_bare_options() {
+    fn ac7_edge_plain_flags_with_options_refuse_for_context() {
         let home = tmp_home("edge");
         let root = tmp_root("edge");
         let mut r = req("plain text question", &root);
         r.options = vec!["a".to_string(), "b".to_string()];
         r.node = Some("x-aaaa".to_string());
         let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2);
+        assert_eq!(answer.refusal.as_deref(), Some("context"));
+        assert!(answer.lines.iter().any(|l| l.contains("a question needs")));
+        assert!(journal_text(&root).is_empty());
+    }
+
+    #[test]
+    fn ac9_hp_plain_ask_line_is_refused_and_records_nothing() {
+        let home = tmp_home("hp-refusal");
+        let root = tmp_root("hp-refusal");
+        let answer = run_intake(&req("which lane?", &root), &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("context"));
+        assert!(
+            answer
+                .lines
+                .iter()
+                .any(|l| l.contains("why, two options and a recommendation")
+                    || l.contains("a question needs")),
+            "the refusal names the missing parts: {:?}",
+            answer.lines
+        );
+        assert!(journal_text(&root).is_empty());
+        assert_eq!(answer.qid, None);
+    }
+
+    #[test]
+    fn ac9_edge_a_pin_and_a_complete_question_file_pass() {
+        // A pin passes: one action, no choice.
+        let home = tmp_home("pin");
+        let root = tmp_root("pin");
+        let mut pin = req("note to self", &root);
+        pin.ask = Some("publish the crate".to_string());
+        let answer = run_intake(&pin, &home);
         assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
-        let row: Value = journal_text(&root)
-            .lines()
-            .last()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .unwrap();
-        let options = row
-            .pointer("/data/options")
-            .and_then(Value::as_array)
-            .unwrap();
-        assert_eq!(options[0], json!("a"));
-        assert!(row.pointer("/data/context").is_none());
+        assert!(journal_text(&root).lines().count() == 1);
+        // A complete question file passes.
+        let home = tmp_home("file-ok");
+        let root = tmp_root("file-ok");
+        let mut r = req(QUESTION_FILE, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer2 = run_intake(&r, &home);
+        assert_eq!(answer2.exit_code, 0, "lines: {:?}", answer2.lines);
+        let _ = answer;
+    }
+
+    #[test]
+    fn rule10_reversible_recommended_question_refused_without_why_user() {
+        let home = tmp_home("rule10");
+        let root = tmp_root("rule10");
+        let question = QUESTION_FILE.replace("## Reversible\ncostly", "## Reversible\nyes");
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+        assert!(
+            answer
+                .lines
+                .iter()
+                .any(|l| l.contains("fno backlog decide")),
+            "the refusal names the decide door: {:?}",
+            answer.lines
+        );
+        assert!(journal_text(&root).is_empty());
+    }
+
+    #[test]
+    fn rule10_why_user_irreversible_lets_it_pass() {
+        let home = tmp_home("rule10-pass");
+        let root = tmp_root("rule10-pass");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "## Meanwhile\nstops\n",
+                "## Meanwhile\nstops\n\n## Why user\nirreversible\n",
+            );
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+    }
+
+    #[test]
+    fn rule10_empty_why_user_is_refused() {
+        let home = tmp_home("rule10-empty");
+        let root = tmp_root("rule10-empty");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "## Meanwhile\nstops\n",
+                "## Meanwhile\nstops\n\n## Why user\n\n",
+            );
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
     }
 
     #[test]
@@ -726,11 +885,13 @@ stops
         let mut first = req("first", &root);
         first.subject = Some("subject-s".to_string());
         first.node = Some("x-aaaa".to_string());
+        first.ask = Some("finish the lane".to_string());
         assert_eq!(run_intake(&first, &home).exit_code, 0);
 
         let mut second = req("second", &root);
         second.subject = Some("subject-s".to_string());
         second.node = Some("x-aaaa".to_string());
+        second.ask = Some("finish the lane".to_string());
         let answer = run_intake(&second, &home);
         assert_eq!(answer.exit_code, 2);
         assert_eq!(answer.refusal.as_deref(), Some("dedup"));
@@ -769,7 +930,9 @@ stops
         let home = tmp_home("cap");
         let root = tmp_root("cap");
         let long = "x".repeat(QUESTION_CAP + 50);
-        let answer = run_intake(&req(&long, &root), &home);
+        let mut r = req(&long, &root);
+        r.ask = Some("note the cap".to_string());
+        let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 0);
         assert!(answer.truncated);
         let row: Value = journal_text(&root)
@@ -799,7 +962,9 @@ stops
             "data": {"question_id": "q-old", "question": "old", "blocks": ["x-1", "x-2"]}
         });
         write_index_row(&index, &older).unwrap();
-        let answer = run_intake(&req("newest question", &root), &home);
+        let mut r = req("newest question", &root);
+        r.ask = Some("finish the lane".to_string());
+        let answer = run_intake(&r, &home);
         assert_eq!(answer.total, Some(2));
         assert_eq!(answer.position, Some(1), "newest sorts first");
     }

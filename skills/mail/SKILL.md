@@ -1,6 +1,6 @@
 ---
 name: mail
-description: "Message background agent workers and projects from a runner-less surface (phone / Happy app), or hold this session's incoming mail while the operator needs uninterrupted time. One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, drain, and timed DND hold. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message', 'check my unread', 'hold my mail', 'turn on DND', 'do not interrupt me', or 'I need your time for ten minutes'."
+description: "Message background agent workers and projects from a runner-less surface (phone / Happy app), or hold this session's incoming mail while the user needs uninterrupted time. One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, drain, and timed DND hold. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message', 'check my unread', 'hold my mail', 'turn on DND', 'do not interrupt me', or 'I need your time for ten minutes'."
 argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  unread|list|status [name]"
 metadata:
   internal: false
@@ -94,7 +94,7 @@ because a misrouted `send` could publish a malformed message.)
 
 ## `hold` - timed DND for the current session
 
-Route explicit hold verbs and ordinary operator language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session stops prompt-line mail injection while the operator is talking to it.
+Route explicit hold verbs and ordinary user language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session stops prompt-line mail injection while the user is talking to it.
 
 - A single duration runs `fno agents mail hold --minutes <N>`.
 - A duration range uses its upper bound: "5-10 minutes" runs `--minutes 10`, so DND does not expire inside the requested window.
@@ -102,7 +102,7 @@ Route explicit hold verbs and ordinary operator language to the shipped timed ho
 - "Is DND on?" or equivalent runs `fno agents mail hold --status`.
 - No duration uses the CLI's five-minute default.
 
-Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry. It does not mute the operator's ordinary typing in the attached mux client.
+Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry. It does not mute the user's ordinary typing in the attached mux client.
 
 ---
 

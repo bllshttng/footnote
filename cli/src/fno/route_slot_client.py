@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fno.rust_binary import VerbUnavailable, verb_call
+from fno import rust_binary
+from fno.rust_binary import VerbUnavailable
 
 
 class RouteSlotUnavailable(VerbUnavailable):
@@ -23,4 +24,7 @@ def route_slot_call(payload: dict[str, Any], timeout: float = 30) -> dict[str, A
     raises this above the 30s a pure local resolver needs: the bound must
     cover the refresh, or the spawn runs on defaults for a decision that was
     merely still running."""
-    return verb_call("route-slot", payload, RouteSlotUnavailable, timeout=timeout)
+    # Late-bound through the module: a from-import frozen at first import
+    # would keep a monkeypatched probe alive past its test, and the spawn
+    # chain imports this module lazily inside exactly such a test.
+    return rust_binary.verb_call("route-slot", payload, RouteSlotUnavailable, timeout=timeout)

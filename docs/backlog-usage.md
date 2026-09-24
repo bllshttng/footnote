@@ -173,6 +173,8 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 
 ## Lifecycle
 
+`fno backlog ready` accepts `--created-before`, `--created-after`, `--touched-before`, and `--touched-after` with values such as `30d` or an ISO date, plus `--sort created|touched` (oldest first); touched uses `touched_at`, falling back to `created_at`. Preview the 60-day stale-idea sweep with `fno backlog ready --ideas --touched-before 60d --sort touched --json`.
+
 `intake -> triage -> ready/next -> done`, with two reversible side states:
 
 | Action | Command | Effect |
@@ -318,7 +320,7 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
 
-- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `operator_request`: a human asked, via `--source-kind operator_request`. Birth requires an unacked operator turn in the filing session (`fno inbox operator status` above 0). File the ask before you ack the turn.
 - `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
 - `automated_followup`: a machine follow-up. Retro landings and decomposed children.
 - `unknown`: everything else.

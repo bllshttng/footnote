@@ -14,6 +14,7 @@ never hit - tests stub it.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,10 @@ def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
 def _make_graph(path: Path, entries: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+
+
+def _git_checkout(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
 
 
 @pytest.fixture(autouse=True)
@@ -231,9 +236,8 @@ def test_scan_passes_repo_from_url():
 
 @pytest.fixture
 def live_cwd(tmp_path) -> str:
-    """An existing dir standing in for a live worktree cwd. The reverse-map
-    dead-cwd guard (x-4114) skips any node whose cwd is not an existing dir, so
-    tests exercising the gh-query path must anchor on a real directory."""
+    """A real checkout for tests exercising a reverse-map listing call."""
+    _git_checkout(tmp_path)
     return str(tmp_path)
 
 
@@ -377,6 +381,8 @@ def test_reverse_map_budget_defers_remaining_repos_on_a_slow_gh(tmp_path, monkey
     cwd_b = tmp_path / "repo-b"
     cwd_a.mkdir()
     cwd_b.mkdir()
+    _git_checkout(cwd_a)
+    _git_checkout(cwd_b)
 
     calls: list[str] = []
 
@@ -407,6 +413,7 @@ def test_reverse_map_gone_cwd_falls_back_to_project_root(tmp_path, monkeypatch):
 
     root = tmp_path / "proj-root"
     root.mkdir()
+    _git_checkout(root)
     monkeypatch.setattr(
         intake, "project_root_from_settings",
         lambda project: str(root) if project == "myproj" else None,
@@ -457,6 +464,7 @@ def test_reverse_map_advisory_aggregates_and_is_silent_when_clean(tmp_path, monk
     """US2: N dead-cwd nodes -> exactly one advisory line naming all ids; a graph
     with no dead-cwd node prints nothing."""
     import fno.graph._intake as intake
+    _git_checkout(tmp_path)
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
 
     gone = str(tmp_path / "nope")
@@ -548,7 +556,7 @@ def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
 
     live_dir = tmp_path / "live-checkout"
     live_dir.mkdir()
-    (live_dir / ".git").mkdir()  # a checkout
+    _git_checkout(live_dir)
     live = str(live_dir)
     entries = [_node("ab-live", cwd=live, project="whatever")]
     records = scan_merge_drift(entries, list_merged=_spy)
@@ -563,7 +571,7 @@ def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monke
 
     root = tmp_path / "proj-root"
     root.mkdir()
-    (root / ".git").mkdir()  # a checkout
+    _git_checkout(root)
     monkeypatch.setattr(
         intake, "project_root_from_settings",
         lambda project: str(root) if project == "myproj" else None,
@@ -585,29 +593,26 @@ def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monke
     assert records[0].pr_number == 5
 
 
-def test_reverse_map_non_checkout_cwd_unresolvable_keeps_cwd(tmp_path, monkeypatch):
-    """AC2-ERR (x-b59f): a non-checkout cwd whose project maps to no root keeps
-    its cwd; the gh failure from it still lands as an error record."""
+def test_reverse_map_non_checkout_cwd_is_skipped(tmp_path, monkeypatch, capsys):
+    """A non-checkout cwd follows the same named skip path as a missing one."""
     import fno.graph._intake as intake
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
 
-    seen: dict = {}
+    seen = []
 
-    def _boom(**kw):
-        seen["cwd"] = kw.get("cwd")
-        raise rec.ReconcileError(
-            "gh pr list (merged) failed (rc=1): failed to run git: "
-            "fatal: not a git repository (or any of the parent directories)"
-        )
+    def _listed(**kw):
+        seen.append(kw.get("cwd"))
+        return []
 
     stray_dir = tmp_path / "stray"
     stray_dir.mkdir()
     entries = [_node("ab-stray2", cwd=str(stray_dir), project="nomap")]
-    records = scan_merge_drift(entries, list_merged=_boom)
-    assert seen["cwd"] == str(stray_dir)  # unmapped project: cwd unchanged
-    assert len(records) == 1
-    assert not records[0].closeable
-    assert "not a git repository" in records[0].error
+    records = scan_merge_drift(entries, list_merged=_listed)
+    stderr = capsys.readouterr().err
+    assert seen == []
+    assert records == []
+    assert "ab-stray2" in stderr
+    assert "non-checkout cwd" in stderr
 
 
 def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
@@ -616,6 +621,7 @@ def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
 
     root = tmp_path / "shared-root"
     root.mkdir()
+    _git_checkout(root)
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: str(root))
 
     calls = {"n": 0, "cwds": []}
@@ -697,6 +703,7 @@ def test_write_retro_sentinel(tmp_path):
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
     """Tmp graph + tmp retro sentinel dir + a no-op plan stamp."""
+    _git_checkout(tmp_path)
     graph_path = tmp_path / "graph.json"
     _patch_graph_path(monkeypatch, graph_path)
     # The reconcile single-flight gate locks on the claims root, which

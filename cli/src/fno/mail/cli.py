@@ -3201,9 +3201,9 @@ def _raw_send(
                 if not subject_ok:
                     reason = (
                         f"{name!r} review/start would read an empty diff: "
-                        f"{subject_detail}. Fire from the PR worktree session "
-                        "(`fno do target request-self-review --pr <n>`) or "
-                        "spawn the reviewer with --cwd <worktree>."
+                        f"{subject_detail}. Run the review inline in the PR "
+                        "worktree session: `fno do target request-self-review`, "
+                        "or `$fno:review <level>` there."
                     )
                     if check:
                         print(f"not-injectable: {reason}")
@@ -3497,10 +3497,7 @@ def cmd_send(
     ),
     from_name: str | None = typer.Option(
         None, "--from-name",
-        help=(
-            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
-            "agent send, the working dir's project for an inbox-kind send."
-        ),
+        help="XML-safe sender. Unset: session handle or 'fno' for agents; project for inbox notes.",
     ),
     origin: str | None = typer.Option(
         None,
@@ -4185,12 +4182,14 @@ def cmd_send(
             _unavailable_token_exit(name, unavailable)
         return
 
+    timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
     try:
         result = dispatch_send(
             name=name,
             message=message,
             provider=harness,
             cwd=workdir,
+            **({"lock_timeout": float(timeout_override)} if timeout_override else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
         )

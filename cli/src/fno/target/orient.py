@@ -569,15 +569,11 @@ def _local_review_gates(review: Any) -> List[str]:
 
 
 def _self_review_clause(project_root: Optional[Path] = None) -> str:
-    """The self-review verb + fallback clause, or "".
+    """The inline self-review verb and refusal remedy, or "".
 
-    Names this harness's self-review verb and the ``--to-self --raw`` fallback so
-    a session can satisfy the code-payload review gate itself rather than ask an
-    epic leader. The level is sized from the branch's actual diff when one
-    exists; pre-diff the invocation keeps its `<level>` placeholder instead of
-    baking in one concrete level. The fallback is a prompt-line injection, so it
-    is omitted on a headless substrate (no prompt line exists there). Never
-    raises."""
+    Names this harness's inline review verb, sized from the branch diff when
+    available. A refusal stays visible; it never routes a review command through
+    the mail bus. Never raises."""
     try:
         from fno.review_capability import (
             detect_session,
@@ -593,10 +589,9 @@ def _self_review_clause(project_root: Optional[Path] = None) -> str:
     clause = (
         f"self-review required for code ({harness}): run `{verb}` (the lane "
         "emits its own attestation; `bash skills/review/scripts/"
-        "emit-attestation.sh code-review` is the recovery path when it could not)"
+        "emit-attestation.sh code-review` is the recovery path when emission fails)"
     )
-    if s.substrate != "headless":
-        clause += f"; refused? fno agents mail send '{verb}' --to-self --raw"
+    clause += "; on refusal, report the literal refusal and stop"
     return clause
 
 

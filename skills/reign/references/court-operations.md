@@ -53,6 +53,7 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 | Hand your crown to a successor | Spawn the heir over your OWN scope with `--succeed`: without the explicit transfer flag the spawn is refused and you keep the crown. The vacate and stamp are one registry write. Return it with `fno agents crown --reclaim`; that uses `crown_grantor` and creates no session. The attended in-place verb is a re-scope, not succession: it moves a crown between two live rows (re-scope the incumbent first, then crown the heir) but never creates an heir at spawn |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno agents mail send <handle> "<msg>" --from-self` |
+| Steer a running teammate | `fno agents ask <name> "<instruction>"` pauses or redirects it WITHOUT ending it. `fno agents stop` is teardown, never steering: on claude it ends the session and the worker reads Done |
 | Resolve a handle you lost | `fno agents discovered-json` · `fno agents top` |
 | Is it alive? | `fno agents peek <handle>` |
 | Who is actually running | `fno agents top` |
@@ -60,7 +61,7 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 | Wake a blocked/stopped teammate | `fno agents resume <handle>` (then re-send) |
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a thread/daemon worker | `fno agents stop <name>` |
-| Halt the fleet, a scope, or one crown | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and `fno doctor test` admissions refuse fleet-wide (a suite started outside that path is not gated) until `fno agents incident clear --reason "<why>"`; running workers keep going, mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on operator order. `fno agents king cancel --scope <scope>` cancels one scope's walk; `fno agents king done` ends one crown |
+| Halt the fleet, a scope, or one crown | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and `fno doctor test` admissions refuse fleet-wide (a suite started outside that path is not gated) until `fno agents incident clear --reason "<why>"`; running workers keep going, mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on user order. `fno agents king cancel --scope <scope>` cancels one scope's walk; `fno agents king done` ends one crown |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno do pr merge <n>` (only when config permits) |
 

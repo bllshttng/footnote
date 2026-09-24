@@ -25,8 +25,6 @@ done_probes = []
 loops = {}
 # Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}.
 status_sinks = []
-# Questions-file sinks: list of {name, type (md), path, tag, settle_secs, ready_only}. The daemon's attention arm writes open questions there; see docs/architecture/attention-items.md. The retired [[reach_me]] name reads for one release.
-attention = []
 # Settings schema version; managed by fno, not hand-set.
 schema_version = 1
 
@@ -401,6 +399,10 @@ models = []
 enforce_inventory = false
 # The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.
 operator_access = "unknown"
+
+[sideline]
+# The sideline's row shape: "card" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); "list" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.
+layout = "list"
 
 [sideline.colors]
 # Lane colors keyed by harness name (e.g. codex = "cyan"). The cascade's coarsest config key; see sideline.colors.route.

@@ -86,7 +86,7 @@ Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. F
 | `blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `execute` | Execute a plan: `flat` (default) or `waves` |
 | `think` \| `review` \| `fix` \| `tdd` \| `triage` \| `setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
-| `pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
+| `pr create` \| `check` \| `merged` | Open PR inline / poll+implement external review / post-merge ritual |
 | `growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
 Surface evolution: `blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)). An approved native Plan-Mode plan is picked up by the next bare `target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
@@ -162,7 +162,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno agents claim`** - the one work-claim primitive with atomic lockfiles. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
-- **`fno agents mail` - native review.** The native review runs via Skill. Raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review. `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
+- **`fno agents mail` - coordination.** Review inline via `/fno:review` or Codex `$fno:review`. Never use mail or spawn a reviewer. The merge gate enforces review. `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disables auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno agents feed`** - one ordered projection of questions.jsonl + the graph store. Rows carry the node id + session id the mux `prefix+e` overlay deep-links through. [activity-feed](docs/architecture/activity-feed.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.

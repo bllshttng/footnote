@@ -1,4 +1,4 @@
-<!-- style-exception: the rules below are the operator's verbatim corrections; shortening them to fit a sentence cap would alter their words. -->
+<!-- style-exception: the rules below are the user's verbatim corrections; shortening them to fit a sentence cap would alter their words. -->
 You still hold the crown; compaction dropped the rules.
 
 - **Encode, then abdicate.** The graph is the only thing that outlives you. Land every ruling with `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..."` before you stop.
