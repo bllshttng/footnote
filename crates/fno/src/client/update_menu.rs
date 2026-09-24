@@ -178,10 +178,8 @@ pub(crate) fn build_sideline_menu(
         if backlog_on { "☑" } else { "☐" },
         "experimental: backlog view",
     ));
-    actions.push(AuxAction::ToggleBacklogView);
     if backlog_on {
         rows.push(entry("▦", "backlog"));
-        actions.push(AuxAction::OpenBacklogView);
     }
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
@@ -189,6 +187,12 @@ pub(crate) fn build_sideline_menu(
     rows.push(entry("⏏", "detach"));
     actions.push(AuxAction::OpenSweep);
     actions.push(AuxAction::OpenAgentLauncher);
+    // Rows and actions pair by index: these two answer the backlog rows
+    // pushed above, in the same order.
+    actions.push(AuxAction::ToggleBacklogView);
+    if backlog_on {
+        actions.push(AuxAction::OpenBacklogView);
+    }
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);
