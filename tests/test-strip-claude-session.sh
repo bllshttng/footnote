@@ -66,6 +66,7 @@ git -C "$canonical" worktree add -q -b wtb "$wt"
 # global hooksPath dispatcher this machine may have (which would strip the
 # trailer itself and could green-light a broken shim).
 common_hooks="$canonical/.git/hooks"
+git -C "$canonical" config core.hooksPath "$common_hooks"
 
 # --- AC1: a commit carrying the trailer lands without it, rest unchanged ---
 
