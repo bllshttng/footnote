@@ -175,6 +175,7 @@ pub mod hook;
 mod identity;
 pub mod install_verify;
 pub mod intel;
+pub mod intel_html;
 pub mod intel_insights;
 pub mod interrupt_classify;
 pub mod json_output;
