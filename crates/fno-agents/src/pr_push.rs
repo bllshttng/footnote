@@ -1247,17 +1247,7 @@ pub fn run_push(argv: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write_exec(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
-    }
+    use crate::write_exec_stub as write_exec;
 
     /// A fake gh: green rust-ci check runs, an empty status read, a failed
     /// cli-ci run with no check-run link, and a jobs read answering zero.
