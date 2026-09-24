@@ -832,7 +832,7 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
 mod tests {
     use super::{
         last_lines, mesh_identity_assignments, mux_pane_run_argv, pane_death_receipt,
-        pane_relaunch_target, prove_pane_worker, worker_token, PaneProbes, PaneProof,
+        prove_pane_worker, worker_token, PaneProbes, PaneProof,
     };
     use crate::pane_stop::PaneSighting;
     use std::time::Duration;
