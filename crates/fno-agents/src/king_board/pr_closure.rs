@@ -33,7 +33,13 @@ pub(crate) fn line_ids(line: &str) -> Vec<String> {
 /// `None` on any line whose head is not keyword + (colon or whitespace).
 fn closure_line_rest(line: &str) -> Option<&str> {
     for kw in KEYWORDS {
-        if line.len() >= kw.len() && line[..kw.len()].eq_ignore_ascii_case(kw) {
+        // get(), never [..len]: a line opening with a multibyte character
+        // makes the keyword length a non-boundary, and a bare slice panics.
+        if line.len() >= kw.len()
+            && line
+                .get(..kw.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kw))
+        {
             let rest = &line[kw.len()..];
             return match rest.chars().next() {
                 Some(':') => Some(&rest[1..]),
@@ -223,5 +229,15 @@ mod tests {
         );
         assert_eq!(render(["not-an-id", "x-aaaa", "x-aaaa"]), "Fixes x-aaaa");
         assert_eq!(render(Vec::<String>::new()), "");
+    }
+
+    #[test]
+    fn a_multibyte_line_never_panics_the_keyword_slice() {
+        // A body line opening with a multibyte character puts a non-char
+        // boundary at the keyword length; the prefix check must read None,
+        // not panic.
+        let body = "日本語の行です。\nFixes x-aaaa\n";
+        assert_eq!(parse(body), vec!["x-aaaa"]);
+        assert_eq!(line_ids("日本語の行です。"), Vec::<String>::new());
     }
 }
