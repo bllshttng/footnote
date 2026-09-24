@@ -219,9 +219,10 @@ candidate_python() {
 
 # The receipt path writes the live events store under ~/.fno. The candidate
 # build is fenced out of live stores (live_store_fence in both crates), so the
-# store-touching receipt calls ride the INSTALLED fno: FNO_BIN outranks the
-# checkout build in the Python store client. Candidate code still serves every
-# command that touches no live store.
+# store-touching receipt calls ride the INSTALLED fno, not the candidate build:
+# FNO_BIN outranks the checkout build in the Python store client, and the
+# journal commit calls the one native binary directly. Candidate code still
+# serves every command that touches no live store.
 INSTALLED_FNO_BIN="$(command -v fno 2>/dev/null || true)"
 
 receipt_fno() {
@@ -232,13 +233,21 @@ receipt_fno() {
     fi
 }
 
-receipt_python() {
-    if [[ -n "$INSTALLED_FNO_BIN" ]]; then
-        FNO_BIN="$INSTALLED_FNO_BIN" candidate_python "$@"
-    else
-        candidate_python "$@"
-    fi
-}
+# One native binary for the receipt commit: the installed fno, else the
+# checkout build, else PATH - the same chain the Python store client walks,
+# pinned once. The commit skips the Python detour on purpose: validation
+# already ran in this shell, and a Python re-resolution would ride the
+# candidate interpreter and re-walk the same chain per call.
+RECEIPT_NATIVE_BIN="$INSTALLED_FNO_BIN"
+if [[ -z "$RECEIPT_NATIVE_BIN" ]]; then
+    for _profile in debug release; do
+        if [[ -x "$INVOKING_ROOT/crates/fno/target/$_profile/fno" ]]; then
+            RECEIPT_NATIVE_BIN="$INVOKING_ROOT/crates/fno/target/$_profile/fno"
+            break
+        fi
+    done
+fi
+[[ -n "$RECEIPT_NATIVE_BIN" ]] || RECEIPT_NATIVE_BIN="$(command -v fno 2>/dev/null || true)"
 
 GLOBAL_EVENTS_PATH="$(receipt_fno do pr global-receipt-events-path)" || {
     echo "preflight: canonical receipt journal path unavailable" >&2
@@ -301,15 +310,12 @@ emit_verification_receipt() {
 
 append_receipt_journal() {
     local events_path="$1" event="$2"
-    receipt_python -c '
-import json
-import sys
-from pathlib import Path
-from fno.events import append_event
-
-event = json.load(sys.stdin)
-append_event(event, events_path=Path(sys.argv[1]))
-' "$events_path" <<< "$event"
+    if [[ -z "$RECEIPT_NATIVE_BIN" ]]; then
+        echo "preflight: no native fno binary for the receipt commit" >&2
+        return 1
+    fi
+    printf '%s\n' "$event" \
+        | "$RECEIPT_NATIVE_BIN" doctor event emit-envelope --events "$events_path" >/dev/null
 }
 
 emit_setup_unavailable() {
