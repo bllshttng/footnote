@@ -82,6 +82,46 @@ class FakeTracker:
     def close(self, id):
         raise AssertionError("close is not part of selection")
 
+    def snapshot(self):
+        """The door-shaped document: open entries joined with sidecar fields,
+        tombstones omitted (this fake carries no closed rows)."""
+        import fno.tracker.sidecar as sidecar_store
+
+        entries = []
+        for c in self.list_open():
+            try:
+                sc = sidecar_store.load(c.id)
+            except Exception as exc:
+                raise RuntimeError(f"sidecar read failed for {c.id}: {exc}")
+            entries.append({
+                "id": c.id,
+                "title": c.title,
+                "state": "open",
+                "status": _open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
+                "parent": c.parent,
+                "blocked_by": list(c.blocked_by),
+                "priority": c.priority,
+                "rank": c.rank,
+                "created_at": c.created_at,
+                "cwd": sc.cwd,
+                "plan_path": sc.plan_path,
+                "pr_number": sc.pr_number,
+                "pr_url": sc.pr_url,
+                "additional_prs": sc.additional_prs,
+                "batch": sc.batch,
+                "contained_in": sc.contained_in,
+                "sessions": sc.sessions,
+                "claimed_at": sc.claimed_at,
+                "cost_usd": sc.cost_usd,
+            })
+        return {"backend": self.name, "entries": entries}
+
+
+def _open_status(*, pr_number, plan_path):
+    if pr_number:
+        return "in_review"
+    return "ready" if plan_path else "idea"
+
 
 def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     """Point tracker, sidecar store, claims, and the local graph at fakes."""

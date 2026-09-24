@@ -1,22 +1,18 @@
 """Work-item tracker package: the seam between footnote and a backlog store.
 
 Consumers call :func:`get_tracker` rather than reading graph.json directly, so
-the backend is selectable without touching call sites. The default backend is
-graph.json (today's behaviour, unchanged); GitHub Issues is the first external
-backend. graph.json stays the default forever: a stock install with no account
-must work offline.
+the backend is selectable without touching call sites. Backend selection is
+env-driven so it works with no config-schema machinery: ``FNO_TRACKER_BACKEND``
+(default ``graph``). graph.json stays the default forever: a stock install with
+no account must work offline.
 
-Backend selection is env-driven so it works with no config-schema machinery:
-``FNO_TRACKER_BACKEND=github`` opts into GitHub Issues, and
-``FNO_TRACKER_GITHUB_REPO=owner/repo`` scopes its ``list_open``. Default is
-``graph``.
+Every backend answers in Rust (``crates/fno-agents/src/tracker/``), through
+``fno-agents graph-get``'s stdin door; this module is the exec client.
 """
 from __future__ import annotations
 
 import os
 
-from .graph_backend import GraphTracker
-from .github_backend import GitHubIssuesTracker
 from .types import (
     NodeNotFound,
     NodeTracker,
@@ -41,21 +37,44 @@ def get_tracker(name: str | None = None) -> NodeTracker:
     """Return the configured work-item tracker.
 
     ``name`` selects a backend explicitly (used by tests). Otherwise the
-    ``FNO_TRACKER_BACKEND`` env var selects, defaulting to ``"graph"``.
+    ``FNO_TRACKER_BACKEND`` env var selects, defaulting to ``"graph"``. An
+    unknown backend now fails at the first call, with the Rust refusal text.
     """
-    backend = active_backend_name(name)
-    if backend == "graph":
-        return GraphTracker()
-    if backend == "github":
-        return GitHubIssuesTracker(
-            default_repo=os.environ.get("FNO_TRACKER_GITHUB_REPO")
+    return _RustTracker(active_backend_name(name))
+
+
+class _RustTracker:
+    """Every backend answers in Rust, through `fno-agents graph-get`'s stdin door."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def _call(self, op: str, id: str | None = None) -> dict:
+        from fno.rust_binary import verb_call
+
+        out = verb_call(
+            "graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120
         )
-    raise ValueError(f"unknown tracker backend: {backend!r}. Available: graph, github")
+        if out.get("not_found"):
+            raise NodeNotFound(id)
+        if out.get("error"):
+            raise TrackerError(out["error"])
+        return out
+
+    def read(self, id: str) -> TrackerNode:
+        return TrackerNode(**self._call("read", id)["node"])
+
+    def list_open(self) -> list[TrackerCandidate]:
+        return [TrackerCandidate(**c) for c in self._call("list-open")["candidates"]]
+
+    def snapshot(self) -> dict:
+        return self._call("snapshot")
+
+    def close(self, id: str) -> None:
+        self._call("close", id)
 
 
 __all__ = [
-    "GitHubIssuesTracker",
-    "GraphTracker",
     "NodeNotFound",
     "NodeTracker",
     "TrackerCandidate",
