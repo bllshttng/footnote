@@ -227,12 +227,15 @@ def test_native_loop_admission_surfaces_rust_readiness_refusal(monkeypatch):
 
     def refuse(verb, args):
         calls.append((verb, args))
-        return "session-refresh-unverified: no correlated Stop fire", None
+        return "plugin-missing: fno@footnote is not enabled", None
 
     monkeypatch.setattr(fno.rust_binary, "call_binary_json", refuse)
-    with pytest.raises(DispatchResolveError, match="session-refresh-unverified"):
+    with pytest.raises(DispatchResolveError, match="plugin-missing"):
         check_loop_participation("codex", "/target x-1")
 
     assert calls == [
-        ("loop", ["readiness", "--harness", "codex", "--command", "/target x-1"])
+        (
+            "loop",
+            ["readiness", "--pre-launch", "--harness", "codex", "--command", "/target x-1"],
+        )
     ]
