@@ -1775,6 +1775,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let home = dir.join("agents-home");
         std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
         std::env::set_var(crate::paths::HOME_ENV, &home);
         let claims_root = dir.join("claims-root");
         std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
@@ -1802,8 +1804,14 @@ mod tests {
             "seed": "/fno:think why"
         }));
 
-        std::env::remove_var(crate::paths::HOME_ENV);
-        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
         match prior_config {
             Some(value) => std::env::set_var("FNO_CONFIG", value),
             None => std::env::remove_var("FNO_CONFIG"),
