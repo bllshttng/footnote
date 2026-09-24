@@ -785,6 +785,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
         "title": "ERR target",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
@@ -932,6 +933,7 @@ def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
         monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: driving)
         _seed(tmp_graph, [{
             "id": node_id, "title": "Same line", "status": "ready", "domain": "code",
+            "artifact_url": "https://example.test/artifact",
         }])
         _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
         r = runner.invoke(app, ["done", node_id])

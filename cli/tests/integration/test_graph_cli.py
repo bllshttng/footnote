@@ -2427,7 +2427,8 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
         {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-cdone001", "title": "Child A", "status": "ready", "project": "p",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
         {"id": "ab-cstill02", "title": "Child B (stays open)", "status": "ready",
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
