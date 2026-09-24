@@ -1901,21 +1901,13 @@ fn codex_target_launch_cwd_fixture(answer: &str, exit: i32) -> (tempfile::TempDi
         .current_dir(repo.path())
         .status()
         .unwrap();
-    let bin = repo.path().join("fno-py");
-    std::fs::write(
-        &bin,
-        format!(
+    let bin = crate::write_exec_stub(
+        repo.path(),
+        "fno-py",
+        &format!(
             "#!/bin/sh\ncat >/dev/null\necho '{answer}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {exit}\n"
         ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&bin).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&bin, perm).unwrap();
-    }
+    );
     (repo, bin)
 }
 
