@@ -306,20 +306,23 @@ fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
 
 /// The default blueprint-subagent ceiling when no provider budget applies
 /// (no new config key: a registry row is barred, so the default is a named
-/// Rust constant).
-const DEFAULT_BLUEPRINT_CEILING: usize = 2;
+/// Rust constant). One per king: law d-6eb2cbbd.
+const DEFAULT_BLUEPRINT_CEILING: usize = 1;
 
 /// The check-in's blueprint reading: this session's live blueprint
 /// subagents against the ceiling, then which unplanned nodes to start and
 /// which to skip. The claim list and the session id arrive through the seam
 /// (arguments, not ambient reads) so the unit tests need no claims directory.
 /// A failed source is this reading's error, never a zero: an unreadable claim
-/// list read as `running 0` would name starts past the ceiling.
+/// list read as `running 0` would name starts past the ceiling. Starts also
+/// wait until plans ready fall below the king's worker slots - a blueprint
+/// nobody can build is the exact spend the wake meter exists to name.
 fn r_blueprint(
     board: &Result<Value, String>,
     cwd: &Path,
     session_id: Option<String>,
     claims: Result<Vec<String>, String>,
+    slots: Result<usize, String>,
 ) -> Result<Value, String> {
     let session_id = session_id
         .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
@@ -337,18 +340,59 @@ fn r_blueprint(
         .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
     let provider = std::env::var("FNO_ROUTE_PROVIDER").unwrap_or_default();
-    let (ceiling, ceiling_source) =
-        match crate::spawn_gate_lanes::provider_subagents_cap(cwd, &provider) {
-            Some(cap) => (cap, format!("agents.provider_limits.{provider}.subagents")),
-            None => (DEFAULT_BLUEPRINT_CEILING, "default 2".to_string()),
-        };
-    let open = ceiling.saturating_sub(running);
+    let provider_cap = crate::spawn_gate_lanes::provider_subagents_cap(cwd, &provider);
+    // A provider budget can only lower the one-per-king ceiling, never raise it.
+    let (ceiling, ceiling_source) = match provider_cap {
+        Some(cap) if cap < DEFAULT_BLUEPRINT_CEILING => {
+            (cap, format!("agents.provider_limits.{provider}.subagents"))
+        }
+        _ => (DEFAULT_BLUEPRINT_CEILING, "one per king".to_string()),
+    };
+    let plans_ready = board_queue(board, "undispatched")
+        .ok()
+        .and_then(|q| q.get("count").and_then(Value::as_u64).map(|c| c as usize));
+    let (pr_v, slots_v, gate_reason): (Value, Value, Option<String>) = match (plans_ready, &slots) {
+        (Some(pr), Ok(s)) => {
+            if pr < *s {
+                (json!(pr), json!(s), None)
+            } else {
+                (
+                    json!(pr),
+                    json!(s),
+                    Some(format!(
+                        "plans ready {pr} / slots {s}: build slots are the bottleneck"
+                    )),
+                )
+            }
+        }
+        (None, Ok(_)) => (
+            Value::Null,
+            slots.clone().map(|s| json!(s)).unwrap_or(Value::Null),
+            Some("plans ready unmeasured: the board names no undispatched count".to_string()),
+        ),
+        (_, Err(e)) => (
+            Value::Null,
+            Value::Null,
+            Some(format!("plans ready unmeasured: {e}")),
+        ),
+    };
+    let open = if gate_reason.is_some() {
+        0
+    } else {
+        ceiling.saturating_sub(running)
+    };
     let starts: Vec<String> = candidates.iter().take(open).cloned().collect();
-    let mut skips: Vec<Value> = candidates
-        .iter()
-        .skip(open)
-        .map(|id| json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
-        .collect();
+    let mut skips: Vec<Value> = match &gate_reason {
+        Some(reason) => candidates
+            .iter()
+            .map(|id| json!({"id": id, "reason": reason}))
+            .collect(),
+        None => candidates
+            .iter()
+            .skip(open)
+            .map(|id| json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
+            .collect(),
+    };
     if candidates.is_empty() && running == 0 {
         skips.push(json!({"id": null, "reason": "no unplanned node in scope"}));
     }
@@ -356,6 +400,8 @@ fn r_blueprint(
         "running": running,
         "ceiling": ceiling,
         "ceiling_source": ceiling_source,
+        "plans_ready": pr_v,
+        "slots": slots_v,
         "starts": starts,
         "skips": skips,
     }))
@@ -906,17 +952,42 @@ fn crown_split_fields(
 const REFUSAL_RATE_WINDOW: usize = 200;
 
 fn r_refusal_rate() -> Result<Value, String> {
+    let transcript = own_claude_transcript()?;
+    crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
+}
+
+/// The caller's own claude transcript, shared by the refusal and wake
+/// readers. Only claude sessions keep a per-session transcript file today
+/// (`crate::claude_drive::find_transcript`), so any other harness (or a
+/// claude session whose transcript cannot be found) reads as an ordinary
+/// failed reading, never a silent zero.
+fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
-        return Err(
-            "refusal rate needs a claude transcript; this session's harness is not claude".into(),
-        );
+        return Err("the wake and refusal readers need a claude transcript; \
+             this session's harness is not claude"
+            .into());
     }
     let session_id = session_id
         .ok_or_else(|| "no session id resolved from the ambient environment".to_string())?;
-    let transcript = crate::claude_drive::find_transcript(&session_id)
-        .ok_or_else(|| format!("no transcript found for session {session_id}"))?;
-    crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
+    crate::claude_drive::find_transcript(&session_id)
+        .ok_or_else(|| format!("no transcript found for session {session_id}"))
+}
+
+/// The wake meter over the king's own transcript. `since` is the previous
+/// loop row's top-level `ts`: token spend is the per-task-id delta since
+/// that beat, and with no previous row it reads the whole session.
+fn r_wake_meter(since: Option<&str>) -> Result<Value, String> {
+    let transcript = own_claude_transcript()?;
+    let cut = match since {
+        None => None,
+        Some(ts) => Some(
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .map_err(|e| format!("previous beat ts unreadable: {e}"))?
+                .timestamp() as f64,
+        ),
+    };
+    crate::wake_meter::wake_meter(&transcript, cut)
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
@@ -1193,7 +1264,7 @@ struct Beat {
     folded: Result<Value, String>,
 }
 
-fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
+fn collect_readings(ctx: &Ctx, since: Option<&str>) -> Vec<Reading> {
     let beat = Beat {
         board: fetch_board(ctx),
         folded: fetch_fold(ctx),
@@ -1211,7 +1282,14 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
         let (session_id, _harness) = crate::claims::resolve_identity();
         let claims = crate::claims::list(Some("node:"), None, false)
             .map(|rows| rows.iter().map(|r| r.holder.clone()).collect());
-        r_blueprint(&beat.board, &ctx.cwd, session_id, claims)
+        let slots = crate::spawn_gate_lanes::share_reading(
+            &crate::paths::AgentsHome::from_env().registry_json(),
+            crate::agents_config::max_live(&ctx.cwd) as usize,
+            session_id.as_deref(),
+        )
+        .share
+        .ok_or_else(|| "king share unreadable".to_string());
+        r_blueprint(&beat.board, &ctx.cwd, session_id, claims, slots)
     });
     take(
         "escalations",
@@ -1226,6 +1304,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("workers", r_workers());
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
+    take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", r_held(ctx));
     take("main_ci", r_main_ci());
@@ -1252,6 +1331,11 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(bp) = get("blueprint").filter(|r| r.ok) {
         data.insert("blueprint_running".into(), bp.value["running"].clone());
         data.insert("blueprint_ceiling".into(), bp.value["ceiling"].clone());
+        data.insert(
+            "blueprint_plans_ready".into(),
+            bp.value["plans_ready"].clone(),
+        );
+        data.insert("blueprint_slots".into(), bp.value["slots"].clone());
         data.insert("blueprint_starts".into(), bp.value["starts"].clone());
         data.insert("blueprint_skips".into(), bp.value["skips"].clone());
     }
@@ -1294,6 +1378,20 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         data.insert(
             "refusal_rate".into(),
             rr.value.get("rate").cloned().unwrap_or(Value::Null),
+        );
+    }
+    if let Some(wm) = get("wake_meter").filter(|r| r.ok) {
+        data.insert("wake_machine".into(), wm.value["machine"].clone());
+        data.insert("wake_user".into(), wm.value["user"].clone());
+        data.insert("wake_ratio".into(), wm.value["ratio"].clone());
+        data.insert("wake_over".into(), wm.value["over"].clone());
+        data.insert(
+            "subagent_tokens_since".into(),
+            wm.value["tokens_since"].clone(),
+        );
+        data.insert(
+            "subagent_tokens_session".into(),
+            wm.value["tokens_session"].clone(),
         );
     }
     if let Some(drain) = get("drain").filter(|r| r.ok) {
@@ -1412,6 +1510,17 @@ fn derive_change(
         .unwrap_or(false)
     {
         attention.push("refusal rate rising two consecutive beats".into());
+    }
+    if data
+        .get("wake_over")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let ratio = data
+            .get("wake_ratio")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        attention.push(format!("wake ratio {ratio:.1} to 1 over 3 to 1"));
     }
     // Attention outranks silence: a control plane failing for 30 minutes,
     // or a refusal rate climbing two beats running, is never journaled as
@@ -1532,10 +1641,12 @@ fn render_lines(
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null);
             lines.push(format!(
-                "blueprint: running {} of {} ({})",
+                "blueprint: running {} of {} ({}); plans ready {} / slots {}",
                 dash(bp.get("running")),
                 dash(bp.get("ceiling")),
                 dash(bp.get("ceiling_source")),
+                dash(bp.get("plans_ready")),
+                dash(bp.get("slots")),
             ));
             for id in bp
                 .get("starts")
@@ -1825,6 +1936,43 @@ fn render_lines(
                 text.push_str(" - RISING (handoff signal)");
             }
             lines.push(text);
+        }
+    }
+
+    match failed("wake_meter") {
+        Some(r) => lines.push(format!("READER FAILED wake_meter: {}", r.error)),
+        None => {
+            let wm = by_name("wake_meter")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let machine = wm.get("machine").and_then(Value::as_u64).unwrap_or(0);
+            let user = wm.get("user").and_then(Value::as_u64).unwrap_or(0);
+            let mut text = if user == 0 {
+                format!("wake_ratio: {machine} machine / 0 user wakes = n/a")
+            } else {
+                format!(
+                    "wake_ratio: {machine} machine / {user} user wakes = {:.1} to 1",
+                    machine as f64 / user as f64
+                )
+            };
+            if data
+                .get("wake_over")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                text.push_str(" - OVER 3 to 1");
+            }
+            lines.push(text);
+            let since_phrase = if previous.is_some() {
+                "since last beat"
+            } else {
+                "since session start"
+            };
+            lines.push(format!(
+                "subagent_tokens: {} {since_phrase} ({} this session)",
+                dash(wm.get("tokens_since")),
+                dash(wm.get("tokens_session")),
+            ));
         }
     }
 
@@ -2213,9 +2361,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let ts = iso_now();
-    let readings = collect_readings(&ctx);
-    let mut data = build_data(&readings, &ctx.scope);
     let (previous, previous_error) = previous_row(&ctx);
+    let since = previous
+        .as_ref()
+        .and_then(|p| p.get("ts"))
+        .and_then(Value::as_str);
+    let readings = collect_readings(&ctx, since);
+    let mut data = build_data(&readings, &ctx.scope);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
     let second_previous = second_previous_loop_row(&ctx);
     let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
@@ -2788,8 +2940,10 @@ mod tests {
                 "blueprint",
                 json!({
                     "running": 0,
-                    "ceiling": 2,
-                    "ceiling_source": "default 2",
+                    "ceiling": 1,
+                    "ceiling_source": "one per king",
+                    "plans_ready": 0,
+                    "slots": 4,
                     "starts": [],
                     "skips": [],
                 }),
@@ -2807,6 +2961,11 @@ mod tests {
             Reading::took(
                 "refusal_rate",
                 json!({"rate": 0.05, "refused": 5, "total": 100, "window": 100}),
+            ),
+            Reading::took(
+                "wake_meter",
+                json!({"machine": 12, "user": 10, "ratio": 1.2, "over": false,
+                       "tokens_since": 0, "tokens_session": 0}),
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
@@ -2826,11 +2985,19 @@ mod tests {
         readings[i] = r;
     }
 
-    /// A board payload naming one `unplanned` queue with `ids` as candidates.
-    fn unplanned_board(ids: &[&str]) -> Value {
-        json!({"queues": [{"name": "unplanned", "status": "ok", "count": ids.len(),
-             "rows": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()
-        }]})
+    /// A board payload naming one `unplanned` queue with `ids` as candidates
+    /// and, when `plans_ready` is Some, one `undispatched` queue counting it.
+    fn unplanned_board(ids: &[&str], plans_ready: Option<usize>) -> Value {
+        let mut queues = vec![json!({
+            "name": "unplanned", "status": "ok", "count": ids.len(),
+            "rows": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()
+        })];
+        if let Some(pr) = plans_ready {
+            queues.push(json!({
+                "name": "undispatched", "status": "ok", "count": pr, "rows": []
+            }));
+        }
+        json!({"queues": queues})
     }
 
     /// Call `r_blueprint` with a fixed provider (so the ambient
@@ -2841,6 +3008,7 @@ mod tests {
         board: Value,
         session_id: Option<&str>,
         holders: Vec<String>,
+        slots: Result<usize, String>,
     ) -> Result<Value, String> {
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2851,7 +3019,13 @@ mod tests {
         std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
         let prior_provider = std::env::var_os("FNO_ROUTE_PROVIDER");
         std::env::set_var("FNO_ROUTE_PROVIDER", "zai");
-        let reading = r_blueprint(&Ok(board), dir, session_id.map(str::to_string), Ok(holders));
+        let reading = r_blueprint(
+            &Ok(board),
+            dir,
+            session_id.map(str::to_string),
+            Ok(holders),
+            slots,
+        );
         match prior_provider {
             Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
             None => std::env::remove_var("FNO_ROUTE_PROVIDER"),
@@ -2863,33 +3037,107 @@ mod tests {
         reading
     }
 
-    /// The happy path: 4 unplanned candidates, running 0, ceiling 2 read from
-    /// the provider budget: the first two ids in board order start, the rest
-    /// skip at the ceiling.
+    /// The happy path: 4 unplanned candidates, running 0, ceiling capped to
+    /// one per king even under a higher provider budget: only the first id in
+    /// board order starts, the rest skip at the ceiling.
     #[test]
     fn r_blueprint_starts_up_to_the_ceiling_in_board_order() {
         let dir = std::env::temp_dir().join(format!("fno-bp-happy-{}", std::process::id()));
         let reading = blueprint_reading(
             &dir,
             "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3", "x-4"]),
+            unplanned_board(&["x-1", "x-2", "x-3", "x-4"], Some(0)),
             Some("sess-1"),
             vec![],
+            Ok(4),
         )
         .unwrap();
         assert_eq!(reading["running"], 0);
-        assert_eq!(reading["ceiling"], 2);
-        assert_eq!(
-            reading["ceiling_source"],
-            "agents.provider_limits.zai.subagents"
-        );
-        assert_eq!(reading["starts"], json!(["x-1", "x-2"]), "{reading}");
+        assert_eq!(reading["ceiling"], 1);
+        assert_eq!(reading["ceiling_source"], "one per king");
+        assert_eq!(reading["plans_ready"], 0);
+        assert_eq!(reading["slots"], 4);
+        assert_eq!(reading["starts"], json!(["x-1"]), "{reading}");
         assert_eq!(
             reading["skips"],
             json!([
-                {"id": "x-3", "reason": "at ceiling 0 of 2"},
-                {"id": "x-4", "reason": "at ceiling 0 of 2"}
+                {"id": "x-2", "reason": "at ceiling 0 of 1"},
+                {"id": "x-3", "reason": "at ceiling 0 of 1"},
+                {"id": "x-4", "reason": "at ceiling 0 of 1"}
             ]),
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC7: a provider budget can only lower the one-per-king ceiling, and a
+    /// start waits until plans ready are fewer than the king's worker slots.
+    #[test]
+    fn r_blueprint_ceiling_is_one_per_king_under_a_bigger_budget() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-one-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "[agents.provider_limits.zai]\nsubagents = 3\n",
+            unplanned_board(&["x-1", "x-2"], Some(2)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+        )
+        .unwrap();
+        assert_eq!(reading["ceiling"], 1);
+        assert_eq!(reading["ceiling_source"], "one per king");
+        assert_eq!(reading["plans_ready"], 2);
+        assert_eq!(reading["slots"], 4);
+        assert_eq!(reading["starts"], json!(["x-1"]), "{reading}");
+        assert_eq!(
+            reading["skips"][0]["reason"], "at ceiling 0 of 1",
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC6: plans ready at or above slots stops every start.
+    #[test]
+    fn r_blueprint_skips_everything_when_build_slots_are_the_bottleneck() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-bottl-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&["x-1", "x-2", "x-3"], Some(5)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+        )
+        .unwrap();
+        assert_eq!(reading["running"], 0);
+        assert_eq!(reading["starts"], json!([]));
+        assert_eq!(reading["skips"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            reading["skips"][0]["reason"],
+            "plans ready 5 / slots 4: build slots are the bottleneck",
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC8: an unreadable undispatched queue reads plans ready unmeasured,
+    /// and no candidate starts on an unmeasured gate.
+    #[test]
+    fn r_blueprint_skips_everything_when_plans_ready_unmeasured() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-unmeas-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&["x-1", "x-2"], None),
+            Some("sess-1"),
+            std::vec![],
+            Ok(4),
+        )
+        .unwrap();
+        assert_eq!(reading["starts"], json!([]), "{reading}");
+        assert_eq!(
+            reading["skips"][0]["reason"],
+            "plans ready unmeasured: the board names no undispatched count",
             "{reading}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2900,8 +3148,15 @@ mod tests {
     #[test]
     fn r_blueprint_leaves_a_receipt_when_nothing_is_unplanned() {
         let dir = std::env::temp_dir().join(format!("fno-bp-empty-{}", std::process::id()));
-        let reading =
-            blueprint_reading(&dir, "", unplanned_board(&[]), Some("sess-1"), vec![]).unwrap();
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&[], Some(0)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+        )
+        .unwrap();
         assert_eq!(reading["starts"], json!([]));
         assert_eq!(
             reading["skips"],
@@ -2917,19 +3172,20 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3"]),
+            unplanned_board(&["x-1", "x-2", "x-3"], Some(0)),
             Some("sess-1"),
             vec![
                 "blueprint-session:sess-1".to_string(),
                 "blueprint-session:sess-1".to_string(),
             ],
+            Ok(4),
         )
         .unwrap();
         assert_eq!(reading["running"], 2);
         assert_eq!(reading["starts"], json!([]));
         assert_eq!(reading["skips"].as_array().unwrap().len(), 3);
         assert_eq!(
-            reading["skips"][0]["reason"], "at ceiling 2 of 2",
+            reading["skips"][0]["reason"], "at ceiling 2 of 1",
             "{reading}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2943,9 +3199,10 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "",
-            unplanned_board(&["x-1"]),
+            unplanned_board(&["x-1"], Some(0)),
             Some("sess-1"),
             vec!["blueprint-session:someone-else".to_string()],
+            Ok(4),
         )
         .unwrap();
         assert_eq!(reading["running"], 0);
@@ -2957,8 +3214,15 @@ mod tests {
     /// `running 0`, which would name starts past the ceiling.
     #[test]
     fn r_blueprint_fails_without_a_session_id() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-nosess-{}", std::process::id()));
-        let reading = blueprint_reading(&dir, "", unplanned_board(&["x-1"]), None, vec![]);
+        let dir = std::env::temp_dir().join(format!("fno-fno-bp-nosess-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&["x-1"], Some(0)),
+            None,
+            vec![],
+            Ok(4),
+        );
         assert!(reading.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2970,7 +3234,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-bp-badq-{}", std::process::id()));
         let board = json!({"queues": [{"name": "unplanned", "status": "error",
             "error": "graph unreadable", "rows": []}]});
-        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![]);
+        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4));
         assert!(reading.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2988,7 +3252,10 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let bp_line = lines.iter().find(|l| l.starts_with("blueprint:")).unwrap();
-        assert_eq!(*bp_line, "blueprint: running 0 of 2 (default 2)");
+        assert_eq!(
+            *bp_line,
+            "blueprint: running 0 of 1 (one per king); plans ready 0 / slots 4"
+        );
         assert_eq!(
             data.get("blueprint_running"),
             Some(&json!(0)),
@@ -3246,9 +3513,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(16)));
+        assert_eq!(data.get("coverage"), Some(&json!(17)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 16 of 16 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 17 of 17 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3270,6 +3537,66 @@ mod tests {
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
         assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
+    }
+
+    // AC4: an over-ceiling wake ratio prints the OVER suffix and journals an
+    // attention item, so an over beat is never journalled as a quiet one.
+    #[test]
+    fn wake_ratio_line_prints_and_names_attention_when_over() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "wake_meter",
+                json!({"machine": 287, "user": 44, "ratio": 6.5, "over": true,
+                       "tokens_since": 318429, "tokens_session": 11567215}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(change.starts_with("attention:"), "change: {change}");
+        assert!(change.contains("wake ratio"));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        let line = lines.iter().find(|l| l.starts_with("wake_ratio:")).unwrap();
+        assert_eq!(
+            line,
+            "wake_ratio: 287 machine / 44 user wakes = 6.5 to 1 - OVER 3 to 1"
+        );
+    }
+
+    // AC5: a failed wake_meter reading prints the READER FAILED line, names
+    // itself in readers_failed, and no wake_ratio or subagent_tokens line
+    // prints.
+    #[test]
+    fn a_failed_wake_meter_reading_prints_the_reader_failed_line() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::failed(
+                "wake_meter",
+                "transcript unreadable: no such file".to_string(),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "READER FAILED wake_meter: transcript unreadable: no such file"),
+            "lines: {lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.starts_with("wake_ratio:")));
+        assert!(!lines.iter().any(|l| l.starts_with("subagent_tokens:")));
     }
 
     // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
@@ -3346,7 +3673,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 15 of 16 readings ok")));
+            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -3475,7 +3802,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 15 of 15 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 16 of 16 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -3484,7 +3811,7 @@ mod tests {
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
                      "owned_active": 2, "live_workers": 3, "undelivered": 9,
-                     "held_open": 0, "blueprint_running": 0, "blueprint_ceiling": 2}})
+                     "held_open": 0, "blueprint_running": 0, "blueprint_ceiling": 1}})
     }
 
     #[test]
@@ -3613,7 +3940,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 15 of 16 readings ok")));
+            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
