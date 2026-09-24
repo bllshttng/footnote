@@ -3213,16 +3213,7 @@ mod tests {
     // remote, so the two properties that matter (exactly one push, and never
     // a push over a run in flight) are provable rather than argued.
 
-    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     /// A stub `gh` answering the four reads heal makes. `pending` decides
     /// whether the SECOND check-runs read (the pre-push one) reports a run in
