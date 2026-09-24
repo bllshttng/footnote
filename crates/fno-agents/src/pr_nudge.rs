@@ -1808,7 +1808,9 @@ mod tests {
             1900,
             &mut runner,
         );
-        let raw = std::fs::read_to_string(&store).unwrap();
+        // The close commits to the event store; read committed rows plus
+        // the live tail.
+        let raw = crate::event_store::journal_text(&store, &["fleet_task", "fleet_task_closed"]);
         assert!(
             raw.contains(r#""type":"fleet_task_closed""#) && raw.contains(r#""reason":"activity""#),
             "{raw}"
