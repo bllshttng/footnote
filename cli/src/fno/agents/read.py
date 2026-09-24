@@ -25,7 +25,6 @@ from fno.agents.reachability import (
     UNREACHABLE,
     classify_progress,
     classify_reachability,
-    reachability,
     registry_falsifier,
     rendered_activity,
 )
@@ -37,7 +36,7 @@ from fno.agents.registry import (
     resolve_agent_across_sources,
 )
 
-__all__ = ["reachability", "list_agents", "ListResult"]
+__all__ = ["list_agents", "ListResult"]
 
 
 @dataclass
