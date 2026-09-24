@@ -285,7 +285,7 @@ fn render(payload: &Value) -> String {
 /// `king-history [--scope SCOPE] --events-path PATH [--events-path PATH ...] [--json|-J]`
 ///
 /// With no `--scope`, the caller's crown scope is resolved natively from the
-/// registry (the retired Python `resolve_scope`, x-9400).
+/// registry (the retired Python `resolve_scope`).
 ///
 /// rc 0 read (any match count), 1 a store that cannot be opened or synced
 /// (the message names the store path), 2 usage failure.

@@ -9,7 +9,7 @@
 //! Python resolves the paths Python owns (journals, graph, handoffs, FAQs)
 //! and relays here, the same split `king-history` applies; the caller's
 //! crown scope, level and board state are resolved NATIVELY when `--scope`
-//! is not passed (the scope fold's `resolve_scope`, x-9400); the gather and
+//! is not passed (the scope fold's `resolve_scope`); the gather and
 //! the row write are native so the Python-tree ratchet holds. The scope fold
 //! is the `court-fold` fold in process, the previous row comes through the
 //! `king-history` scan, and the board is the `board` payload read in
@@ -2070,7 +2070,7 @@ pub(crate) fn hook_beat(
 /// be resolved), the crown level from the registry row holding that scope,
 /// and the board-state manifest for the named scope when one exists. The
 /// registry read tolerates unknown keys, so a row carrying a field this
-/// binary predates no longer blinds the resolution (x-9400).
+/// binary predates no longer blinds the resolution.
 fn resolve_missing_crown_inputs(
     scope: &mut String,
     level: &mut Option<i64>,
@@ -4119,7 +4119,8 @@ mod tests {
         );
     }
 
-    /// The x-9400 beat defaults: no `--scope`, no `--level`, no
+    /// The beat defaults under the equal-version trap this repo guards
+    /// against: no `--scope`, no `--level`, no
     /// `--board-state`. The crowned caller's scope resolves from the
     /// registry (which may carry fields this binary predates), the level
     /// comes from the crowned row, and the board state defaults to the
@@ -4145,7 +4146,7 @@ mod tests {
                     "harness": "claude",
                     "harness_session_id": "ses-crown",
                     "crown_level": 2,
-                    "crown_scope": "x-a792 fleet",
+                    "crown_scope": "probe fleet",
                     "future_field": "x",
                 })],
             })
@@ -4165,7 +4166,7 @@ mod tests {
 
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let scope = crate::territory::canonical_scope("x-a792 fleet");
+        let scope = crate::territory::canonical_scope("probe fleet");
         let expected_board = crate::paths::space_dir(&repo)
             .join("kings")
             .join(format!("{scope}.md"));
@@ -4205,7 +4206,7 @@ mod tests {
         let home_backup = std::env::var_os("FNO_AGENTS_HOME");
         std::env::set_var("FNO_AGENTS_HOME", &home);
 
-        let mut scope = String::from("x-a792");
+        let mut scope = String::from("probe");
         let mut level: Option<i64> = None;
         let mut board_state: Option<PathBuf> = None;
         let resolved =

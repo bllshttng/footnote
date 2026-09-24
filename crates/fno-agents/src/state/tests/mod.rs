@@ -2612,7 +2612,8 @@ fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The equal-version trap (x-9400): PR 2090 minted v33 and PR 2091 then added
+/// The equal-version trap (see `registry_schema.toml`): PR 2090 minted v33
+/// and PR 2091 then added
 /// `spawn_id`/`spawn_provenance` AT v33 without a bump, so an fno built
 /// between the two merges called itself v33, read the new rows as its own
 /// version, and Python's strict reader refused the whole registry. This test

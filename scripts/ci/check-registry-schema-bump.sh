@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ci/check-registry-schema-bump.sh
 #
-# Registry schema field-set / version bump guard (x-9400). The collision
+# Registry schema field-set / version bump guard. The collision
 # class: PR 2090 minted v33 for lineage_reason; PR 2091 added spawn_id and
 # spawn_provenance AT v33 without a bump. An fno installed between the two
 # merges called itself v33, read the new rows as its own version, and
@@ -77,6 +77,27 @@ read_fields() {
         | sed '/^$/d' | sort
 }
 
+# A `fields` line that does not end the array means a multi-line TOML array,
+# which this reader cannot see past line one: both sides would then compare
+# truncated sets and a real bump could read as "unchanged". Fail closed and
+# name the fix instead. A multi-line array is refused BEFORE the compare by
+# re-reading the raw line here.
+fields_array_is_single_line() {
+    local rev="$1" label="$2" blob
+    blob="$(git show "$rev:$SCHEMA_FILE")" || return 1
+    local line
+    line="$(grep -E '^fields[[:space:]]*=' <<<"$blob" || true)"
+    if [[ -z "$line" ]]; then
+        return 0
+    fi
+    if [[ "$line" != *"]"* ]]; then
+        echo "ERROR: the fields array at $label spans multiple lines; this" >&2
+        echo "       guard reads one line only. Keep the array on a single" >&2
+        echo "       line, or extend this reader." >&2
+        return 1
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Resolve the base tip. Fail CLOSED when unreachable: a failed fetch that
 # silently skipped the check would re-open the collision class. Fetch is
@@ -109,6 +130,8 @@ BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 2
 HEAD_V="$(read_version "$HEAD_SHA" "PR head")" || exit 2
 BASE_F="$(read_fields "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 2
 HEAD_F="$(read_fields "$HEAD_SHA" "PR head")" || exit 2
+fields_array_is_single_line "$BASE_TIP" "$REMOTE/$BASE_REF tip" || exit 2
+fields_array_is_single_line "$HEAD_SHA" "PR head" || exit 2
 
 if [[ -z "$BASE_F" ]]; then
     echo "check-registry-schema-bump: no baseline fields at base tip"
@@ -122,7 +145,10 @@ if [[ "$HEAD_F" == "$BASE_F" ]]; then
     exit 0
 fi
 
-if [[ "$HEAD_V" -gt "$BASE_V" ]]; then
+# 10# forces base 10: bash reads a leading-zero literal as octal, and this
+# guard reads the toml as text, where a malformed `version = 010` would
+# compare as 8 before the TOML parser ever sees it.
+if (( 10#$HEAD_V > 10#$BASE_V )); then
     echo "check-registry-schema-bump: OK (v$BASE_V -> v$HEAD_V, field set changed)"
     echo "  head=$HEAD_SHA base=$REMOTE/$BASE_REF@$BASE_TIP"
     exit 0

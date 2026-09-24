@@ -627,8 +627,9 @@ jobs:
       - name: Registry schema field-set bump guard
         # Same pull_request wiring as the proto guard, for the registry twin:
         # a `fields` change in registry_schema.toml without a monotonic
-        # `version` bump re-opens the x-9400 class (an equal-version fno
-        # reading newer rows as its own version, Python refusing the lot).
+        # `version` bump re-opens the equal-version read (an fno built before
+        # the field landed reading newer rows as its own version, Python
+        # refusing the lot).
         if: github.event_name == 'pull_request'
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

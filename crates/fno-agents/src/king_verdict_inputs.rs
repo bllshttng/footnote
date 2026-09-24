@@ -128,8 +128,7 @@ pub(crate) struct VerdictInputs {
 /// retired Python `resolve_scope`, whose wording is matched). Shared by the
 /// verdict, checkin and history verbs: the Rust reader tolerates unknown
 /// keys, so a registry row carrying a field this binary predates no longer
-/// blinds the crown resolution the way the strict Python reader did
-/// (x-9400).
+/// blinds the crown resolution the way the strict Python reader did.
 pub(crate) fn resolve_scope(
     explicit_scope: Option<&str>,
     registry_path: &Path,
@@ -786,7 +785,7 @@ mod tests {
         );
     }
 
-    // --- x-9400: the caller-crown resolution survives an unknown field ----
+    // --- the caller-crown resolution survives an unknown field ----
 
     fn write_registry(dir: &Path, rows: Value) -> PathBuf {
         let path = dir.join("registry.json");
@@ -811,7 +810,7 @@ mod tests {
             "harness": "claude",
             "harness_session_id": "ses-crown",
             "crown_level": 2,
-            "crown_scope": "x-a792 fleet",
+            "crown_scope": "probe fleet",
         });
         if let Value::Object(map) = extra {
             for (k, v) in map {
@@ -854,7 +853,7 @@ mod tests {
         );
         with_crowned_identity(|| {
             let scope = resolve_scope(None, &path).expect("unknown key must not blind the read");
-            assert_eq!(scope, crate::territory::canonical_scope("x-a792 fleet"));
+            assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
         });
         fs::remove_dir_all(&dir).ok();
     }
@@ -891,11 +890,11 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         with_crowned_identity(|| {
             let scope = resolve_scope(
-                Some("x-a792"),
-                Path::new("/nonexistent/x-9400/registry.json"),
+                Some("probe"),
+                Path::new("/nonexistent/registry-probe/registry.json"),
             )
             .expect("explicit scope must win");
-            assert_eq!(scope, crate::territory::canonical_scope("x-a792"));
+            assert_eq!(scope, crate::territory::canonical_scope("probe"));
         });
     }
 }
