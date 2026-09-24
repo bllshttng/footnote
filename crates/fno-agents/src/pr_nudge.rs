@@ -1044,7 +1044,13 @@ mod tests {
         // no undelivered, no operator question.
         let r = row(false);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (17, String::new(), String::new())
             } else {
                 (0, String::new(), String::new())
@@ -1098,7 +1104,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1151,7 +1157,13 @@ mod tests {
         let stderr_line = "fno agents resume: t-x (9a879b3b) is 'Working'; \
                            it was not woken and the message was NOT delivered.";
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (16, String::new(), format!("{stderr_line}\n"))
             } else {
                 (0, String::new(), String::new())
@@ -1183,7 +1195,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -1229,7 +1241,13 @@ mod tests {
     fn a_landed_resume_carries_no_reason() {
         let r = row(false);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (0, String::new(), "some noise line\n".into())
             } else {
                 (0, String::new(), String::new())
@@ -1266,7 +1284,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -1339,7 +1357,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1379,7 +1397,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1419,7 +1437,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1463,7 +1481,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -2148,7 +2166,7 @@ mod tests {
         // AC7-HP: one row, one ladder state, one payload - plan_with and
         // apply return the same action.
         let r = row(true);
-        let out = status_payload("pending", false, "0123456789abcdef");
+        let out = status_payload("green", true, "0123456789abcdef");
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dry-run"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
         save_state(&home, &r.session_id, &LadderState::default());
