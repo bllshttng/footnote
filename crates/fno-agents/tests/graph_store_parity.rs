@@ -141,14 +141,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
         .expect("rust locked_mutate")
     };
 
-    // The store is graph.db; the json file is a frozen mirror under it. The
-    // probe reads the store and re-runs the defaults pipeline, whose
-    // insertion order is the byte contract the goldens were captured with.
-    let read_store = |g: &Path| -> Vec<Value> {
-        let mut rows = graph_store::read_rows(g).expect("rust read");
-        graph_store::apply_defaults(&mut rows, false);
-        rows
-    };
+    // The store is graph.db; the json file is a frozen mirror under it.
+    // read_rows runs the defaults pipeline, whose insertion order is the
+    // byte contract the goldens were captured with.
+    let read_store = |g: &Path| -> Vec<Value> { graph_store::read_rows(g).expect("rust read") };
     let read_now = |g: &Path| -> String {
         let entries = read_store(g);
         graph_store::serialize_entries(&entries)
