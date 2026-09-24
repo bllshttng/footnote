@@ -585,29 +585,26 @@ def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monke
     assert records[0].pr_number == 5
 
 
-def test_reverse_map_non_checkout_cwd_unresolvable_keeps_cwd(tmp_path, monkeypatch):
-    """AC2-ERR (x-b59f): a non-checkout cwd whose project maps to no root keeps
-    its cwd; the gh failure from it still lands as an error record."""
+def test_reverse_map_non_checkout_cwd_is_skipped(tmp_path, monkeypatch, capsys):
+    """A non-checkout cwd follows the same named skip path as a missing one."""
     import fno.graph._intake as intake
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
 
-    seen: dict = {}
+    seen = []
 
-    def _boom(**kw):
-        seen["cwd"] = kw.get("cwd")
-        raise rec.ReconcileError(
-            "gh pr list (merged) failed (rc=1): failed to run git: "
-            "fatal: not a git repository (or any of the parent directories)"
-        )
+    def _listed(**kw):
+        seen.append(kw.get("cwd"))
+        return []
 
     stray_dir = tmp_path / "stray"
     stray_dir.mkdir()
     entries = [_node("ab-stray2", cwd=str(stray_dir), project="nomap")]
-    records = scan_merge_drift(entries, list_merged=_boom)
-    assert seen["cwd"] == str(stray_dir)  # unmapped project: cwd unchanged
-    assert len(records) == 1
-    assert not records[0].closeable
-    assert "not a git repository" in records[0].error
+    records = scan_merge_drift(entries, list_merged=_listed)
+    stderr = capsys.readouterr().err
+    assert seen == []
+    assert records == []
+    assert "ab-stray2" in stderr
+    assert "non-checkout cwd" in stderr
 
 
 def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):

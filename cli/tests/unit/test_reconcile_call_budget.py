@@ -12,8 +12,8 @@ first, warming the shared cache the drift scan reads.
 """
 from __future__ import annotations
 
-import functools
 import json
+import os
 import subprocess
 
 from fno.graph import _reconcile as rec
@@ -23,6 +23,8 @@ from fno.graph._reconcile import (
     collect_open_binding_heals,
     scan_merge_drift,
 )
+from fno.pr import _rest
+from fno.pr._proc import Result
 
 REPO_SLUG_URL = "https://github.com/o/r/pull/{n}"
 STAMPED = list(range(101, 118))  # 17 PR-carrying open nodes
@@ -32,6 +34,10 @@ def _repo_tree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/o/r.git"],
+        check=True,
+    )
     dirs = []
     for i in range(6):
         d = repo / f"wt-{i}"
@@ -58,31 +64,41 @@ def _merged_rows(numbers):
     return [
         {
             "number": n,
-            "url": REPO_SLUG_URL.format(n=n),
-            "headRefName": f"feature/stuff-{n}",
-            "mergedAt": f"2026-09-0{1 + n % 8}T00:00:00Z",
+            "state": "closed",
+            "merged_at": f"2026-09-0{1 + n % 8}T00:00:00Z",
+            "title": f"PR {n}",
+            "body": "",
+            "head": {"ref": f"feature/stuff-{n}"},
+            "html_url": REPO_SLUG_URL.format(n=n),
         }
         for n in numbers
     ]
 
 
-def _install_fake_gh(monkeypatch, *, merged_rows, open_rows):
-    """Record every command with its argv; answer gh pr list from fixtures."""
-    real_run = subprocess.run
+def _install_fake_rest(monkeypatch, *, merged_rows, open_rows, tmp_path):
+    """Record REST listings and answer them from GitHub-shaped fixtures."""
     calls: list[list[str]] = []
+    real_run = subprocess.run
 
-    def fake_run(cmd, **kwargs):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_gh = bin_dir / "gh"
+    fake_gh.write_text("#!/bin/sh\nexit 97\n")
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    def fake_run(cmd, *, cwd=None, timeout=None, **kwargs):
         calls.append(list(cmd))
-        if cmd[0] == "git":
-            return real_run(cmd, **kwargs)
-        assert cmd[:3] == ["gh", "pr", "list"], f"unexpected gh command: {cmd}"
-        rows = merged_rows if "merged" in cmd else open_rows
-        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows), stderr="")
+        if cmd[:3] == ["git", "remote", "get-url", "origin"]:
+            result = real_run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+            return Result(result.returncode, result.stdout, result.stderr)
+        assert cmd[:2] == ["gh", "api"], f"unexpected command: {cmd}"
+        rows = merged_rows if "state=closed" in cmd[2] else open_rows
+        return Result(0, json.dumps(rows), "")
 
-    monkeypatch.setattr(rec.subprocess, "run", fake_run)
+    monkeypatch.setattr(_rest, "run", fake_run)
     monkeypatch.setattr(rec, "_gh_executable", lambda: "/usr/bin/gh")
-    return calls, functools.partial(rec.list_open_pr_branches, runner=fake_run), \
-        functools.partial(rec.list_merged_pr_branches, runner=fake_run)
+    return calls, rec.list_open_pr_branches, rec.list_merged_pr_branches
 
 
 def _gh_calls(calls):
@@ -103,13 +119,15 @@ def test_two_listings_answer_the_whole_scan_pair(tmp_path, monkeypatch):
     open_rows = [
         {
             "number": 900,
-            "url": REPO_SLUG_URL.format(n=900),
-            "headRefName": "feature/ab-aaa0",
+            "state": "open",
+            "title": "PR 900",
             "body": "",
+            "head": {"ref": "feature/ab-aaa0"},
+            "html_url": REPO_SLUG_URL.format(n=900),
         }
     ]
-    calls, open_seam, merged_seam = _install_fake_gh(
-        monkeypatch, merged_rows=_merged_rows(STAMPED), open_rows=open_rows
+    calls, open_seam, merged_seam = _install_fake_rest(
+        monkeypatch, merged_rows=_merged_rows(STAMPED), open_rows=open_rows, tmp_path=tmp_path
     )
 
     listings = _ListingCache()
@@ -124,9 +142,9 @@ def test_two_listings_answer_the_whole_scan_pair(tmp_path, monkeypatch):
 
     gh = _gh_calls(calls)
     assert len(gh) == 2, gh
-    assert any("--state" in c and "open" in c for c in gh)
-    assert any("--state" in c and "merged" in c for c in gh)
-    assert not any("view" in c for c in gh)
+    assert all(c[:2] == ["gh", "api"] for c in gh)
+    assert any("state=open" in c[2] for c in gh)
+    assert any("state=closed" in c[2] for c in gh)
     assert counter == [], "every stamped number resolved from a listing"
     assert len(heals) == 1 and heals[0].pr_number == 900
     assert advisories == []
@@ -152,8 +170,8 @@ def test_number_in_neither_listing_fires_the_query_exactly_once(tmp_path, monkey
     stray = next(e for e in entries if e.get("pr_number") == STAMPED[0])
     stray["pr_number"] = 999
     stray["pr_url"] = REPO_SLUG_URL.format(n=999)
-    calls, open_seam, merged_seam = _install_fake_gh(
-        monkeypatch, merged_rows=_merged_rows(STAMPED[1:]), open_rows=[]
+    calls, open_seam, merged_seam = _install_fake_rest(
+        monkeypatch, merged_rows=_merged_rows(STAMPED[1:]), open_rows=[], tmp_path=tmp_path
     )
 
     listings = _ListingCache()
@@ -183,8 +201,8 @@ def test_pending_supersession_successor_takes_the_query_not_the_listing(
         "superseded_by": successor["id"],
         "supersession": {"cause": "old bug", "surfaces": ["src/a.py"]},
     })
-    calls, open_seam, merged_seam = _install_fake_gh(
-        monkeypatch, merged_rows=_merged_rows(STAMPED), open_rows=[]
+    calls, open_seam, merged_seam = _install_fake_rest(
+        monkeypatch, merged_rows=_merged_rows(STAMPED), open_rows=[], tmp_path=tmp_path
     )
 
     listings = _ListingCache()
