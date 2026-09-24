@@ -66,7 +66,7 @@ pub struct PaneInfo {
     /// (v51) The pane's spawn-captured `FNO_AGENT_SELF` identity.
     #[serde(default)]
     pub name: Option<String>,
-    /// (v88) The portal index whose seat this pane is, under the same
+    /// (v89) The portal index whose seat this pane is, under the same
     /// one-row rule the sideline marker wears: a held seat (its row is gone)
     /// or an ambiguous key carries none. Absent on every other pane, so the
     /// JSON shape of `pane ls --json` for plain panes is byte-identical.

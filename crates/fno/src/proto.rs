@@ -315,8 +315,6 @@ fn default_true() -> bool {
 /// the client derives the age at render. Same decode both ways; floor 58.
 /// v78: `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-/// v88: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
-/// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
 /// v87: `Layout.missions` removed (the band is gone); floor stays 58.
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
@@ -330,7 +328,11 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 88;
+/// v88: `AgentLaunchRequest.node` (serde default), the board's target key
+/// binds the launch to its node; floor stays 58.
+/// v89: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
+/// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
+pub const PROTO_VERSION: u32 = 89;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1496,7 +1498,7 @@ pub enum Command {
     SplitH,
     SplitV,
     ClosePane,
-    /// (v88) Close ONLY the portal seat `seat` - the viewer pane - never the
+    /// (v89) Close ONLY the portal seat `seat` - the viewer pane - never the
     /// row it shows: removing a row is not removing a pane, and closing a
     /// portal is its own gesture. Fail-closed: a pane that is no live portal
     /// seat, or the session's last pane, gets a notice and stays open.
@@ -4044,7 +4046,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 88);
+        assert_eq!(PROTO_VERSION, 89);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
