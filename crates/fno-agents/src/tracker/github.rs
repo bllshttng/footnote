@@ -117,15 +117,14 @@ impl GitHubTracker {
         Self { default_repo, gh }
     }
 
-    fn run_gh(&self, args: Vec<String>) -> Result<(i32, String, String), TrackerError> {
-        let id_label = args
-            .iter()
-            .find(|a| a.contains('#'))
-            .cloned()
-            .unwrap_or_default();
+    fn run_gh(
+        &self,
+        args: Vec<String>,
+        label: &str,
+    ) -> Result<(i32, String, String), TrackerError> {
         self.gh
             .run(&args)
-            .map_err(|e| TrackerError::Backend(format!("gh failed for {id_label}: {e}")))
+            .map_err(|e| TrackerError::Backend(format!("gh failed for {label}: {e}")))
     }
 }
 
@@ -136,15 +135,18 @@ impl Tracker for GitHubTracker {
 
     fn read(&self, id: &str) -> Result<TrackerNode, TrackerError> {
         let (owner, repo, number) = parse_github_id(id)?;
-        let (rc, out, err) = self.run_gh(vec![
-            "issue".into(),
-            "view".into(),
-            number.to_string(),
-            "-R".into(),
-            format!("{owner}/{repo}"),
-            "--json".into(),
-            "title,state,body,url".into(),
-        ])?;
+        let (rc, out, err) = self.run_gh(
+            vec![
+                "issue".into(),
+                "view".into(),
+                number.to_string(),
+                "-R".into(),
+                format!("{owner}/{repo}"),
+                "--json".into(),
+                "title,state,body,url".into(),
+            ],
+            id,
+        )?;
         if rc != 0 {
             if not_found_stderr(&err) {
                 return Err(TrackerError::NotFound(id.to_string()));
@@ -178,18 +180,21 @@ impl Tracker for GitHubTracker {
             );
             return Ok(Vec::new());
         };
-        let (rc, out, err) = self.run_gh(vec![
-            "issue".into(),
-            "list".into(),
-            "-R".into(),
-            repo.clone(),
-            "--state".into(),
-            "open".into(),
-            "--json".into(),
-            "number,title,state,createdAt,body,url".into(),
-            "--limit".into(),
-            "1000".into(),
-        ])?;
+        let (rc, out, err) = self.run_gh(
+            vec![
+                "issue".into(),
+                "list".into(),
+                "-R".into(),
+                repo.clone(),
+                "--state".into(),
+                "open".into(),
+                "--json".into(),
+                "number,title,state,createdAt,body,url".into(),
+                "--limit".into(),
+                "1000".into(),
+            ],
+            repo,
+        )?;
         if rc != 0 {
             return Err(TrackerError::Backend(format!(
                 "gh issue list failed for {repo}: {}",
@@ -235,20 +240,23 @@ impl Tracker for GitHubTracker {
             };
             let since =
                 (chrono::Utc::now() - chrono::Duration::days(days as i64)).format("%Y-%m-%d");
-            let (rc, out, err) = self.run_gh(vec![
-                "issue".into(),
-                "list".into(),
-                "-R".into(),
-                repo.to_string(),
-                "--state".into(),
-                "closed".into(),
-                "--search".into(),
-                format!("closed:>={since}"),
-                "--json".into(),
-                "number,title,state,createdAt,closedAt,body,url".into(),
-                "--limit".into(),
-                "200".into(),
-            ])?;
+            let (rc, out, err) = self.run_gh(
+                vec![
+                    "issue".into(),
+                    "list".into(),
+                    "-R".into(),
+                    repo.to_string(),
+                    "--state".into(),
+                    "closed".into(),
+                    "--search".into(),
+                    format!("closed:>={since}"),
+                    "--json".into(),
+                    "number,title,state,createdAt,closedAt,body,url".into(),
+                    "--limit".into(),
+                    "200".into(),
+                ],
+                repo,
+            )?;
             if rc != 0 {
                 return Err(TrackerError::Backend(format!(
                     "gh issue list failed for {repo}: {}",
@@ -294,13 +302,16 @@ impl Tracker for GitHubTracker {
 
     fn close(&self, id: &str) -> Result<(), TrackerError> {
         let (owner, repo, number) = parse_github_id(id)?;
-        let (rc, _out, err) = self.run_gh(vec![
-            "issue".into(),
-            "close".into(),
-            number.to_string(),
-            "-R".into(),
-            format!("{owner}/{repo}"),
-        ])?;
+        let (rc, _out, err) = self.run_gh(
+            vec![
+                "issue".into(),
+                "close".into(),
+                number.to_string(),
+                "-R".into(),
+                format!("{owner}/{repo}"),
+            ],
+            id,
+        )?;
         if rc != 0 {
             if not_found_stderr(&err) {
                 return Err(TrackerError::NotFound(id.to_string()));
