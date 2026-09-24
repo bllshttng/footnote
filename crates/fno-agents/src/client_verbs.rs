@@ -2223,6 +2223,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("{line}");
         return 13;
     }
+    // Codex route args belong after the executable token. Keep terminal argv
+    // raw until route resolution; composing pre_exec first would put those
+    // args into the outer `sh -c` invocation.
+    let codex_terminal_exec = harness == "codex" && matches!(&route, ResumeRoute::TerminalExec);
     // the account flag is parsed so a wake never exits 2 at argv. The
     // ROW's recorded launch account stays the binding authority on this path -
     // a wake continues a transcript that lives under the config dir it was
@@ -2300,7 +2304,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return 13;
         }
-        let v = match build_resume_argv(harness, session_id, Some(cwd)) {
+        let v = match if codex_terminal_exec {
+            crate::pane_relaunch::build_resume_argv_tokens_split(
+                harness,
+                session_id,
+                Some(cwd),
+                true,
+            )
+        } else {
+            build_resume_argv(harness, session_id, Some(cwd))
+        } {
             Some(v) => v,
             None => {
                 eprintln!(
@@ -2483,6 +2496,27 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // refuse after the wake, before any claim; announce a restore.
     if let Some(code) = crate::codex_route::resume_verdict(&codex_route_outcome, entry, &row_name) {
         return code;
+    }
+
+    if codex_terminal_exec {
+        argv = match crate::harness_capabilities::compose_pre_exec(
+            harness,
+            "interactive_resume",
+            argv,
+        ) {
+            Ok(argv) => argv,
+            Err(_) => {
+                eprintln!(
+                    "fno agents resume: harness {} resume contract is invalid.",
+                    py_repr_str(harness)
+                );
+                return 13;
+            }
+        };
+        if !which_on_path(&argv[0]) {
+            eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
+            return 14;
+        }
     }
 
     // Guard claude's same-id session resume before launch. Terminal

@@ -622,7 +622,7 @@ pub(crate) fn build_resume_argv_split(
 }
 
 /// Raw resume command tokens before the lane's declared `pre_exec` wrapper.
-/// Print-command output splices route and identity tokens before composing it.
+/// Codex paths splice route args before composing the wrapper.
 pub(crate) fn build_resume_argv_tokens_split(
     provider: &str,
     session_id: &str,

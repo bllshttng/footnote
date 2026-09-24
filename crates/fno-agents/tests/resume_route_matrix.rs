@@ -187,6 +187,15 @@ fn run_null_with_env(
 }
 
 fn run_terminal(fixture: &Fixture, row: &Row, path: &Path) -> (u32, String) {
+    run_terminal_with_env(fixture, row, path, &[])
+}
+
+fn run_terminal_with_env(
+    fixture: &Fixture,
+    row: &Row,
+    path: &Path,
+    extra_env: &[(&str, &str)],
+) -> (u32, String) {
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -207,6 +216,9 @@ fn run_terminal(fixture: &Fixture, row: &Row, path: &Path) -> (u32, String) {
     command.env("PATH", path);
     command.env("TERM", "xterm-256color");
     command.cwd(fixture.root.path());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
     let mut output = String::new();
@@ -627,4 +639,43 @@ fn claude_print_command_uses_transcript_resolved_cwd() {
     assert!(stdout.contains("exec env FNO_AGENT_SELF="), "{stdout}");
     assert!(!stdout.contains("fake-executed"), "{stdout}");
     assert!(fixture.events().is_empty(), "{}", fixture.events());
+}
+
+#[test]
+fn routed_codex_terminal_resume_composes_pre_exec_after_route_args() {
+    let fixture = Fixture::new();
+    std::os::unix::fs::symlink("/bin/sh", fixture.bins.join("sh")).unwrap();
+    let row = fixture.row("codex", "pane", false).clone();
+    let mut entries = fixture
+        .rows
+        .iter()
+        .map(|row| row_json(row, fixture.root.path()))
+        .collect::<Vec<_>>();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["route_provider_id"] = json!("zai-openai");
+    entry["model_name"] = json!("glm-route-test");
+    fixture.write_registry_entries(&entries);
+
+    let config_dir = fixture.root.path().join(".fno");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[model_routing.providers.zai-openai]\nprotocol = \"openai\"\nbase_url = \"https://example.invalid/v1\"\napi_key_env = \"FNO_TEST_ZAI_KEY\"\n",
+    )
+    .unwrap();
+
+    let (code, output) = run_terminal_with_env(
+        &fixture,
+        &row,
+        &fixture.bins,
+        &[("FNO_TEST_ZAI_KEY", "must-not-print-this-key")],
+    );
+
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("fake-executed"), "{output}");
+    assert!(output.contains("model_providers.zai-openai"), "{output}");
+    assert!(!output.contains("must-not-print-this-key"), "{output}");
 }
