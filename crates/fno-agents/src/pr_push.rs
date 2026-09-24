@@ -1358,14 +1358,21 @@ exit 1
     #[test]
     fn timeout_annotations_escalate_while_unannotated_and_unreadable_cancels_rerun() {
         let message = "The job has exceeded the maximum execution time of 35m0s";
-        for (marker, check_name, expected_bucket, expected_signature) in [
-            ("timeout-run", "stress", "fail", "timed_out"),
-            ("cancel-run", "cancelled", "cancel", "cancelled"),
+        for (marker, check_name, expected_bucket, expected_signature, expected_run_id) in [
+            ("timeout-run", "stress", "fail", "timed_out", None),
+            (
+                "cancel-run",
+                "cancelled",
+                "cancel",
+                "cancelled",
+                Some("124"),
+            ),
             (
                 "timeout-run fail-timeout-annotations",
                 "stress",
                 "cancel",
                 "cancelled",
+                Some("123"),
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1398,15 +1405,16 @@ exit 1
                 false,
             );
             assert_eq!(finding.signature, expected_signature);
-            match expected_signature {
-                "timed_out" => assert!(matches!(
+            if let Some(expected_run_id) = expected_run_id {
+                assert!(matches!(
+                    finding.remedy,
+                    crate::heal::Remedy::Rerun { ref run_id } if run_id == expected_run_id
+                ));
+            } else {
+                assert!(matches!(
                     finding.remedy,
                     crate::heal::Remedy::Escalate { .. }
-                )),
-                _ => assert!(matches!(
-                    finding.remedy,
-                    crate::heal::Remedy::Rerun { ref run_id } if run_id == "124"
-                )),
+                ));
             }
         }
     }
