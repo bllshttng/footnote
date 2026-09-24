@@ -186,18 +186,25 @@ pub(crate) fn print_resume_command(
             }
         }
     }
-    let identity = match crate::pane_relaunch::mesh_identity_assignments(
-        entry.get("name").and_then(Value::as_str).unwrap_or(name),
-        harness,
-        entry.get("node").and_then(Value::as_str),
-    ) {
-        Ok(identity) => identity,
-        Err(reason) => {
-            eprintln!("fno agents resume: {reason}; refusing an unattributable resume");
-            return 13;
+    let identity = if client_resume || codex_route_outcome.is_some() {
+        match crate::pane_relaunch::mesh_identity_assignments(
+            entry.get("name").and_then(Value::as_str).unwrap_or(name),
+            harness,
+            entry.get("node").and_then(Value::as_str),
+        ) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                eprintln!("fno agents resume: {reason}; refusing an unattributable resume");
+                return 13;
+            }
         }
+    } else {
+        Vec::new()
     };
-    let mut printable = vec!["env".to_string()];
+    let mut printable = Vec::new();
+    if !identity.is_empty() || !print_env.is_empty() {
+        printable.push("env".to_string());
+    }
     printable.extend(identity);
     printable.extend(crate::pane_relaunch::env_prefixed(&print_env, &argv));
     crate::pane_relaunch::print_relaunch_command(None, &cwd, &printable, &[], row_name);

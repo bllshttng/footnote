@@ -2372,8 +2372,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // Keep the row's identity on both the printed command and the codex wake
-    // route, which may relaunch the session through the daemon.
+    // Keep the row's identity on route-managed print commands and the codex
+    // wake route, which may relaunch the session through the daemon.
     let identity = match mesh_identity_assignments(
         entry.get("name").and_then(Value::as_str).unwrap_or(&name),
         harness,
