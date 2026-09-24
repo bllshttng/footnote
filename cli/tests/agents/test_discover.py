@@ -103,6 +103,42 @@ def _run(sdir, alive, tmp_path, **kw):
     )
 
 
+def test_discover_walks_a_registered_account_root(tmp_path, monkeypatch):
+    """With no FNO_CLAUDE_SESSIONS_DIR, discovery walks every root: a record
+    under a registered claude account's sessions dir is a candidate. The env
+    override still wins, so the test seam stays hermetic."""
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv(discover.SESSIONS_DIR_ENV, raising=False)
+    acct = tmp_path / "acct"
+    acct.mkdir()
+    config = tmp_path / "accounts-config.toml"
+    config.write_text(
+        "[[accounts.records]]\n"
+        'id = "makers"\n'
+        'name = "makers"\n'
+        'harness = "claude"\n'
+        'auth = "managed"\n'
+        f'config_dir = "{acct}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+    sdir = acct / "sessions"
+    ct = _write_session(sdir, 4242, session_id="uuid-acct", job_id="feedc0de", cwd="/tmp")
+    kwargs = dict(
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil({4242: ct}),
+        project_resolver=lambda c: None,
+        registry_path=tmp_path / "registry.json",
+    )
+    sessions = discover.discover_live_sessions(**kwargs)
+    assert "feedc0de" in [s.short_id for s in sessions]
+
+    override = tmp_path / "override"
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(override))
+    assert discover.discover_live_sessions(**kwargs) == []
+
+
 def test_ac1_hp_three_live_sessions(tmp_path, monkeypatch):
     """AC1-HP: each live session appears with a legible handle + status."""
     use_tmpdir(monkeypatch, tmp_path)

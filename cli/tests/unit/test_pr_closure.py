@@ -6,6 +6,8 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -713,6 +715,7 @@ def test_open_binding_heal_fills_a_trailer_named_node(tmp_path):
     # reverse key.
     from fno.graph._reconcile import collect_open_binding_heals
 
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     entries = [_node(id="x-0001", status="ready", cwd=str(tmp_path))]
     heals, advisories = collect_open_binding_heals(
         entries,
@@ -737,32 +740,42 @@ def test_open_binding_heal_untouched_by_a_reverse_resolved_row():
     assert advisories == []
 
 
-def test_open_pr_listing_refuses_a_truncated_result():
-    from fno.graph._reconcile import ReconcileError, list_open_pr_branches
+def test_open_pr_listing_refuses_a_truncated_result(monkeypatch, tmp_path):
+    from fno.graph import _reconcile as rec
+    from fno.pr import _rest
+    from fno.pr._proc import Result
 
     calls = []
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text("#!/bin/sh\nexit 97\n")
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
 
     def runner(cmd, **kwargs):
         calls.append(cmd)
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    {
-                        "number": number,
-                        "url": f"https://github.com/o/r/pull/{number}",
-                        "headRefName": f"feature/x-{number:04x}",
-                    }
-                    for number in range(101)
-                ]
-            ),
-            stderr="",
-        )
+        page = int(cmd[2].rsplit("page=", 1)[1])
+        rows = [
+            {
+                "number": (page - 1) * 100 + number,
+                "state": "open",
+                "title": "t",
+                "body": "",
+                "head": {"ref": f"feature/x-{number:04x}"},
+                "html_url": f"https://github.com/o/r/pull/{number}",
+            }
+            for number in range(100)
+        ]
+        return Result(0, json.dumps(rows), "")
 
-    with pytest.raises(ReconcileError, match="open PR listing hit its 100-row limit"):
-        list_open_pr_branches(cwd="/tmp", runner=runner)
-    assert calls[0][calls[0].index("--limit") + 1] == "101"
-    assert "body" in calls[0][calls[0].index("--json") + 1]
+    monkeypatch.setattr(_rest, "_slug_or_reason", lambda cwd, runner: ("o/r", ""))
+    monkeypatch.setattr(_rest, "run", runner)
+    monkeypatch.setattr(rec, "_gh_executable", lambda: "/usr/bin/gh")
+    with pytest.raises(rec.ReconcileError, match="open PR listing hit its 100-row limit"):
+        rec.list_open_pr_branches(cwd="/tmp")
+    assert [c[2].rsplit("page=", 1)[1] for c in calls] == ["1", "2"]
+    assert all(c[:2] == ["gh", "api"] for c in calls)
 
 
 def test_rest_listing_details_carry_the_body_at_no_extra_request():
@@ -777,6 +790,7 @@ def test_rest_listing_details_carry_the_body_at_no_extra_request():
                     {
                         "number": 5,
                         "state": "open",
+                        "merged_at": None,
                         "title": "t",
                         "body": "Backlog-Closure: x-0001",
                         "head": {"ref": "chore/tidy-docs"},
@@ -790,6 +804,7 @@ def test_rest_listing_details_carry_the_body_at_no_extra_request():
     rows, reason = list_prs_rest("o/r", details=True, runner=runner)
     assert reason == ""
     assert rows[0]["body"] == "Backlog-Closure: x-0001"
+    assert rows[0]["mergedAt"] is None
 
 
 def test_pr_list_surfaces_the_binding_detail_and_drops_the_body(monkeypatch, tmp_path):
