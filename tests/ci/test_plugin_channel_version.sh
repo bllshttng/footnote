@@ -44,12 +44,14 @@ expect_match "" 0.4.0 1; check "an unresolved install never matches" $?
 expect_match 0.4.0rc1 0.4.0 1; check "an rc never satisfies a stable plugin" $?
 expect_match 0.4.0.dev20260924 0.4.0-dev.20260925 1; check "yesterday's nightly never matches today's" $?
 
-# ------------------------------------------------------------- platform glob
-[ "$(plugin_wheel_platform Darwin arm64)" = "macosx*arm64" ]; check "darwin arm64 wheel glob" $?
-[ "$(plugin_wheel_platform Darwin x86_64)" = "macosx*x86_64" ]; check "darwin x86_64 wheel glob" $?
-[ "$(plugin_wheel_platform Linux x86_64)" = "manylinux*x86_64" ]; check "linux x86_64 wheel glob" $?
-[ "$(plugin_wheel_platform Linux aarch64)" = "manylinux*aarch64" ]; check "linux aarch64 wheel glob" $?
-[ -z "$(plugin_wheel_platform MINGW_NT x86_64)" ]; check "an unsupported platform has no glob" $?
+# ------------------------------------------------------------ platform regex
+[ "$(plugin_wheel_platform Darwin arm64)" = "macosx.*arm64" ]; check "darwin arm64 wheel regex" $?
+[ "$(plugin_wheel_platform Darwin x86_64)" = "macosx.*x86_64" ]; check "darwin x86_64 wheel regex" $?
+[ "$(plugin_wheel_platform Linux x86_64)" = "manylinux.*x86_64" ]; check "linux x86_64 wheel regex" $?
+[ "$(plugin_wheel_platform Linux aarch64)" = "manylinux.*aarch64" ]; check "linux aarch64 wheel regex" $?
+[ -z "$(plugin_wheel_platform MINGW_NT x86_64)" ]; check "an unsupported platform has no pattern" $?
+printf 'fno-0.4.0.dev20260925-py3-none-macosx_11_0_arm64.whl' | python3 -c 'import re,sys; sys.exit(0 if re.search("macosx.*arm64", sys.stdin.read()) else 1)'
+check "the darwin arm64 regex matches a real wheel filename" $?
 
 # ------------------------------------------------- marketplace + plugin shape
 python3 - <<'PY' || fails=$((fails + 1))

@@ -30,14 +30,15 @@ plugin_version_matches() {
   [ "$(plugin_pep_normalize "$1")" = "$(plugin_pep_normalize "$2")" ]
 }
 
-# plugin_wheel_platform <uname-s> <uname-m> -> an extended glob matching the
-# release wheel's platform tag for this machine, or "" when unsupported.
+# plugin_wheel_platform <uname-s> <uname-m> -> a REGEX matching the release
+# wheel's platform tag for this machine (the consumer is python re.search,
+# where a lone * is not a wildcard), or "" when unsupported.
 plugin_wheel_platform() {
   case "$1/$2" in
-    Darwin/arm64) echo "macosx*arm64" ;;
-    Darwin/x86_64) echo "macosx*x86_64" ;;
-    Linux/x86_64) echo "manylinux*x86_64" ;;
-    Linux/aarch64) echo "manylinux*aarch64" ;;
+    Darwin/arm64) echo "macosx.*arm64" ;;
+    Darwin/x86_64) echo "macosx.*x86_64" ;;
+    Linux/x86_64) echo "manylinux.*x86_64" ;;
+    Linux/aarch64) echo "manylinux.*aarch64" ;;
     *) echo "" ;;
   esac
 }
