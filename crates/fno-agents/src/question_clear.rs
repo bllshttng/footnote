@@ -219,14 +219,19 @@ mod tests {
     fn a_failed_index_close_resumes_the_same_decision_and_project_close() {
         let tmp = tempfile::tempdir().unwrap();
         let req = request(&tmp, "q-index-fail", Some("ship it"));
-        std::fs::create_dir_all(req.index_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &req.index_path,
-            format!("{}\n", ask("q-index-fail", "which lane?", None, None)),
-        )
-        .unwrap();
-        let blocked_store = crate::event_store::store_path(&req.index_path);
-        std::fs::create_dir_all(&blocked_store).unwrap();
+        seed_question(&req, &ask("q-index-fail", "which lane?", None, None));
+        let store = crate::event_store::store_path(&req.index_path);
+        {
+            let connection = rusqlite::Connection::open(&store).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_question_close
+                     BEFORE INSERT ON events
+                     WHEN NEW.type = 'operator_question_closed'
+                     BEGIN SELECT RAISE(FAIL, 'injected index close failure'); END;",
+                )
+                .unwrap();
+        }
 
         let failed = run_clear(&req);
 
@@ -244,7 +249,10 @@ mod tests {
             rows(&req.journal_path, &["operator_question_closed"]).len(),
             1
         );
-        std::fs::remove_dir_all(blocked_store).unwrap();
+        let connection = rusqlite::Connection::open(&store).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_question_close")
+            .unwrap();
 
         let resumed = run_clear(&req);
 
@@ -294,6 +302,7 @@ mod tests {
 
         let intake: crate::question_intake::IntakeRequest = serde_json::from_value(json!({
             "question": "which lane again?",
+            "ask": "Use the attention lane again",
             "subject": "attention lane",
             "node": "x-0000",
             "storage_root": tmp.path().join("storage"),
