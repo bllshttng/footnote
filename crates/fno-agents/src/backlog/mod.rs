@@ -2044,14 +2044,11 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
         let json_rows = raw_rows(&graph);
         let sqlite_rows = crate::backlog::read_entries(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 0,
-            "defaulted row reached the store: {report:?}; json={:?}; sqlite={:?}",
-            json_rows[0], sqlite_rows[0]
-        );
+        assert_eq!(json_rows[0]["tags"], Value::Array(vec![]));
+        assert_eq!(sqlite_rows[0]["tags"], Value::Array(vec![]));
+        assert_eq!(sqlite_rows[1]["title"], "Two changed");
     }
 
     #[test]
@@ -2100,11 +2097,12 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 0,
-            "the settle reached the store: {report:?}"
-        );
+        let json_rows = raw_rows(&graph);
+        let sqlite_rows = crate::backlog::read_entries(&graph).unwrap();
+        assert_eq!(json_rows[1]["status"], "superseded");
+        assert_eq!(sqlite_rows[1]["status"], "superseded");
+        assert_eq!(json_rows[1]["superseded_by"], "ab-one");
+        assert_eq!(sqlite_rows[1]["superseded_by"], "ab-one");
     }
 
     #[test]
