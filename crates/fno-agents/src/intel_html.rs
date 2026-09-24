@@ -277,11 +277,13 @@ fn path_rx() -> &'static Regex {
     RX.get_or_init(|| Regex::new(r"(?:/Users|/home)/[A-Za-z0-9._-]+").expect("static regex"))
 }
 
-/// Straight and curly double-quoted spans.
+/// Straight and curly double-quoted spans. A quote preceded by `=` is an
+/// attribute value (id="..."), not speech, so it stays for the escaper.
 fn quote_rx() -> &'static Regex {
     static RX: OnceLock<Regex> = OnceLock::new();
     RX.get_or_init(|| {
-        Regex::new("\u{201c}[^\u{201c}\u{201d}\n]*\u{201d}|\"[^\"\n]*\"").expect("static regex")
+        Regex::new("(^|[^=])(\u{201c}[^\u{201c}\u{201d}\n]*\u{201d}|\"[^\"\n]*\")")
+            .expect("static regex")
     })
 }
 
@@ -307,7 +309,14 @@ fn scrub_text(text: &str, in_corrections: bool, scrub: &mut Scrub) -> String {
     if !in_corrections {
         let quotes = quote_rx().find_iter(&out).count();
         if quotes > 0 {
-            out = quote_rx().replace_all(&out, "[quote omitted]").into_owned();
+            out = quote_rx()
+                .replace_all(&out, |caps: &regex::Captures| {
+                    format!(
+                        "{}[quote omitted]",
+                        caps.get(1).map(|m| m.as_str()).unwrap_or("")
+                    )
+                })
+                .into_owned();
             scrub.quotes += quotes;
         }
     }
@@ -1219,7 +1228,10 @@ mod tests {
         let (dir, _out) = render_fixture("ac6", "intel_report.json", FIXTURE_FOLD);
         let page = rendered_page(&dir);
         assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-        assert!(page.contains("&lt;a id=\"s-zz\"&gt;"));
+        // The malformed anchor prints as escaped text, attributes intact:
+        // the quote-drop never eats an attribute value, and the escaper
+        // turns the angle brackets and the quotes into entities.
+        assert!(page.contains("&lt;a id=&quot;s-zz&quot;&gt;&lt;/a&gt;"));
         assert!(
             !page.contains("href=\"file"),
             "file links never become hrefs"
