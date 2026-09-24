@@ -973,12 +973,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     assert!(!sock.exists(), "shutdown unlinks its socket");
 
     // THE CONTRACT: every staged connection that read an ok reply has its
-    // row in the file. A connection cut before its reply has no row (it
-    // never read ok).
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // row in the store. A connection cut before its reply has no row (it
+    // never read ok). The json file is a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -989,7 +986,7 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             ok_replies += 1;
             assert!(
                 final_ids.contains(id),
-                "commit {id} answered ok but is missing from the file"
+                "commit {id} answered ok but is missing from the store"
             );
         }
     }

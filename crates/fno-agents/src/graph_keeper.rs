@@ -3575,13 +3575,16 @@ mod tests {
         })
     }
 
+    // The fixtures seed each row at the status the publish derives for a
+    // planless node under an empty rung map: a row the first publish
+    // re-derives really moved underneath the second writer, and conflicts.
     #[test]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         std::fs::write(
             &graph,
-            r#"{"entries":[{"id":"x-left","title":"left"},{"id":"x-right","title":"right"}]}"#,
+            r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
         )
         .unwrap();
         let state = row_commit_state(graph.clone());
@@ -3607,7 +3610,7 @@ mod tests {
         let graph = dir.path().join("graph.json");
         std::fs::write(
             &graph,
-            r#"{"entries":[{"id":"x-a","title":"a"},{"id":"x-b","title":"b"},{"id":"x-c","title":"c"}]}"#,
+            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
         )
         .unwrap();
         let state = row_commit_state(graph.clone());
