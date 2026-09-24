@@ -1982,6 +1982,74 @@ console.log("evictedRowCount: 18 cases ok");
         );
     }
 
+    /// The three pure helpers must hold their contracts when run for real,
+    /// not when re-implemented in Rust: lift them from the shipped page and
+    /// run the cases under node (same rule as evicted_row_count above).
+    #[test]
+    fn backlog_page_helpers_hold_under_node() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (got !== want) { console.error("FAIL " + what + ": got " + got + ", want " + want); process.exit(1); }
+};
+// cellHead: "<column> <total>"
+eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
+// sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
+eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
+eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
+   "fno agents resume abcd1234-full-id", "resume cmd carries the full id");
+eq(sessionCommand({action: "none", reason: "done"}), null, "dim row has no command");
+// mergeBoard: an errors-only answer keeps the last lanes and stamps staleness.
+const last = {lanes: [{key: "p"}], fetched_at: 111};
+const bad = mergeBoard(last, {errors: ["boom"], lanes: []}, 222);
+eq(bad.lanes.length, 1, "errors-only keeps the last lanes");
+eq(bad.stale_since, 111, "stale_since names the kept board fetch time");
+eq(bad.errors[0], "boom", "the error lines carry");
+eq(bad.fetched_at, 111, "the kept board keeps its fetch time");
+// A good answer is taken whole, stamped with its own fetch time.
+const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
+eq(good.lanes.length, 1, "a good answer lanes carry");
+eq(good.errors.length, 0, "a good answer clears the errors");
+eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
+console.log("backlog page helpers: 11 cases ok");
+"#;
+        let src = format!(
+            "{}\n{}\n{}\n{}",
+            lift_js_fn(BACKLOG_PAGE, "cellHead"),
+            lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
+            lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
+            asserts
+        );
+        let path =
+            std::env::temp_dir().join(format!("fno-backlog-helpers-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                // On CI a missing node means the assertions never ran, and a
+                // skip that reads as a pass is exactly the failure to prevent.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped backlog helpers: {e}"
+                );
+                println!(
+                    "SKIPPED backlog_page_helpers_hold_under_node: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                // The end-of-harness marker is the whole verdict.
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                assert!(
+                    stdout.contains("backlog page helpers: 11 cases ok"),
+                    "the shipped backlog helpers did not clear every case:\n{}{}",
+                    stdout,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+        }
+    }
+
     #[test]
     fn page_serves_the_shared_nav_not_absolute_links() {
         assert!(!PAGE.contains("\"/backlog?t="));
