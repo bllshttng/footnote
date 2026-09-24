@@ -6,6 +6,7 @@ use std::process::Command;
 #[test]
 fn spawn_door_readiness_needs_no_session_env() {
     let output = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .env_remove("FNO_HARNESS_SESSION_ID")
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")

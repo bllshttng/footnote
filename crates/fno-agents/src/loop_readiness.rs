@@ -351,11 +351,7 @@ pub fn run(args: &[String]) -> i32 {
     let owner = flag(args, "--continuation-owner")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
-            if pre_launch {
-                "target:pre-launch".to_string()
-            } else {
-                continuation_owner(&scope, &session)
-            }
+            continuation_owner(&scope, if pre_launch { "pre-launch" } else { &session })
         });
 
     let ensure_goal = args.iter().any(|arg| arg == "--ensure-goal");
