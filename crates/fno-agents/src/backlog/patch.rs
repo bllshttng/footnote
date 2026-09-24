@@ -1378,9 +1378,10 @@ mod tests {
             apply(&graph, &req("x-1", None, &[("merge_status", "null")])).expect("clear applied");
         assert_eq!(receipt.status.from, "in_review");
         assert_eq!(receipt.status.to, "in_review");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-1")).unwrap();
-        assert_eq!(row.get("merge_status"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("merge_status").map_or(true, Value::is_null));
         assert_eq!(row.get("pr_number"), Some(&json!(1060)));
         assert_eq!(
             row.get("pr_url"),
