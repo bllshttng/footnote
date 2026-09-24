@@ -143,7 +143,7 @@ impl View {
                 .enumerate()
                 .map(|(i, drow)| {
                     let depth = row_depths.get(i).copied().unwrap_or(0);
-                    self.sideline_table_row(drow, depth, name_w, now)
+                    self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
                 })
                 .collect();
             let mut table = RtTable::new(table_rows, SIDELINE_COLUMNS)
@@ -266,12 +266,6 @@ impl View {
             if matches!(drow, DisplayRow::NewSquad) {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
             }
-            let row_stamp = self.row_stamp_for(drow);
-            if card && row_stamp.is_none() {
-                if let DisplayRow::Agent(a) = drow {
-                    self.paint_card_pr(cells, r, cols, text_w, rects[4].width as usize, a);
-                }
-            }
             let mut highlit =
                 !row_is_inert(drow) && (self.selector == Some(i) || self.hover_row == Some(i));
             if card {
@@ -288,6 +282,7 @@ impl View {
                     }
                 }
             }
+            let row_stamp = self.row_stamp_for(drow);
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
         }
         // The density button, painted LAST over the sideline's top row.
@@ -360,6 +355,7 @@ impl View {
         drow: &DisplayRow<'_>,
         depth: usize,
         name_w: usize,
+        right_slot_w: usize,
         now: u64,
     ) -> RtRow<'static> {
         // The focused pane's owning row is the sole standing full-width
@@ -488,16 +484,26 @@ impl View {
                 let tail = row_message_text(a)
                     .map(|t| format!("\u{b7} {t}"))
                     .unwrap_or_default();
+                let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
                 let pr =
                     a.pr.map(|n| format!("#{n}"))
                         .unwrap_or_else(|| "\u{2014}".into());
                 let age = row_age(a, now);
+                let (pr_cell, age_cell) = if card {
+                    let pr_cell = if pr.width() <= right_slot_w {
+                        pr
+                    } else {
+                        String::new()
+                    };
+                    (String::new(), pr_cell)
+                } else {
+                    (pr, age)
+                };
                 let quiet = if flags & cell_flags::DIM != 0 {
                     cell_flags::DIM
                 } else {
                     0
                 };
-                let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
                 (
                     vec![
                         // Card line 1: glyph in the status column, the word
@@ -524,18 +530,8 @@ impl View {
                             quiet | focus_bit,
                             false,
                         ),
-                        rt_cell(
-                            if card { String::new() } else { pr },
-                            cell_fg,
-                            quiet | focus_bit,
-                            true,
-                        ),
-                        rt_cell(
-                            if card { String::new() } else { age },
-                            cell_fg,
-                            quiet | focus_bit,
-                            true,
-                        ),
+                        rt_cell(pr_cell, cell_fg, quiet | focus_bit, true),
+                        rt_cell(age_cell, cell_fg, quiet | focus_bit, true),
                     ],
                     0,
                 )
@@ -699,31 +695,6 @@ impl View {
             None => base,
         };
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
-    }
-
-    /// Put a card's PR in the age cell's right-edge slot. Omit a value that
-    /// cannot fit instead of overwriting the card identity or status.
-    fn paint_card_pr(
-        &self,
-        cells: &mut [Cell],
-        r: usize,
-        cols: usize,
-        text_w: usize,
-        slot_w: usize,
-        a: &AgentRow,
-    ) {
-        let text =
-            a.pr.map(|n| format!("#{n}"))
-                .unwrap_or_else(|| "\u{2014}".to_string());
-        let width = text.width();
-        if width > slot_w || width > text_w {
-            return;
-        }
-        let mut col = text_w - width;
-        for ch in text.chars() {
-            cells[r * cols + col].c = ch;
-            col += glyph_cols(ch);
-        }
     }
 
     /// Line 2 of a card: two spaces, then `harness · king · message`, with
