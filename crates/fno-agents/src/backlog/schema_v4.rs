@@ -502,7 +502,11 @@ mod tests {
                 &connection,
                 "SELECT id FROM agent_sessions WHERE harness_id IS NULL ORDER BY id"
             ),
-            vec!["20260911T051456Z-cl67883-05ec5f".to_string(), "s-3".into()]
+            vec![
+                "20260911T051456Z-cl67883-05ec5f".to_string(),
+                "s-3".into(),
+                "s-8".into()
+            ]
         );
         let report: serde_json::Value = serde_json::from_str(
             &crate::backlog::meta(&connection, "schema_v4_report")

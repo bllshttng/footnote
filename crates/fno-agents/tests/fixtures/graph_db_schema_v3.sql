@@ -4,6 +4,9 @@
 -- id, a cost list that promotes and one with a naive timestamp that stays in
 -- extras, provenance keys in extras, a claim, an encounter and a ruling join.
 -- Read by crates/fno-agents/src/backlog/schema_v4.rs tests.
+-- WAL, as every store main opened is: two openers of a rollback-journal file
+-- race the WAL switch itself, which is store birth, not the migration.
+PRAGMA journal_mode=WAL;
 CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE nodes (
   id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
