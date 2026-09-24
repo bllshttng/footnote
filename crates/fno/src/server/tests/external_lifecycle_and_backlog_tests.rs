@@ -352,8 +352,8 @@ fn inflight_hint_names_session_then_holder_then_default() {
 
 #[test]
 fn plan_refusal_names_only_an_in_flight_node() {
-    // AC24/AC25 (x-0fa2): the blueprint spawn door accepts an idea node
-    // the feed has never heard of, and refuses ONLY a node in flight -
+    // The plan spawn door accepts an idea node the feed has never
+    // heard of, and refuses ONLY a node in flight -
     // a second blueprint for worked work is not asked twice.
     let mut core = empty_core();
     core.backlog = vec![BacklogCard {

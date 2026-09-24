@@ -899,7 +899,7 @@ fn input_commit(view: &mut View) {
                 view.set_notice("title: nothing to set".into());
                 return;
             }
-            let Some(id) = cursor_card_id(b) else {
+            let Some(id) = edit_target(b) else {
                 return;
             };
             queue_write(
@@ -915,7 +915,7 @@ fn input_commit(view: &mut View) {
                 view.set_notice("details: nothing to append".into());
                 return;
             }
-            let Some(id) = cursor_card_id(b) else {
+            let Some(id) = edit_target(b) else {
                 return;
             };
             queue_write(b, WriteAction::Append { id, text });
@@ -970,19 +970,9 @@ pub(crate) fn edit_title(view: &mut View) -> Result<(), String> {
 /// The target card's current title prefill (the title editor's starting
 /// text). Empty when the read no longer shows the card.
 fn card_title(b: &BoardView, id: &str) -> String {
-    for lane in b
-        .body
-        .as_ref()
-        .map(|bd| bd.lanes.iter())
+    find_card(b, id)
+        .map(|c| c.title.clone())
         .unwrap_or_default()
-    {
-        for cell in &lane.cells {
-            if let Some(c) = cell.cards.iter().find(|c| c.id == id) {
-                return c.title.clone();
-            }
-        }
-    }
-    String::new()
 }
 
 /// `p`: the priority picker (p0-p3).
@@ -1065,7 +1055,10 @@ fn rank_move(view: &mut View, word: &str, up: Option<bool>) -> Result<(), String
     };
     let anchor = up.and_then(|u| same_parent_anchor(b, u));
     if up.is_some() && anchor.is_none() {
-        view.set_notice("no card above in the same rank scope; T pins it to the top".into());
+        let dir = if up == Some(true) { "above" } else { "below" };
+        view.set_notice(format!(
+            "no card {dir} in the same rank scope; T pins it to the top"
+        ));
         return Ok(());
     }
     let mut args: Vec<String> = vec!["backlog".into(), "rank".into(), id, word.to_string()];

@@ -3055,6 +3055,7 @@ impl View {
             || self.yard.is_some()
             || self.peek.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// The narrower guard for the ROW/TAB menu paths (right-press
@@ -3088,6 +3089,7 @@ impl View {
             || self.answers.is_some()
             || self.yard.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// Open the owning agent's row menu for the pane under
@@ -6002,7 +6004,9 @@ impl View {
             );
         } else if let Some(b) = &self.backlog_board {
             if b.detail.is_some() {
-                let w = overlay_dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+                let w = overlay_dims
+                    .1
+                    .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
                 let (lines, follow) = node_detail::overlay_lines(b, w);
                 let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
                     .footer("enter open · b plan · A king · d details · esc back");
@@ -6022,7 +6026,9 @@ impl View {
             } else if let Some(m) = backlog_board::facet_popup(b) {
                 draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
             } else {
-                let w = overlay_dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+                let w = overlay_dims
+                    .1
+                    .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
                 let (lines, follow) = backlog_board::render(b, w);
                 let chrome = chrome::Chrome::new("backlog", Anchor::Center)
                     .footer("hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · esc close");

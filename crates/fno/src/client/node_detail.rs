@@ -9,9 +9,9 @@
 //! time so a worker that exited between paint and press answers with its
 //! reason, never a stale launch.
 
+use super::backlog_board::{trunc, BoardView};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
-use super::backlog_board::{trunc, BoardView};
 /// One selectable row of the drill-down: a link to another node, or a
 /// session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,10 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
         return (vec!["reading board...".into()], None);
     };
     let Some(view) = crate::backlog_model::node(inputs, &o.node_id) else {
-        return (vec![format!("no node {} in the board read", o.node_id)], None);
+        return (
+            vec![format!("no node {} in the board read", o.node_id)],
+            None,
+        );
     };
     let sels = sel_list(&view);
     let sel = if sels.is_empty() {
@@ -96,14 +99,26 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
         view.difficulty.as_deref().unwrap_or("none"),
         king
     )));
-    lines.push(t(&format!("kind: {}", view.kind.as_deref().unwrap_or("none"))));
+    lines.push(t(&format!(
+        "kind: {}",
+        view.kind.as_deref().unwrap_or("none")
+    )));
     lines.push(t(&format!(
         "column: {} · rank: {}",
         view.card.column,
-        view.card.rank.map(|r| r.to_string()).unwrap_or_else(|| "unranked".into())
+        view.card
+            .rank
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "unranked".into())
     )));
-    lines.push(t(&format!("plan: {}", view.plan_path.as_deref().unwrap_or("none"))));
-    lines.push(t(&format!("cwd: {}", view.cwd.as_deref().unwrap_or("none"))));
+    lines.push(t(&format!(
+        "plan: {}",
+        view.plan_path.as_deref().unwrap_or("none")
+    )));
+    lines.push(t(&format!(
+        "cwd: {}",
+        view.cwd.as_deref().unwrap_or("none")
+    )));
     for f in &view.unavailable {
         lines.push(t(&format!("{}: {}", f.feature, f.reason)));
     }
@@ -126,7 +141,10 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
             for l in shown {
                 lines.push(t(l));
             }
-            lines.push(t(&format!("\u{2026} {} more lines (d opens)", wrapped.len() - 12)));
+            lines.push(t(&format!(
+                "\u{2026} {} more lines (d opens)",
+                wrapped.len() - 12
+            )));
         }
     } else {
         lines.push(t("details: none"));
@@ -407,9 +425,11 @@ async fn activate(
             let Some(s) = nv.sessions.get(*i) else {
                 return Ok(());
             };
-            let joined = view.layout.agents.iter().find(|a| {
-                a.harness_session_id.as_deref() == s.session_id.as_deref()
-            });
+            let joined = view
+                .layout
+                .agents
+                .iter()
+                .find(|a| a.harness_session_id.as_deref() == s.session_id.as_deref());
             match session_action(joined) {
                 SessionAction::Attach | SessionAction::Resume => {
                     let a = joined.expect("a derivable action has a row");
