@@ -383,10 +383,11 @@ fn try_resume_codex_goal_on_wake(
     successor: bool,
     harness: Option<&str>,
     resume: impl FnOnce() -> Result<serde_json::Value, String>,
-) -> Option<serde_json::Value> {
-    should_resume_codex_goal(king_wake, successor, harness)
-        .then(resume)
-        .and_then(Result::ok)
+) -> Result<Option<serde_json::Value>, String> {
+    if !should_resume_codex_goal(king_wake, successor, harness) {
+        return Ok(None);
+    }
+    resume().map(Some)
 }
 
 fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
@@ -711,12 +712,21 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         if let Some(queue) = king_queue.as_ref() {
             if let Ok(content) = std::fs::read_to_string(queue.manifest_path()) {
                 if let Some(manifest) = crate::king_termination::parse_king_manifest(&content) {
-                    if let Some(receipt) = try_resume_codex_goal_on_wake(
+                    let resumed = match try_resume_codex_goal_on_wake(
                         king_wake,
                         king_wake_successor,
                         manifest.harness.as_deref(),
                         || crate::reign_goal::resume(&manifest, &cwd),
                     ) {
+                        Ok(resumed) => resumed,
+                        Err(error) => {
+                            eprintln!(
+                                "fno-agents loop run: Codex goal wake resume refused: {error}"
+                            );
+                            return Ok(1);
+                        }
+                    };
+                    if let Some(receipt) = resumed {
                         let mut body = serde_json::json!({
                             "session_id": manifest.harness_session_id.unwrap_or_default(),
                             "scope": manifest.scope,
@@ -1027,32 +1037,36 @@ mod tests {
         let absent = try_resume_codex_goal_on_wake(false, false, Some("codex"), || {
             called = true;
             Ok(serde_json::json!({"status": "active"}))
-        });
+        })
+        .unwrap();
         assert!(absent.is_none());
         assert!(!called, "no admitted wake means no provider action");
 
         let resumed = try_resume_codex_goal_on_wake(true, false, Some("codex"), || {
             Ok(serde_json::json!({"status": "active"}))
-        });
+        })
+        .unwrap();
         assert_eq!(resumed.unwrap()["status"], "active");
         assert!(
             try_resume_codex_goal_on_wake(true, true, Some("codex"), || {
                 Ok(serde_json::json!({"status": "active"}))
             })
+            .unwrap()
             .is_none()
         );
         assert!(
             try_resume_codex_goal_on_wake(true, false, Some("claude"), || {
                 Ok(serde_json::json!({"status": "active"}))
             })
+            .unwrap()
             .is_none()
         );
-        assert!(
+        assert!(matches!(
             try_resume_codex_goal_on_wake(true, false, Some("codex"), || {
                 Err("unreadable goal".to_string())
-            })
-            .is_none()
-        );
+            }),
+            Err(error) if error == "unreadable goal"
+        ));
     }
     use std::path::{Path, PathBuf};
 
