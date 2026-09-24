@@ -174,9 +174,7 @@ fn t_key_prefills_the_launcher_from_a_card() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, b"t", &mut sock)
-            .await
-            .expect("t folds");
+        board_keys(&mut v, b"t", &mut sock).await.expect("t folds");
     });
     assert!(v.backlog_board.is_none(), "the board closes");
     assert!(sock.is_empty(), "nothing spawns on t");
@@ -197,9 +195,7 @@ fn t_key_refuses_a_card_already_being_worked() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, b"t", &mut sock)
-            .await
-            .expect("t folds");
+        board_keys(&mut v, b"t", &mut sock).await.expect("t folds");
     });
     assert!(
         v.backlog_board.is_some(),
@@ -249,9 +245,7 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, b"t", &mut sock)
-            .await
-            .expect("t folds");
+        board_keys(&mut v, b"t", &mut sock).await.expect("t folds");
     });
     let l = v.launcher.as_ref().expect("the dock stays open");
     assert_eq!(l.draft.message, "fix the flake", "the kept draft survives");
