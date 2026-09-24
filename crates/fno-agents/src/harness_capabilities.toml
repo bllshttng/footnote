@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 20
+map_version = 21
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -203,7 +203,7 @@ command_surface = "codex-skill"
 # spawn or dispatch reaches the TUI verb instead of a footnote skill that does
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
-native_verbs = ["/review", "/code-review", "/model", "/status", "/compact"]
+native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
 # The subset the shared app-server daemon maps to its review/start RPC. Every
 # other native verb has no prompt line on a daemon thread, and the mail lane
 # refuses it by name.
@@ -1384,3 +1384,18 @@ preserves_id = true
 [harness.grok.conversion]
 strategy = "keeper-rebind"
 preserves_id = true
+
+[harness.codex.provider_actions.compact]
+transport = "app-server"
+method = "thread/compact/start"
+proof = "context-compaction"
+
+[harness.codex.provider_actions.goal_get]
+transport = "app-server"
+method = "thread/goal/get"
+proof = "goal-active"
+
+[harness.codex.provider_actions.goal_set]
+transport = "app-server"
+method = "thread/goal/set"
+proof = "goal-active"

@@ -799,6 +799,7 @@ def test_native_verbs_roster_is_filled_from_measured_sources():
         "/model",
         "/status",
         "/compact",
+        "/goal",
     ]
     assert capabilities("pi")["native_verbs"] == ["/name"]
     assert capabilities("gemini").get("native_verbs") is None
@@ -1218,7 +1219,7 @@ def test_native_and_review_verbs_come_from_the_capability_table():
 
     caps = capabilities("codex")
     assert set(caps["native_verbs"]) == {
-        "/review", "/code-review", "/model", "/status", "/compact",
+        "/review", "/code-review", "/model", "/status", "/compact", "/goal",
     }
     assert _CODEX_REVIEW_VERBS == {"/review", "/code-review"}
     assert _CODEX_REVIEW_VERBS <= set(caps["native_verbs"])
