@@ -1835,10 +1835,7 @@ mod tests {
 
         // A stub writer binary: the injected seam points argv[0] at it, so no
         // PATH mutation and no real `opencode` run.
-        let stub = dir.path().join("opencode-stub");
-        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "opencode-stub", "#!/bin/sh\nexit 0\n");
 
         let cwd = dir.path().join("w");
         std::fs::create_dir_all(&cwd).unwrap();

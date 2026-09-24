@@ -775,6 +775,18 @@ class TestTransport:
         assert "caller_session" in stub.payload
         assert stub.payload["account"] is None
 
+    def test_succession_scope_rides_the_payload_and_defaults_to_none(self, monkeypatch):
+        stub = _stub_verb(monkeypatch, {"status": "admitted"})
+        try:
+            spawn_gate.run_gate("w", "bg", succession_scope="x-epic")
+        except TypeError:
+            pytest.fail("run_gate must accept and transport succession_scope")
+        assert stub.payload["succession_scope"] == "x-epic"
+
+        stub = _stub_verb(monkeypatch, {"status": "admitted"})
+        spawn_gate.run_gate("w", "bg")
+        assert stub.payload["succession_scope"] is None
+
     def test_probe_is_a_verb_call_passed_through(self, monkeypatch):
         stub = _stub_verb(
             monkeypatch, {"verdict": "accepted", "lanes": {}, "live_workers": 0}
