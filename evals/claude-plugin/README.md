@@ -22,7 +22,7 @@ claude plugin eval . --eval-dir evals/claude-plugin --model claude-opus-5-5 \
   --judge-model claude-sonnet-5 --scaffold --allow-tools Bash Edit Write --max-cost-usd 20
 ```
 
-`--scaffold` runs each `fixture.sh` as you, outside the sandbox. Read them first. They only write inside the run's workspace. `--allow-tools` lets Claude edit files and run the tests. Use a Sonnet judge: the default small judge failed a correct `findings.md`. Every run is a real model call on your account. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
+`--scaffold` runs each `fixture.sh` as you, outside the sandbox. Read them first. They only write inside the run's workspace. `--allow-tools` lets Claude edit files and run the tests. Use a Sonnet judge: the default small judge failed a correct `findings.md`. Every run is a real model call on your account. Six cases at three runs in two arms cost $8.48 at list price on `claude-opus-5-5`. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
 
 ## Read the table
 

@@ -3,5 +3,14 @@ type: llm
 focus: { source: file, path: calc.py }
 ---
 
-PASS if `add(a, b)` returns `a + b`, `mean` raises `ValueError` for an empty list, and `mean` still returns the arithmetic mean of a non-empty list.
-FAIL if `add` still subtracts, if `mean([])` raises any other exception or returns a value, or if `mean([2, 4, 6])` would not return 4.
+PASS needs all of these:
+
+- `add(a, b)` returns `a + b`.
+- `mean([])` raises `ValueError`.
+- `mean` still returns the arithmetic mean of a non-empty list, so `mean([2, 4, 6])` returns 4.
+
+FAIL on any of these:
+
+- `add` still subtracts.
+- `mean([])` raises another exception or returns a value.
+- `mean([2, 4, 6])` does not return 4.
