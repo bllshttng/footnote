@@ -1086,15 +1086,7 @@ mod tests {
         let script = format!(
             "#!/bin/sh\ncase \"$3\" in\nrun) printf '%s\\n' '{pane_out}' ;;\nwait) exit {wait_exit} ;;\nls) printf '%s\\n' '{listing}' ;;\nread) printf '%s\\n' '{read_text}' ;;\nesac\n"
         );
-        let stub = dir.join("fno");
-        fs::write(&stub, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut p = fs::metadata(&stub).unwrap().permissions();
-            p.set_mode(0o755);
-            fs::set_permissions(&stub, p).unwrap();
-        }
+        crate::write_exec_stub(dir, "fno", &script);
     }
 
     /// Run `relaunch_on_pane` with a zero window against a temp home, the

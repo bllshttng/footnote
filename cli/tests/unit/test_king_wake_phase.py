@@ -18,6 +18,7 @@ from fno.pr_watch._king_wake import (
     CrownTarget,
     _board_digest,
     _board_rows,
+    _crowned,
     _holder_absent,
     _ask_wake_ceiling,
     _store_board_hash,
@@ -42,6 +43,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
         self.dispatches: list[tuple[str, str, str | None, str | None]] = []
+        self.targets: list[CrownTarget] = []
         self.successor_flags: list[bool] = []
         self.asks: list[tuple[str, int, int]] = []
         self.unread_calls: list[str] = []
@@ -57,6 +59,7 @@ class _Recorder:
         detail: str | None = None,
         successor: bool = False,
     ) -> None:
+        self.targets.append(target)
         self.dispatches.append((target.scope, reason, address, detail))
         self.successor_flags.append(successor)
 
@@ -101,6 +104,7 @@ def _run(
             manifest,
             scope="epic-x",
             harness_session_id=manifest_session_id,
+            owner_cwd=str(root),
             force=True,
         )
     if pre is not None:
@@ -125,6 +129,180 @@ def _run(
         kwargs.update(extra)
     summary = run_king_wake(_settings(armed=armed), **kwargs)
     return rec, summary, manifest
+
+
+_ROWLESS_HOLDER = "11111111-2222-3333-4444-555555555555"
+
+
+def _run_rowless(tmp_path, truth):
+    root = tmp_path / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+    rec = _Recorder()
+
+    truth_calls = []
+
+    def read_truth(holder):
+        truth_calls.append(holder)
+        return truth(holder)
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=_court(crowns),
+        rows_fn=lambda: [],
+        truth_fn=read_truth,
+        unread_fn=lambda address: [object()] if address == _ROWLESS_HOLDER else [],
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *args: None,
+    )
+    return rec, summary, manifest, root, truth_calls
+
+
+def test_manifest_only_crown_is_named_but_not_rooted_at_owner_cwd(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+
+    targets, note = _crowned(_court(crowns), lambda: [])
+
+    assert targets == []
+    assert note == "epic-x: unregistered holder"
+
+
+def test_rowless_manifest_paths_are_ignored_when_naming_drops(tmp_path, monkeypatch):
+    import fno.king.state as state_mod
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        },
+        {
+            "holder": "22222222-3333-4444-5555-666666666666",
+            "scope": "epic-y",
+            "status": "manifest-only",
+            "manifest_path": str(tmp_path / "unreadable.md"),
+        },
+    ]
+
+    def fail_if_read(_path):
+        raise AssertionError("manifest-only crown paths must not be read")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    targets, note = _crowned(_court(crowns), lambda: [])
+
+    assert targets == []
+    assert note == (
+        "epic-x: unregistered holder; epic-y: unregistered holder"
+    )
+
+
+def test_registered_crown_keeps_its_row_root_and_rowless_crown_without_manifest_is_named(
+    monkeypatch, tmp_path
+):
+    import fno.king.state as state_mod
+
+    root = tmp_path / "registered"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(manifest, scope="epic-x", owner_cwd=str(root), force=True)
+
+    def fail_if_read(_path):
+        raise AssertionError("a registered holder must not read manifest_path")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    crowns = [
+        {
+            "holder": "king-x",
+            "scope": "epic-x",
+            "status": "live",
+            "manifest_path": str(tmp_path / "must-not-read.md"),
+        }
+    ]
+    targets, note = _crowned(
+        _court(crowns),
+        lambda: [SimpleNamespace(name="king-x", cwd=str(root), short_id="aa11bb22")],
+    )
+    assert targets == [CrownTarget("king-x", "epic-x", root, manifest, "aa11bb22")]
+    assert note == ""
+
+    targets, note = _crowned(
+        _court([{"holder": _ROWLESS_HOLDER, "scope": "epic-z"}]), lambda: []
+    )
+    assert targets == []
+    assert note == "epic-z: unregistered holder"
+
+
+def test_rowless_missing_holder_with_mail_is_named_without_waking(tmp_path):
+    rec, summary, _manifest, _root, truth_calls = _run_rowless(
+        tmp_path,
+        lambda _holder: {"state": "unknown", "reason": "not-found"},
+    )
+
+    assert rec.dispatches == []
+    assert rec.targets == []
+    assert truth_calls == []
+    assert summary["crowns"] == 0
+    assert summary["note"] == "epic-x: unregistered holder"
+
+
+def test_rowless_stalled_and_parked_holders_are_never_woken(tmp_path):
+    for state in ("stalled", "done"):
+        case = tmp_path / state
+        case.mkdir()
+        rec, summary, _manifest, _root, truth_calls = _run_rowless(
+            case, lambda _holder, state=state: {"state": state}
+        )
+        assert rec.dispatches == []
+        assert rec.targets == []
+        assert truth_calls == []
+        assert summary["note"] == "epic-x: unregistered holder"
 
 
 def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
@@ -757,7 +935,7 @@ def test_a_conflicted_scope_is_skipped(tmp_path):
     )
 
     assert rec.dispatches == [], "never wake into a disputed territory"
-    assert "conflicting" in (summary["note"] or "")
+    assert summary["note"] == "epic-x: conflicting holders king-a, king-b"
 
 
 def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
@@ -779,9 +957,17 @@ def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
         {"holder": "king-x", "scope": "epic-x", "status": "live"},
         {"holder": "king-y", "scope": "epic-y", "status": "live"},
         # A manifest-only crown: the holder is a session uuid with no
-        # registry row, the production shape the tally must name.
-        {"holder": "88888888-9999-aaaa-bbbb-cccccccccccc", "scope": "epic-z", "status": "live"},
+        # registry row, the production shape the per-scope note must name.
+        {
+            "holder": "88888888-9999-aaaa-bbbb-cccccccccccc",
+            "scope": "epic-z",
+            "status": "manifest-only",
+            "manifest_path": str(
+                king_manifest_path("epic-z", state_root=king_state_root(root))
+            ),
+        },
         {"holder": "", "scope": "epic-w", "status": "live"},
+        {"holder": "king-empty", "scope": "", "status": "live"},
     ]
 
     summary = run_king_wake(
@@ -802,9 +988,16 @@ def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
     assert summary["crowns"] == 1, "only epic-x has both row and manifest"
     assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
     note = summary["note"] or ""
-    assert "manifest missing" in note, note
-    assert "unregistered holder(s)" in note, note
-    assert "holderless crown(s)" in note, note
+    expected_missing = king_manifest_path("epic-y", state_root=king_state_root(root))
+    assert note == "; ".join(
+        (
+            f"epic-y: manifest missing at {expected_missing}",
+            "epic-z: unregistered holder",
+            "epic-w: holderless crown",
+            "(no scope): empty scope",
+        )
+    )
+    assert "(s)" not in note
 
 
 def test_an_unreadable_registry_wakes_nothing(tmp_path):
@@ -1322,7 +1515,7 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
     )
     fill(_king_manifest(root))
 
-    summary = run_king_wake(
+    run_king_wake(
         settings,
         emit=rec.emit,
         now=NOW,
@@ -1483,7 +1676,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
     # Positive control inside the same run: the reader sees the row.
     assert len(scan_unread("aa11bb22")) == 1, "the reader must see the waking row"
 
-    summary = run_king_wake(
+    run_king_wake(
         _settings(),
         emit=rec.emit,
         now=datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc),
@@ -1813,8 +2006,7 @@ def test_one_bus_read_serves_every_address_in_a_pass(tmp_path, monkeypatch):
 
 
 def test_the_default_court_reads_no_agreement(tmp_path, monkeypatch):
-    # AC2-EDGE: the default court_fn binds agree=False, and a manifest-only
-    # crown still lands in the note as an unregistered holder.
+    # The default court_fn binds agree=False and reports the rowless holder.
     from fno.agents import court as court_mod
 
     received = {}
@@ -1831,6 +2023,7 @@ def test_the_default_court_reads_no_agreement(tmp_path, monkeypatch):
                     "status": "manifest-only",
                     "agree": None,
                     "reason": "crown lives on the manifest",
+                    "manifest_path": str(_king_manifest(tmp_path / "proj")),
                 }
             ],
             "conflicts": [],
@@ -1845,7 +2038,7 @@ def test_the_default_court_reads_no_agreement(tmp_path, monkeypatch):
     )
 
     assert received == {"agree": False}
-    assert "unregistered holder(s)" in summary["note"]
+    assert summary["note"] == "epic-x: unregistered holder"
     assert summary["evaluated"] == 0
     assert rec.dispatches == []
 

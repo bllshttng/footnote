@@ -1143,7 +1143,6 @@ pub fn run_kill_check_capture(args: &[String]) -> (i32, String, String) {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn parse_cmp_iteration_forms() {
@@ -1251,15 +1250,11 @@ mod tests {
             "---\nkill_criteria:\n  - name: iteration_ceiling\n    predicate: iteration > 15\n    reason: too many\nstatus: ready\n---\n",
         )
         .unwrap();
-        let git = temp.path().join("git");
-        fs::write(
-            &git,
-            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", repo.display()),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&git).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&git, permissions).unwrap();
+        let git = crate::write_exec_stub(
+            temp.path(),
+            "git",
+            &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", repo.display()),
+        );
 
         let (code, stdout, stderr) = run_kill_check_capture(&[
             plan.to_string_lossy().into_owned(),

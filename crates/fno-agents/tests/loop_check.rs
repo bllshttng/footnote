@@ -24,14 +24,11 @@ use tempfile::TempDir;
 /// Write an executable shell script to `dir/<name>` that prints `body` to
 /// stdout and exits 0.  Returns the path.
 ///
-/// Published atomically: the body is written to a temp sibling, chmod'd,
-/// then renamed onto the final path. Rename is atomic within a directory,
-/// so the published path is complete and closed from birth - it never has a
-/// write-open fd (which is what makes an exec fail ETXTBSY, including via a
-/// parallel test's fork inheriting the fd) and never exists as a partial
-/// file (the ENOEXEC variant PR 650 showed). That is why no probe-exec or
-/// retry loop is needed here: the flake family this used to paper over is
-/// unreachable at the source.
+/// The temp sibling plus rename does NOT make ETXTBSY unreachable: a sibling
+/// thread that forks while the temp fd is open copies it, and the copied fd
+/// follows the inode the rename publishes. CI runs these integration
+/// binaries with `--test-threads=1` (cli-ci.yml), so the window has no
+/// sibling fork; that single-threaded condition is why no retry is needed.
 fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));

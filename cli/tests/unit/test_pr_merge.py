@@ -1140,15 +1140,16 @@ def test_floor_verbless_set_stays_locked_to_the_rust_twin():
         / "crates"
         / "fno-agents"
         / "src"
-        / "loopcheck.rs"
+        / "loopcheck"
+        / "self_review_floor.rs"
     ).read_text(encoding="utf-8")
     m = re.search(r"KNOWN_VERBLESS_HARNESSES: &\[&str\] = &\[([^\]]*)\]", rust)
-    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck.rs"
+    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck/self_review_floor.rs"
     rust_set = {v.strip().strip('"') for v in m.group(1).split(",") if v.strip()}
     derived = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
     assert rust_set == derived, (
         f"Rust floor releases {sorted(rust_set)}, Python releases "
-        f"{sorted(derived)}: update both together (loopcheck.rs "
+        f"{sorted(derived)}: update both together (loopcheck/self_review_floor.rs "
         "KNOWN_VERBLESS_HARNESSES and review_capability's verb table)"
     )
 
