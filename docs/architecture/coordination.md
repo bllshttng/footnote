@@ -72,6 +72,8 @@ Two modes, mutually exclusive per claim:
 
 **Hybrid arm (TTL claims that also record a pid).** A TTL claim past its clock is not unconditionally stale. A recorded pid that is live on this host (same host + `create_time` guards as PID-liveness) keeps the claim LIVE. This protects an idle or SIGSTOP-suspended session from peer reclaim past its TTL. A suspended process cannot run its own refresh, and plain TTL semantics cannot cover it. The arm is purely additive: it only ever extends liveness. A TTL claim with a transient, dead, missing, or off-host pid falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>` target claims opt in by recording a durable session pid (see below). The retired megawalk walker recorded a transient pid, so the arm never fired for it. Its TTL park-exclusion is unchanged.
 
+**Blueprint-session claims are clock-only leases.** A `blueprint-session:` claim is a 60-minute lease. It runs from `acquired_at`, or from its explicit `expires_at`. Past the clock it reads STALE like a `review:branch:` hold, whatever the pid or session witness says. A native subagent planner shares its parent's pid and session id. Both outlive a planner stopped mid-close and hold the node for the parent's whole life. The manual `fno agents claim release --holder` is the fast path. The lease is the backstop that caps the strand at one hour.
+
 **Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
 This is the respawned-worker case: a bg `/target` supervisor pid dies and the
