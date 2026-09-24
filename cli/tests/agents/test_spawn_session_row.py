@@ -311,9 +311,10 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
     assert "session row open skipped" not in result.stderr
 
 
-def test_spawn_prompt_two_ids_arms_nothing(workdir_claude, resolvable_uuid) -> None:
-    """A review prompt naming TWO node ids is ambiguous; first-by-position would
-    assert a reviewer worked on a node the operator never targeted."""
+def test_spawn_prompt_two_ids_cannot_bypass_review_session(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """Two node ids do not turn an external prompt into a local review session."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -322,7 +323,8 @@ def test_spawn_prompt_two_ids_arms_nothing(workdir_claude, resolvable_uuid) -> N
          f"/review {NODE} then x-4ab2"],
         catch_exceptions=False,
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 89, result.output
+    assert '"reason":"review_session"' in result.output.replace(" ", "")
     assert _node_rows() == []
 
 
