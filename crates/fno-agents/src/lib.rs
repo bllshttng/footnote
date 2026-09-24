@@ -292,6 +292,7 @@ pub mod screen;
 pub mod select_read;
 pub(crate) mod served_liveness;
 pub mod session_activity;
+pub mod session_backfill;
 pub mod session_cost;
 pub mod session_names_fold;
 pub mod session_start_bytes;

@@ -789,6 +789,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
+    if verb == "session-backfill" {
+        return fno_agents::session_backfill::run(&args[1..]);
+    }
     // `intel`: the session-provenance fold, daemon-free read, == dispatch
     // like board/reclaim: never registered in ALL_CLIENT_ACTIONS (the action
     // list is shrink-only, d-fe66560a) and never routed by `fno agents`;

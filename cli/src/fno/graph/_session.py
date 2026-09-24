@@ -670,6 +670,25 @@ def cmd_session_close(
         typer.echo(f"launch: {launch}")
 
 
+@session_app.command("backfill")
+def cmd_session_backfill(
+    apply: bool = typer.Option(False, "--apply", help="Write the fills; the default is a dry run."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the per-phase counts as JSON."),
+) -> None:
+    """Fill missing session starts and ends from transcripts and merge commits. Never overwrites a stamp."""
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("session backfill: the fno-agents binary was not found.", err=True)
+        raise typer.Exit(code=2)
+    argv = [str(binary), "session-backfill", "--graph", str(_graph_path())]
+    argv += ["--apply"] * apply + ["--json"] * json_out
+    raise typer.Exit(code=subprocess.run(argv, check=False).returncode)
+
+
 @session_app.command("reap-open")
 def cmd_session_reap_open(
     node: "str | None" = typer.Argument(

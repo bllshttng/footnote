@@ -54,8 +54,14 @@ pub(crate) fn settle_ship_rows(home: &AgentsHome) -> Vec<(String, String)> {
     let Ok(entries) = api::rows(&store) else {
         return vec![("*".into(), "graph unreadable".into())];
     };
+    end_ship(&store, &ship_backfill_plan(&entries))
+}
+
+/// (node, ended_at, ended_by) for each open ship row a recorded merge or
+/// close can end, looked up in git and GitHub.
+pub(crate) fn ship_backfill_plan(entries: &[Value]) -> Vec<(String, String, &'static str)> {
     let mut merges: HashMap<String, Option<HashMap<u64, String>>> = HashMap::new();
-    let plan = plan_ship_ends(&entries, &mut |cwd, pr, merged| {
+    plan_ship_ends(entries, &mut |cwd, pr, merged| {
         if merged {
             merges
                 .entry(cwd.to_string())
@@ -66,8 +72,7 @@ pub(crate) fn settle_ship_rows(home: &AgentsHome) -> Vec<(String, String)> {
         } else {
             gh_closed_at(pr, cwd)
         }
-    });
-    end_ship(&store, &plan)
+    })
 }
 
 /// Close the think, blueprint and review rows of sessions that just retired,
@@ -84,12 +89,15 @@ pub(crate) fn close_retired_rows<'a>(
     if sessions.is_empty() {
         return Vec::new();
     }
-    let store = Store::new(&crate::gc_sweep::graph_path(home));
-    let Ok(entries) = api::rows(&store) else {
+    close_session_rows(&Store::new(&crate::gc_sweep::graph_path(home)), &sessions)
+}
+
+fn close_session_rows(store: &Store, sessions: &HashSet<String>) -> Vec<(String, String)> {
+    let Ok(entries) = api::rows(store) else {
         return vec![("*".into(), "graph unreadable".into())];
     };
     let mut refused = Vec::new();
-    for (node, harness, session_id, phase) in plan_retired_closes(&entries, &sessions) {
+    for (node, harness, session_id, phase) in plan_retired_closes(&entries, sessions) {
         let tail = crate::claude_adopt::transcript_stamp(&session_id);
         if let Err(err) = api::session_end(
             &store,
@@ -107,13 +115,10 @@ pub(crate) fn close_retired_rows<'a>(
 }
 
 fn end_ship(store: &Store, plan: &[(String, String, &str)]) -> Vec<(String, String)> {
-    let mut refused = Vec::new();
-    for (node, at, ended_by) in plan {
-        if let Err(err) = api::phase_end(store, node, "ship", at, ended_by) {
-            refused.push((node.clone(), format!("ship row: {}", err.0)));
-        }
+    match api::phase_end(store, "ship", plan) {
+        Ok(_) => Vec::new(),
+        Err(err) => vec![("*".into(), format!("ship rows: {}", err.0))],
     }
-    refused
 }
 
 fn sessions_of(entry: &Value) -> impl Iterator<Item = &Value> {
@@ -254,7 +259,7 @@ fn gh_closed_at(pr: u64, cwd: &str) -> Option<String> {
     utc(pr.get("closed_at").and_then(Value::as_str)?)
 }
 
-fn utc(at: &str) -> Option<String> {
+pub(crate) fn utc(at: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(at).ok()?;
     Some(
         parsed
@@ -368,7 +373,8 @@ mod tests {
         std::fs::write(
             &graph,
             json!({"entries": [{
-                "id": "x-s", "title": "s", "status": "idea", "priority": "p2",
+                "id": "x-s", "slug": "s", "type": "feature", "title": "s",
+                "status": "idea", "priority": "p2",
                 "sessions": [
                     {"phase": "ship", "harness": "claude", "session_id": "a", "started_at": "2026-09-01T00:00:00Z"},
                     {"phase": "ship", "harness": "codex", "session_id": "b", "started_at": "2026-09-01T01:00:00Z"},
@@ -382,17 +388,64 @@ mod tests {
         let at = "2026-09-02T00:00:00Z";
         assert!(close_ship_rows_at(&store, &[("x-s".into(), at.into())], "merge").is_empty());
         let row = api::rows(&store).unwrap().remove(0);
-        let ended: Vec<(&str, Option<&str>)> = row["sessions"]
+        assert_eq!(
+            stamps(&row),
+            vec![
+                ("ship", Some("2026-09-01T00:00:00Z"), Some(at)),
+                ("ship", Some("2026-09-01T01:00:00Z"), Some(at)),
+                ("do", Some("2026-09-01T00:00:00Z"), None),
+            ]
+        );
+        assert_eq!(row["sessions"][0]["ended_by"], json!("merge"));
+        let again = [("x-s".to_string(), "2026-09-03T00:00:00Z".to_string(), "merge")];
+        assert_eq!(api::phase_end(&store, "ship", &again).unwrap(), 0);
+    }
+
+    /// (phase, started_at, ended_at) per session row.
+    fn stamps(row: &Value) -> Vec<(&str, Option<&str>, Option<&str>)> {
+        row["sessions"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| (s["phase"].as_str().unwrap(), s["ended_at"].as_str()))
-            .collect();
-        assert_eq!(
-            ended,
-            vec![("ship", Some(at)), ("ship", Some(at)), ("do", None)]
-        );
-        assert_eq!(row["sessions"][0]["ended_by"], json!("merge"));
-        assert!(!api::phase_end(&store, "x-s", "ship", "2026-09-03T00:00:00Z", "merge").unwrap());
+            .map(|s| {
+                (
+                    s["phase"].as_str().unwrap(),
+                    s["started_at"].as_str(),
+                    s["ended_at"].as_str(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_retired_session_leaves_its_think_and_review_rows_with_both_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            json!({"entries": [{
+                "id": "x-t", "title": "t", "status": "idea", "priority": "p2",
+                "sessions": [
+                    {"phase": "think", "harness": "claude", "session_id": "gone-1", "started_at": "2026-09-01T00:00:00Z"},
+                    {"phase": "review", "harness": "claude", "session_id": "gone-1", "started_at": "2026-09-01T02:00:00Z"},
+                    {"phase": "think", "harness": "claude", "session_id": "alive-2", "started_at": "2026-09-01T03:00:00Z"}
+                ]
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        let store = Store::new(&graph);
+        let retired: HashSet<String> = ["gone-1".to_string()].into();
+        assert!(close_session_rows(&store, &retired).is_empty());
+        let row = api::rows(&store).unwrap().remove(0);
+        let rows = stamps(&row);
+        for (phase, started, ended) in &rows[..2] {
+            assert!(
+                started.is_some() && ended.is_some(),
+                "{phase} row: {rows:?}"
+            );
+        }
+        assert_eq!(rows[2].2, None, "a live session's row stays open");
+        assert_eq!(row["sessions"][0]["ended_by"], json!("reap-sweep"));
     }
 }

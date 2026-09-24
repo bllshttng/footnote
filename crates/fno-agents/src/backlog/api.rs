@@ -20,6 +20,7 @@ pub use crate::backlog::model::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1291,40 +1292,105 @@ pub fn session_end(
     }
 }
 
-/// Fill `ended_at` on every `phase` record of node `id` that has none,
-/// whoever opened it: a ship record ends at the merge, whichever session
-/// linked the PR. False when no record needed the fill, or when the node
-/// rides the raw carry.
-pub fn phase_end(
-    store: &Store,
-    id: &str,
-    phase: &str,
-    ended_at: &str,
-    ended_by: &str,
-) -> Result<bool, ApiError> {
-    mutate(store, "phase_end", |rows| {
-        let Some(row) = rows
-            .iter_mut()
-            .find(|row| crate::graph_store::entry_id(row) == Some(id))
-        else {
-            return Ok(false);
-        };
-        let Ok(mut parsed) = Node::from_json(row) else {
-            return Ok(false);
-        };
-        let mut filled = false;
-        for record in parsed.sessions.iter_mut().flatten() {
-            if record.phase == phase && record.ended_at.as_deref().is_none_or(str::is_empty) {
-                record.ended_at = Some(ended_at.to_string());
-                record.ended_by = Some(ended_by.to_string());
-                filled = true;
+/// One session record's recorded stamps, for [`session_backfill`].
+pub struct SessionFill {
+    pub phase: String,
+    pub harness: String,
+    pub session_id: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub ended_by: String,
+}
+
+/// Fill missing `started_at` and `ended_at` on session records from recorded
+/// sources, all in one write. A stamp already there is never overwritten; a
+/// fill matches its node, phase, harness and session id. Returns the stamps
+/// written. A node that rides the raw carry takes none.
+pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, Vec<&SessionFill>> = HashMap::new();
+    for (node, fill) in fills {
+        by_node.entry(node.as_str()).or_default().push(fill);
+    }
+    let mut written = 0;
+    if by_node.is_empty() {
+        return Ok(written);
+    }
+    mutate(store, "session_backfill", |rows| {
+        written = 0;
+        for row in rows.iter_mut() {
+            let Some(mine) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id)) else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = written;
+            for record in parsed.sessions.iter_mut().flatten() {
+                for fill in mine {
+                    if record.phase != fill.phase
+                        || record.harness != fill.harness
+                        || record.session_id != fill.session_id
+                    {
+                        continue;
+                    }
+                    if record.started_at.as_deref().is_none_or(str::is_empty) && fill.started_at.is_some() {
+                        record.started_at = fill.started_at.clone();
+                        written += 1;
+                    }
+                    if record.ended_at.as_deref().is_none_or(str::is_empty) && fill.ended_at.is_some() {
+                        record.ended_at = fill.ended_at.clone();
+                        record.ended_by = Some(fill.ended_by.clone());
+                        written += 1;
+                    }
+                }
+            }
+            if written > before {
+                *row = parsed.to_json();
             }
         }
-        if filled {
-            *row = parsed.to_json();
+        Ok(written > 0)
+    })?;
+    Ok(written)
+}
+
+/// Fill `ended_at` on every `phase` record that has none, whoever opened it,
+/// for each (node, ended_at, ended_by), all in one write: a ship record ends
+/// at the merge, whichever session linked the PR. The first end named for a
+/// node wins. Returns the records ended. A node that rides the raw carry
+/// takes none.
+pub fn phase_end(store: &Store, phase: &str, ends: &[(String, String, &str)]) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, (&str, &str)> = HashMap::new();
+    for (node, at, by) in ends {
+        by_node.entry(node.as_str()).or_insert((at.as_str(), *by));
+    }
+    let mut ended = 0;
+    if by_node.is_empty() {
+        return Ok(ended);
+    }
+    mutate(store, "phase_end", |rows| {
+        ended = 0;
+        for row in rows.iter_mut() {
+            let Some(&(at, by)) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id)) else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = ended;
+            for record in parsed.sessions.iter_mut().flatten() {
+                if record.phase == phase && record.ended_at.as_deref().is_none_or(str::is_empty) {
+                    record.ended_at = Some(at.to_string());
+                    record.ended_by = Some(by.to_string());
+                    ended += 1;
+                }
+            }
+            if ended > before {
+                *row = parsed.to_json();
+            }
         }
-        Ok(filled)
-    })
+        Ok(ended > 0)
+    })?;
+    Ok(ended)
 }
 
 pub fn encounter_create(
