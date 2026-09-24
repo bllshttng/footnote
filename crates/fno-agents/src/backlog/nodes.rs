@@ -15,10 +15,10 @@
 //! "supersession_extras".
 //!
 //! Schema 4: `nodes.version` and `nodes_raw.version` count the writes of
-//! that row, and the statement that writes the row is the only one that
-//! bumps it; the keeper's commit_rows compares them (see [`versions`]). A
-//! row moving between the two tables starts one above its old version, so
-//! the move itself reads as a write.
+//! that row. The row's own write bumps it, and so does the status pass when
+//! it moves a status or a defect; the keeper's commit_rows compares them
+//! (see [`versions`]). A row moving between the two tables starts one above
+//! its old version, so the move itself reads as a write.
 //! The claim's lock time is the claim row's created_at. A schema-3 binary
 //! still writes request_origin/origin_evidence into extras, so load reads
 //! the provenance columns first and those extras keys second.
@@ -1320,7 +1320,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
         }
         connection
             .execute(
-                "UPDATE nodes SET status = ?1, ownership_defect = ?2
+                "UPDATE nodes SET status = ?1, ownership_defect = ?2, version = version + 1
                  WHERE id = ?3 AND (status IS NOT ?1
                     OR COALESCE(ownership_defect, '') IS NOT COALESCE(?2, ''))",
                 params![row.status, fresh_defect, row.id],
@@ -1445,6 +1445,41 @@ mod tests {
                 "SELECT rowid FROM sessions WHERE node_id = 'x-a' ORDER BY seq"
             ),
             sessions_before
+        );
+    }
+
+    #[test]
+    fn a_status_the_pass_moves_counts_as_a_write() {
+        let (_dir, connection) = store();
+        let row = |id: &str, extra: Value| {
+            let mut row = serde_json::json!({
+                "id": id, "slug": id, "title": id, "type": "feature",
+                "status": "ready", "priority": "p2",
+            });
+            row.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            Node::from_json(&row).unwrap()
+        };
+        crate::backlog::save_aggregate(&connection, &row("x-p", serde_json::json!({}))).unwrap();
+        let child = serde_json::json!({"parent": "x-p", "completed_at": "2026-09-01T00:00:00Z"});
+        crate::backlog::save_aggregate(&connection, &row("x-c", child)).unwrap();
+        let version =
+            |connection: &Connection| versions(connection, Some(&["x-p"])).unwrap()["x-p"];
+        let before = version(&connection);
+        recompute_status(&connection).unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM nodes WHERE id = 'x-p'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "done", "the parent rolls up from its done child");
+        assert_eq!(version(&connection), before + 1);
+        recompute_status(&connection).unwrap();
+        assert_eq!(
+            version(&connection),
+            before + 1,
+            "a pass that moves nothing writes nothing"
         );
     }
 

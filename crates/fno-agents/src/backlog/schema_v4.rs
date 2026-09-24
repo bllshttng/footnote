@@ -233,8 +233,8 @@ fn migrate_locked(connection: &mut Connection, graph: &Path) -> Result<(), Strin
 fn failure(snapshot: &Path, error: &str) -> String {
     format!(
         "schema v4 migration refused and rolled back: {error}. Nothing changed; the \
-         pre-migration snapshot is {}. Fix the named row with the previous release and \
-         retry. See docs/architecture/graph-db-schema.md for the rollback steps.",
+         pre-migration snapshot is {}. Fix what the error names with the previous \
+         release, then retry. See docs/architecture/graph-db-schema.md for the rollback steps.",
         snapshot.display()
     )
 }

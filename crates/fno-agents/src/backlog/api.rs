@@ -1318,7 +1318,8 @@ pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Resul
     mutate(store, "session_backfill", |rows| {
         written = 0;
         for row in rows.iter_mut() {
-            let Some(mine) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id)) else {
+            let Some(mine) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
                 continue;
             };
             let Ok(mut parsed) = Node::from_json(row) else {
@@ -1333,11 +1334,15 @@ pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Resul
                     {
                         continue;
                     }
-                    if record.started_at.as_deref().is_none_or(str::is_empty) && fill.started_at.is_some() {
+                    if record.started_at.as_deref().is_none_or(str::is_empty)
+                        && fill.started_at.is_some()
+                    {
                         record.started_at = fill.started_at.clone();
                         written += 1;
                     }
-                    if record.ended_at.as_deref().is_none_or(str::is_empty) && fill.ended_at.is_some() {
+                    if record.ended_at.as_deref().is_none_or(str::is_empty)
+                        && fill.ended_at.is_some()
+                    {
                         record.ended_at = fill.ended_at.clone();
                         record.ended_by = Some(fill.ended_by.clone());
                         written += 1;
@@ -1358,7 +1363,11 @@ pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Resul
 /// at the merge, whichever session linked the PR. The first end named for a
 /// node wins. Returns the records ended. A node that rides the raw carry
 /// takes none.
-pub fn phase_end(store: &Store, phase: &str, ends: &[(String, String, &str)]) -> Result<usize, ApiError> {
+pub fn phase_end(
+    store: &Store,
+    phase: &str,
+    ends: &[(String, String, &str)],
+) -> Result<usize, ApiError> {
     let mut by_node: HashMap<&str, (&str, &str)> = HashMap::new();
     for (node, at, by) in ends {
         by_node.entry(node.as_str()).or_insert((at.as_str(), *by));
@@ -1370,7 +1379,8 @@ pub fn phase_end(store: &Store, phase: &str, ends: &[(String, String, &str)]) ->
     mutate(store, "phase_end", |rows| {
         ended = 0;
         for row in rows.iter_mut() {
-            let Some(&(at, by)) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id)) else {
+            let Some(&(at, by)) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
                 continue;
             };
             let Ok(mut parsed) = Node::from_json(row) else {

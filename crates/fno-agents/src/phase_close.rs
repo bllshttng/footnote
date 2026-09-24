@@ -100,7 +100,7 @@ fn close_session_rows(store: &Store, sessions: &HashSet<String>) -> Vec<(String,
     for (node, harness, session_id, phase) in plan_retired_closes(&entries, sessions) {
         let tail = crate::claude_adopt::transcript_stamp(&session_id);
         if let Err(err) = api::session_end(
-            &store,
+            store,
             &node,
             &session_id,
             "reap-sweep",
@@ -264,8 +264,7 @@ pub(crate) fn utc(at: &str) -> Option<String> {
     Some(
         parsed
             .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
     )
 }
 
@@ -397,7 +396,11 @@ mod tests {
             ]
         );
         assert_eq!(row["sessions"][0]["ended_by"], json!("merge"));
-        let again = [("x-s".to_string(), "2026-09-03T00:00:00Z".to_string(), "merge")];
+        let again = [(
+            "x-s".to_string(),
+            "2026-09-03T00:00:00Z".to_string(),
+            "merge",
+        )];
         assert_eq!(api::phase_end(&store, "ship", &again).unwrap(), 0);
     }
 
