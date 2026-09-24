@@ -2586,7 +2586,11 @@ mod tests {
         deliveries: &std::cell::RefCell<
             Vec<(String, String, std::path::PathBuf, std::path::PathBuf)>,
         >,
-    ) -> i32 {
+        run_mail: M,
+    ) -> i32
+    where
+        M: FnMut(&[String]) -> (i32, String, String),
+    {
         claude_live_route_with(
             entry,
             "parked-w",
