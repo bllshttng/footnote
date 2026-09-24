@@ -593,8 +593,9 @@ fn resolve_dispatch(
             node_id.to_string(),
         ];
         if !has_pr_ref {
+            let note = drain_close_note(&ev.reason, &ev.message);
             args.push("--note".to_string());
-            args.push(drain_close_note(&ev.reason, &ev.message));
+            args.push(note);
         }
         match retry_etxtbsy(|| {
             fno_cmd(&cfg.fno_bin)
