@@ -153,6 +153,23 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
                 .map_err(|error| error.to_string())?,
         )
     };
+    open_connection(graph)
+}
+
+/// Open the store for a caller that already holds the store lock: the
+/// locked_mutate publication seam. Skips the creation lock, because a
+/// second flock on a fresh fd blocks behind the caller's own lock and
+/// burns the full timeout on every write to a fresh graph.
+pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
+    let path = database_path(graph);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    open_connection(graph)
+}
+
+fn open_connection(graph: &Path) -> Result<Connection, String> {
+    let path = database_path(graph);
     let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -662,7 +679,9 @@ pub fn shadow_sync(
     after: &[Value],
     json_version: &str,
 ) -> Result<PathBuf, String> {
-    let mut connection = open(graph)?;
+    // The caller holds the store lock (the locked_mutate publication seam),
+    // so the creation lock here would block behind it and burn the timeout.
+    let mut connection = open_holding_lock(graph)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -679,7 +698,8 @@ pub fn authoritative_sync(
     before: &[Value],
     after: &[Value],
 ) -> Result<String, String> {
-    let mut connection = open(graph)?;
+    // Same seam contract as shadow_sync: the caller holds the store lock.
+    let mut connection = open_holding_lock(graph)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -1997,14 +2017,15 @@ mod tests {
 
     #[test]
     fn flipgate_shadow_normalization_only_change_reaches_the_store() {
-        // AC1-HP: the file row lacks the default lists; a mutation on a
+        // AC1-HP: the seeded row lacks the default lists; a mutation on a
         // DIFFERENT node publishes the defaulted form. The diff must see
         // that change against the raw baseline and save the row.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
-        let raw = raw_rows(&graph);
-        // Seed the store from the raw file: the db now holds ab-one with no
-        // tags key, exactly what the last publish wrote.
+        let mut raw = raw_rows(&graph);
+        // The seed is the UN-defaulted form: no tags key, what an older
+        // file's row looked like before the defaults pipeline ran.
+        raw[0].as_object_mut().unwrap().remove("tags");
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
@@ -2017,7 +2038,6 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("title".to_string(), Value::String("Two changed".into()));
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&after)).unwrap();
         let outcome = crate::graph_store::locked_mutate_with_hook(
             &graph,
             crate::graph_store::MutateInput {
@@ -2035,16 +2055,30 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
+        // graph.db is the only store; graph.json is frozen under it, so the
+        // assertion reads the store, never file-vs-store parity.
         let stored = read_entries(&graph).unwrap();
-        assert_eq!(stored[0]["tags"], serde_json::json!([]));
-        assert_eq!(stored[1]["title"], "Two changed");
+        let one = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-one".into())))
+            .unwrap();
+        assert_eq!(
+            one.get("tags"),
+            Some(&Value::Array(vec![])),
+            "defaulted row reached the store"
+        );
+        let two = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-two".into())))
+            .unwrap();
+        assert_eq!(two.get("title"), Some(&Value::String("Two changed".into())));
     }
 
     #[test]
     fn flipgate_shadow_superseded_settle_reaches_the_store() {
         // AC2-HP: the raw row is blocked with superseded_by set; the
         // mutation pipeline settles it to superseded. The settle must reach
-        // the store, not only graph.json.
+        // the store, not only the published rows.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
@@ -2061,10 +2095,9 @@ mod tests {
             "blocked_reason".to_string(),
             Value::String("pending supersession".into()),
         );
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
-        let mut after = raw_rows(&graph);
+        let mut after = raw.clone();
         after[0]
             .as_object_mut()
             .unwrap()
@@ -2086,9 +2119,17 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
+        // graph.db is the only store; the settle is read back from it.
         let stored = read_entries(&graph).unwrap();
-        assert_eq!(stored[1]["status"], "superseded");
-        assert_eq!(stored[1]["superseded_by"], "ab-one");
+        let two = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-two".into())))
+            .unwrap();
+        assert_eq!(
+            two.get("status"),
+            Some(&Value::String("superseded".into())),
+            "the settle reached the store"
+        );
     }
 
     #[test]
@@ -2319,7 +2360,7 @@ mod tests {
 
     /// Seed a schema-2 store whose db rows lag the json: the title change
     /// after the seed is published to graph.json only, then the store is
-    /// downgraded and one stale soak key is planted.
+    /// downgraded.
     fn schema2_graph_with_stale_rows(dir: &TempDir) -> PathBuf {
         let graph = two_node_graph(dir);
         let rows = raw_rows(&graph);
@@ -2334,13 +2375,6 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO graph_meta(key, value) VALUES('soak_clean_since_ms', '123')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .unwrap();
         drop(connection);
         graph
     }
@@ -2349,9 +2383,9 @@ mod tests {
     fn schema_v3_population_keeps_its_rows_and_stamps_three() {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The first schema-3 open keeps the rows, stamps the new
-        // schema, and leaves the soak key because no rebuild ran. Parity still
-        // reports the mirror's staleness instead of rebuilding from json.
+        // authority. The schema-3 open keeps the rows and stamps the new
+        // schema; parity still reports the mirror's staleness instead of
+        // papering over it with a rebuild.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
         let entries = read_entries(&graph).unwrap();
@@ -2370,14 +2404,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
-        let soak: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM graph_meta WHERE key LIKE 'soak_%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(soak, 1, "the sqlite backend does not rebuild from json");
     }
 
     #[test]

@@ -25,8 +25,10 @@ fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
     .unwrap();
 }
 
+/// The landed rows, read from the store: graph.json is a frozen mirror
+/// under graph.db.
 fn read_graph(path: &PathBuf) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    json!({ "entries": fno_agents::graph_store::read_rows(path).unwrap() })
 }
 
 /// Run the binary entry point with the body on stdin.

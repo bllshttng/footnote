@@ -3465,13 +3465,11 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
 
 /// Stage a real graph file at the state root.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
-    let graph = dir.join("graph.json");
     std::fs::write(
-        &graph,
+        dir.join("graph.json"),
         serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
     )
     .unwrap();
-    crate::backlog::set_backend(&graph, crate::backlog::Backend::Json).unwrap();
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
@@ -3625,10 +3623,10 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
             "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string()
         )]
     );
-    // THE assertion: the file still holds the row, now closed, never removed.
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let entry = &raw["entries"][0];
+    // THE assertion: the store still holds the row, now closed, never
+    // removed. graph.json is the frozen mirror; graph.db is the record.
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let entry = &rows[0];
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     let row = &sessions[0];
@@ -3817,9 +3815,8 @@ fn the_live_eighteen_split_fifteen_and_three() {
     for node in ["Nu", "Np1", "Np2"] {
         assert!(held.contains(&&node.to_string()), "held: {held:?}");
     }
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    for entry in raw["entries"].as_array().unwrap() {
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    for entry in rows.iter() {
         let node = entry["id"].as_str().unwrap();
         for row in entry["sessions"].as_array().unwrap() {
             let stamped = row.get("ended_at").is_some();
