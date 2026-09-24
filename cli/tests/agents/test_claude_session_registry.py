@@ -20,8 +20,17 @@ import pytest
 
 
 def _claude_home_setup(tmp_path: Path, monkeypatch) -> Path:
-    """Point HOME at tmp_path and prepare ~/.claude/{sessions,jobs}."""
+    """Point HOME at tmp_path and prepare ~/.claude/{sessions,jobs}.
+
+    ``FNO_CONFIG`` is pinned to an empty tmp file so a developer's real
+    ``.fno/config.toml`` never leaks an account root into a test, and an
+    ambient ``CLAUDE_CONFIG_DIR`` is dropped for the same reason.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    config = tmp_path / "config.toml"
+    config.touch()
+    monkeypatch.setenv("FNO_CONFIG", str(config))
     (tmp_path / ".claude" / "sessions").mkdir(parents=True)
     (tmp_path / ".claude" / "jobs").mkdir(parents=True)
     return tmp_path
@@ -336,13 +345,82 @@ def test_read_timeline_tail_skips_malformed_lines(tmp_path, monkeypatch):
 def test_paths_resolved_via_path_home(tmp_path, monkeypatch):
     """All session/jobs paths must derive from Path.home() so HOME is the only knob."""
     from fno.agents.harnesses._claude_session_registry import (
-        _sessions_dir,
+        session_dirs,
         _jobs_dir_for,
     )
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert _sessions_dir() == tmp_path / ".claude" / "sessions"
+    assert session_dirs() == [tmp_path / ".claude" / "sessions"]
     assert _jobs_dir_for("xyz12345") == tmp_path / ".claude" / "jobs" / "xyz12345"
+
+
+def _register_claude_account(tmp_path: Path, monkeypatch, acct: Path) -> None:
+    """Write a config naming ``acct`` as a managed claude account's config_dir."""
+    config = tmp_path / "accounts-config.toml"
+    config.write_text(
+        "[[accounts.records]]\n"
+        'id = "makers"\n'
+        'name = "makers"\n'
+        'harness = "claude"\n'
+        'auth = "managed"\n'
+        f'config_dir = "{acct}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+
+
+def test_locate_session_reads_a_registered_account_root(tmp_path, monkeypatch):
+    """A claude account record's config_dir joins the root set: a record
+    written under <config_dir>/sessions is found, its jobs_dir is the
+    account's once that job dir exists, and the full UUID resolves."""
+    from fno.agents.harnesses._claude_session_registry import (
+        locate_session,
+        resolve_session_uuid,
+    )
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    acct = tmp_path / "acct"
+    (acct / "sessions").mkdir(parents=True)
+    _register_claude_account(tmp_path, monkeypatch, acct)
+    (acct / "sessions" / "4242.json").write_text(
+        json.dumps(
+            {
+                "messagingSocketPath": "/tmp/sock-acct",
+                "jobId": "feedc0de",
+                "kind": "bg",
+                "sessionId": "sess-feedc0de",
+                "cwd": "/tmp",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loc = locate_session("feedc0de")
+    assert loc is not None
+    assert loc.messaging_socket_path == "/tmp/sock-acct"
+    assert loc.session_id == "sess-feedc0de"
+    (acct / "jobs" / "feedc0de").mkdir(parents=True)
+    assert locate_session("feedc0de").jobs_dir == acct / "jobs" / "feedc0de"
+    assert resolve_session_uuid("feedc0de") == "sess-feedc0de"
+    assert home is not None
+
+
+def test_account_roots_fail_open_on_unreadable_config(tmp_path, monkeypatch):
+    """A config that fails to parse leaves the ambient roots: HOME's workers
+    stay visible and nothing raises."""
+    from fno.agents.harnesses._claude_session_registry import (
+        locate_session,
+        session_dirs,
+    )
+
+    home = _claude_home_setup(tmp_path, monkeypatch)
+    _write_session_file(home, pid=111, jobId="aaaa1111")
+    config = tmp_path / "broken.toml"
+    config.write_text("[[accounts.records\nid = never-closed", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+
+    assert session_dirs() == [tmp_path / ".claude" / "sessions"]
+    assert locate_session("aaaa1111") is not None
 
 
 # ---------------------------------------------------------------------------
