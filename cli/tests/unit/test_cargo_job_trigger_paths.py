@@ -56,7 +56,7 @@ def _manifest_paths_diffed_by(run: str) -> set[str]:
 def _cargo_job_step_inputs() -> set[str]:
     jobs = _workflow()["jobs"]
     inputs: set[str] = set()
-    for job_name in ("test-agents", "test-mux", "test"):
+    for job_name in ("test-agents", "test-agents-integration", "test-mux", "test"):
         run_blocks = [step.get("run", "") for step in jobs[job_name]["steps"]]
         for run in run_blocks:
             for block in re.findall(r"git diff --exit-code --(?P<paths>.*?)(?:\n\n|\Z)", run, re.S):

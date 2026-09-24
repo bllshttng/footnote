@@ -45,7 +45,6 @@ CHECKS: dict[str, str] = {
     "hook-tombstones": "hook_tombstones",
     "seam-crossings": "seam_crossings",
     "field-coverage": "field_coverage",
-    "graph-parity": "graph_parity",
     "preamble-budget": "preamble_budget",
     "internal-refs": "internal_refs",
     "plan-filenames": "plan_filenames",
@@ -250,17 +249,6 @@ def plan_filenames() -> None:
         typer.echo(f"plan-filenames: {len(mismatches)} mismatch(es)")
         raise typer.Exit(code=1)
     typer.echo("plan-filenames: ok")
-
-
-def graph_parity(
-    graph: Optional[Path] = None,
-    db: Optional[Path] = None,
-) -> None:
-    """Compare the JSON export with every row in the SQLite graph store."""
-    from fno.graph.parity import compare
-
-    raise typer.Exit(compare(graph=graph, db=db))
-
 
 
 # ---------------------------------------------------------------------------
@@ -2143,12 +2131,6 @@ def lint(
         help="hook-tombstones: revision to measure deletions against, "
         "instead of the auto-resolved base.",
     ),
-    graph: Optional[Path] = typer.Option(
-        None, "--graph", help="graph-parity: JSON export to compare."
-    ),
-    db: Optional[Path] = typer.Option(
-        None, "--db", help="graph-parity: SQLite store to compare."
-    ),
 ) -> None:
     """Run a repository lint check by name.
 
@@ -2178,8 +2160,6 @@ def lint(
         "as_json": as_json,
         "live": live,
         "base": base,
-        "graph": graph,
-        "db": db,
     }
     accepted = set(inspect.signature(fn).parameters)
     fn(**{k: v for k, v in supplied.items() if k in accepted})

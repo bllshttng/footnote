@@ -151,6 +151,7 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
             "decisions_truncated": False,
             "decisions_detail": f"decision index unreadable: {exc}",
         }
+    unknown = [row for row in rows if row.get("lifecycle") == "unknown"]
     live = [row for row in rows if not row.get("superseded_by")]
     capped = live[:_DECISIONS_CAP]
     out = []
@@ -165,13 +166,17 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
                 "lane": row.get("lane"),
                 "subject": row.get("subject"),
                 "text": text,
+                "lifecycle": row.get("lifecycle"),
             }
         )
     return {
         "decisions": out,
-        "decisions_status": "ok",
+        "decisions_status": "error" if unknown else "ok",
         "decisions_truncated": len(live) > len(capped),
-        "decisions_detail": None,
+        "decisions_detail": (
+            f"{unknown[0].get('lifecycle_reason')}; "
+            f"{len(unknown)} coord ruling(s) listed with an unknown lifecycle" if unknown else None
+        ),
     }
 
 

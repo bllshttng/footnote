@@ -42,7 +42,10 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.chdir(tmp_path)
 
     def entries():
-        return json.loads(g.read_text())["entries"]
+        # The store owns state; the file is a frozen export.
+        from fno.graph.store import read_graph_strict
+
+        return read_graph_strict(g)
 
     return g, entries
 

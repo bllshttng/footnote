@@ -98,12 +98,13 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claims_root: Path
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "ga.json")
     return g
 
 
 def _node_row(graph: Path, node_id: str, task_id: str) -> dict:
-    entries = json.loads(graph.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    entries = read_graph_strict(graph)
     node = next(e for e in entries if e.get("id") == node_id)
     return next(r for r in node["tasks"] if r["id"] == task_id)
 
@@ -148,7 +149,7 @@ def test_task_list_materializes_pending_rows(tmp_graph: Path):
     # Positive persistence marker: the rows are in the graph file, not just
     # the echoed payload.
     row = _node_row(tmp_graph, "x-t1", "1.1")
-    assert row["status"] == "pending" and row["owner"] is None
+    assert row["status"] == "pending" and row.get("owner") is None
 
 
 def test_task_list_no_plan_refuses_and_writes_nothing(
@@ -403,7 +404,7 @@ def test_pending_give_back_is_holder_only(
     )
     assert holder.exit_code == 0, holder.output
     row = _node_row(tmp_graph, "x-t1", "1.1")
-    assert row["status"] == "pending" and row["owner"] is None
+    assert row["status"] == "pending" and row.get("owner") is None
     assert "claimed_at" not in row
     assert claim_status(key, root=claims_root)["state"] == "free"
 
@@ -457,7 +458,7 @@ def test_done_by_non_holder_refused(
 def test_exited_graph_write_releases_the_claim(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """locked_mutate_graph sys.exit()s (does not raise) on a corrupt graph;
+    """commit_rows_via_store sys.exit()s (does not raise) on a corrupt graph;
     the transition must release the claim on that path too, or it stays held
     by the long-lived session pid until the whole session dies."""
     import fno.graph.store as store
@@ -681,7 +682,7 @@ def test_malformed_rows_survive_materialization(tmp_path: Path):
 
     The returned list is written back over entry["tasks"], so filtering the
     unreadable row out of it DELETES it from graph.json. read_graph and
-    locked_mutate_graph both keep what they cannot migrate.
+    commit_rows_via_store both keep what they cannot migrate.
     """
     from fno.graph.tasks import ensure_task_rows
 
@@ -713,13 +714,17 @@ def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
 
     # The row goes done underneath the live holder (a peer reconcile, an
     # operator), leaving the claim in place.
-    data = json.loads(tmp_graph.read_text(encoding="utf-8"))
-    for e in data["entries"]:
-        if e.get("id") == "x-t1":
-            for r in e["tasks"]:
-                if r["id"] == "1.1":
-                    r["status"] = "done"
-    tmp_graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    from fno.graph.store import commit_rows_via_store
+
+    def _mark_done(entries):
+        for e in entries:
+            if e.get("id") == "x-t1":
+                for r in e["tasks"]:
+                    if r["id"] == "1.1":
+                        r["status"] = "done"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _mark_done)
 
     refused = _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
@@ -750,13 +755,17 @@ def test_a_stale_self_claim_is_not_one_you_hold(
     ).exit_code == 0
     assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["state"] == "stale"
 
-    data = json.loads(tmp_graph.read_text(encoding="utf-8"))
-    for e in data["entries"]:
-        if e.get("id") == "x-t1":
-            for r in e["tasks"]:
-                if r["id"] == "1.1":
-                    r["status"] = "done"
-    tmp_graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    from fno.graph.store import commit_rows_via_store
+
+    def _mark_done(entries):
+        for e in entries:
+            if e.get("id") == "x-t1":
+                for r in e["tasks"]:
+                    if r["id"] == "1.1":
+                        r["status"] = "done"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _mark_done)
 
     refused = _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
@@ -1063,7 +1072,7 @@ def test_takeover_give_back_over_a_gone_owner_row(
     )
     assert given.exit_code == 0, given.output
     row = _node_row(tmp_graph, "x-t1", "1.2")
-    assert row["status"] == "pending" and row["owner"] is None
+    assert row["status"] == "pending" and row.get("owner") is None
 
     # Refusal strings advertise the NEW escape, never the old --owner one.
     assert _task_update(

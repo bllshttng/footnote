@@ -115,6 +115,18 @@ def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Opti
             raise typer.Exit(code=3)
         node["locked_by"] = None
         node["locked_at"] = None
+        # session_id is the lock's mirror (_normalize_lock_fields keeps it
+        # equal to locked_by): leaving it set re-materializes the holder on
+        # the next write, so the release clears the whole lock family.
+        node["session_id"] = None
+        node["locked_by_harness"] = None
+        node["locked_by_harness_session"] = None
+        # The keeper cannot derive plan rungs; a released row returns to the
+        # state it was claimed from (ready, or idea for an undesigned plan).
+        if node.get("status") == "in_progress":
+            from fno.graph.ladder import Rung, plan_rung
+
+            node["status"] = "idea" if plan_rung(node) in (Rung.IDEA, Rung.NONE) else "ready"
         return entries
 
     commit_rows_via_store(_graph_path(), mutator)

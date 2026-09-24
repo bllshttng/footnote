@@ -44,7 +44,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 |-------------|--------------|
 | `fno doctor event emit\|audit` | events.jsonl writes + audit. |
 | `fno doctor intel` | The provenance fold: who typed, per session. `/fno:intel` is the report skill. |
-| `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
+| `fno backlog ...` | graph store mutations: intake, update, done, defer, supersede, find, get. |
 | `fno do pr status <n>` | Merge-readiness verdict: `ready` + `optional_reviews_unresolved` + `review_activity`, plus the `merge_authority` and `merge_execution` projections (the recorded dispatch grant, claim liveness, and whether a live watcher would execute it). A review RUNNING now blocks `ready` (`review_in_flight`, `worktree_dirty`): coverage only knows what verdicts EXIST, and CI green reliably arrives before the review of that same head finishes. |
 | `fno do pr merge\|verify\|rebase\|heal` | PR ops with canonical guards. `heal` applies the mechanical fix for a red check; dry run unless `--apply`. [pr-heal](../../docs/architecture/pr-heal.md) |
 | `fno do plan stamp\|graduate` | Plan frontmatter stamping at ship time. |

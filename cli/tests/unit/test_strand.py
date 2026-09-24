@@ -226,7 +226,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _by_id_file(g: Path) -> dict:

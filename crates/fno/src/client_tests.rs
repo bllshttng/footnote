@@ -14708,18 +14708,17 @@ async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
 }
 
 #[tokio::test]
-async fn xf331_selector_r_on_a_non_squad_row_notices_not_beeps() {
-    // x-f331 US3/AC1-ERR: a refused sideline action prints a notice naming
-    // why, never a bare beep. `r` (rename workspace) on an agent row refuses.
+async fn xf331_selector_r_on_an_agent_row_opens_rename() {
     let mut v = unified_rows_view();
     let mut buf: Vec<u8> = Vec::new();
     let idx = agent_row_at(&v, |a| a.pane_id == Some(10));
     v.selector = Some(idx);
     selector_keys(&mut v, b"r", &mut buf).await.unwrap();
-    assert!(v.rename.is_none(), "r on an agent row opens no rename");
+    assert!(buf.is_empty(), "opening the overlay sends nothing");
+    assert_eq!(v.selector, None, "the selector closes");
     assert!(
-        v.notice.is_some(),
-        "the refusal is a visible notice, not a bare beep"
+        matches!(v.rename, Some((RenameTarget::Agent(_), _))),
+        "r opens the agent rename overlay"
     );
 }
 

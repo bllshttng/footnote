@@ -15,7 +15,6 @@ def _clean_result(**overrides):
     base = {
         "status": "fresh",
         "launch_agents": {"applicable": True, "dead": []},
-        "archive_id_collisions": {"count": 0, "ids": []},
         "fd_limit": {"verdict": "ok"},
         "plugin_hooks": {"failed": 0},
         "plugin_cache": {"status": "fresh"},
@@ -48,11 +47,6 @@ def test_missing_report_keys_do_not_raise_and_produce_no_lines():
                 }
             },
             "sh.fno.groom",
-        ),
-        ({"archive_id_collisions": {"count": 29, "ids": []}}, "29 node id"),
-        (
-            {"archive_id_collisions": {"count": 0, "ids": [], "unreadable": True}},
-            "unreadable",
         ),
         ({"fd_limit": {"verdict": "low", "launchd_soft": 256}}, "256"),
         ({"plugin_hooks": {"failed": 2}}, "2 plugin hook"),

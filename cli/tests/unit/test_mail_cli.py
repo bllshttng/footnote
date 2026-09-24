@@ -86,7 +86,9 @@ def ruling_graph(mailbox, monkeypatch):
 
 
 def _graph_details(graph_path):
-    return json.loads(graph_path.read_text(encoding="utf-8"))["entries"][0]["details"]
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(graph_path)[0]["details"]
 
 
 def _hosted_dispatch(monkeypatch, before_transport=None):

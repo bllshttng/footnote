@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 import fno.graph.epics as epics_module
 from fno.graph.cli import cli
 from fno.graph.epics import holds_epic_open, stuck_epics
-from fno.graph.store import locked_mutate_graph
+from fno.graph.store import commit_rows_via_store
 
 runner = CliRunner()
 
@@ -121,7 +121,7 @@ def test_stuck_epics_verb_reports_and_never_mutates(tmp_path, monkeypatch):
     from fno.graph import cli as graph_cli
 
     g = tmp_path / "graph.json"
-    locked_mutate_graph(
+    commit_rows_via_store(
         g,
         lambda entries: entries
         + [
