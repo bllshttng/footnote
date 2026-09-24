@@ -2071,6 +2071,7 @@ mod tests {
         );
         std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw_rows(&graph);
         after[0]
