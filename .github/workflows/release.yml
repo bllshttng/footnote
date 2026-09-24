@@ -1,0 +1,489 @@
+name: release
+
+# One release workflow for all three channels: nightly, release candidate and
+# stable. It replaces the retired nightly tag-and-bump workflow and keeps both
+# fence reasons that retired it: nightly makes NO bump commit on main and NO
+# v* tag, and rc and stable create their tag only after the release-environment
+# approval click (autonomy ends at the click). The nightly job's only commit
+# lives on the rolling `nightly` tag itself - the plugin-version stamp - so the
+# plugin channel resolves to a version distinct from stable's; main never
+# moves. Builds are delegated to release-binaries.yml and release-wheels.yml
+# as reusable workflows; the publish legs they used to carry now live here.
+#
+# Channels:
+#   nightly  - scheduled daily (or dispatch): picks the newest main commit
+#              whose rust-ci push run succeeded and whose newest ancestor
+#              cli-ci push run succeeded, publishes a rolling pre-release
+#              named `nightly` with no approval (rolling, replaceable, no
+#              registry).
+#   rc       - dispatch: builds the nightly commit (or inputs.sha) and stops
+#              at the `release` environment approval. PyPI + GitHub Release
+#              + the v<src>rcN tag all happen in the approved job.
+#   stable   - dispatch: promotes the newest v<src>rc* commit (or
+#              inputs.sha) in the approved job: PyPI, crates.io, the v<src>
+#              tag, the GitHub Release, the Homebrew tap, and the `stable`
+#              branch the plugin marketplaces pin.
+#
+# Rehearse on a fork with dry_run=true: cargo publish runs with --dry-run,
+# PyPI and the tap are skipped, and the GitHub Release is created as a draft.
+
+on:
+  schedule:
+    # Daily; the channel input is absent on schedule, which resolves to nightly.
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Which channel to release"
+        type: choice
+        default: nightly
+        options:
+          - nightly
+          - rc
+          - stable
+      sha:
+        description: "Commit to release (rc/stable only); defaults to the nightly tag (rc) or the newest rc tag (stable)"
+        type: string
+        default: ""
+      dry_run:
+        description: "Rehearse: no registry uploads, the GitHub Release is a draft"
+        type: boolean
+        default: false
+
+# Per channel: an rc or stable run can wait at the approval for days, and a
+# shared group would park every nightly behind it (GitHub keeps one pending
+# run per group and cancels the older pending one).
+concurrency:
+  group: release-${{ inputs.channel || 'nightly' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # tags, branches, releases
+  actions: read # read rust-ci / cli-ci run conclusions
+
+jobs:
+  resolve:
+    name: resolve channel, sha and version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      channel: ${{ steps.pick.outputs.channel }}
+      sha: ${{ steps.pick.outputs.sha }}
+      version: ${{ steps.math.outputs.version }}
+      tag: ${{ steps.math.outputs.tag }}
+      skip: ${{ steps.skip.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags + history: merge-base and release-version.sh need them
+
+      - name: Refuse a non-default branch and pick the release sha
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          WANTED_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # 0. Release only from the default branch. A dispatch on a feature
+          #    branch would otherwise publish from unmerged code.
+          branch="${GITHUB_REF_NAME}"
+          default_branch="${DEFAULT_BRANCH:-main}"
+          if [ "$branch" != "$default_branch" ]; then
+            echo "::error::refusing to release from non-default branch '${branch}'; run this on '${default_branch}'"
+            exit 1
+          fi
+          echo "channel: ${CHANNEL}"
+
+          git fetch origin "${default_branch}" --no-tags
+          main_ref="origin/${default_branch}"
+
+          # 1. Pick the commit.
+          #    nightly: the newest main push whose rust-ci run succeeded AND
+          #    whose newest ancestor cli-ci push run also succeeded (a failed
+          #    cli shard on the newest cli-touching commit blocks the nightly,
+          #    so a red Python tree can never ride a green rust run).
+          #    rc: the wanted sha, else the nightly tag's commit.
+          #    stable: the wanted sha, else the newest v<src>rc* tag's commit.
+          case "$CHANNEL" in
+            nightly)
+              rust_sha="$(gh run list -w rust-ci.yml -b "${default_branch}" -e push -s success -L 1 --json headSha --jq '.[0].headSha // empty')"
+              if [ -z "$rust_sha" ]; then
+                echo "::error::no successful rust-ci push run on ${default_branch}; nothing to ship nightly"
+                exit 1
+              fi
+              echo "newest green rust-ci push run: ${rust_sha}"
+
+              cli_run="$(gh run list -w cli-ci.yml -b "${default_branch}" -e push -L 30 --json headSha,conclusion \
+                --jq '.[] | select(.conclusion != "" and .conclusion != null) | "\(.databaseId) \(.headSha) \(.conclusion)"' \
+                | while read -r _run_id run_sha run_conclusion; do
+                    if git merge-base --is-ancestor "$run_sha" "$rust_sha" 2>/dev/null; then
+                      echo "$run_conclusion"
+                      break
+                    fi
+                  done)"
+              if [ -n "$cli_run" ] && [ "$cli_run" != "success" ]; then
+                echo "::error::the newest cli-ci push run at or before ${rust_sha} concluded '${cli_run}'; nightly blocked until cli-ci is green"
+                exit 1
+              fi
+              [ -z "$cli_run" ] && echo "::notice::no completed cli-ci push run found in the last 30 on ${default_branch}; rust-ci green is the only gate here"
+
+              sha="$rust_sha"
+              ;;
+
+            rc)
+              if [ -n "$WANTED_SHA" ]; then
+                sha="$WANTED_SHA"
+              else
+                sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null || true)"
+                if [ -z "$sha" ]; then
+                  echo "::error::no nightly tag exists to promote; dispatch channel=rc with an explicit sha"
+                  exit 1
+                fi
+              fi
+              ;;
+
+            stable)
+              if [ -n "$WANTED_SHA" ]; then
+                sha="$WANTED_SHA"
+              else
+                rc_tag="$(git tag -l 'v*rc*' --sort=-v:refname | head -1 || true)"
+                if [ -n "$rc_tag" ]; then
+                  sha="$(git rev-parse --verify "refs/tags/${rc_tag}^{commit}")"
+                else
+                  sha=""
+                fi
+                if [ -z "$sha" ]; then
+                  echo "::error::no v*rc* tag exists; stable promotes a candidate - cut an rc first"
+                  exit 1
+                fi
+              fi
+              ;;
+
+            *)
+              echo "::error::unknown channel '${CHANNEL}'"
+              exit 1
+              ;;
+          esac
+
+          # 2. The released commit must be an ancestor of the default branch.
+          if ! git merge-base --is-ancestor "$sha" "$main_ref"; then
+            echo "::error::refusing to release ${sha}: it is not an ancestor of ${main_ref}"
+            exit 1
+          fi
+
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Idempotence - skip a nightly already published
+        id: skip
+        run: |
+          set -euo pipefail
+          channel="${{ steps.pick.outputs.channel }}"
+          sha="${{ steps.pick.outputs.sha }}"
+          if [ "$channel" = "nightly" ] && nightly_sha="$(git rev-parse --verify 'refs/tags/nightly^{commit}' 2>/dev/null)" \
+             && git merge-base --is-ancestor "$sha" "$nightly_sha"; then
+            echo "the nightly tag already carries ${sha} (or newer) - skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute version and tag
+        id: math
+        env:
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          SHA: ${{ steps.pick.outputs.sha }}
+        run: |
+          set -euo pipefail
+          channel="${CHANNEL}"
+          sha="${SHA}"
+          day="$(date -u +%Y%m%d)"
+
+          src="$(git show "${sha}:cli/src/fno/__init__.py" | sed -nE 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
+          if [ -z "$src" ]; then
+            echo "::error::cannot read __version__ from cli/src/fno/__init__.py at ${sha}"
+            exit 1
+          fi
+          echo "source version at ${sha}: ${src}"
+
+          # exit 3 (stable already shipped) reads as an idempotent no-op;
+          # exit 1 (v<src> released on another channel) is a real failure
+          # naming the sync-version bump.
+          rc=0
+          bash scripts/release/release-version.sh "$channel" "$src" "$day" >> "$GITHUB_OUTPUT" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+  binaries:
+    name: build binary tarballs
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  wheels:
+    name: build wheels
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    uses: ./.github/workflows/release-wheels.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  publish-nightly:
+    name: publish the nightly pre-release (rolling, replaceable, no registry)
+    needs: [resolve, binaries, wheels]
+    if: needs.resolve.outputs.skip != 'true' && (inputs.channel || 'nightly') == 'nightly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+          path: dist
+
+      - name: Drop the files that never ship
+        # Windows is built but not released. Drop any universal py3-none-any
+        # wheel too: a release wheel must always carry a bundled binary, so a
+        # none-any artifact means the build hook no-op'd (codex P2 on PR #351).
+        run: |
+          rm -f dist/*windows*.tar.gz dist/*win*.whl dist/*-none-any.whl
+          ls -1 dist >/dev/null 2>&1 || { echo "no releaseable artifacts remain"; exit 1; }
+
+      - name: Stamp the plugin version onto the nightly tag
+        # The nightly tag carries ONE commit on top of the released sha whose
+        # only change is .claude-plugin/plugin.json's version, so the nightly
+        # plugin channel resolves to a version distinct from stable's (the
+        # Claude marketplace skips an update when a channel's version is
+        # unchanged). Main never moves; no v* tag is created.
+        id: stamp
+        run: |
+          set -euo pipefail
+          sha="${{ needs.resolve.outputs.sha }}"
+          version="${{ needs.resolve.outputs.version }}"
+
+          # PEP 440 -> semver for the plugin manifest (0.4.0.dev20260925 ->
+          # 0.4.0-dev.20260925); the marketplace docs compare these as strings.
+          semver="$(printf '%s' "$version" | sed -E 's/\.dev([0-9]+)$/-dev.\1/; s/rc([0-9]+)$/-rc.\1/')"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout "$sha"
+          perl -i -pe "s/\"version\": \"[^\"]*\"/\"version\": \"${semver}\"/" .claude-plugin/plugin.json
+          git diff --quiet -- .claude-plugin/plugin.json \
+            || { git add .claude-plugin/plugin.json && git commit -m "chore(nightly): stamp plugin ${semver} [skip ci]"; }
+          stamped="$(git rev-parse HEAD)"
+
+          # Replace the rolling tag (delete-then-create below removed the old
+          # one; force anyway so a re-run never loses to a stale remote tag).
+          git tag -f nightly "$stamped"
+          git push -f origin refs/tags/nightly
+          echo "stamped=${stamped}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the nightly release
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.version }}"
+          stamped="${{ steps.stamp.outputs.stamped }}"
+
+          # Tolerate "not found": the first nightly (or a previous delete) has
+          # nothing to remove.
+          gh release delete nightly --cleanup-tag -y 2>/dev/null || true
+
+          notes="nightly build of footnote.
+          - Commit: ${stamped}
+          - Version: ${version}
+
+          Install (pick the wheel for your platform):
+          "
+          for whl in dist/fno-*.whl; do
+            notes="${notes}
+          - FNO_INSTALL_WHEEL=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/$(basename "$whl") sh fno.sh"
+          done
+
+          gh release create nightly \
+            --prerelease --latest=false \
+            --target "$stamped" \
+            --title "nightly ${version}" \
+            --notes "$notes" \
+            dist/*.tar.gz dist/*.whl scripts/install/fno.sh
+
+          echo "nightly ${version} published at ${stamped}"
+
+  publish:
+    name: publish rc / stable (one approval click)
+    needs: [resolve, binaries, wheels]
+    if: needs.resolve.outputs.skip != 'true' && (inputs.channel || 'nightly') != 'nightly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # THE click. Every publish leg sits in this one job, so one approval
+    # releases one job: PyPI, crates.io, the tag, the GitHub Release, the tap
+    # and the stable branch the plugin marketplaces pin.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ needs.resolve.outputs.channel }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+          path: dist
+
+      - name: Drop the files that never ship
+        run: |
+          rm -f dist/*windows*.tar.gz dist/*win*.whl dist/*-none-any.whl
+          ls -1 dist >/dev/null 2>&1 || { echo "no releaseable artifacts remain"; exit 1; }
+          echo "publishing:"
+          ls -1 dist
+
+      - name: Install uv
+        if: ${{ inputs.dry_run != true }}
+        uses: astral-sh/setup-uv@v3
+
+      - name: PyPI
+        if: ${{ inputs.dry_run != true }}
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$UV_PUBLISH_TOKEN" || { echo "PYPI_API_TOKEN not set; refusing to publish"; exit 1; }
+          uv publish --check-url https://pypi.org/simple/ dist/*.whl
+
+      - name: crates.io (stable only)
+        if: ${{ inputs.dry_run != true && env.CHANNEL == 'stable' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN not set; refusing to publish"; exit 1; }
+          # crates.io uploads are permanent: a version already there is an
+          # idempotent skip, so a re-run after a partial publish never retries.
+          for pair in "fno-agents:crates/fno-agents" "fno:crates/fno"; do
+            name="${pair%%:*}"
+            dir="${pair#*:}"
+            code="$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/${name}/${VERSION}")"
+            if [ "$code" = "200" ]; then
+              echo "${name} ${VERSION} is already on crates.io - skipping"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              cargo publish --dry-run --manifest-path "${dir}/Cargo.toml"
+            else
+              cargo publish --manifest-path "${dir}/Cargo.toml"
+            fi
+          done
+
+      - name: GitHub Release and tag
+        run: |
+          set -euo pipefail
+          # The v* tag is created HERE, after the approval click (or, for a
+          # draft rehearsal, as a draft release with no tag move).
+          if [ "$DRY_RUN" = "true" ]; then
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" --clobber dist/*
+            else
+              gh release create "$TAG" --draft --prerelease --target "$SHA" --generate-notes \
+                --title "${TAG} (dry run)" dist/*
+            fi
+            echo "dry run: draft release ${TAG} holds the artifacts; nothing was uploaded to a registry"
+            exit 0
+          fi
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # Notes span the previous PLAIN release only (rcs use --prerelease).
+            start_tag="$(git tag -l 'v[0-9]*' | grep -Ev 'rc|dev' | sort -V | tail -1 || true)"
+            extra=""
+            [ -n "$start_tag" ] && extra="--notes-start-tag ${start_tag}"
+            if [ "$CHANNEL" = "rc" ]; then
+              gh release create "$TAG" --prerelease --target "$SHA" --generate-notes $extra --title "$TAG" dist/*
+            else
+              gh release create "$TAG" --latest --target "$SHA" --generate-notes $extra --title "$TAG" dist/*
+            fi
+          else
+            gh release upload "$TAG" --clobber dist/*
+          fi
+          echo "release ${TAG} published at ${SHA}"
+
+      - name: Stable plugin channel (stable only)
+        if: ${{ inputs.dry_run != true && env.CHANNEL == 'stable' }}
+        # Move the `stable` branch the plugin marketplaces pin, and add the
+        # plugin tag beside v<src>. Both live INSIDE the approved job: the
+        # plugin channel moves only on stable promotion.
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push -f origin "+${SHA}:refs/heads/stable"
+          echo "stable branch moved to ${SHA}"
+          if git rev-parse --verify -q "refs/tags/fno--v${VERSION}" >/dev/null; then
+            echo "plugin tag fno--v${VERSION} already exists - skipping"
+          else
+            git tag "fno--v${VERSION}" "$SHA"
+            git push origin "refs/tags/fno--v${VERSION}"
+            echo "plugin tag fno--v${VERSION} pushed"
+          fi
+
+      - name: Homebrew tap (stable only)
+        if: ${{ inputs.dry_run != true && env.CHANNEL == 'stable' }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A fine-grained PAT with write to the SEPARATE tap repo - the default
+          # GITHUB_TOKEN cannot push cross-repo. Absent it, this leg fails soft
+          # (PyPI + crates + the release already shipped); set the secret to
+          # enable the brew channel.
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping tap update (PyPI + crates already published)."
+            exit 0
+          fi
+          echo "fno version: ${VERSION}"
+          # The wheels were just published; give PyPI a few seconds to serve them.
+          for _ in $(seq 1 10); do
+            curl -fsSL "https://pypi.org/pypi/fno/${VERSION}/json" -o /dev/null && break || sleep 6
+          done
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/bllshttng/homebrew-fno.git" tap
+          python3 scripts/release/update-homebrew-formula.py "${VERSION}" tap/Formula/fno.rb
+          cd tap
+          if git diff --quiet; then
+            echo "tap already at ${VERSION} - nothing to push."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "fno ${VERSION}: bump url + sha256 (auto, x-0afe)"
+          git push

@@ -113,6 +113,33 @@ check(publish_jobs.get("dry-run", {}).get("if") == "github.event_name == 'pull_r
 check("publish" not in publish_jobs,
       "crates-publish.yml carries no publish job; publishing lives in release.yml")
 
+# release.yml is the one release workflow: its publish job is the single
+# approval click (the release environment) and only ever runs for rc/stable;
+# the nightly publishes with no approval and no v* tag.
+release = load(".github/workflows/release.yml")
+release_events = event_map(release)
+release_jobs = release["jobs"]
+release_dispatch = (release_events.get("workflow_dispatch") or {}).get("inputs") or {}
+check(sorted((release_dispatch.get("channel") or {}).get("options") or []) == ["nightly", "rc", "stable"],
+      "release.yml dispatches a channel among nightly, rc and stable")
+check("schedule" in release_events,
+      "release.yml runs the nightly on a schedule")
+check((release_dispatch.get("dry_run") or {}).get("type") == "boolean",
+      "release.yml carries the dry_run rehearsal input")
+publish_job = release_jobs.get("publish") or {}
+check(publish_job.get("environment") == "release",
+      "release.yml's publish job sits behind the release approval environment")
+check((publish_job.get("needs") or []) == ["resolve", "binaries", "wheels"],
+      "release.yml's publish job runs after resolve and both build workflows")
+publish_if = str(publish_job.get("if", ""))
+check("(inputs.channel || 'nightly') != 'nightly'" in publish_if,
+      "release.yml's publish job runs only for rc or stable")
+nightly_if = str((release_jobs.get("publish-nightly") or {}).get("if", ""))
+check("(inputs.channel || 'nightly') == 'nightly'" in nightly_if,
+      "release.yml's nightly job runs only for the nightly channel")
+check(str((release.get("concurrency") or {}).get("group", "")) == "release-${{ inputs.channel || 'nightly' }}",
+      "release.yml serializes per channel so an approval wait never parks the nightly")
+
 # Build workflows are callable and build-only: release.yml calls them and owns
 # every publish leg behind the release-environment approval.
 for wf_name in ("release-binaries.yml", "release-wheels.yml"):
