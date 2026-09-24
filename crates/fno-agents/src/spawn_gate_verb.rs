@@ -276,6 +276,8 @@ fn gate_answer(payload: &Value) -> Value {
         caller_session: opt_str_of(payload, "caller_session"),
         succession_scope: opt_str_of(payload, "succession_scope"),
         holder_pid: Some(holder_pid as u32),
+        seed: opt_str_of(payload, "seed"),
+        session_phase: opt_str_of(payload, "session_phase"),
     };
     match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
         Ok(mut guard) => {
@@ -1864,6 +1866,68 @@ mod tests {
             "refusals before the mint write nothing: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn gate_refuses_a_review_seed_before_the_bypass() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+        let prior_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::set_var("FNO_SPAWN_GATE", "0");
+
+        let review = gate_answer(&json!({
+            "mode": "gate",
+            "name": "review-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "$fno:review high --comment",
+            "session_phase": "do"
+        }));
+        let think = gate_answer(&json!({
+            "mode": "gate",
+            "name": "think-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "/fno:think why"
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(review["status"], "refused", "{review}");
+        assert_eq!(review["exit_code"], 89, "{review}");
+        assert_eq!(review["receipt"]["reason"], "review_session", "{review}");
+        assert_eq!(think["status"], "admitted", "{think}");
     }
 
     /// AC3-HP: reserve mints a claim with the reservation metadata, an expiry

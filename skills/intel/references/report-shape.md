@@ -83,7 +83,7 @@ Rules the renderer holds to:
 - Every number in the report traces to the saved fold JSON named in `fold:`. Every number names its population: `scanned` for fold counters, Usage over time, and Activity. `judged` is the population for the Executive summary, Categories, and the facet-derived sections. A line never mixes two.
 - Anchors are `s-` plus the first 8 characters of the session id. Only sessions named in the run file get a Sessions line.
 - The new sections carry no transcript text beyond the one-line summaries.
-- The tag `#agent-correction` appears only in the Operator corrections section. The corrections line grammar does not change.
+- The tag `#agent-correction` appears only in the User corrections section. The corrections line grammar does not change.
 - A section that cannot be written still appears, with one line `not written: <reason>`. It is never left out.
-- Unattended sessions (zero operator and zero relay turns) stay out of every section except the fold counters. They are machinery runs.
+- Unattended sessions (zero user and zero relay turns) stay out of every section except the fold counters. They are machinery runs.
 - The corrections lines must survive `bash scripts/corrections-insights-tag.sh --insights-file <report>` untouched: the tag is ` #agent-correction` at end of line, the `signal=` pair inside it.

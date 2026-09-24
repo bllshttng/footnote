@@ -958,6 +958,8 @@ def run_gate(
     no_wait: bool = False,
     route_provider: Optional[str] = None,
     account: Optional[str] = None,
+    seed: Optional[str] = None,
+    session_phase: Optional[str] = None,
     succession_scope: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate - by asking the ONE gate in the binary. Returns a
@@ -966,9 +968,10 @@ def run_gate(
 
     This is a TRANSPORT, not a second gate: the axes (fleet incident, schema,
     quota lock, provider cap, CPU, slots, RAM, king share) are decided inside
-    ``crates/fno-agents/src/spawn_gate.rs`` and this side only carries the
-    caller's identity and the refusal out. The refusal event still emits from
-    here (locked decision 5), so the journal population is unchanged for
+    ``crates/fno-agents/src/spawn_gate.rs``. This side carries the caller's
+    identity and raw seed/phase inputs in, then carries refusal data out. The
+    refusal event still emits from here (locked decision 5), so journal
+    population is unchanged for
     spawns that enter Python.
     """
     # Set before the first branch that can refuse, so every refusal event in
@@ -992,6 +995,8 @@ def run_gate(
         "no_wait": no_wait,
         "route_provider": route_provider,
         "account": account,
+        "seed": seed,
+        "session_phase": session_phase,
         "succession_scope": succession_scope,
         "caller_session": caller_session,
         "holder_pid": os.getpid(),

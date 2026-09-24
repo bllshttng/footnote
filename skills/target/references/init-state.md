@@ -17,7 +17,7 @@ Generate fresh codemap for structural awareness:
 fno doctor codemap --tokens 2048 2>/dev/null || true
 ```
 
-If `fno` is unavailable or `fno doctor codemap`'s deps are missing, skip this step silently. Read the codemap in the repo's space (`fno-agents state path codemap`) if it exists. Top files in the output are the highest-importance nodes in the codebase - changes to these have wide blast radius and may need extra verification. This context informs the operator's execution and the sigma-review's risk assessment.
+If `fno` is unavailable or `fno doctor codemap` dependencies are missing, skip silently. If a codemap exists, read it from the repo's space with `fno-agents state path codemap`. The top files are high-importance codebase nodes. Changes to them have wide blast radius and can need extra verification. This context informs the user's execution and sigma-review's risk assessment.
 
 ## Step 1b: Load Project Config (AUTO)
 
@@ -58,10 +58,12 @@ The size profile sets the base values for all toggles. Individual flags then ove
 
 ## Step 1c-blast: Blast-Radius Modulation (AUTO, opt-in)
 
-When `config.target.blast.enabled: true` **and** the input is a plan or node (a File Ownership Map exists), `fno do target init` performs a deterministic blast read on the plan's touched surface BEFORE it writes the immutable manifest, and modulates the size resolved in Step 1c. This is fully internal to the verb — there is no separate LLM step — but the agent should understand the resulting `target_size` may differ from the operator/default size, and an announce line is printed to stderr:
+When `config.target.blast.enabled: true` and the input is a plan or node with a File Ownership Map, `fno do target init` reads blast radius before writing the immutable manifest. It checks the plan's touched paths and adjusts the size from Step 1c. This runs inside the verb with no LLM call. Tell the agent that `target_size` can differ from the user's size or the default. The verb prints an announce line to stderr.
 
 - **high blast** (touched surface matches the blast map: the loc-ratchet control-plane globs plus a general auth/migrations/sql/infra/billing list, extended by `config.target.blast.high_blast_globs`) → ceremony is **floored at `M`**, non-overridable downward even over an explicit `S`. Announce: `blast: high (<matched-path>) -> floor M ...`.
-- **low blast** (all paths known, none match) **and no size was pinned** → **downgraded to `S`** (do + PR, fast path). An explicit operator size is never downgraded. Announce: `blast: low -> fast path S ...`. Suppressed when `config.target.blast.downgrade: false` (safety-only mode: floor up, never down).
+- **low blast** (known paths, no matches) **and no pinned size** → **downgraded to `S`** (do + PR, fast path).
+  - Never downgrade an explicit user size. Announce: `blast: low -> fast path S ...`.
+  - When `config.target.blast.downgrade: false`, suppress the downgrade. This is safety-only mode: size can rise, never fall.
 - **unknown** (empty/unparseable map, classifier error, or `fno do target blast-check` failure) → **no change**, fail-safe to the Step 1c size. A blast read never blocks init.
 
 Disabled (the default) is byte-for-byte the pre-feature behavior. Inspect a plan's verdict directly with `fno do target blast-check <plan>` (prints `{verdict, matched_paths, reason}`; `--quiet` for the bare token).

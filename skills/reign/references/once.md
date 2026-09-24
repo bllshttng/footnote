@@ -5,7 +5,13 @@ You have been crowned over one scope, and the crown expires when you exit. That 
 
 One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
 
-Nothing holds you here while work is pending. That changed. With `config.king.enabled` set, coronation through `fno agents crown` or `fno agents spawn --crown` arms the scope manifest automatically, and `fno-agents loop-check --driver king` holds this session open while `fno inbox board` names work you can shrink (a bare call is scoped to your crown's manifest; `--state <path>` reads outside it). It lets you exit only on a clean board. That is a floor under the abdication, not supervision of the tail. It exists because a king filed eight nodes, dispatched none, and sat idle for an hour with a full board. A clean board exits you for real. When the board refills, a human crowns the next king by hand: nothing crowns one for you. A full board that stops shrinking is different. Before the loop lets you go, it records one operator question naming the stalled rows. A stuck board is never a silent exit.
+Pending work once let the session exit immediately. Setting `config.king.enabled` now makes `fno agents crown` or `fno agents spawn --crown` arm the scope manifest.
+
+The `fno-agents loop-check --driver king` loop holds the session while `fno inbox board` lists work to shrink. A bare call uses the crown manifest. `--state <path>` reads outside it.
+
+Exit requires a clean board. This limits abdication but does not supervise the tail. The change follows an incident: a king filed eight nodes, dispatched none, and sat idle for an hour with a full board.
+
+A clean board exits the session. When the board refills, a human crowns the next king. If a full board stops shrinking, the loop records one user question with the stalled rows before exit. It never exits silently with a stuck board.
 
 The core loop is **keep-map-true + promote-next-wave**.
 It is never dispatch-ordering: you do not hand work to workers, you make the graph say what should run next and let the existing hands do their job.
@@ -55,7 +61,8 @@ This is orthogonal to the crown and equally load-bearing.
 A king who crowns a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
 Fan out, record what you fanned out, exit.
 If a crowned session dies, the next one sees it in the graph and re-crowns; that is the recovery path, not a regency.
-It restores planning continuity, not review triggering: it assumes a next king arrives, and a worker blocked on a review trigger waits indefinitely if none does.
+
+It restores planning continuity, not court coverage. Without a next king, a worker can wait indefinitely for an in-scope ruling.
 So do not let a spawning reign depend on a successor materializing - hand off before you exit ([What a pass is not](#what-a-pass-is-not)).
 
 **Crown kings on a frontier model at high effort.**
@@ -67,7 +74,7 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
   --crown <epic> --substrate pane --workspace <epic>
 ```
 
-`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `thread` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default. When the flag is absent, `config.agents.defaults.substrate` takes precedence and is injected. If the user set `thread`, this command becomes a placement flag on a non-pane substrate and exits 2. Crowning then fails because you cannot see or change that config here.
 
 What `pane` buys here is the COURT, not the crown.
 The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
@@ -127,7 +134,7 @@ The crown model above is unchanged. What changes is *tenure*: the crown has two 
 1. The crowning brief names monitoring, answering questions, or running a team -> **court**.
 2. The crown is bestowed autonomously (daemon, cron, another king) with no monitoring language -> **pass**.
 3. Ambiguous human crowning -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
-4. You will spawn workers who mail you back (minions that reach a review point and need their king to trigger it) -> **not pass**. A pure pass abdicates at kickoff, before any worker gets to review, so it orphans every worker it spawned. Pick court, or hand off before you exit by spawning your heir over your own scope, which transfers the crown in the same atomic write that vacates yours (`fno agents spawn -k "<scope>" "<seed prompt>"`). Resolve this at kickoff, when it is cheap - not at abdication, when the workers are already live. See [What a pass is not](#what-a-pass-is-not).
+4. Workers who need live decisions or monitoring -> **not pass**. A pure pass abdicates at kickoff. Workers review their diffs inline, but blocked workers still need a live king for in-scope rulings. Pick court, or hand off before exit by spawning your heir.
 
 **What court actually costs.**
 Not idle tokens.
@@ -149,7 +156,13 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 
 **Rule.** Every ruling channel is in [Recording a ruling](../SKILL.md#recording-a-ruling).
 
-**Priority.** High-priority work comes from the OPERATOR or from a KING SUPERIOR, not from whoever mails you most. Push back on either when you disagree, think clearly, and advocate for your team and your epic. The failure mode is structural, not a discipline gap: mail arrives as a discrete event with an id and a queue, so it gets recorded, while operator conversation is a stream with no boundary, so it does not - and the direction a king records FROM is the direction it gets pushed from. So the capture loop is part of the tick, not a memory exercise: run `fno inbox operator status`, disposition every queued operator turn before the tick ends, file an operator ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add` (new work follows the same rule), record an operator ruling with `fno inbox law set`, then ack the turn naming what it produced: `fno inbox operator ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`. A captured law lands as `chat_attested`, never as `operator`, and that is honest attribution rather than a downgrade: the ack records that the operator asked; it does not manufacture authority an agent never had.
+**Priority.** High-priority work comes from the user or a KING SUPERIOR. It does not come from whoever mails most. If you disagree, push back and advocate for your team and epic.
+
+The failure mode is structural. Mail has a discrete event id and queue, so it gets recorded. User conversation has no boundary, so it does not. A king's recorded direction controls where work is pushed.
+
+Make capture part of each tick. Run `fno inbox operator status`. Disposition every queued user turn before the tick ends. File a user ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add`. New work follows the same rule. Record a superuser ruling with `fno inbox law set`. Then ack with the outcome: `fno inbox user ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`.
+
+A captured law uses `chat_attested`, never `operator`. This is honest attribution, not a downgrade. The ack records the user's request. It does not grant authority to the agent.
 
 **Dispatch.**
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|thread|headless` starts a worker (`bg` is the deprecated alias for `thread`).
@@ -219,7 +232,7 @@ Wiring `blocked_by` *after* linking loses that race and stampedes a wave that wa
 
 ### 1. Read the track
 
-Read your operator's lane before the graph.
+Read the user's lane before the graph.
 
 `fno outstanding` prints its count and top item at session start, in every session, and `fno inbox board` lists it as the first queue, above `undispatched`.
 
@@ -306,7 +319,7 @@ When an S node is next in a chain you just serialized but unselectable for want 
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
 
-The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the operator lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
+The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses a write whose realpath is inside the repo and names the rejected path. The repo's `.fno` state tree, build output, and any path the user lists in `config.king.write_roots` stay writable. So does everything outside the repo, which covers a plans directory kept in the vault. A plans directory elsewhere in the repo needs a `write_roots` entry. `config.king.implementation_guard` turns the whole guard to `warn` or `off`.
 
 Use `fno do plan path` for the canonical filename.
 
@@ -435,7 +448,7 @@ The coordination contract is two-sided: your duties are worthless if the teammat
 
 1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
-3. **Ask for a review.** A minion's Skill-tool self-invocation of its harness's native review verb (claude `/code-review`, codex `/review`) is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so the reliable path is the mail loop. When it finishes a unit of work it reports `RESULT: resolved` and mails you for the review; answer with `fno agents mail send <worker> --raw '/<review-verb>'` - the raw payload is injected unwrapped at the worker's prompt line so its harness's slash parser fires the verb, which is the reliable path (the worker's own Skill-tool self-invocation is observed refusing intermittently, cause unknown; a wrapped reply relies on the worker pulling its own trigger and does not fire it). **A `RESULT: resolved` report on a phase that produced a diff is itself the review request: answering it is your job**, the same class as answering an in-scope question - a worker that reported and stopped must not wait on a second mail it never sent. Two qualifications keep that from misfiring: a `blocked` or `failed` report is NOT a request (its author says the work is unfinished), and a `think` or `blueprint` phase has no diff to review, so it gets an answer rather than a review verb. If the explicit request arrives too, it is the same request - order the review once. Mail the trigger so the review runs in the worker's harness, do not run it in yours, and never fan out a sigma panel the worker did not configure. The verb per harness, the retry rule, and the never-substitute-silently contract are in [review.md](review.md) - read it before you answer, because mailing a claude verb to a codex worker sends an unknown command.
+3. **Review inline.** Run `$fno:review <level> --comment` in Codex or `/fno:review <level> --comment` in Claude before you report a completed diff. Use `medium` below 300 lines, `high` at 300 or more, and `xhigh` for risky state or protocol changes. Fix valid findings. Run round two with `--verify-fixes`. Never mail the king to fire a review verb or spawn a reviewer.
 
 **Rebase first, review once.** A rebase moves the head. Every attestation reads pinned to the head it reviewed, so a rebase after a review re-buys it. `CarriedBaseSync` exists but fires rarely, so it rarely helps in practice. Measured one night: about ten rebases ordered with a review after each one bought ten reviews for one PR's worth of code. When a PR needs both, order the rebases first, all of them, not one at a time. Wait for green, then request the review once on the final head. A rebase ordered after a review is a bug in the ordering, not a cost of doing business.
 
@@ -511,7 +524,7 @@ The crown expires when the wave completes - every teammate unit reconciled, the 
 These bound the **pass** shape - the abdicate-at-kickoff reign. Court explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
 
 - **Not a supervisor (pass only).** A pass narrows what the daemon may select and abdicates; it never stays to watch. Court monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
-- **Not a shape for a reign that spawns workers.** A pure pass abdicates at kickoff, before any worker reaches its review point, so a reign that spawns workers cannot be a pure pass: it leaves every worker it spawned with nobody to mail for a review trigger. If you will spawn workers, pick court, or hand the crown to an heir before you exit by spawning it over your own scope (`fno agents spawn -k "<scope>" "<seed prompt>"`), which vacates your crown in the same write that stamps theirs; if you deliberately exit review-orphaned, state it with a carveout (`fno backlog carveout add -k deferred --scope <scope> ...`) so the workers fall back to advisory self-review as a recorded decision, not a silent consequence. A Stop hook blocks you at the boundary until you pick one.
+- **Not a shape for active court.** A pure pass abdicates at kickoff. It cannot answer in-scope questions or monitor the wave. Workers review their diffs inline. They do not need a king to fire a review verb. If active monitoring or questions are part of the grant, pick court or hand off to the heir before exit.
 - **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
 - **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A king promotes and wires. A king's one supersession is the consolidation gate above, receipted with `--replaces` and a reason and reversible via `unsupersede`; outside it, quarantine means defer, and supersede stays with the groom pass or a human.
 - **Not a driver (both shapes).** You may `peek` at anything, and a court king mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the crown: peek before you send, and never inject a ruling into a session a human is actively driving.

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::io::Read;
+
 /// Cap on RETAINED stderr per bounded run. Only retention is capped - the
 /// drain itself always runs to EOF, or a child that overflows the pipe would
 /// deadlock before exiting. The tail (not the head) is kept because the end
@@ -36,6 +38,10 @@ pub(super) enum BoundedRun {
     /// from `TimedOut` or a wait failure would misreport as "timed out
     /// after 0s", naming a hang that never happened.
     WaitFailed,
+    /// The fire budget was spent before the read, and its bound sits at the
+    /// spent line, so the read refuses without spawning: enough floored
+    /// reads would spend the drain's reserved slice.
+    Refused,
 }
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
@@ -56,6 +62,9 @@ pub(super) fn run_bounded(
     cwd: &Path,
     timeout: std::time::Duration,
 ) -> BoundedRun {
+    if timeout <= super::read_bounds::STOPGATE_PRE_DRAIN_SPENT_BOUND {
+        return BoundedRun::Refused;
+    }
     let mut child = match crate::bounded_spawn::spawn_bounded(fno_bin, args, cwd) {
         Ok(c) => c,
         Err(kind) => return BoundedRun::SpawnFailed(kind),
@@ -164,6 +173,9 @@ pub(super) enum ReadErrorKind {
     Unrunnable,
     /// The child outlived its bound and the process group was killed.
     TimedOut,
+    /// The read refused to start: the fire budget was spent before it, and
+    /// running it at the 1ms spent bound would erode the drain's reserve.
+    BudgetRefused,
 }
 
 /// One external read's typed failure: the logical read name, the kind, the
@@ -217,6 +229,16 @@ impl GhReadError {
         }
     }
 
+    pub(super) fn budget_refused(read: &str) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::BudgetRefused,
+            stderr_tail: String::new(),
+            elapsed: None,
+            spawn_kind: None,
+        }
+    }
+
     pub(super) fn unrunnable_spawn(
         read: &str,
         spawn_kind: std::io::ErrorKind,
@@ -255,6 +277,10 @@ impl GhReadError {
                 "external read '{}' could not run; retrying next fire. {}",
                 self.read, self.stderr_tail
             ),
+            ReadErrorKind::BudgetRefused => format!(
+                "external read '{}' was not run: the fire budget was spent before the read",
+                self.read
+            ),
         }
     }
 
@@ -266,6 +292,7 @@ impl GhReadError {
             ReadErrorKind::TimedOut => "timeout",
             ReadErrorKind::Failed => "failed",
             ReadErrorKind::Unrunnable => "unrunnable",
+            ReadErrorKind::BudgetRefused => "budget_refused",
         }
     }
 }
@@ -304,6 +331,7 @@ pub(crate) fn bounded_read(
     match run_bounded(bin, args, cwd, timeout) {
         BoundedRun::Completed(out) => Ok(out),
         BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
+        BoundedRun::Refused => Err(GhReadError::budget_refused(read_name)),
         BoundedRun::SpawnFailed(kind) => Err(GhReadError::unrunnable_spawn(
             read_name,
             kind,
@@ -370,7 +398,7 @@ pub(super) fn probe_gh_bin(gh_bin: &OsStr, cwd: &Path) -> GhProbeOutcome {
             // read can only follow a completed spawn.
             Ok(_)
             | Err(GhReadError {
-                kind: ReadErrorKind::Failed | ReadErrorKind::TimedOut,
+                kind: ReadErrorKind::Failed | ReadErrorKind::TimedOut | ReadErrorKind::BudgetRefused,
                 ..
             }) => return GhProbeOutcome::Present,
             Err(GhReadError {
@@ -448,6 +476,11 @@ pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<Bo
         }
         BoundedRun::WaitFailed => {
             let error = GhReadError::unrunnable(&read_name, "wait failed");
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::Refused => {
+            let error = GhReadError::budget_refused(&read_name);
             log_bounded_read_error("git", &error);
             None
         }
