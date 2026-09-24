@@ -64,7 +64,7 @@ pub(crate) fn evaluate(
             note: "the court payload carries no crowns list".to_string(),
         };
     };
-    let mut scopes_seen: Vec<String> = Vec::new();
+    let mut scopes_seen: Vec<(String, bool)> = Vec::new();
     // (scope, node, pr, cwd) - the covered set this pass answers for.
     let mut covered: Vec<(String, String, i64, PathBuf)> = Vec::new();
     for crown in crowns {
@@ -83,8 +83,13 @@ pub(crate) fn evaluate(
             notes.push(format!("crown {scope} fold unread: {reason}"));
             continue;
         }
-        if !scopes_seen.iter().any(|s| s == scope) {
-            scopes_seen.push(scope.to_string());
+        if !scopes_seen.iter().any(|(s, _)| s == scope) {
+            // The freed scan runs only when the fold's owners resolved: a
+            // transient owner failure nulls every owned field, and reading
+            // that as "the node left the fold" would forget keys a good
+            // beat needed.
+            let owners_ok = fold.get("owned_total").is_some_and(Value::is_number);
+            scopes_seen.push((scope.to_string(), owners_ok));
         }
         let Some(nodes) = fold.get("nodes").and_then(Value::as_array) else {
             continue;
@@ -195,7 +200,13 @@ pub(crate) fn evaluate(
     }
     // The freed pass: a node this arm saw covered whose scope still folds but
     // which left the covered set. Its graph row decides whether it merged.
-    for scope in &scopes_seen {
+    for (scope, owners_ok) in &scopes_seen {
+        if !owners_ok {
+            notes.push(format!(
+                "crown {scope} owners unread; the freed scan keeps its keys"
+            ));
+            continue;
+        }
         let still: Vec<&str> = covered
             .iter()
             .filter(|(s, _, _, _)| s == scope)
@@ -279,7 +290,7 @@ pub(crate) fn evaluate(
         let departed = key
             .strip_prefix("king_settle_seen:")
             .and_then(|rest| rest.split(':').next())
-            .is_some_and(|scope| !scopes_seen.iter().any(|s| s == scope));
+            .is_some_and(|scope| !scopes_seen.iter().any(|(s, _)| s == scope));
         if departed {
             crate::operator_notice::forget_at(store, &key);
         }
@@ -288,7 +299,7 @@ pub(crate) fn evaluate(
         let departed = key
             .strip_prefix("king_settle:")
             .and_then(|rest| rest.split(':').next())
-            .is_some_and(|scope| !scopes_seen.iter().any(|s| s == scope));
+            .is_some_and(|scope| !scopes_seen.iter().any(|(s, _)| s == scope));
         if departed {
             crate::operator_notice::forget_at(store, &key);
         }
@@ -395,7 +406,7 @@ mod tests {
         json!({
             "holder": "sess-1", "level": 1, "scope": scope,
             "status": "manifest-only",
-            "scope_nodes": {"status": "ok", "nodes": nodes},
+            "scope_nodes": {"status": "ok", "owned_total": 1, "nodes": nodes},
         })
     }
 
@@ -617,6 +628,35 @@ mod tests {
         assert_eq!(out.mailed, 1);
         assert!(crate::operator_notice::stored_token(&store, &seen_key("gone", "x-9")).is_none());
         assert!(crate::operator_notice::stored_token(&store, &settle_key("gone", "x-9")).is_none());
+        assert_eq!(
+            crate::operator_notice::stored_token(&store, &seen_key("s1", "x-1")),
+            Some("7".to_string())
+        );
+    }
+
+    /// A transient owner-read failure keeps every key: the fold reads ok
+    /// with `owned_total` null, and that is not "the node left the fold".
+    #[test]
+    fn an_owners_unread_beat_keeps_the_keys() {
+        let store = temp_store("ac-owners");
+        crate::operator_notice::mark_once(&store, &seen_key("s1", "x-1"), "7");
+        let payload = json!({"crowns": [json!({
+            "holder": "sess-1", "level": 1, "scope": "s1",
+            "status": "manifest-only",
+            "scope_nodes": {"status": "ok", "owned_total": Value::Null,
+                            "owned_reason": "a live crown's scope does not compile",
+                            "nodes": [covered_node("x-1", 7, Value::Null)]},
+        })]});
+        let graph = |_pr: i64| -> Result<Vec<Value>, String> {
+            Ok(vec![json!({"id": "x-1", "status": "in_progress"})])
+        };
+        let mut status =
+            |_cwd: &Path, _pr: i64| -> Result<Value, String> { Err("never".to_string()) };
+        let log = Log::new(RefCell::new(Vec::new()));
+        let mut mail = mail_log(Rc::clone(&log));
+        let out = evaluate(&payload, &store, &graph, &mut status, &mut mail, NOW, 0);
+        assert_eq!(out.mailed, 0);
+        assert!(out.note.contains("owners unread"));
         assert_eq!(
             crate::operator_notice::stored_token(&store, &seen_key("s1", "x-1")),
             Some("7".to_string())
