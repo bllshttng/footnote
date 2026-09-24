@@ -973,7 +973,7 @@ mod tests {
         assert!(BASE.contains("name: \"Needs you\""));
         assert!(BASE.contains("name: \"Open by king\""));
         assert!(BASE.contains("name: Answered"));
-        assert!(BASE.contains("name: \"Board\""));
+        assert!(BASE.contains("name: Board"));
         assert!(BASE.contains("displayName: Age (d)"));
         for column in [
             "formula.question",
