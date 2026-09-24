@@ -38,7 +38,7 @@ pr_app = typer.Typer(
 
 @pr_app.callback()
 def _select_pr_worktree(ctx: typer.Context) -> None:
-    if not (command := ctx.invoked_subcommand) or not command.endswith(("check", "status", "verify")):
+    if not (command := ctx.invoked_subcommand) or command not in {"verify", "status", "base-lineage-check", "merge-result-check", "coverage-check"}:
         return
     if pr := next((arg for arg in sys.argv[sys.argv.index(command) + 1:] if arg.isdigit()), None):
         from fno.pr._review_hold import resolve_pr_worktree
