@@ -542,7 +542,7 @@ def test_the_grid_still_injects_nothing_when_config_declares_nothing():
 
 
 def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monkeypatch):
-    """The fallback bands `gpt-5.6-sol` from `max`, not from `high`.
+    """The fallback bands `codex-sol` from `max`, not from `high`.
 
     It sits in both. A regression guard on the rule, not the test that caught
     the bug - the duplicate-row test below is that one, and this assertion
@@ -551,12 +551,12 @@ def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monke
     """
     from fno.adapters.providers import benchmarks as _bm
 
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
+    assert "codex-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
+    assert "codex-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
 
     def _band_of(table):
         monkeypatch.setattr(_bm, "STATIC_TIERS", table)
-        return {r["name"]: r["band"] for r in rr._builtin_rows()}["gpt-5.6-sol"]
+        return {r["name"]: r["band"] for r in rr._builtin_rows()}["codex-sol"]
 
     forward = dict(_bm.STATIC_TIERS)
     reversed_table = dict(reversed(list(_bm.STATIC_TIERS.items())))
@@ -843,3 +843,27 @@ def test_an_unrouted_verb_still_walks_the_resolver_and_names_the_grid():
     assert chain, "the walk must leave a receipt for an unrouted verb"
     assert chain[-1] == "grid=no-inventory-declared"
     assert verdict == "unarmed"
+
+
+@requires_rust
+def test_resolve_tier_resolves_codex_family_words_and_keeps_claude_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """AC8-EDGE: with no declared rows, the builtin fallback still answers a
+    tier request, and the codex family word resolves through the real
+    route-slot pre-pass while the claude alias stays verbatim for the
+    harness to resolve itself."""
+    import json as _json
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(_json.dumps({
+        "fetched_at": "2026-09-23T06:14:54Z",
+        "models": [
+            {"slug": "gpt-6-sol", "visibility": "list"},
+            {"slug": "gpt-6-luna", "visibility": "list"},
+        ],
+    }))
+    model, chain = rr.resolve_tier("high", provider="codex")
+    assert model == "gpt-6-sol", chain
+    model, chain = rr.resolve_tier("high", provider="claude")
+    assert model == "opus", chain
