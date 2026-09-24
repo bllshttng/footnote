@@ -41,7 +41,7 @@ def _disposition(relative: str, source: str, offset: int) -> str:
     if relative in {
         "crates/fno-agents/src/loopcheck.rs",
         "crates/fno-agents/src/finalize.rs",
-    }:
+    } or relative.startswith("crates/fno-agents/src/loopcheck/"):
         return "fixed-purpose-adapter"
     if relative == "hooks/git-protection.py":
         return "operator-guard-definition"
