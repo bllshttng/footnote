@@ -229,6 +229,16 @@ def test_collect_failures_reports_a_status_context_without_pretending_a_log() ->
     assert "no job log" in entries[0]["detail"]
 
 
+def test_collect_failures_carries_a_timeout_annotation_as_first_error(monkeypatch) -> None:
+    message = "The job has exceeded the maximum execution time of 35m0s"
+    check = {**_actions_check(), "timeout": message}
+    monkeypatch.setattr(_failures, "first_error", lambda *_args: "a different log cause")
+    entries = _failures.collect_failures(
+        [check], runner=_fake_runner(_RED_LOG, [])
+    )
+    assert entries[0]["first_error"] == message
+
+
 def test_collect_failures_names_the_failed_step_without_a_log() -> None:
     """The no-log branch fetched the job steps and named the steps
     fail-fast never reached, but never the step that failed - the cause

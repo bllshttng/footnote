@@ -565,12 +565,10 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
 def _merge_authority(repo: str) -> dict:
     """The resolved merge-authority axes for this repo.
 
-    Three keys, all fail-open to None on an unreadable settings load: a
+    Two keys, both fail-open to None on an unreadable settings load: a
     status receipt that cannot read config says so rather than asserting
     "disabled" - a guessed NO here is the direction a wedged fleet reads as
-    a disarm, and a guessed YES is the dangerous one. The autonomous shape
-    is `enabled AND grant=dispatch`; every other enabled grant routes the
-    actual merge through a human or the operator.
+    a disarm, and a guessed YES is the dangerous one.
     """
     try:
         from fno.config import load_settings_for_repo
@@ -581,13 +579,11 @@ def _merge_authority(repo: str) -> dict:
         return {
             "config_auto_merge_enabled": enabled,
             "grant": grant,
-            "mergeable_autonomously": enabled and grant == "dispatch",
         }
     except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
         return {
             "config_auto_merge_enabled": None,
             "grant": None,
-            "mergeable_autonomously": None,
         }
 
 
