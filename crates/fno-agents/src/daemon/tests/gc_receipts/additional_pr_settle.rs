@@ -205,9 +205,8 @@ fn ac2_a_merged_answer_stamps_and_settles() {
         "refused: {:?}",
         summary.settle_refused
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let extras = &raw["entries"][0]["additional_prs"];
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let extras = &rows[0]["additional_prs"];
     assert_eq!(extras[0]["merge_status"], json!("merged"));
     assert_eq!(
         summary.settled_do_rows,
@@ -235,9 +234,8 @@ fn ac3_a_closed_answer_stamps_and_settles() {
         vec![("x-stamp".into(), "claude".into(), "sess-stamp".into())]
     );
     assert!(summary.retired.iter().any(|(id, _)| id == "row-stamp"));
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let extras = &raw["entries"][0]["additional_prs"];
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let extras = &rows[0]["additional_prs"];
     assert_eq!(extras[0]["merge_status"], json!("closed"));
 }
 
@@ -341,18 +339,14 @@ fn ac1_hp_a_merged_primary_answer_stamps_and_settles() {
         "refused: {:?}",
         summary.settle_refused
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    assert_eq!(raw["entries"][0]["merge_status"], json!("merged"));
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert_eq!(rows[0]["merge_status"], json!("merged"));
     assert_eq!(
         summary.settled_do_rows,
         vec![("x-prim".into(), "claude".into(), "sess-prim".into())]
     );
     assert!(summary.retired.iter().any(|(id, _)| id == "row-prim"));
-    assert_eq!(
-        raw["entries"][0]["sessions"][0]["ended_by"],
-        json!("reap-sweep")
-    );
+    assert_eq!(rows[0]["sessions"][0]["ended_by"], json!("reap-sweep"));
 }
 
 #[test]
