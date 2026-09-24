@@ -5395,6 +5395,7 @@ pub fn block(op: crate::cli_args::BlockOp, args: &[OsString], env_session: Optio
 
 #[cfg(test)]
 mod tests {
+    use super::pane_submit::positive_post_submit_marker;
     use super::*;
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
     use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};

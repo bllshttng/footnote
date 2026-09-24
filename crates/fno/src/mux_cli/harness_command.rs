@@ -131,6 +131,26 @@ struct CommandReceipt {
     detail: String,
 }
 
+fn receipt_matches_request(
+    receipt: &CommandReceipt,
+    selector: &str,
+    session_id: &str,
+    harness: &str,
+    command: &str,
+    proof: &str,
+    expected_screen: Option<&str>,
+    empty_composer: Option<&str>,
+) -> bool {
+    receipt.selector == selector
+        && receipt.session_id == session_id
+        && receipt.expected_identity == session_id
+        && receipt.harness == harness
+        && receipt.command == command
+        && receipt.proof == proof
+        && receipt.expected_screen.as_deref() == expected_screen
+        && receipt.empty_composer.as_deref() == empty_composer
+}
+
 fn digest(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
 }
@@ -672,14 +692,27 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         return EXIT_USAGE;
     }
     cleanup_receipts();
+    let row = match resolve_row_or_print("fno mux command", &args.selector) {
+        Ok(row) => row,
+        Err(code) => return code,
+    };
+    let Some(session_id) = row.effective_identity().map(str::to_string) else {
+        eprintln!("fno mux command: live row has no full harness session id");
+        return EXIT_ERROR;
+    };
+    let harness = row.harness.clone().unwrap_or_default();
     match load_receipt(&request_id) {
         Ok(Some(receipt)) => {
-            if receipt.selector != args.selector
-                || receipt.command != args.text
-                || receipt.proof != proof.word()
-                || receipt.expected_screen != args.expect
-                || receipt.empty_composer != args.empty_composer
-            {
+            if !receipt_matches_request(
+                &receipt,
+                &args.selector,
+                &session_id,
+                &harness,
+                &args.text,
+                proof.word(),
+                args.expect.as_deref(),
+                args.empty_composer.as_deref(),
+            ) {
                 eprintln!(
                     "fno mux command: request id {request_id:?} already belongs to a different action"
                 );
@@ -694,16 +727,6 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     }
-
-    let row = match resolve_row_or_print("fno mux command", &args.selector) {
-        Ok(row) => row,
-        Err(code) => return code,
-    };
-    let Some(session_id) = row.effective_identity().map(str::to_string) else {
-        eprintln!("fno mux command: live row has no full harness session id");
-        return EXIT_ERROR;
-    };
-    let harness = row.harness.clone().unwrap_or_default();
     let recipe = action_for(&harness, &args.text, proof);
     let refusal = if row.exited {
         Some("selected row is exited")
@@ -820,12 +843,16 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         Ok(true) => {}
         Ok(false) => match load_receipt(&request_id) {
             Ok(Some(receipt))
-                if receipt.selector == args.selector
-                    && receipt.command == args.text
-                    && receipt.proof == proof.word()
-                    && receipt.expected_screen == args.expect
-                    && receipt.empty_composer == args.empty_composer
-                    && receipt.session_id == session_id =>
+                if receipt_matches_request(
+                    &receipt,
+                    &args.selector,
+                    &session_id,
+                    &harness,
+                    &args.text,
+                    proof.word(),
+                    args.expect.as_deref(),
+                    args.empty_composer.as_deref(),
+                ) =>
             {
                 print_receipt(&receipt);
                 return command_status_exit_code(&receipt.status);
@@ -1110,6 +1137,34 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_receipt_is_bound_to_the_current_session_identity() {
+        let receipt = CommandReceipt {
+            request_id: "request-1".into(),
+            selector: "king".into(),
+            session_id: "thread-1".into(),
+            harness: "codex".into(),
+            transport: "app-server".into(),
+            expected_identity: "thread-1".into(),
+            command: "/compact".into(),
+            proof: "compact".into(),
+            expected_screen: None,
+            empty_composer: None,
+            provider_receipt: None,
+            status: CommandStatus::Verified.word().into(),
+            before_digest: String::new(),
+            after_digest: String::new(),
+            detail: "provider receipt confirmed by thread/compact/start".into(),
+        };
+
+        assert!(receipt_matches_request(
+            &receipt, "king", "thread-1", "codex", "/compact", "compact", None, None
+        ));
+        assert!(!receipt_matches_request(
+            &receipt, "king", "thread-2", "codex", "/compact", "compact", None, None
+        ));
+    }
 
     #[test]
     fn proof_parser_is_closed_and_screen_requires_a_bounded_expectation() {
