@@ -339,8 +339,8 @@ fn read_file_returns_the_bytes_load_graph_validates() {
     let on_disk = std::fs::read(&graph).unwrap();
     assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
     assert!(
-        result["sha256"].as_str().unwrap().starts_with("sha256:"),
-        "the digest labels its algorithm"
+        result["sha256"].as_str().unwrap().starts_with("sqlite:"),
+        "the version token labels the store it names"
     );
 }
 
@@ -796,11 +796,9 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         "did not race: zero commit_rows conflicts across both appenders"
     );
 
-    // Every append that answered ok must be in the final file.
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // Every append that answered ok must be in the store: the json file is
+    // a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -818,9 +816,8 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     // reverted note write (clobbered by a stale whole-file publish) reads as
     // a revision below the count of ok answers.
     for (node, ok) in &note_out {
-        let row = final_graph["entries"]
-            .as_array()
-            .unwrap()
+        let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
+        let row = rows
             .iter()
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();
@@ -976,12 +973,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     assert!(!sock.exists(), "shutdown unlinks its socket");
 
     // THE CONTRACT: every staged connection that read an ok reply has its
-    // row in the file. A connection cut before its reply has no row (it
-    // never read ok).
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // row in the store. A connection cut before its reply has no row (it
+    // never read ok). The json file is a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -992,7 +986,7 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             ok_replies += 1;
             assert!(
                 final_ids.contains(id),
-                "commit {id} answered ok but is missing from the file"
+                "commit {id} answered ok but is missing from the store"
             );
         }
     }
