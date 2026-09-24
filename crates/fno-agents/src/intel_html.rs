@@ -430,7 +430,6 @@ impl<'a> Renderer<'a> {
                     out.push("</details>".to_string());
                     in_details = false;
                 }
-                self.in_categories = false;
                 let title_text = self.text_node(h2);
                 self.section = Some(h2.trim().to_string());
                 if h2.trim() == "Categories" && !usage_done {
@@ -799,12 +798,12 @@ fn daily_chart(
     let mut slots: Vec<Vec<(&str, u64)>> = Vec::new();
     let mut table = String::from("<table><tr><th>date</th>");
     for h in &harnesses {
-        table.push_str(&format!("<th>{h}</th>"));
+        table.push_str(&format!("<th>{}</th>", html_escape_quote(h)));
     }
     table.push_str("</tr>");
     for (date, by_harness) in &by_date {
         let mut segs: Vec<(&str, u64)> = Vec::new();
-        table.push_str(&format!("<tr><td>{date}</td>"));
+        table.push_str(&format!("<tr><td>{}</td>", html_escape_quote(date)));
         for h in &harnesses {
             let v = by_harness.get(h).copied().unwrap_or(0);
             segs.push((harness_class(h), v));
@@ -816,7 +815,11 @@ fn daily_chart(
     table.push_str("</table>");
     let mut legend = String::from("<div class=\"legend\">");
     for h in &harnesses {
-        legend.push_str(&format!("<i class=\"{}\"></i>{h}", harness_class(h)));
+        legend.push_str(&format!(
+            "<i class=\"{}\"></i>{}",
+            harness_class(h),
+            html_escape_quote(h)
+        ));
     }
     legend.push_str("</div>");
     let figcaption = format!("{label}, {pop}");
@@ -833,15 +836,18 @@ fn daily_chart(
 /// Operator messages by hour of day: the 24 buckets the fold holds, in the
 /// fold's timezone. The renderer never re-buckets an hour.
 fn hours_chart(fold: &Value, pop: &str, notes: &mut Vec<String>) -> Option<String> {
-    let vals: Option<Vec<u64>> = fold
+    // A mistyped bucket drops the whole chart (the AC5 rule): no bucket
+    // ever reads as a silent zero.
+    let buckets = fold
         .get(KEY_HOURS)
         .and_then(|h| h.get(KEY_TURNS))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0)).collect());
-    let Some(vals) = vals.filter(|v| v.len() == 24) else {
+        .and_then(Value::as_array);
+    let good = buckets.is_some_and(|b| b.len() == 24 && b.iter().all(|v| v.as_u64().is_some()));
+    if !good {
         notes.push("no hour-of-day chart: the fold holds no 24-bucket hours series".to_string());
         return None;
-    };
+    }
+    let vals: Vec<u64> = buckets.unwrap().iter().filter_map(Value::as_u64).collect();
     let max = vals.iter().max().copied().unwrap_or(0);
     if max == 0 {
         notes.push("no hour-of-day chart: the hours series is all zero".to_string());
