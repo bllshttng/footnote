@@ -194,7 +194,18 @@ fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
     let mut started = false;
     let mut quote = None;
     let mut escaped = false;
+    let mut in_comment = false;
     for character in command.chars() {
+        if in_comment {
+            if character == '\n' {
+                flush_shell_word(&mut args, &mut word, &mut started);
+                if !args.is_empty() {
+                    segments.push(std::mem::take(&mut args));
+                }
+                in_comment = false;
+            }
+            continue;
+        }
         if escaped {
             word.push(character);
             started = true;
@@ -221,6 +232,7 @@ fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
                 quote = Some(character);
                 started = true;
             }
+            '#' if !started => in_comment = true,
             ';' | '|' | '&' | '\n' => {
                 flush_shell_word(&mut args, &mut word, &mut started);
                 if !args.is_empty() {
@@ -1000,6 +1012,27 @@ mod tests {
             check3_crown_before_ruling(&entries).status,
             "violation",
             "a flag mentioned inside quoted prompt text is not a crown"
+        );
+        let commented = vec![
+            entry(
+                0,
+                "tool_use",
+                Some("Bash"),
+                "fno agents spawn worker # --crown\n",
+                "",
+            ),
+            entry(
+                1,
+                "tool_use",
+                Some("Bash"),
+                "fno agents mail send ruling",
+                "",
+            ),
+        ];
+        assert_eq!(
+            check3_crown_before_ruling(&commented).status,
+            "violation",
+            "a flag in a shell comment is not a crown"
         );
         let crowned = vec![
             entry(
