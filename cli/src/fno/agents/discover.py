@@ -128,12 +128,12 @@ RECENCY_SECONDS_ENV = "FNO_CLAUDE_SESSION_RECENCY_SECONDS"
 _DEFAULT_RECENCY_SECONDS = 600.0
 
 
-def default_sessions_dir() -> Path:
-    """Claude Code's per-session registry directory on this host."""
-    override = os.environ.get(SESSIONS_DIR_ENV)
-    if override:
-        return Path(override)
-    return Path(os.path.expanduser("~")) / ".claude" / "sessions"
+def default_sessions_dirs() -> list[Path]:
+    """Claude Code's per-session registry directories on this host."""
+    if override := os.environ.get(SESSIONS_DIR_ENV):
+        return [Path(override)]
+    from fno.agents.harnesses._claude_session_registry import session_dirs
+    return session_dirs()
 
 
 def default_projects_dir() -> Path:
@@ -2651,14 +2651,14 @@ def discover_live_sessions(
     only candidates whose :attr:`DiscoveredSession.is_alive` is true.
     ``projects_dir`` / ``project_resolver`` / ``psutil_mod`` are test seams.
     """
-    sdir = sessions_dir or default_sessions_dir()
+    sdirs = [sessions_dir] if sessions_dir else default_sessions_dirs()
     resolver = project_resolver or resolve_project_for_cwd
     psu = psutil_mod or _import_psutil()
     exclude = {s for s in (exclude_short_ids or ()) if s}
     excluded_session_ids = {s for s in (exclude_session_ids or ()) if s}
 
     candidates: list[dict] = []
-    for f in _iter_pid_files(sdir):
+    for f in (f for d in sdirs for f in _iter_pid_files(d)):
         data = _read_registry_file(f)
         if not data:
             continue
