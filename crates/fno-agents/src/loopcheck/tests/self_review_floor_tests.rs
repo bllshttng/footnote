@@ -322,14 +322,11 @@ fn self_review_gate_held_reason_names_code_review_and_its_verb() {
     pr.unattested_reviewers[0].name = "code-review".to_string();
 
     let tmp = tempfile::tempdir().unwrap();
-    let stub = tmp.path().join("fno-stub");
-    std::fs::write(
-        &stub,
+    let stub = crate::write_exec_stub(
+        tmp.path(),
+        "fno-stub",
         "#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n",
-    )
-    .unwrap();
-    #[allow(clippy::permissions_set_readonly_false)]
-    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    );
 
     std::env::set_var(var, stub.to_str().unwrap());
     let sized_reason = build_block_reason(&pr, "abc", true, true);

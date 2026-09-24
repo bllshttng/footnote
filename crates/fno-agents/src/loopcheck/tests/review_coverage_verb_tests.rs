@@ -10,11 +10,7 @@ fn sized_hint_bridge_reads_one_clean_line_and_nothing_else() {
     let dir = tmp.path();
 
     let stub = |body: &str| -> std::path::PathBuf {
-        let p = dir.join(format!("stub-{}", body.len()));
-        std::fs::write(&p, body).unwrap();
-        #[allow(clippy::permissions_set_readonly_false)]
-        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        p
+        crate::write_exec_stub(dir, &format!("stub-{}", body.len()), body)
     };
 
     let good = stub("#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n");

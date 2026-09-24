@@ -4772,19 +4772,16 @@ mod tests {
         body: &str,
         marker: &std::path::Path,
     ) -> String {
-        let script = dir.join("refresh-stub.sh");
-        std::fs::write(
-            &script,
-            format!(
+        let script = crate::write_exec_stub(
+            dir,
+            "refresh-stub.sh",
+            &format!(
                 "#!/bin/sh\nprintf '%s' '{}' > {}\nprintf '%s' '{}'\n",
                 body,
                 marker.display(),
                 body
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         script.display().to_string()
     }
 

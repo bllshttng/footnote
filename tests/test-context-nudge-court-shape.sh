@@ -6,6 +6,7 @@
 #        king_orphan_block event
 #   AC9  shape: pass -> the nudge fires and option 1 names the verb
 #   AC10 no manifest (or one without a shape) -> the nudge fires
+#   AC11 the manifest sits only in the crown ROW's cwd space -> no nudge
 #
 # Drives the REAL hook against the REAL worktree fno (same FNO_PYTHON discovery
 # and sandbox shape as test-context-nudge.sh). No python that can import fno.cli
@@ -86,7 +87,7 @@ cd "$SBX"
 # past the window and the suite would turn red on a clock, not on a defect.
 FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n --arg ts "$FRESH_TS" '{schema_version: 13, agents: ([
-  {name:"king-court", harness:"claude", cwd:"/tmp", log_path:"/tmp/k", status:"live",
+  {name:"king-court", harness:"claude", cwd:"'"$SBX"'", log_path:"/tmp/k", status:"live",
    short_id:"'"$KING_SID"'", harness_session_id:"'"$KING_SID"'",
    crown_level:1, crown_scope:"'"$SCOPE"'", crown_grantor:"human"},
   {name:"court-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live",
@@ -120,10 +121,13 @@ fi
 events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
 reset_events() { rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db"; }
 
-# The hook reads the manifest from the resolver's DEFAULT root (the space dir
-# keyed on this cwd), no longer a repo-local .fno: compute it with the same
-# shim + env the hook sees rather than re-deriving the slug here.
-KINGS_DIR="$(cd "$SBX" && PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno.paths import space_dir; print(space_dir() / "kings")')"
+# The hook reads the manifest from the crown row's cwd space: the resolver
+# keys the row, so the fixture computes the same root the resolver makes,
+# with the same shim + env rather than re-deriving the slug here.
+space_kings() {  # space_kings <dir> - the kings dir of <dir>'s space
+  (cd "$SBX" && SBX="$1" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'import os; from pathlib import Path; from fno.king.state import king_state_root; print(king_state_root(Path(os.environ["SBX"])) / "kings")')
+}
+KINGS_DIR="$(space_kings "$SBX")"
 mkdir -p "$KINGS_DIR"
 write_shape() {  # write_shape <shape|none|garbage>
   local _path="$KINGS_DIR/$SCOPE.md"
@@ -152,7 +156,7 @@ events_has king_orphan_block && ok "AC10: king_orphan_block event written" || ba
 
 # === AC10b: a manifest with no shape line is not a court ======================
 reset_events
-printf -- '---\nscope: %s\nharness_session_id: %s\n---\n' "$SCOPE" "$KING_SID" > "$SBX/.fno/kings/$SCOPE.md"
+printf -- '---\nscope: %s\nharness_session_id: %s\n---\n' "$SCOPE" "$KING_SID" > "$KINGS_DIR/$SCOPE.md"
 run_hook "$(payload)"
 assert_contains "AC10b: shapeless manifest -> nudge fires" "$OUT" "still alive"
 
@@ -177,6 +181,28 @@ jq --arg ts "$DEAD_TS" \
   "$SBX/.fno/agents/registry.json" > "$SBX/.fno/agents/registry.json.tmp" && mv "$SBX/.fno/agents/registry.json.tmp" "$SBX/.fno/agents/registry.json"
 run_hook "$(payload)"
 assert_absent "AC8 control: dead workers never orphan-block" "$OUT" "you spawned are still alive"
+
+# === AC11: the manifest only in the crown ROW's cwd space -> no nudge ========
+# The king's row cwd is a repo dir its shell no longer stands in: the resolver
+# must key the row, not the hook's own cwd. The repo space holds the court
+# manifest; the shell's space holds none.
+reset_events
+KINGREPO="$SBX/kingrepo"
+mkdir -p "$KINGREPO"
+KINGREPO_KINGS="$(space_kings "$KINGREPO")"
+mkdir -p "$KINGREPO_KINGS"
+FRESH_TS2="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq --arg ts "$FRESH_TS2" --arg cwd "$KINGREPO" \
+  '.agents |= map(if .name == "king-court" then .cwd = $cwd | .liveness_measured_at = $ts
+                  elif .name == "court-a" or .name == "court-b" then .liveness = "alive" | .liveness_measured_at = $ts
+                  else . end)' \
+  "$SBX/.fno/agents/registry.json" > "$SBX/.fno/agents/registry.json.tmp" && mv "$SBX/.fno/agents/registry.json.tmp" "$SBX/.fno/agents/registry.json"
+rm -f "$KINGS_DIR/$SCOPE.md"
+printf -- '---\nscope: %s\nshape: court\nharness_session_id: %s\n---\n' "$SCOPE" "$KING_SID" > "$KINGREPO_KINGS/$SCOPE.md"
+run_hook "$(payload)"
+assert_absent "AC11: no orphan reason with the manifest only in the row-cwd space" "$OUT" "you spawned are still alive"
+events_has king_orphan_block && bad "AC11: king_orphan_block event written anyway" || ok "AC11: no king_orphan_block event"
+assert_contains "AC11 positive control: the hook ran (context nudge fired)" "$OUT" '"decision":"block"'
 
 echo
 if [ "$fail" -eq 0 ]; then

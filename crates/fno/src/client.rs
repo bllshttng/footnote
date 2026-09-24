@@ -69,6 +69,7 @@ use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
 use crate::vt::ShellActivity;
+use sideline::sideline_column_rects;
 
 mod row_stamp;
 // (v75) The sideline's density width rules, moved out under the file-budget
@@ -836,6 +837,10 @@ struct View {
     /// travels in either direction and the server keeps every pane at its
     /// size.
     sideline_full: bool,
+    /// The `[sideline] layout` switch, read once at startup from the same
+    /// palette read the lane colors use. A config change takes effect on the
+    /// next attach, not live.
+    sideline_layout: sideline_color::SidelineLayout,
     /// Sideline density, persisted by [`crate::view_store`]. Since
     /// it drives only the row set (via [`View::display_rows`]) and the
     /// preset width jump - the rendered width is [`View::sideline_width`], an
@@ -2196,6 +2201,7 @@ impl View {
             frames: HashMap::new(),
             panel_on: true,
             sideline_full: false,
+            sideline_layout: sideline_color::palette().layout,
             density,
             sideline_width,
             agent_sort,
@@ -4081,7 +4087,10 @@ impl View {
                 Some(format!("sub:{head}+{off}:{t}"))
             }
             DisplayRow::NewSquad => Some("newsquad".into()),
-            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+            DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
         }
     }
 
@@ -4562,6 +4571,10 @@ impl View {
             // the idle sibling of a header's CycleSection. Actionable, so it is
             // NOT inert: both a click and a selector Enter route here.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
+            // A card's lower half acts on the card: the exact hit of the
+            // Agent row painted above it. Inert for the selector, clickable
+            // here - the same split a Header has.
+            DisplayRow::CardDetail(_) => self.row_action(i.checked_sub(1)?),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action.
             DisplayRow::Sub(_)
@@ -6882,26 +6895,10 @@ impl View {
     /// consumer indexes into (: painting, hover, hit-test, and the
     /// selector share this index space in all three densities).
     ///
-    /// Slim is a FILTER over the regular rows rather than a second builder, so
-    /// it inherits section keys, rollup folding, and ordering for free and
-    /// cannot drift from the tree it is a summary of. Extended keeps the same
-    /// structural rows and changes only agent-row composition and ordering.
+    /// A delegation to [`Self::display_rows_with_depths`]`.0`: one builder, so
+    /// the card expansion hooks two places, not three.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
-        match self.density {
-            Density::Regular => self.tree_rows(),
-            // Header bands only: squad name rows (a `Sel` with no tab) and the
-            // `~` section headers. Both already carry their rollup counts, which
-            // is what keeps the rail legible rather than blind.
-            Density::Slim => self
-                .tree_rows()
-                .into_iter()
-                .filter(|r| {
-                    matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                        || matches!(r, DisplayRow::Header { .. })
-                })
-                .collect(),
-            Density::Extended => self.table_rows_with_depths().0,
-        }
+        self.display_rows_with_depths().0
     }
 
     /// [`Self::display_rows`] plus the lineage depth of each rendered
@@ -6914,7 +6911,10 @@ impl View {
     /// the same lineage depths inside its agent-name cells.
     fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         match self.density {
-            Density::Regular => self.tree_rows_with_depths(),
+            Density::Regular => {
+                let (rows, depths) = self.tree_rows_with_depths();
+                self.card_rows(rows, depths)
+            }
             Density::Slim => {
                 let (rows, depths) = self.tree_rows_with_depths();
                 let mut kept_rows = Vec::with_capacity(rows.len());
@@ -6977,7 +6977,8 @@ impl View {
         if !has_agent {
             out.insert(1, (DisplayRow::TableEmpty, 0));
         }
-        out.into_iter().unzip()
+        let (rows, depths) = out.into_iter().unzip();
+        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -6993,11 +6994,7 @@ impl View {
     // free: folded rows are absent from this list, so selector navigation only
     // ever lands on rendered rows. Overflow is reached by the fold row's own
     // Enter/click toggle, which persists in `idle_expanded`.
-    fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
-        self.tree_rows_with_depths().0
-    }
-
-    /// [`Self::tree_rows`] with the per-row lineage depth beside it (see
+    /// The tree rows with the per-row lineage depth beside it (see
     /// [`Self::display_rows_with_depths`]). The depth is computed over the
     /// EMITTED set after every display filter, never re-derived in the painter.
     fn tree_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
@@ -7166,36 +7163,6 @@ impl View {
     }
 }
 
-/// The sideline Table's five columns: status word, name, message, PR, age.
-/// Width ranking (operator, 2026-09-20): name first, message second, status
-/// third. The status words are shortened (operator, 2026-09-21, longest is
-/// `Input`) so the cell fits in 5, right-aligned so a word's blank parks at
-/// the margin, and every freed column goes to the name's Min(22); the
-/// message keeps the Fill(3) surplus. Read by the Table and - through
-/// [`sideline_column_rects`] - by the callers that need the solver's answer
-/// beside the paint: one geometry authority, and it is the solver.
-const SIDELINE_COLUMNS: [Constraint; 5] = [
-    Constraint::Length(5),
-    Constraint::Min(22),
-    Constraint::Fill(3),
-    Constraint::Length(6),
-    // 6, not the plan's 4: the density button overlays the last two
-    // columns, and a 4-wide age cell leaves the sort arrow nowhere to hide
-    // under it (the regression `age_sort_arrow_survives_the_density_button`
-    // pins). The two spare columns are the padding the old COL_TIME=6 gave.
-    Constraint::Length(6),
-];
-
-/// The solver's column rects for a text width: the same call the Table makes
-/// internally (same constraints, same spacing, same flex), so a caller that
-/// must know a column's width reads the SAME answer the paint uses.
-fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
-    Layout::horizontal(SIDELINE_COLUMNS)
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(RtRect::new(0, 0, text_w, 1))
-}
-
 /// One table cell: text in a proto fg + flag set, left- or right-aligned in
 /// its column.
 fn rt_cell(text: String, fg: Color, flags: u8, right: bool) -> RtCell<'static> {
@@ -7304,6 +7271,12 @@ enum DisplayRow<'a> {
     /// (US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
+    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
+    /// "card"`): harness, king, message and age in a DIM legacy row. Inert
+    /// like `Sub` - every painted line stays one display row (the
+    /// single-enumeration invariant) - and a click on it acts on the `Agent`
+    /// row above it via [`View::row_action`]'s index shift.
+    CardDetail(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -7421,6 +7394,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )

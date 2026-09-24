@@ -2508,16 +2508,7 @@ mod tests {
         (git, gh)
     }
 
-    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     // ── gh probe: spawn trouble is never absence ─────────────────────────────
 
