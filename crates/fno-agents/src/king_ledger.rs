@@ -272,15 +272,24 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
         esc(s_str(crown, "scope").unwrap_or("-")),
         esc(status),
     );
-    out.push_str(&format!(
-        "<p class=\"holder\">held by <b>{}</b> · granted by {}</p>",
-        esc(s_str(crown, "holder").unwrap_or("-")),
-        esc(s_str(crown, "grantor").unwrap_or("-")),
-    ));
+    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
+    let holder_line = match s_str(&fold, "name") {
+        Some(name) => format!(
+            "<p class=\"holder\">held by <b>{}</b> ({}) · granted by {}</p>",
+            esc(name),
+            esc(s_str(crown, "holder").unwrap_or("-")),
+            esc(s_str(crown, "grantor").unwrap_or("-")),
+        ),
+        None => format!(
+            "<p class=\"holder\">held by <b>{}</b> · granted by {}</p>",
+            esc(s_str(crown, "holder").unwrap_or("-")),
+            esc(s_str(crown, "grantor").unwrap_or("-")),
+        ),
+    };
+    out.push_str(&holder_line);
     if let Some(reason) = s_str(crown, "reason") {
         out.push_str(&format!("<p class=\"holder\">{}</p>", esc(reason)));
     }
-    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
     if s_str(&fold, "status") == Some("unresolved") {
         out.push_str(&format!(
             "<p class=\"holder\">scope fold: unresolved - {}</p>",
@@ -1560,5 +1569,31 @@ mod tests {
         *arm.last_tick.lock().unwrap() = Some(std::time::Instant::now());
         maybe_tick_with(&arm, h.clone(), || panic!("arm must be gated"));
         assert!(!h.events_jsonl().exists(), "a gated tick wrote no row");
+    }
+
+    #[test]
+    fn a_named_fold_renders_the_name_on_the_holder_line() {
+        let crown = json!({
+            "scope": "x-65a7", "level": 2, "status": "live",
+            "holder": "king-fno-g7", "grantor": "user",
+            "scope_nodes": {"status": "ok", "name": "Barnaby II"},
+        });
+        let card = crown_card(&crown, &BTreeMap::new());
+        assert!(
+            card.contains("held by <b>Barnaby II</b> (king-fno-g7)"),
+            "{card}"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_fold_leaves_the_holder_line_unchanged() {
+        let crown = json!({
+            "scope": "x-65a7", "level": 2, "status": "live",
+            "holder": "king-fno-g7", "grantor": "user",
+            "scope_nodes": {"status": "ok"},
+        });
+        let card = crown_card(&crown, &BTreeMap::new());
+        assert!(card.contains("held by <b>king-fno-g7</b>"), "{card}");
+        assert!(!card.contains("Barnaby"), "{card}");
     }
 }
