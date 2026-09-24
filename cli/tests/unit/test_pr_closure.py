@@ -201,7 +201,7 @@ def test_parse_forwarder_sends_the_body_to_the_rust_leg(monkeypatch):
         calls.append((verb, payload))
         return {"ids": ["x-aaaa"]}
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", _call)
+    monkeypatch.setattr("fno.pr.closure.verb_call", _call)
     assert parse_closure_trailer("Fixes x-aaaa") == ["x-aaaa"]
     assert calls[0][0] == "pr-closure-parse"
     assert calls[0][1] == {"body": "Fixes x-aaaa"}
@@ -214,7 +214,7 @@ def test_render_forwarder_passes_the_ids_to_the_rust_leg(monkeypatch):
         calls.append((verb, payload))
         return {"line": "Fixes x-aaaa"}
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", _call)
+    monkeypatch.setattr("fno.pr.closure.verb_call", _call)
     assert render_closure_trailer(["x-aaaa"]) == "Fixes x-aaaa"
     assert calls[0][0] == "pr-closure-render"
     assert calls[0][1] == {"ids": ["x-aaaa"]}
@@ -224,7 +224,7 @@ def test_a_missing_rust_leg_stops_loudly(monkeypatch):
     def _missing(verb, payload, unavailable=None, **kwargs):
         raise VerbUnavailable("fno-agents binary not found")
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", _missing)
+    monkeypatch.setattr("fno.pr.closure.verb_call", _missing)
     with pytest.raises(VerbUnavailable):
         parse_closure_trailer("Fixes x-aaaa")
 
@@ -238,7 +238,7 @@ def test_the_shared_corpus_parses_through_the_real_leg(monkeypatch):
     binary = find_dev_binary()
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    monkeypatch.setattr("fno.rust_binary.verb_call", _REAL_VERB_CALL)
+    monkeypatch.setattr("fno.pr.closure.verb_call", _REAL_VERB_CALL)
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
     corpus = json.loads(
         (REPO / "tests" / "fixtures" / "pr-closure-cases.json").read_text(encoding="utf-8")

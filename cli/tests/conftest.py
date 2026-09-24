@@ -929,9 +929,10 @@ def _closure_leg_hermetic(monkeypatch):
     `fno.rust_binary.verb_call`). In the test environment that resolver can
     find an installed binary without the new verb, or none at all, so the
     default answers from a test-local copy of the shared-corpus grammar;
-    tests that pin the forwarder WIRING re-stub `fno.rust_binary.verb_call`
-    themselves, and the corpus test runs the real dev binary when one exists
-    (skip otherwise, the same contract as `native_backlog_door`).
+    tests that pin the forwarder WIRING re-stub `fno.pr.closure.verb_call`
+    themselves (closure.py binds the transport at module level), and the
+    corpus test runs the real dev binary when one exists (skip otherwise,
+    the same contract as `native_backlog_door`).
     """
     from fno.graph._constants import is_wellformed_node_id
 
@@ -966,7 +967,7 @@ def _closure_leg_hermetic(monkeypatch):
                 best = ids
         return {"ids": best or []}
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", _fake_verb_call)
+    monkeypatch.setattr("fno.pr.closure.verb_call", _fake_verb_call)
 
 
 @pytest.fixture(autouse=True)
