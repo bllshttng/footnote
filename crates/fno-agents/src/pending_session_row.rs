@@ -309,8 +309,8 @@ mod tests {
         assert_eq!(answer["opened"], json!(true));
         assert_eq!(answer["cleared"], json!(true));
 
-        let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
-        let sessions = body["entries"][0]["sessions"].as_array().unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
+        let sessions = rows[0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["session_id"], json!("sid-1"));
         assert_eq!(sessions[0]["phase"], json!("do"));
@@ -323,8 +323,8 @@ mod tests {
         // A second observation adds no twin row.
         let answer = open(&open_payload(&registry, &graph, "sid-1")).unwrap();
         assert_eq!(answer["opened"], json!(false));
-        let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
-        assert_eq!(body["entries"][0]["sessions"].as_array().unwrap().len(), 1);
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows[0]["sessions"].as_array().unwrap().len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
