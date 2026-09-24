@@ -310,6 +310,7 @@ def _declare(monkeypatch, rows, objective="cheapest-that-clears"):
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
+@requires_rust
 def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     _declare(monkeypatch, [
         {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
@@ -347,6 +348,58 @@ def test_inventory_says_nothing_is_declared(monkeypatch) -> None:
     res = runner.invoke(route_app, ["inventory"])
     assert res.exit_code == 0
     assert "no inventory declared" in res.output
+
+
+@requires_rust
+def test_inventory_drift_line_prints_once_for_a_stale_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import fno.route_resolve as rr
+
+    _declare(monkeypatch, [
+        {"name": "codex-luna", "harness": "codex", "model": "gpt-5.6-luna", "band": "high"},
+    ])
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(json.dumps({
+        "fetched_at": "2026-09-23T06:14:54Z",
+        "models": [
+            {"slug": "gpt-5.6-luna", "visibility": "list"},
+            {"slug": "gpt-6-luna", "visibility": "list"},
+        ],
+    }))
+    expected = (
+        "drift codex-luna pins gpt-5.6-luna; "
+        "newest luna in codex models_cache.json is gpt-6-luna"
+    )
+    res = runner.invoke(route_app, ["inventory"])
+    assert res.exit_code == 0
+    assert res.output.count(expected) == 1
+    res = runner.invoke(route_app, ["inventory", "--json"])
+    assert res.exit_code == 0
+    assert json.loads(res.output)["drift"] == [expected]
+
+
+@requires_rust
+def test_inventory_family_row_and_no_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import fno.route_resolve as rr
+
+    _declare(monkeypatch, [
+        {"name": "codex-luna", "harness": "codex", "model": "luna", "band": "high"},
+    ])
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(json.dumps({
+        "fetched_at": "2026-09-23T06:14:54Z",
+        "models": [
+            {"slug": "gpt-5.6-luna", "visibility": "list"},
+            {"slug": "gpt-6-luna", "visibility": "list"},
+        ],
+    }))
+    res = runner.invoke(route_app, ["inventory"])
+    assert res.exit_code == 0
+    assert "luna -> gpt-6-luna" in res.output
+    assert "drift " not in res.output
 
 
 _SLOT_ROWS = [
