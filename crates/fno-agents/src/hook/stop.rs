@@ -1293,15 +1293,24 @@ mod tests {
             "king",
             "41725e5f-1c20-4b81-824e",
         );
-        let row = std::fs::read_to_string(crate::paths::events_path(dir.path())).unwrap();
+        let tick_row = || {
+            crate::event_store::query_events(
+                &crate::paths::events_path(dir.path()),
+                &crate::event_store::EventQuery::of_types(&["control_plane_tick"]),
+            )
+            .unwrap()
+            .pop()
+            .map(|r| r.line)
+            .unwrap_or_default()
+        };
+        let row = tick_row();
         assert!(
             row.contains("driver=king decision=block reason=live session=41725e5f"),
             "{row}"
         );
 
         super::super::emit_tick(dir.path(), "allow", "", "target", "");
-        let row = std::fs::read_to_string(crate::paths::events_path(dir.path())).unwrap();
-        let last = row.lines().last().unwrap_or_default();
+        let last = tick_row();
         assert!(
             last.contains("driver=target decision=allow reason=live"),
             "{last}"

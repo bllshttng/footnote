@@ -3132,12 +3132,19 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
-        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "HOME",
+            "FNO_CLAIMS_ROOT",
+        ]);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
         std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
         std::env::set_var("HOME", dir.path());
-        crate::paths::pin_test_claims_root(dir.path());
+        // Declared directly, not through the skip-if-unset pin: a parallel
+        // test's leaked root must not send the claims scan at a dead dir.
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
         // ONE stale claim: off-host holder with an expired TTL reads stale,
         // and a dead-stated holder is exactly the token the board probes.
         let now_ms = crate::claims::now_ms();
@@ -3146,11 +3153,12 @@ mod tests {
         std::fs::write(
             &lock,
             serde_json::json!({
-                "schema_version": crate::claims::SCHEMA_VERSION,
+                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
                 "key": "node:king-truth-holder",
                 "holder": "claude:t-2440-truth",
                 "acquired_at": now_ms - 3_600_000,
                 "host": "board-test-off-host",
+                "pid_unavailable": true,
                 "expires_at": now_ms - 1_800_000,
             })
             .to_string(),
@@ -3179,6 +3187,10 @@ mod tests {
         let start = std::time::Instant::now();
         let payload = read_board(&BoardOpts {
             budget_ms: 2_000,
+            // Pin the board to the temp space: the unset default reads the
+            // test process's cwd, whose real journals and canonical checkout
+            // the needs fold would sync whole, unbudgeted.
+            cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
         let elapsed = start.elapsed();

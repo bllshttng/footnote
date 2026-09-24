@@ -2231,7 +2231,7 @@ pub(crate) fn production_source() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::read_bounds::clamp_to_fire_budget;
+    use super::read_bounds::{clamp_to_fire_budget, STOPGATE_BOUND_FLOOR};
     use super::*;
 
     // ── review freshness: the one predicate (/) ───────────────

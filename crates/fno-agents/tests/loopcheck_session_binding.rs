@@ -320,15 +320,52 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     let cwd = cwd_dir.path();
     home.seed_registry(&[row_json_crowned("opencode", "ses_king", cwd)]);
     // A king manifest with a scope: the board reads in-process, then the
-    // drain read shells to the scripted binary.
+    // drain read shells to the scripted binary. created_at is NOW: a stale
+    // stamp puts the crown past its 96h default span and the term gate
+    // blocks before the drain read ever runs. FNO_HOME carries a seeded
+    // graph.json: the scope read demands an epic entry, and an ambient
+    // graph cannot be opened from a test.
+    let created = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let king_md = cwd.join("king.md");
     fs::write(
         &king_md,
-        "---\nfno_id: k-2440\ncreated_at: 2026-09-18T00:00:00Z\nscope: x-2440\n---\n",
+        format!("---\nfno_id: k-2440\ncreated_at: {created}\nscope: x-2440\n---\n"),
     )
     .unwrap();
-    // The scripted drain sleeps 400ms, then answers: a bound at the old
-    // 250ms floor would have killed it.
+    let graph_home = TempDir::new().unwrap();
+    fs::write(
+        graph_home.path().join("graph.json"),
+        r#"{"entries":[{"id":"x-2440","type":"epic","priority":"p1","status":"in_progress"}]}"#,
+    )
+    .unwrap();
+    std::env::set_var("FNO_HOME", graph_home.path());
+    // The board's quiet verdict needs its own sources readable: fno-py and gh
+    // answer empty queues from a stub dir on PATH. The scripted drain sleeps
+    // 400ms, then answers: a bound at the old 250ms floor would have killed
+    // it. It rides --fno-bin, so the PATH stubs never cover it.
+    let bin = cwd.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for (name, body) in [
+        ("fno-py", "#!/bin/sh\nprintf '[]\\n'\n"),
+        ("gh", "#!/bin/sh\nprintf '[]\\n'\n"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let saved_py = std::env::var_os("FNO_PY");
+    let saved_path = std::env::var_os("PATH");
+    std::env::set_var("FNO_PY", bin.join("fno-py"));
+    std::env::set_var(
+        "PATH",
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+            &saved_path.clone().unwrap_or_default(),
+        )))
+        .unwrap(),
+    );
     let stub = cwd.join("fno-stub.sh");
     fs::write(&stub, "#!/bin/sh\nsleep 0.4\necho '{\"undelivered\": 2}'\n").unwrap();
     {
@@ -341,6 +378,14 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     args.push("--fno-bin".into());
     args.push(stub.to_string_lossy().into_owned());
     let (code, out) = run_loop_check_capture(&with_binding(args, "ses_king"));
+    match saved_py {
+        Some(v) => std::env::set_var("FNO_PY", v),
+        None => std::env::remove_var("FNO_PY"),
+    }
+    if let Some(v) = saved_path {
+        std::env::set_var("PATH", v);
+    }
+    std::env::remove_var("FNO_HOME");
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(code, 0);
     assert_ne!(v["decision"], "refuse");

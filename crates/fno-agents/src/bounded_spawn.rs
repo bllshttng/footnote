@@ -139,7 +139,7 @@ mod tests {
         let acceptance = production(include_str!("acceptance_evidence.rs"));
         // run_bounded moved to its own module; the routed call site moved
         // with it, so the guard scans that production half too.
-        let bounded_read = production(include_str!("loopcheck/bounded_read.rs"));
+        let bounded_read = production(include_str!("loopcheck/bounded_run.rs"));
         // Positive control first: a zero-hit scan of the wrong haystack reads
         // identical to a clean one, so prove the routed sites are in view
         // before trusting the count below.

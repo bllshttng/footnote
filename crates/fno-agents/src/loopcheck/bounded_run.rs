@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::io::Read;
+
 /// Cap on RETAINED stderr per bounded run. Only retention is capped - the
 /// drain itself always runs to EOF, or a child that overflows the pipe would
 /// deadlock before exiting. The tail (not the head) is kept because the end
