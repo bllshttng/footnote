@@ -628,6 +628,9 @@ FIELD_META: dict[str, Meta] = {
     "sideline.colors.row": Meta(
         "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
     ),
+    "sideline.layout": Meta(
+        "advanced", "The sideline's row shape: \"card\" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); \"list\" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.",
+    ),
     # --- config.model_routing.* (role-based per-spawn model routing) ---
     "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.",
@@ -649,7 +652,6 @@ FIELD_META: dict[str, Meta] = {
     "status_fanout.interval_secs": Meta("advanced", "Seconds between status-fanout ticks per project (daemon host)."),
     "status_fanout.http_timeout_secs": Meta("advanced", "Bounded per-webhook HTTP timeout for a status sink."),
     "status_fanout.retries": Meta("advanced", "Retry budget per webhook dispatch before drop/short-circuit."),
-    "attention": Meta("advanced", "Questions-file sinks: list of {name, type (md), path, tag, settle_secs, ready_only}. The daemon's attention arm writes open questions there; see docs/architecture/attention-items.md. The retired [[reach_me]] name reads for one release."),
     # --- config.king.* (the king loop; both default false) ---
     "king.enabled": Meta("advanced", "Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false."),
     "king.autonomous_merge": Meta("advanced", "Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work."),

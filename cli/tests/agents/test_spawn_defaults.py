@@ -633,7 +633,7 @@ def test_unpinned_config_permission_still_refuses_on_codex(
     monkeypatch.setattr(
         rb,
         "verb_call",
-        lambda verb, payload, exc: {
+        lambda verb, payload, exc, **_kwargs: {
             "refusal": f"{payload['provider']} --permission-mode {payload['mode']} unmappable",
             "mappable": False,
         },

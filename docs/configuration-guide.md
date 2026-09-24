@@ -165,6 +165,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `sideline.colors.route` | dict[str, str] | `{}` | advanced | Lane colors keyed by the vendor lane the row bills (route, else provider), e.g. openrouter = "magenta". The DEFAULT colored axis: it separates bills where harness and model each fail alone. |
 | `sideline.colors.model` | dict[str, str] | `{}` | advanced | Lane colors keyed by the recorded model string, quoted ("glm-5.3-flash[1m]" = "green"). Rendered verbatim; never imply an alias resolved. |
 | `sideline.colors.row` | dict[str, str] | `{}` | advanced | Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = "orange"). A row's own `color` field outranks this table for the same row. |
+| `sideline.layout` | typing.Literal['card', 'list'] | `list` | advanced | The sideline's row shape: "card" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); "list" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach. |
 | `autonomy.enabled` | bool | `true` | never | The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `keep_going.enabled` | bool | `false` | advanced | Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap). |
@@ -281,7 +282,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.interval_secs` | int | `5` | advanced | Seconds between status-fanout ticks per project (daemon host). |
 | `status_fanout.http_timeout_secs` | int | `5` | advanced | Bounded per-webhook HTTP timeout for a status sink. |
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
-| `attention` | list[ReachMeRow] | `[]` | advanced | Questions-file sinks: list of {name, type (md), path, tag, settle_secs, ready_only}. The daemon's attention arm writes open questions there; see docs/architecture/attention-items.md. The retired [[reach_me]] name reads for one release. |
 | `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
 | `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
 | `king.wake_enabled` | bool | `false` | advanced | Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false. |

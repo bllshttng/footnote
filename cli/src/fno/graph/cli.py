@@ -4441,8 +4441,14 @@ def cmd_undispatched(
     typer.echo(json.dumps(receipt, indent=2))
 
 
-@cli.command("ready", hidden=True)
+@cli.command(
+    "ready", hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    epilog=("Native date filters: --created-before/--created-after/--touched-before/"
+            "--touched-after <Nd|YYYY-MM-DD>, --sort created|touched. Touched falls back to created."),
+)
 def cmd_ready(
+    ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -4473,18 +4479,10 @@ def cmd_ready(
     ),
 ) -> None:
     from fno.graph._intake import repo_root
-    from fno.graph.store import (
-        ClaimsUnavailableError,
-        ReadyParentMissingError,
-        StoreUnavailable,
-        ready as store_ready,
-    )
+    from fno.graph.store import ClaimsUnavailableError, StoreUnavailable, ready as store_ready
     from fno.tracker import active_backend_name
 
-    # Joined selection under an external backend: the same filters and ranking
-    # run over the transient list_open + sidecar join (fail-closed, never the
-    # local graph), so `ready` and `next` cannot drift between backends. The
-    # rows ride IN, the one decision answers both backends.
+    # External backends share the Rust filters and ranking with `next`.
     entries = None
     if active_backend_name() != "graph":
         try:
@@ -4504,11 +4502,12 @@ def cmd_ready(
             include_deferred=include_deferred,
             repo_root=repo_root(),
             entries=entries,
+            filter_args=list(ctx.args or []),
         )
     except StoreUnavailable as exc:
         typer.echo(f"Error: store keeper unavailable; ready selection refused: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    except ReadyParentMissingError as exc:
+    except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except ClaimsUnavailableError as exc:
@@ -8732,7 +8731,7 @@ def cmd_reconcile_findings(
     (). This re-runs the harvest addressed-detection against each open
     retro node's source PR and closes the ones now addressed - the
     reconciliation counterpart to the harvest-side suppression. Dry-run by
-    default; ``--apply`` closes via ``fno backlog done --force``. A PR whose
+    default; ``--apply`` closes via ``fno backlog done --note``. A PR whose
     review state can't be read is skipped, never closed on uncertainty.
     """
     import subprocess
@@ -8762,7 +8761,7 @@ def cmd_reconcile_findings(
             f"addressed on PR #{f.pr_number} ({f.signal}); retro reconcile-findings "
             f"re-check - fix landed without the thread being resolved/replied"
         )
-        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--force", "--reason", reason])
+        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--note", reason])
         if proc.returncode == 0:
             closed += 1
         else:

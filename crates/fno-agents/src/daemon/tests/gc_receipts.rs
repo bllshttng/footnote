@@ -3465,11 +3465,13 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
 
 /// Stage a real graph file at the state root.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
+    let graph = dir.join("graph.json");
     std::fs::write(
-        dir.join("graph.json"),
+        &graph,
         serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
     )
     .unwrap();
+    crate::backlog::set_backend(&graph, crate::backlog::Backend::Json).unwrap();
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.

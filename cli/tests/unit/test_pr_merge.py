@@ -1140,15 +1140,16 @@ def test_floor_verbless_set_stays_locked_to_the_rust_twin():
         / "crates"
         / "fno-agents"
         / "src"
-        / "loopcheck.rs"
+        / "loopcheck"
+        / "self_review_floor.rs"
     ).read_text(encoding="utf-8")
     m = re.search(r"KNOWN_VERBLESS_HARNESSES: &\[&str\] = &\[([^\]]*)\]", rust)
-    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck.rs"
+    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck/self_review_floor.rs"
     rust_set = {v.strip().strip('"') for v in m.group(1).split(",") if v.strip()}
     derived = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
     assert rust_set == derived, (
         f"Rust floor releases {sorted(rust_set)}, Python releases "
-        f"{sorted(derived)}: update both together (loopcheck.rs "
+        f"{sorted(derived)}: update both together (loopcheck/self_review_floor.rs "
         "KNOWN_VERBLESS_HARNESSES and review_capability's verb table)"
     )
 
@@ -3039,7 +3040,7 @@ def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_pat
     race the lock closes ended at the merged receipt."""
     seen = {}
 
-    def fake_on_confirmed(pr, cwd=""):
+    def fake_on_confirmed(pr, cwd="", **kwargs):
         from fno.claims.core import acquire_claim
 
         # Raises CLAIM_UNAVAILABLE (and fails the merge) if the first merge
@@ -3053,6 +3054,39 @@ def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_pat
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert seen.get("second_acquired"), "the lock must free before post-merge work runs"
+
+
+def test_do_merge_defers_close_only_on_the_durable_grant_path(
+    enabled, monkeypatch, tmp_path
+):
+    """x-3bee: the watcher's merge phase (authority="durable_grant") cannot
+    hold the inline reconcile inside its slice, so _do_merge defers the
+    node-close there and only there; a manifest merge closes inline as
+    before."""
+    seen = {}
+
+    def recorder(pr, cwd="", *, defer_close=False):
+        seen["defer_close"] = defer_close
+        return []
+
+    def fake_authorized(pr_number, repo, **kw):
+        if kw.get("decide_only"):
+            return {"outcome": "authorized"}
+        return {"outcome": "merged"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", fake_authorized)
+    monkeypatch.setattr(_merge, "_on_confirmed_merge", recorder)
+    monkeypatch.setattr(_merge, "_post_merge_remote_delete", lambda *a, **k: "")
+    monkeypatch.setattr(_merge, "_run_post_merge_followups", lambda *a, **k: None)
+    block = AutoMergeBlock(enabled=True)
+
+    _merge._do_merge(
+        42, block, str(tmp_path), covered_head="deadbeef", authority="durable_grant"
+    )
+    assert seen["defer_close"] is True
+
+    _merge._do_merge(42, block, str(tmp_path), covered_head="deadbeef")
+    assert seen["defer_close"] is False
 
 
 def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_path):

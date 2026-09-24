@@ -351,7 +351,13 @@ fn translate(
     let _ = std::fs::remove_file(&counter);
 
     // One control-plane arm row for this fire.
-    emit_tick(hook_cwd, decision, &termination_reason, driver);
+    super::emit_tick(
+        hook_cwd,
+        decision,
+        &termination_reason,
+        driver,
+        &fire.hook_harness_id,
+    );
 
     // ── Block ─────────────────────────────────────────────────────────────────
     if decision == "block" {
@@ -518,7 +524,7 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
         .unwrap_or(0)
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
-    emit_tick(cwd, "blocked", "unavailable", driver);
+    super::emit_tick(cwd, "blocked", "unavailable", driver, session_id);
     if count <= MAX_UNAVAIL_RETRIES {
         return emit_block_for_harness(&format!(
             "checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running"
@@ -569,28 +575,6 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     }
     eprintln!("target stop-hook: {reason}");
     2
-}
-
-/// One control-plane arm row for this fire.
-fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
-    let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
-    let detail = format!(
-        "driver={driver} decision={decision} reason={}",
-        if reason.is_empty() { "live" } else { reason }
-    );
-    let data = serde_json::json!({
-        "arm": "stop_hook",
-        "scheduler": "hook:target-stop-hook",
-        "acted": 1,
-        "skip_reason": Value::Null,
-        "detail": detail,
-        "interval_s": 0,
-    });
-    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
 }
 
 ///: the CARGO_BUILD_BUILD_DIR value, ported from
@@ -934,24 +918,13 @@ enum KingResolve {
 }
 
 /// The king manifest resolution: the registry row - not file presence -
-/// proves authority, the scope names the manifest under the space's kings
-/// dir, and any unreadable step answers None (the same fail-open the Python
+/// proves authority, and the manifest is read through the row's own cwd, so
+/// a shell or Stop payload outside the repo still resolves the court it
+/// declared. Any unreadable step answers None (the same fail-open the Python
 /// resolver's catch-all ships). The row lookup is the ONE matcher,
 /// `loop_reign::find_by_session`.
 fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
     if fire.hook_harness_id.is_empty() {
-        return KingResolve::None;
-    }
-    let kings_dir = super::events_space(cwd).join("kings");
-    let has_manifests = std::fs::read_dir(&kings_dir)
-        .map(|mut it| {
-            it.any(|e| {
-                e.map(|e| e.path().extension().is_some_and(|x| x == "md"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !has_manifests {
         return KingResolve::None;
     }
     let sid = if fire.resolve_harness_id.is_empty() {
@@ -964,9 +937,24 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             Ok(r) => r.entries,
             Err(_) => return KingResolve::None,
         };
-    let Some(row) = crate::loop_reign::find_by_session(&rows, sid, fire.harness.as_deref()) else {
-        return KingResolve::None;
-    };
+    match king_manifest_in(&rows, sid, fire.harness.as_deref(), cwd) {
+        Some(path) => KingResolve::Found(path),
+        None => KingResolve::None,
+    }
+}
+
+/// The manifest through the crown row: the row's cwd names the space, and a
+/// row whose cwd names a since-removed directory (a deleted linked worktree
+/// keys its own dead slug) falls back to the payload cwd's space before
+/// answering None. `loop_reign::manifest_path` carries the unsafe-scope
+/// refusal.
+fn king_manifest_in(
+    rows: &[crate::state::RegistryEntry],
+    sid: &str,
+    harness: Option<&str>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    let row = crate::loop_reign::find_by_session(rows, sid, harness)?;
     use crate::AgentStatus;
     if matches!(
         row.status,
@@ -975,25 +963,27 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             | AgentStatus::Failed
             | AgentStatus::PermanentDead
     ) {
-        return KingResolve::None;
+        return None;
     }
-    let Some(scope) = row
+    let scope = row
         .crown_scope
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return KingResolve::None;
-    };
-    if scope.contains("..") || scope.contains('/') || scope.contains('\\') {
-        return KingResolve::None;
+        .filter(|s| !s.is_empty())?;
+    let mut roots = Vec::with_capacity(2);
+    if !row.cwd.is_empty() {
+        roots.push(PathBuf::from(&row.cwd));
     }
-    let path = kings_dir.join(format!("{scope}.md"));
-    if path.is_file() {
-        KingResolve::Found(path)
-    } else {
-        KingResolve::None
-    }
+    roots.push(cwd.to_path_buf());
+    roots
+        .iter()
+        .map(|root| {
+            crate::loop_reign::manifest_path(&super::events_space(root), scope)
+                .ok()
+                .filter(|path| path.is_file())
+        })
+        .find(Option::is_some)
+        .flatten()
 }
 
 /// The pending-delivery retry file this session would resume, if any. With a
@@ -1282,5 +1272,170 @@ mod tests {
             None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The tick row names the fire's session so a reader of `fno agents
+    /// status` can tell a king's own fire from its newest neighbor.
+    #[test]
+    fn the_tick_row_names_its_session_and_an_empty_one_omits_the_field() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
+
+        super::super::emit_tick(
+            dir.path(),
+            "block",
+            "live",
+            "king",
+            "41725e5f-1c20-4b81-824e",
+        );
+        let tick_row = || {
+            crate::event_store::query_events(
+                &crate::paths::events_path(dir.path()),
+                &crate::event_store::EventQuery::of_types(&["control_plane_tick"]),
+            )
+            .unwrap()
+            .pop()
+            .map(|r| r.line)
+            .unwrap_or_default()
+        };
+        let row = tick_row();
+        assert!(
+            row.contains("driver=king decision=block reason=live session=41725e5f"),
+            "{row}"
+        );
+
+        super::super::emit_tick(dir.path(), "allow", "", "target", "");
+        let last = tick_row();
+        assert!(
+            last.contains("driver=target decision=allow reason=live"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("session="),
+            "an empty session omits the field: {last}"
+        );
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("GLOBAL_EVENTS_PATH");
+    }
+
+    /// The manifest resolves through the crown ROW's cwd, not the Stop
+    /// payload's: a king whose shell sits outside the repo still resolves its
+    /// court. Every unreadable reading answers None, the fail-open
+    /// the hook ships.
+    #[test]
+    fn king_manifest_in_keys_on_the_crown_row_cwd() {
+        use crate::paths::DeclaredRoot;
+        use crate::state::RegistryEntry;
+
+        let _root = DeclaredRoot::declare("stop-king-row");
+        let repo = _root.path().join("repo");
+        let elsewhere = _root.path().join("elsewhere");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert_ne!(
+            crate::hook::events_space(&repo),
+            crate::hook::events_space(&elsewhere),
+            "positive control: the row cwd and the payload cwd must key different spaces"
+        );
+        let scope = "x-test-epic";
+        let kings = crate::hook::events_space(&repo).join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        let manifest = kings.join(format!("{scope}.md"));
+        std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: court\n---\n").unwrap();
+        let sid = "0c1f2f9a-7777-4000-8000-000000000007";
+        let crowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some(sid.into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        let rows = vec![crowned];
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest.clone()),
+            "the row's cwd, not the payload cwd, names the space"
+        );
+        let terminal = RegistryEntry {
+            status: crate::AgentStatus::Exited,
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("gone-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[terminal], "gone-session", None, &elsewhere),
+            None
+        );
+        let uncrowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("plain-session".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
+            None
+        );
+        let unsafe_scope = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("sneaky-session".into()),
+            crown_scope: Some("../escape".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[unsafe_scope], "sneaky-session", None, &elsewhere),
+            None
+        );
+        let no_file = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("bare-session".into()),
+            crown_scope: Some("x-no-file".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[no_file], "bare-session", None, &elsewhere),
+            None
+        );
+        assert_eq!(
+            super::king_manifest_in(&rows, "no-such-session", None, &elsewhere),
+            None
+        );
+
+        // A row whose cwd names a removed directory (a deleted linked
+        // worktree keys its own dead slug) falls back to the payload cwd's
+        // space before answering None.
+        let payload_kings = crate::hook::events_space(&elsewhere).join("kings");
+        std::fs::create_dir_all(&payload_kings).unwrap();
+        std::fs::write(payload_kings.join(format!("{scope}.md")), "fallback").unwrap();
+        let dead_cwd = RegistryEntry {
+            cwd: _root
+                .path()
+                .join("removed-worktree")
+                .join("deleted-subdir")
+                .to_string_lossy()
+                .into_owned(),
+            harness_session_id: Some("ghost-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[dead_cwd], "ghost-session", None, &elsewhere),
+            Some(payload_kings.join(format!("{scope}.md"))),
+            "a dead row-cwd falls back to the payload cwd's space"
+        );
+        // With BOTH spaces holding a manifest, the row's own still wins.
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest),
+            "the row's cwd keeps precedence over the payload fallback"
+        );
     }
 }

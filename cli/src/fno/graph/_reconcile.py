@@ -1439,13 +1439,24 @@ _REVERT_TITLE_RE = re.compile(r"^\s*Revert\b")
 _REVERT_BODY_PR_RE = re.compile(r"\breverts\s+(?:([\w.-]+/[\w.-]+))?#(\d+)", re.IGNORECASE)
 
 
+def _rest_pr_rows(cwd: Optional[str], state: str, *, max_pages: int = 1) -> list[dict]:
+    from fno.pr import _rest
+
+    slug, why = _rest._slug_or_reason(cwd, _rest.run)
+    if not slug:
+        raise ReconcileError(why)
+    rows, why = _rest.list_prs_rest(
+        slug, state=state, cwd=cwd, max_pages=max_pages, details=True, runner=_rest.run
+    )
+    if rows is None:
+        raise ReconcileError(f"gh api pulls ({state}) failed: {why}")
+    return rows
+
+
 def fetch_recent_merged_prs(
     *,
-    repo: Optional[str] = None,
     cwd: Optional[str] = None,
     limit: int = 30,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout_s: float = GH_QUERY_TIMEOUT_S,
 ) -> list[dict]:
     """Recently merged PRs (number/title/body) for revert detection.
 
@@ -1455,33 +1466,13 @@ def fetch_recent_merged_prs(
     """
     if _gh_executable() is None:
         return []
-    cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(limit)]
-    if repo:
-        cmd += ["--repo", repo]
-    cmd += ["--json", "number,title,body,url"]
-    try:
-        result = runner(
-            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise ReconcileError(f"gh pr list failed: {exc}") from exc
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr list failed (rc={result.returncode}): {(result.stderr or '').strip()}"
-        )
-    try:
-        rows = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
-    return rows if isinstance(rows, list) else []
+    return [r for r in _rest_pr_rows(cwd, "closed") if r["state"] == "MERGED"][:limit]
 
 
 def list_merged_pr_branches(
     *,
     cwd: str,
     limit: int = 100,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout_s: float = GH_QUERY_TIMEOUT_S,
 ) -> list[dict]:
     """Merged PRs (number/url/headRefName/mergedAt) for reverse-mapping.
 
@@ -1493,26 +1484,7 @@ def list_merged_pr_branches(
     """
     if _gh_executable() is None:
         return []
-    cmd = [
-        "gh", "pr", "list", "--state", "merged", "--limit", str(limit),
-        "--json", "number,url,headRefName,mergedAt",
-    ]
-    try:
-        result = runner(
-            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise ReconcileError(f"gh pr list (merged) failed: {exc}") from exc
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr list (merged) failed (rc={result.returncode}): "
-            f"{(result.stderr or '').strip()}"
-        )
-    try:
-        rows = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
-    return rows if isinstance(rows, list) else []
+    return [r for r in _rest_pr_rows(cwd, "closed") if r["state"] == "MERGED"][:limit]
 
 
 def _branch_matches_node(head_ref: str, node_id: str) -> bool:
@@ -1864,8 +1836,6 @@ def list_open_pr_branches(
     *,
     cwd: str,
     limit: int = 100,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout_s: float = GH_QUERY_TIMEOUT_S,
 ) -> list[dict]:
     """Open PRs (number/url/headRefName) for the open-binding heal.
 
@@ -1876,27 +1846,7 @@ def list_open_pr_branches(
     """
     if _gh_executable() is None:
         return []
-    cmd = [
-        "gh", "pr", "list", "--state", "open", "--limit", str(limit + 1),
-        "--json", "number,url,headRefName,body",
-    ]
-    try:
-        result = runner(
-            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise ReconcileError(f"gh pr list (open) failed: {exc}") from exc
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr list (open) failed (rc={result.returncode}): "
-            f"{(result.stderr or '').strip()}"
-        )
-    try:
-        rows = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
-    if not isinstance(rows, list):
-        raise ReconcileError("gh stdout for open PR listing was not a JSON array")
+    rows = _rest_pr_rows(cwd, "open", max_pages=2)
     if len(rows) > limit:
         raise ReconcileError(
             f"open PR listing hit its {limit}-row limit; refusing a unique binding"
@@ -1985,7 +1935,7 @@ def _group_refless_by_repo(
         if not isinstance(cwd, str) or not cwd:
             continue
         cwd = _effective_reconcile_cwd(cwd, node.get("project"))
-        if not os.path.isdir(cwd):
+        if not os.path.isdir(cwd) or _repo_group_key(cwd, memo) == cwd:
             skipped.append(nid)
             continue
         cwd_by_nid[nid] = cwd
@@ -2130,7 +2080,7 @@ def reverse_map_unstamped(
         # preserve. One line, however many ids; the count is realistically small.
         print(
             f"reverse-map: skipped {len(skipped_dead_cwd)} ref-less node(s) with "
-            f"missing cwd: {' '.join(skipped_dead_cwd)} "
+            f"missing or non-checkout cwd: {' '.join(skipped_dead_cwd)} "
             f"(heal with: fno backlog update <id> --project <p> --cwd <path>)",
             file=sys.stderr,
         )

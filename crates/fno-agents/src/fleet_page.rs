@@ -30,15 +30,6 @@ impl Arm {
     }
 }
 
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 /// Render report JSON into the page template. Escaping `<` in the data blob
 /// keeps operator-controlled slowdown text inside the JSON script element.
 pub(crate) fn render(report: &FleetReport, generated: &str, reload_s: i64) -> String {
@@ -46,9 +37,10 @@ pub(crate) fn render(report: &FleetReport, generated: &str, reload_s: i64) -> St
         .unwrap_or_else(|_| "{}".to_string())
         .replace('<', "\\u003c");
     let template = include_str!("fleet_page.html");
-    let mut out = template
-        .replacen("/*DATA*/null", &data, 1)
-        .replace("__GENERATED__", &html_escape(generated));
+    let mut out = template.replacen("/*DATA*/null", &data, 1).replace(
+        "__GENERATED__",
+        &crate::claude_ask::html_escape_quote(generated),
+    );
     out.push_str(&format!(
         "<script data-fno-reload=\"{reload_s}\">{}</script></body></html>",
         crate::king_ledger::PAGE_RELOAD_JS

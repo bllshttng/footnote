@@ -521,11 +521,9 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let stub = |body: &str| {
-            let path = dir.path().join("stub.sh");
-            std::fs::write(&path, body).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path.display().to_string()
+            crate::write_exec_stub(dir.path(), "stub.sh", body)
+                .display()
+                .to_string()
         };
         std::env::set_var("FNO_BIN", stub("#!/bin/sh\nexit 1\n"));
         assert!(refresh_usage_readings(dir.path(), REFRESH_TIMEOUT).is_none());

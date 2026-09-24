@@ -1,13 +1,13 @@
 ---
 name: intel
-description: Session-provenance report for the operator - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold once, judges a sampled subset, clusters the summaries into categories with per-category metrics, and writes one vault report. Use when the operator says session report, who typed, operator insights, or intel report.
+description: Session-provenance report for the user - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold once, judges a sampled subset, clusters the summaries into categories with per-category metrics, and writes one vault report. Use when the user says session report, who typed, user insights, or intel report.
 ---
 
 # intel
 
-The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail. It counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions. It samples idle substantive sessions and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
+The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (the fold's `operator` class, relay, harness, keepalive, unknown). It joins sessions to nodes, PRs, and mail. It counts tokens, lines, tool errors, languages, response time, hours, and overlapping sessions. It samples idle substantive sessions and computes per-category metrics from the facets. No model runs there. This skill is the judgment layer: you read the fold's sampled rows, judge each sampled session, cluster the summaries into categories, and write the narrative.
 
-The one rule the whole report stands on: **operator turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
+The one rule the whole report stands on: **user turns only**. Relay, harness, keepalive, and unknown turns are other agents and machinery talking, or turns no witness can name. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
 
 The fold names its populations, and the report keeps them apart. Every number says whether it rests on `scanned` sessions or on `judged` ones. No line blends the two.
 
@@ -21,10 +21,10 @@ The fold names its populations, and the report keeps them apart. Every number sa
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the operator question. With no question, use `What were the operator's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
+(`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the user question. With no question, use `What were the user's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
 
    ```bash
-   fno-agents intel --json --days 30 --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
+   fno-agents intel --json --period 1m --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
    ```
 
    The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
@@ -66,7 +66,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
 5. Write the report: `<vault>/fno/intel/<date>-<question key>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md). Every number comes from the JSON named in the frontmatter `fold:` field.
 
-6. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
+6. Corrections section: quote user corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
 
 7. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
 
@@ -78,12 +78,20 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
 8. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
 
+9. Render the shareable HTML copy. Run:
+
+   ```bash
+   fno-agents intel --render <report.md>
+   ```
+
+   Its stdout line is the HTML path. The renderer reads the report and the fold JSON named in the frontmatter `fold:` field. It scrubs secrets, home paths, quoted blocks, and quotes outside `Operator corrections`, and draws the fold counters as inline SVG. End the run by telling the user both paths, one line each: `Report: <md path>` and `Shareable copy: <html path> (open in a browser; print to PDF; latest.html beside it is always the newest)`. A nonzero exit is relayed with its stderr line. The markdown report stands either way: it stays the file every later step reads.
+
 Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
 
 ## Known Limitations and Deferred Work
 
-- Operator is witnessed, not inferred. When a person presses Enter in a pane or portal, the mux writes an `operator_submit` row. The fold binds turns to those rows. A turn outside the witness reads `unknown`, never `operator`. Uncovered paths: a bare terminal, the desktop apps, and claude.ai jobs. That typing never passes the mux. A hand-started harness in a shell pane writes `resolution: unresolved`, and nothing joins it. A submit queued past the 30s bind window also reads unknown. The `witness.unwitnessed_sessions` receipt counts sessions typed outside the witness.
+- User is witnessed, not inferred. When a person presses Enter in a pane or portal, the mux writes an `operator_submit` row. The fold binds turns to those rows. A turn outside the witness reads `unknown`, never `operator`. Uncovered paths: a bare terminal, the desktop apps, and claude.ai jobs. That typing never passes the mux. A hand-started harness in a shell pane writes `resolution: unresolved`, and nothing joins it. A submit queued past the 30s bind window also reads unknown. The `witness.unwitnessed_sessions` receipt counts sessions typed outside the witness.
 - The relay delivered-check is a substring read: a bus body that appears verbatim in the transcript through some other channel reads as delivered even if the mail never landed in this session's turn flow.
-- Opencode sessions are folded now. Their operator class is the same witness join as claude's (the fold binds opencode turns to `operator_submit` rows by `harness_session`). Subagent child sessions carry a `parent_id` and are excluded. When no store is readable, `skipped.opencode` names the reason.
+- Opencode sessions are folded now. Their `operator` class is the same witness join as claude's (the fold binds opencode turns to `operator_submit` rows by `harness_session`). Subagent child sessions carry a `parent_id` and are excluded. When no store is readable, `skipped.opencode` names the reason.
 
 - Full list: [LIMITATIONS.md](LIMITATIONS.md).

@@ -638,22 +638,37 @@ fn r_capacity() -> Result<Value, String> {
     r_capacity_pair(&payload, &gate)
 }
 
-/// The pair from the two fetched payloads. The two instruments speak
-/// different dialects of the same axis: footprint answers in the cpu-axis
-/// vocabulary (admit/refuse), the gate probe in its whole-admission one
-/// (accepted/refused). Disagreement compares meanings, never spellings.
+/// The pair compares footprint's CPU verdict with the gate's own cpu-share
+/// row; the gate's whole verdict and the axis it refused on print beside it.
 fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Value, String> {
     let footprint = footprint_payload
-        .get("capacity_verdict")
+        .pointer("/admission/verdict")
         .cloned()
         .unwrap_or(Value::Null);
     let gate_verdict = s_str(gate_payload, "verdict").unwrap_or("").to_string();
+    let gate_cpu = gate_payload
+        .get("rows")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("name").and_then(Value::as_str) == Some("cpu-share"))
+                .and_then(|row| row.get("verdict").cloned())
+        })
+        .unwrap_or(Value::Null);
+    let gate_axis = if gate_verdict.is_empty() || gate_verdict == "accepted" {
+        Value::Null
+    } else {
+        s_str(gate_payload, "reason")
+            .map(|r| Value::String(r.to_string()))
+            .unwrap_or(Value::Null)
+    };
     let fp_str = footprint.as_str().unwrap_or("").to_string();
-    fn meaning(v: &str) -> &str {
+    fn meaning(v: &str) -> Option<&str> {
         match v {
-            "admit" | "accepted" => "admit",
-            "refuse" | "refused" => "refuse",
-            other => other,
+            "admit" | "pass" => Some("admit"),
+            "refuse" | "undecidable" => Some("refuse"),
+            "hold" => Some("hold"),
+            _ => None,
         }
     }
     let lanes = gate_payload
@@ -682,12 +697,17 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
             }
         })
         .unwrap_or_else(|| "lanes unreadable".into());
+    let cpu_str = gate_cpu.as_str().unwrap_or("").to_string();
+    let disagree = match (meaning(&fp_str), meaning(&cpu_str)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    };
     Ok(json!({
         "footprint": footprint,
         "gate": gate_verdict,
-        "disagree": !gate_verdict.is_empty()
-            && !fp_str.is_empty()
-            && meaning(&fp_str) != meaning(&gate_verdict),
+        "gate_axis": gate_axis,
+        "gate_cpu": gate_cpu,
+        "disagree": disagree,
         "unparsed_lines": footprint_payload
             .get("unparsed_lines")
             .and_then(|u| u.as_i64())
@@ -929,32 +949,102 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
-/// The held reading: nodes an open operator question blocks, oldest
-/// question first. One fold over the question journals in process; the rows
-/// carry everything the render needs to name the decide verb.
-fn r_held() -> Result<Value, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
-    let home = crate::paths::AgentsHome::from_env();
-    let fno_dir = home
-        .root()
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "agents home has no parent".to_string())?;
-    let journals = crate::needs::question_journals(&fno_dir, &cwd);
-    let rows = crate::needs::held_rows(&journals);
-    let rows: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "node": r.node,
-                "question_id": r.question_id,
-                "question": r.question,
-                "ts": r.ts,
-                "epoch": r.epoch,
-            })
-        })
+/// The held reading: this crown's open questions, read from the page
+/// frontmatter the attention arm froze at write time. The folder comes from
+/// items.json's `questions_dir`, so a king in any project reads the one
+/// folder the daemon writes. A missing or stale items.json is a failed
+/// reading, never `held: none`: the arm being down must not read as "no
+/// questions".
+fn r_held(ctx: &Ctx) -> Result<Value, String> {
+    let index_path = crate::attention_arm::attention_dir()
+        .map_err(|e| e.to_string())?
+        .join("items.json");
+    let raw = std::fs::read_to_string(&index_path)
+        .map_err(|_| "the attention arm has not written items.json".to_string())?;
+    let index: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("items.json unreadable: {e}"))?;
+    let as_of = index.get("as_of").and_then(Value::as_u64).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(as_of);
+    if age > 600 {
+        return Err(format!(
+            "items.json is {age}s old; the attention arm is not beating"
+        ));
+    }
+    let dir = index
+        .get("questions_dir")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty())
+        .ok_or("items.json names no questions_dir")?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("questions folder {dir} unreadable: {e}"))?;
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
         .collect();
+    paths.sort();
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if crate::attention_file::has_conflict_markers(&text) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        pages.push((stem.to_string(), text));
+    }
+    let rows = held_from_pages(&pages, &ctx.scope);
     Ok(json!({"open": rows.len(), "rows": rows}))
+}
+
+/// The pure fold: open pages whose question_id the stem names and whose
+/// crown equals this check-in's canonical scope, oldest first. Rows carry
+/// what the render needs to name the decide verb.
+fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Value> {
+    let canon = crate::territory::canonical_scope(scope);
+    let mut rows: Vec<(u64, Value)> = Vec::new();
+    for (stem, text) in pages {
+        let Some((front, _)) = crate::attention_file::parse_page(text) else {
+            continue;
+        };
+        if front.status != "open" {
+            continue;
+        }
+        if !crate::attention_arm::stem_names_id(stem, &front.question_id) {
+            continue;
+        }
+        if crate::territory::canonical_scope(&front.crown) != canon {
+            continue;
+        }
+        let epoch = chrono::DateTime::parse_from_rfc3339(&front.asked_at)
+            .map(|d| d.timestamp().max(0) as u64)
+            .unwrap_or(0);
+        let node = front
+            .blocks
+            .first()
+            .cloned()
+            .filter(|b| !b.is_empty() && b != "none")
+            .or_else(|| Some(front.node.clone()).filter(|n| !n.is_empty() && n != "none"));
+        rows.push((
+            epoch,
+            json!({
+                "node": node,
+                "question_id": front.question_id,
+                "question": front.title,
+                "ts": front.asked_at,
+                "epoch": epoch,
+            }),
+        ));
+    }
+    rows.sort_by_key(|(epoch, _)| *epoch);
+    rows.into_iter().map(|(_, v)| v).collect()
 }
 
 /// One verdict token for the check-in line, from the shared reader's rows:
@@ -1137,7 +1227,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
     take("drain", r_drain(ctx));
-    take("held", r_held());
+    take("held", r_held(ctx));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("parked", r_parked());
@@ -1185,14 +1275,15 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         );
     }
     if let Some(capacity) = get("capacity").filter(|r| r.ok) {
-        for key in ["footprint", "gate", "disagree", "unparsed_lines", "lanes"] {
-            let wire = match key {
-                "footprint" => "capacity_footprint",
-                "gate" => "capacity_gate",
-                "disagree" => "capacity_disagree",
-                "lanes" => "capacity_lanes",
-                _ => "unparsed_lines",
-            };
+        for (key, wire) in [
+            ("footprint", "capacity_footprint"),
+            ("gate", "capacity_gate"),
+            ("gate_axis", "capacity_gate_axis"),
+            ("gate_cpu", "capacity_gate_cpu"),
+            ("disagree", "capacity_disagree"),
+            ("unparsed_lines", "unparsed_lines"),
+            ("lanes", "capacity_lanes"),
+        ] {
             data.insert(
                 wire.into(),
                 capacity.value.get(key).cloned().unwrap_or(Value::Null),
@@ -1525,8 +1616,9 @@ fn render_lines(
     match failed("held") {
         Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
         None => {
-            // Held nodes: the rows already carry node, question id
-            // and ask time; the line names the decide verb that clears them.
+            // This crown's questions: the rows carry node, question id and
+            // ask time; a row with a node names the decide verb, a row with
+            // none names the clear verb.
             let rows = by_name("held")
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null)
@@ -1537,28 +1629,21 @@ fn render_lines(
             if rows.is_empty() {
                 lines.push("held: none".into());
             } else {
-                let now = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                lines.push(format!(
-                    "held: {} node(s) waiting on the operator",
-                    rows.len()
-                ));
+                lines.push(format!("held: {} question(s) for this crown", rows.len()));
                 for row in rows.iter().take(MAX_COURT_ROWS) {
-                    let age = row
-                        .get("epoch")
-                        .and_then(Value::as_u64)
-                        .map(|e| now.saturating_sub(e) / 60)
-                        .unwrap_or(0);
-                    lines.push(format!(
-                        "  {} on question {}, age {}m; answer with: fno backlog decide {} \"<ruling>\" --question-id {}",
-                        dash(row.get("node")),
-                        dash(row.get("question_id")),
-                        age,
-                        dash(row.get("node")),
-                        dash(row.get("question_id")),
-                    ));
+                    let qid = dash(row.get("question_id"));
+                    let node = row
+                        .get("node")
+                        .and_then(Value::as_str)
+                        .filter(|n| !n.is_empty() && *n != "none");
+                    match node {
+                        Some(n) => lines.push(format!(
+                            "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
+                        )),
+                        None => lines.push(format!(
+                            "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
+                        )),
+                    }
                 }
             }
         }
@@ -1650,6 +1735,10 @@ fn render_lines(
                 dash(data.get("capacity_footprint")),
                 dash(data.get("capacity_gate")),
             );
+            if let Some(axis) = data.get("capacity_gate_axis").and_then(Value::as_str) {
+                text.push_str(&format!(" on {axis}"));
+            }
+            text.push_str(&format!(", cpu {}", dash(data.get("capacity_gate_cpu"))));
             if data
                 .get("capacity_disagree")
                 .and_then(|d| d.as_bool())
@@ -2924,28 +3013,123 @@ mod tests {
 
     #[test]
     fn disagree_compares_meanings_not_spellings() {
-        let pair = |fp: &str, gate: &str| {
+        let pair = |fp: &str, gate_cpu: &str| {
             r_capacity_pair(
-                &json!({"capacity_verdict": fp, "unparsed_lines": 0}),
-                &json!({"verdict": gate}),
+                &json!({"admission": {"verdict": fp}, "unparsed_lines": 0}),
+                &json!({
+                    "verdict": "refused",
+                    "reason": "cpu_share",
+                    "rows": [{"name": "cpu-share", "verdict": gate_cpu}]
+                }),
             )
             .unwrap()
             .get("disagree")
             .and_then(|d| d.as_bool())
             .unwrap()
         };
-        // The live healthy pair: footprint speaks cpu-axis, the gate speaks
-        // whole-admission; same meaning, so no DISAGREE.
-        assert!(!pair("admit", "accepted"));
-        assert!(!pair("refuse", "refused"));
-        assert!(pair("admit", "refused"));
-        assert!(pair("refuse", "accepted"));
+        assert!(!pair("admit", "pass"));
+        assert!(!pair("refuse", "refuse"));
+        assert!(!pair("hold", "hold"));
+        assert!(!pair("undecidable", "refuse"));
+        assert!(pair("admit", "refuse"));
+        assert!(pair("undecidable", "pass"));
+        assert!(!pair("admit_degraded", "pass"));
+    }
+
+    #[test]
+    fn capacity_pair_ignores_a_refusal_on_another_axis() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "king_share",
+                "rows": [{"name": "cpu-share", "verdict": "pass"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(capacity["disagree"], false);
+        assert_eq!(capacity["gate_axis"], "king_share");
+        assert_eq!(capacity["gate_cpu"], "pass");
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(
+            line.contains("gate refused on king_share, cpu pass"),
+            "line: {line}"
+        );
+        assert!(!line.contains("DISAGREE"), "line: {line}");
+    }
+
+    #[test]
+    fn capacity_pair_marks_a_cpu_divergence() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "cpu_share_undecidable",
+                "rows": [{"name": "cpu-share", "verdict": "refuse"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(capacity["disagree"], true);
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(line.contains("DISAGREE"), "line: {line}");
+        assert!(
+            line.contains("gate refused on cpu_share_undecidable, cpu refuse"),
+            "line: {line}"
+        );
+    }
+
+    #[test]
+    fn capacity_pair_without_a_gate_cpu_row_never_disagrees() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "ram_floor",
+                "rows": [{"name": "ram", "verdict": "refuse"}]
+            }),
+        )
+        .unwrap();
+        assert!(capacity["gate_cpu"].is_null());
+        assert_eq!(capacity["disagree"], false);
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(line.contains("cpu -"), "line: {line}");
+        assert!(!line.contains("DISAGREE"), "line: {line}");
     }
 
     #[test]
     fn capacity_pair_renders_provider_lanes_in_order_or_as_unreadable() {
         let capacity = r_capacity_pair(
-            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
                 "verdict": "refused",
                 "lanes": {
@@ -2977,7 +3161,7 @@ mod tests {
         );
 
         let unreadable = r_capacity_pair(
-            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({"verdict": "accepted"}),
         )
         .unwrap();
@@ -3007,7 +3191,7 @@ mod tests {
     fn unparsed_capacity_line_names_the_floor_and_zero_stays_silent() {
         let capacity_line = |unparsed: i64| {
             let capacity = r_capacity_pair(
-                &json!({"capacity_verdict": "admit", "unparsed_lines": unparsed}),
+                &json!({"admission": {"verdict": "admit"}, "unparsed_lines": unparsed}),
                 &json!({"verdict": "accepted"}),
             )
             .unwrap();
@@ -3268,7 +3452,10 @@ mod tests {
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
-        assert!(summary[0].contains("2 node(s)"), "lines: {lines:?}");
+        assert!(
+            summary[0].contains("2 question(s) for this crown"),
+            "lines: {lines:?}"
+        );
         let verbs: Vec<&String> = lines
             .iter()
             .filter(|l| l.contains("fno backlog decide"))
@@ -3934,5 +4121,60 @@ mod tests {
             stale,
             vec!["stale crown fno on king-gone (stored status exited); fno agents rm king-gone (tool-call reading: no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d)".to_string()]
         );
+    }
+
+    fn held_page(
+        id: &str,
+        crown: &str,
+        status: &str,
+        asked_at: &str,
+        node: Option<&str>,
+    ) -> (String, String) {
+        let node_line = match node {
+            Some(n) => format!("node: {n}\n"),
+            None => String::new(),
+        };
+        let stem = format!("20260923-{id}-test-x-none");
+        let text = format!(
+            "---\nquestion_id: {id}\nkind: question\nstatus: {status}\ntitle: t-{id}\nasked_at: {asked_at}\n{node_line}crown: {crown}\n---\n\n# t-{id}\n"
+        );
+        (stem, text)
+    }
+
+    // AC11-HP: only this crown's open questions, oldest first, each with the
+    // verb that clears it.
+    #[test]
+    fn held_from_pages_lists_this_crowns_open_questions_oldest_first() {
+        let pages = vec![
+            held_page("q-new", "x-b", "open", "2026-09-23T12:00:00Z", Some("x-1")),
+            held_page("q-old", "x-b", "open", "2026-09-22T08:00:00Z", None),
+            held_page(
+                "q-other",
+                "fno",
+                "open",
+                "2026-09-21T08:00:00Z",
+                Some("x-2"),
+            ),
+            held_page(
+                "q-closed",
+                "x-b",
+                "answered",
+                "2026-09-20T08:00:00Z",
+                Some("x-3"),
+            ),
+        ];
+        let rows = held_from_pages(&pages, "x-b");
+        assert_eq!(rows.len(), 2, "AC11-HP: only x-b's open pages: {rows:?}");
+        assert_eq!(
+            rows[0].get("question_id").and_then(|v| v.as_str()),
+            Some("q-old"),
+            "oldest first"
+        );
+        assert_eq!(
+            rows[1].get("question_id").and_then(|v| v.as_str()),
+            Some("q-new")
+        );
+        // The node-less row reads as null so the render names the clear verb.
+        assert_eq!(rows[0].get("node"), Some(&Value::Null));
     }
 }

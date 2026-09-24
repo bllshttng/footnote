@@ -274,7 +274,10 @@ fn gate_answer(payload: &Value) -> Value {
         node: opt_str_of(payload, "node"),
         account: opt_str_of(payload, "account"),
         caller_session: opt_str_of(payload, "caller_session"),
+        succession_scope: opt_str_of(payload, "succession_scope"),
         holder_pid: Some(holder_pid as u32),
+        seed: opt_str_of(payload, "seed"),
+        session_phase: opt_str_of(payload, "session_phase"),
     };
     match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
         Ok(mut guard) => {
@@ -1034,6 +1037,29 @@ mod tests {
     use super::*;
     use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
 
+    struct TestEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl TestEnvRestore {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn probe_registry_schema_refusal_names_its_reason_row() {
         let _g = crate::claims::test_env_lock()
@@ -1704,6 +1730,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn plain_spawn_refuses_while_crowned_succession_admits_at_full_slot_cap() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnvRestore::capture(&[
+            crate::paths::HOME_ENV,
+            "FNO_CLAIMS_ROOT",
+            "FNO_CONFIG",
+            "FNO_SPAWN_GATE",
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            "FNO_NODE",
+        ]);
+        let dir = std::env::temp_dir().join(format!("fno-verb-succession-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        let config = fnodir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        std::env::set_var("FNO_CONFIG", &config);
+        std::env::remove_var("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_NODE");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let home = crate::paths::AgentsHome::from_env();
+        let registry = home.registry_json();
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        let pid = std::process::id();
+        let start = crate::daemon::process_start_time(pid).unwrap_or(0);
+        std::fs::write(
+            &registry,
+            format!(
+                r#"{{"schema_version":{},"entries":[{{"name":"king","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"crown_level":1,"crown_scope":"x-epic","harness_session_id":"session-king"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-king"}}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+            ),
+        )
+        .unwrap();
+
+        let plain = gate_answer(&json!({
+            "mode": "gate",
+            "name": "plain-spawn",
+            "substrate": "bg",
+            "no_wait": true,
+            "caller_session": "session-king",
+            "holder_pid": pid,
+        }));
+        let answer = gate_answer(&json!({
+            "mode": "gate",
+            "name": "successor",
+            "substrate": "bg",
+            "no_wait": true,
+            "caller_session": "session-king",
+            "succession_scope": "x-epic",
+            "holder_pid": pid,
+        }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(plain["status"], "refused", "{plain}");
+        assert_eq!(plain["exit_code"], spawn_gate::EXIT_NO_WAIT, "{plain}");
+        assert_eq!(plain["receipt"]["axis"], "max_live", "{plain}");
+        assert_eq!(answer["status"], "admitted", "{answer}");
+    }
+
     /// AC1-HP: a gate payload with no `holder_pid` is refused before the gate
     /// runs, so the verb mints no reservation whose holder pid (the verb's
     /// own, dead once it has answered) dooms the row to Suspect for the whole
@@ -1762,6 +1866,68 @@ mod tests {
             "refusals before the mint write nothing: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn gate_refuses_a_review_seed_before_the_bypass() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+        let prior_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::set_var("FNO_SPAWN_GATE", "0");
+
+        let review = gate_answer(&json!({
+            "mode": "gate",
+            "name": "review-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "$fno:review high --comment",
+            "session_phase": "do"
+        }));
+        let think = gate_answer(&json!({
+            "mode": "gate",
+            "name": "think-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "/fno:think why"
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(review["status"], "refused", "{review}");
+        assert_eq!(review["exit_code"], 89, "{review}");
+        assert_eq!(review["receipt"]["reason"], "review_session", "{review}");
+        assert_eq!(think["status"], "admitted", "{think}");
     }
 
     /// AC3-HP: reserve mints a claim with the reservation metadata, an expiry

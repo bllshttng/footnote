@@ -53,6 +53,8 @@ pub const EXIT_TERRITORY_CAP: i32 = 86;
 /// `agents.profiles.blueprint.max_live` live `bp` threads, or more than one
 /// per territory, refuses the spawn and teaches the subagent path.
 pub const EXIT_BLUEPRINT_CAP: i32 = 88;
+/// A spawn whose seed or label names review is refused before every bypass.
+pub const EXIT_REVIEW_SESSION: i32 = 89;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
@@ -223,6 +225,15 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
 /// `spawn_gate.py::CPU_HOLD_POLL_S`.
 const CPU_HOLD_POLL: Duration = Duration::from_secs(15);
 const CPU_ADMIT_SAMPLES: u32 = 2;
+/// A blind CPU read (an undecidable band or an unreadable probe) gets at most
+/// this many total samples before the gate refuses. A blind read is not
+/// evidence the fleet is over. It never holds for the whole queue budget and
+/// never admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
+const CPU_BLIND_SAMPLES: u32 = 3;
+#[cfg(not(test))]
+const CPU_BLIND_POLL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CPU_BLIND_POLL: Duration = Duration::from_millis(10);
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
@@ -1267,7 +1278,38 @@ pub struct GateInput {
     pub node: Option<String>,
     pub account: Option<String>,
     pub caller_session: Option<String>,
+    pub succession_scope: Option<String>,
     pub holder_pid: Option<u32>,
+    /// The spawn's seed message. Its first verb names the session phase.
+    pub seed: Option<String>,
+    /// An explicit `--session-phase` label.
+    pub session_phase: Option<String>,
+}
+
+const REVIEW_SESSION_REMEDY: &str = "run the review in the session that did the work: \
+     /fno:review <level> ($fno:review <level> on codex), or fno do target request-self-review";
+
+/// Refuse before `--force` and `FNO_SPAWN_GATE=0`: a review runs in the
+/// session that did the work, never in a new one.
+fn review_session_gate(input: &GateInput) -> Option<Refusal> {
+    let seeded = input
+        .seed
+        .as_deref()
+        .and_then(crate::spawn_phase::seed_phase);
+    if input.session_phase.as_deref() != Some("review") && seeded != Some("review") {
+        return None;
+    }
+    Some(
+        Refusal::with_receipt(
+            EXIT_REVIEW_SESSION,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "review_session",
+                "remedy": REVIEW_SESSION_REMEDY,
+            }),
+        )
+        .ev("axis", serde_json::json!("review")),
+    )
 }
 
 /// The held keys of a [`GateGuard`], taken out before the guard drops so a
@@ -1309,6 +1351,9 @@ fn decide_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
+    if let Some(refusal) = review_session_gate(&input) {
+        return Err(refusal);
+    }
 
     // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     // precedent): test suites exercising spawn plumbing must not queue behind
@@ -1437,10 +1482,15 @@ fn decide_gate(
     let mut last_progress = Instant::now();
     let mut announced = false;
     let mut last_slots: usize = 0;
+    let mut last_succession_error: Option<&'static str>;
     // LD4: a fleet-over sample holds, and admission after a hold is
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
     let mut under_streak: u32 = 0;
+    // Consecutive blind CPU reads in the current run. Reset by the hold and
+    // admit arms, so the count covers back-to-back blind reads only and the
+    // receipt's `samples` names what actually happened.
+    let mut blind_samples: u32 = 0;
     // Start of the current UNBROKEN run of failed acquisitions (None = holding
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
@@ -1449,6 +1499,7 @@ fn decide_gate(
     loop {
         // Each pass reads afresh: a refusal names only what IT read, never a
         // slot count from an earlier pass.
+        last_succession_error = None;
         let mut axes_read = serde_json::Map::new();
         let mut pause = QUEUE_POLL;
         // The footprint probe runs OUTSIDE the gate mutex (it costs seconds
@@ -1635,24 +1686,47 @@ fn decide_gate(
             let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
-                    // The refusal is decided; drop the mutex BEFORE printing
-                    // so queued spawners (and --no-wait callers) never sit
-                    // behind anything.
-                    guard.release();
-                    eprintln!("{}", admission.reason);
-                    let mut receipt = serde_json::json!({
-                        "status": "refused",
-                        "reason": cpu.token,
-                        "axes_read": axes_read.clone(),
-                    });
-                    for (k, v) in figures.as_object().into_iter().flatten() {
-                        receipt[k] = v.clone();
+                    // A blind read breaks both consecutive-sample runs.
+                    under_streak = 0;
+                    // A blind read is not evidence the fleet is over: the
+                    // instrument can be blind for one pass while the machine
+                    // is fine (2026-09-19: a worker refused twice on
+                    // cpu_instrument_unreadable, a footprint read seconds
+                    // later admitted clean). A waiting spawn re-reads a
+                    // bounded number of times before it believes the
+                    // refusal; --no-wait keeps one sample.
+                    blind_samples += 1;
+                    if !flags.no_wait && blind_samples < CPU_BLIND_SAMPLES {
+                        guard.release_gate_mutex();
+                        eprintln!(
+                            "{NOTE} {reason}; re-reading in {s}s (read \
+                             {blind_samples} of {CPU_BLIND_SAMPLES})",
+                            s = CPU_BLIND_POLL.as_secs(),
+                            reason = admission.reason,
+                        );
+                        pause = CPU_BLIND_POLL;
+                    } else {
+                        // The refusal is decided; drop the mutex BEFORE printing
+                        // so queued spawners (and --no-wait callers) never sit
+                        // behind anything.
+                        guard.release();
+                        eprintln!("{}", admission.reason);
+                        let mut receipt = serde_json::json!({
+                            "status": "refused",
+                            "reason": cpu.token,
+                            "samples": blind_samples,
+                            "axes_read": axes_read.clone(),
+                        });
+                        for (k, v) in figures.as_object().into_iter().flatten() {
+                            receipt[k] = v.clone();
+                        }
+                        return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
+                            .ev("reason", serde_json::json!(cpu.token))
+                            .ev("samples", serde_json::json!(blind_samples))
+                            .ev("axis", serde_json::json!("cpu"))
+                            .ev("axes_read", serde_json::json!(axes_read))
+                            .ev("figures", figures));
                     }
-                    return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
-                        .ev("reason", serde_json::json!(cpu.token))
-                        .ev("axis", serde_json::json!("cpu"))
-                        .ev("axes_read", serde_json::json!(axes_read))
-                        .ev("figures", figures));
                 }
                 "hold" => {
                     // LD4: over is a HOLD - the fleet's own work drains - not
@@ -1660,6 +1734,7 @@ fn decide_gate(
                     // fails on the first over sample.
                     held_on_cpu = true;
                     under_streak = 0;
+                    blind_samples = 0;
                     guard.release_gate_mutex();
                     if flags.no_wait {
                         eprintln!("{}", admission.reason);
@@ -1695,6 +1770,7 @@ fn decide_gate(
                     pause = CPU_HOLD_POLL;
                 }
                 "admit" => {
+                    blind_samples = 0;
                     // A held spawn needs CPU_ADMIT_SAMPLES consecutive
                     // under-ceiling samples before it believes the drain
                     // (LD4); a spawn that was never held admits on the first.
@@ -1723,14 +1799,29 @@ fn decide_gate(
                         let (live, reservations) = slot_reading(registry_path, &mut warnings);
                         let slots = live.len() + reservations.len();
                         last_slots = slots;
+                        let succession = input.succession_scope.as_deref().map(|scope| {
+                            spawn_gate_lanes::succession_replaces(
+                                &live,
+                                input.caller_session.as_deref(),
+                                scope,
+                            )
+                        });
+                        last_succession_error = succession
+                            .as_ref()
+                            .and_then(|result| result.as_ref().err().copied());
+                        let replaced = usize::from(matches!(succession.as_ref(), Some(Ok(_))));
                         for w in &warnings {
                             eprintln!("{w}");
                         }
-                        if slots < cap {
-                            axes_read.insert(
-                                "slots".into(),
-                                serde_json::json!(format!("{slots}/{cap} ok")),
-                            );
+                        if slots.saturating_sub(replaced) < cap {
+                            let slot_reading = succession
+                                .as_ref()
+                                .and_then(|result| result.as_ref().ok())
+                                .map(|name| {
+                                    format!("{slots}/{cap} ok (succession replaces {name})")
+                                })
+                                .unwrap_or_else(|| format!("{slots}/{cap} ok"));
+                            axes_read.insert("slots".into(), serde_json::json!(slot_reading));
                             // Re-checked on dequeue for the same reason the RAM floor is: a
                             // spawn can sit queued past QUEUE_POLL for minutes, and another
                             // process can raise the shared schema inside that window.
@@ -1746,14 +1837,21 @@ fn decide_gate(
                             for w in &dequeue_warnings {
                                 eprintln!("{w}");
                             }
-                            check_king_share(
-                                registry_path,
-                                cap,
-                                input.caller_session.as_deref(),
-                                &axes_read,
-                            )
-                            .inspect_err(|_| guard.release())?;
-                            axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            if replaced == 1 {
+                                axes_read.insert(
+                                    "king_share".into(),
+                                    serde_json::json!("skipped (crowned succession)"),
+                                );
+                            } else {
+                                check_king_share(
+                                    registry_path,
+                                    cap,
+                                    input.caller_session.as_deref(),
+                                    &axes_read,
+                                )
+                                .inspect_err(|_| guard.release())?;
+                                axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            }
                             // The per-territory team cap: beside the machine cap,
                             // never instead of it. Refuses (never queues) - waiting cannot
                             // help while the node's own territory is full, and other
@@ -1840,28 +1938,29 @@ fn decide_gate(
                                 "refusing (--no-wait).",
                             );
                             eprintln!("spawn-gate: {line}");
-                            return Err(Refusal::with_receipt(
-                                EXIT_NO_WAIT,
-                                serde_json::json!({
-                                    "status": "refused",
-                                    "reason": "no_wait",
-                                    "axis": "max_live",
-                                    "axes_read": axes_read.clone(),
-                                    "held_on": "max_live",
-                                    "max_live": cap,
-                                    "count": slots,
-                                    "current_count": slots,
-                                    "slot_rows": live
-                                        .iter()
-                                        .map(|r| r.name.clone())
-                                        .chain(reservations.iter().map(|r| r.name.clone()))
-                                        .collect::<Vec<_>>(),
-                                    "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
-                                        "name": name,
-                                        "question_id": qid,
-                                    })).collect::<Vec<_>>(),
-                                }),
-                            ));
+                            let mut receipt = serde_json::json!({
+                                "status": "refused",
+                                "reason": "no_wait",
+                                "axis": "max_live",
+                                "axes_read": axes_read.clone(),
+                                "held_on": "max_live",
+                                "max_live": cap,
+                                "count": slots,
+                                "current_count": slots,
+                                "slot_rows": live
+                                    .iter()
+                                    .map(|r| r.name.clone())
+                                    .chain(reservations.iter().map(|r| r.name.clone()))
+                                    .collect::<Vec<_>>(),
+                                "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
+                                    "name": name,
+                                    "question_id": qid,
+                                })).collect::<Vec<_>>(),
+                            });
+                            if let Some(reason) = last_succession_error {
+                                receipt["succession"] = serde_json::json!(reason);
+                            }
+                            return Err(Refusal::with_receipt(EXIT_NO_WAIT, receipt));
                         }
                         if !announced {
                             let row_refs: Vec<&RegistryEntry> = live.iter().collect();
@@ -1944,19 +2043,20 @@ fn decide_gate(
                     QUEUE_TIMEOUT.as_secs()
                 );
             }
-            return Err(Refusal::with_receipt(
-                EXIT_QUEUE_TIMEOUT,
-                serde_json::json!({
-                    "status": "refused",
-                    "reason": reason,
-                    "held_on": held_on,
-                    "axis": held_on,
-                    "axes_read": axes_read.clone(),
-                    "max_live": cap,
-                    "count": last_slots,
-                    "current_count": last_slots,
-                }),
-            ));
+            let mut receipt = serde_json::json!({
+                "status": "refused",
+                "reason": reason,
+                "held_on": held_on,
+                "axis": held_on,
+                "axes_read": axes_read.clone(),
+                "max_live": cap,
+                "count": last_slots,
+                "current_count": last_slots,
+            });
+            if let Some(reason) = last_succession_error {
+                receipt["succession"] = serde_json::json!(reason);
+            }
+            return Err(Refusal::with_receipt(EXIT_QUEUE_TIMEOUT, receipt));
         }
         std::thread::sleep(pause);
     }
@@ -2366,6 +2466,24 @@ pub(crate) fn footprint_cause_raw() -> Result<String, String> {
             return Ok(raw);
         }
     }
+    // Test seam for the re-read loop: one payload PER read. Each call
+    // consumes the first line; the last line sticks, so a positive control
+    // can count the reads that actually happened. `ERR <words>` answers the
+    // no-payload path.
+    #[cfg(test)]
+    if let Ok(seq) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ") {
+        if !seq.is_empty() {
+            let raw = std::fs::read_to_string(&seq).expect("payload-seq file readable");
+            let (first, rest) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
+            if !rest.is_empty() {
+                std::fs::write(&seq, rest).expect("payload-seq file writable");
+            }
+            if let Some(why) = first.strip_prefix("ERR ") {
+                return Err(why.to_string());
+            }
+            return Ok(first.to_string());
+        }
+    }
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
@@ -2688,6 +2806,58 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_seed_or_label_is_refused_and_other_phases_pass() {
+        for seed in [
+            "$fno:review high --comment",
+            "/fno:review x",
+            "/code-review this diff",
+            "/review x-1",
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .expect(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+            let receipt = refusal.receipt.as_ref().unwrap();
+            assert_eq!(receipt["reason"], "review_session");
+            let remedy = receipt["remedy"].as_str().unwrap();
+            assert!(remedy.contains("/fno:review"));
+            assert!(remedy.contains("$fno:review"));
+            assert!(verdict_line(&refusal)
+                .starts_with("spawn-gate: refused on review (review_session, exit 89)"));
+        }
+
+        for (seed, phase) in [
+            ("/fno:triage deep", Some("review")),
+            ("/code-review this diff", Some("do")),
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                session_phase: phase.map(str::to_string),
+                ..Default::default()
+            })
+            .expect(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+        }
+
+        for seed in [
+            "/fno:think why",
+            "/fno:target x-1",
+            "review the diff",
+            "/Users/x/review",
+            "",
+        ] {
+            assert!(review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .is_none());
+        }
+        assert!(review_session_gate(&GateInput::default()).is_none());
+    }
 
     /// The no_wait specimen renders the verdict line the plan pins: axis and
     /// breach named, figures from the receipt in key order.
@@ -4748,3 +4918,7 @@ MemAvailable:    8000000 kB\n";
 #[cfg(test)]
 #[path = "spawn_gate_slot_tests.rs"]
 mod spawn_gate_slot_tests;
+
+#[cfg(test)]
+#[path = "spawn_gate_blind_tests.rs"]
+mod spawn_gate_blind_tests;

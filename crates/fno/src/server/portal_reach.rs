@@ -130,7 +130,7 @@ pub(super) fn rearm_held_portal_seats(
         }
         // A live re-arm leaves no fill door armed: the seat runs the real
         // viewer, so `fill_held_portal_at`'s stand-in check already refuses.
-        if core.panes.get(&seat).is_some_and(|e| e.cmd.is_some()) {
+        if core.portal_seat_is_viewer(seat) {
             core.notice_all(format!(
                 "restore: portal {index} ({row}) re-armed live on its re-adopted viewer"
             ));
@@ -168,6 +168,9 @@ pub(super) fn fill_held_portal_seat(
 /// ([`fill_held_portal_seat`]) and the restore verb, so the two doors cannot
 /// disagree about what fills a held seat. The seat's own leaf wins
 /// (`portal_explicit = false`); the reach repoints the stand-in in place.
+/// A seat whose row resolves to zero or several live paneless rows keeps
+/// the shell and the attempt gets one refusal naming the row and one
+/// action; the plain focus the caller falls through to stays readable.
 pub(super) fn fill_held_portal_at(
     core: &mut Core,
     client_id: u64,
@@ -175,43 +178,56 @@ pub(super) fn fill_held_portal_at(
     vp: Rect,
     idx: u8,
 ) -> Option<Flow> {
-    let stand_in = core.portals.get(&idx).is_some_and(|portal| {
-        core.panes
-            .get(&portal.seat)
-            .is_some_and(|entry| entry.cmd.is_none())
-    });
+    let stand_in = core
+        .portals
+        .get(&idx)
+        .is_some_and(|portal| !core.portal_seat_is_viewer(portal.seat));
     if !stand_in {
         return None;
     }
     let row_key = core.portals.get(&idx)?.row_key.clone();
     let mut hits = core.agents.iter().filter(|a| row_answers_key(a, &row_key));
-    if let (Some(row), None) = (hits.next(), hits.next()) {
-        // A recorded session id binds the seat to the row's incarnation at
-        // capture. A different full id under the same key is a DIFFERENT
-        // thread wearing a familiar label: refuse, keep the seat held, and
-        // name both ids - no pane ever renders B under A's label.
-        if let Some(recorded) = core.portal_session_guards.get(&idx) {
-            if row.harness_session_id.as_deref() != Some(recorded.as_str()) {
-                core.notice_all(format!(
-                    "portal {idx} fill refused: stored session {} resolved to {} under the same key; seat stays held",
-                    recorded,
-                    row.harness_session_id.as_deref().unwrap_or("(unreadable)")
-                ));
-                return Some(Flow::Continue);
-            }
+    let first = hits.next();
+    let second = hits.next();
+    let row = match (first, second) {
+        (Some(row), None) => row,
+        (Some(_), Some(_)) => {
+            core.notice_all(format!(
+                "portal {idx} fill refused: {row_key} is ambiguous - reach it by its pane"
+            ));
+            return None;
         }
-        core.portal_session_guards.remove(&idx);
-        return Some(core.reach_portal(
-            client_id,
-            view,
-            vp,
-            idx,
-            &row_key,
-            &PanePlacement::default(),
-            false,
-        ));
+        _ => {
+            core.notice_all(format!(
+                "portal {idx}: no live row answers {row_key}; if this session just resumed, run fno agents register, then reach the row again"
+            ));
+            return None;
+        }
+    };
+    // A recorded session id binds the seat to the row's incarnation at
+    // capture. A different full id under the same key is a DIFFERENT
+    // thread wearing a familiar label: refuse, keep the seat held, and
+    // name both ids - no pane ever renders B under A's label.
+    if let Some(recorded) = core.portal_session_guards.get(&idx) {
+        if row.harness_session_id.as_deref() != Some(recorded.as_str()) {
+            core.notice_all(format!(
+                "portal {idx} fill refused: stored session {} resolved to {} under the same key; seat stays held",
+                recorded,
+                row.harness_session_id.as_deref().unwrap_or("(unreadable)")
+            ));
+            return Some(Flow::Continue);
+        }
     }
-    None
+    core.portal_session_guards.remove(&idx);
+    Some(core.reach_portal(
+        client_id,
+        view,
+        vp,
+        idx,
+        &row_key,
+        &PanePlacement::default(),
+        false,
+    ))
 }
 
 /// What the restore verb would do with portal `idx` right now. One
@@ -238,11 +254,7 @@ pub(super) enum PortalRestoreClass {
 pub(super) fn classify_portal_restore(core: &Core, idx: u8) -> Option<PortalRestoreClass> {
     let portal = core.portals.get(&idx)?;
     let seat_in_tree = core.session.find_pane(portal.seat).is_some();
-    let seat_viewer = seat_in_tree
-        && core
-            .panes
-            .get(&portal.seat)
-            .is_some_and(|entry| entry.cmd.is_some());
+    let seat_viewer = seat_in_tree && core.portal_seat_is_viewer(portal.seat);
     if seat_viewer {
         return Some(PortalRestoreClass::Focused);
     }
@@ -354,7 +366,9 @@ pub(super) fn portal_restore_rows(
                     "refused",
                     None,
                     None,
-                    Some(format!("no live row answers {row_key}")),
+                    Some(format!(
+                        "no live row answers {row_key}; if this session just resumed, run fno agents register, then reach the row again"
+                    )),
                     None,
                 ));
             }
@@ -422,7 +436,7 @@ pub(super) fn portal_restore_rows(
                 let filled = core
                     .portals
                     .get(&idx)
-                    .is_some_and(|p| core.panes.get(&p.seat).is_some_and(|e| e.cmd.is_some()));
+                    .is_some_and(|p| core.portal_seat_is_viewer(p.seat));
                 if filled {
                     let (pseat, ptab) = core
                         .portals
@@ -594,10 +608,7 @@ impl Core {
                     **idx != portal_idx
                         && row_matches_portal_key(&row, key, &portal.row_key)
                         && self.session.find_pane(portal.seat).is_some()
-                        && self
-                            .panes
-                            .get(&portal.seat)
-                            .is_some_and(|entry| entry.cmd.is_none())
+                        && !self.portal_seat_is_viewer(portal.seat)
                 })
                 .map(|(idx, _)| *idx)
             {
@@ -725,7 +736,7 @@ impl Core {
                     // seat holds the idle-shell stand-in (no argv provenance):
                     // "already showing" would lie, so fall through to the
                     // repoint, which respawns the row's viewer in the same tab.
-                    let seat_is_viewer = self.panes.get(&pid).is_some_and(|e| e.cmd.is_some());
+                    let seat_is_viewer = self.portal_seat_is_viewer(pid);
                     if same_row && seat_is_viewer {
                         // Same row: "show me", never a toggle-close. Closing
                         // the pane is the ordinary close gesture. The slot
@@ -1358,12 +1369,48 @@ impl Core {
             .find(|(idx, portal)| {
                 **idx != skip
                     && row_matches_portal_key(row, key, &portal.row_key)
-                    && self
-                        .panes
-                        .get(&portal.seat)
-                        .is_some_and(|entry| entry.cmd.is_some())
+                    && self.portal_seat_is_viewer(portal.seat)
             })
             .map(|(idx, _)| *idx)
+    }
+
+    /// The seat-classification primitive every portal decision shares
+    /// (re-arm, fill, restore classification, default retarget, same-row
+    /// focus, viewer search, landing, restore result): does this pane run
+    /// a live viewer? Explicit provenance, never command presence - a
+    /// keeper-re-adopted placeholder shell carries `cmd: Some` exactly
+    /// like a viewer does.
+    pub(super) fn portal_seat_is_viewer(&self, pid: u64) -> bool {
+        self.panes
+            .get(&pid)
+            .is_some_and(|e| e.cmd.is_some() && e.portal_hold.is_none())
+    }
+
+    /// Spawn `env <wrapper> <shell>` on the first shell candidate that
+    /// spawns: the placeholder mint, whose identity must ride its own argv
+    /// so a later server re-derives it on keeper re-adoption.
+    pub(crate) fn spawn_env_placeholder(
+        &mut self,
+        wrapper: String,
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        what: &str,
+    ) -> Result<u64, String> {
+        let candidates: Vec<String> = self
+            .shells
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let mut spawned = Err(format!("no shell candidate for {what}"));
+        for shell in &candidates {
+            let argv = vec!["env".to_string(), wrapper.clone(), shell.clone()];
+            spawned = self.spawn_pane_cmd(&argv, rows, cols, cwd);
+            if spawned.is_ok() {
+                break;
+            }
+        }
+        spawned
     }
 
     /// Row-aware landed check for the portal the caller NAMED: a slot keyed

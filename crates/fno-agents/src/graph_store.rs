@@ -2354,13 +2354,27 @@ pub fn locked_mutate_with_hook(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
-    // The shadow baseline is the rows AS READ: the db holds the last
-    // publish, so `raw` IS that publish. A change normalization alone makes
-    // (defaults, settles, ownership stamps, children) must compare unequal
-    // against this baseline to reach the store. Deriving the baseline from
-    // the normalized pre-image instead hid exactly those changes, and the
-    // db row stayed stale for good.
-    let shadow_before = raw.clone();
+    // A JSON writer can replace the file before this seam runs, so its raw
+    // rows may already differ from the relational shadow's last publish.
+    // Diff against that shadow when it exists; without one, the file is the
+    // only available pre-image and the first shadow write imports it.
+    let mut shadow_read_warning = None;
+    let shadow_before = if sqlite_backend {
+        raw.clone()
+    } else if crate::backlog::database_path(path).exists() {
+        match crate::backlog::read_entries(path) {
+            Ok(rows) => rows,
+            Err(error) => {
+                shadow_read_warning = Some(format!(
+                    "SQLite shadow read for {} failed: {error}",
+                    path.display()
+                ));
+                raw.clone()
+            }
+        }
+    } else {
+        raw.clone()
+    };
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2513,6 +2527,10 @@ pub fn locked_mutate_with_hook(
         crate::backlog::idea_cap::configured_cap(path).0,
     )
     .map_err(StoreError::Invalid)?;
+    // The close-evidence rule holds at this seam too: a write that sets
+    // completed_at on an existing open row must leave the row a record of
+    // why, or the whole publish refuses and nothing lands.
+    crate::backlog::done_evidence::enforce(&raw, &entries).map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
@@ -2534,9 +2552,11 @@ pub fn locked_mutate_with_hook(
             use sha2::Digest as _;
             format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
         };
-        let warning = crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
-            .err()
-            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
+        let warning = shadow_read_warning.or_else(|| {
+            crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
+                .err()
+                .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()))
+        });
         (backup, warning, version)
     };
 
@@ -2900,6 +2920,47 @@ mod tests {
     fn empty_containers_stay_inline_like_python() {
         let v = json!({"a": [], "b": {}});
         assert_eq!(to_python_json(&v), "{\n  \"a\": [],\n  \"b\": {}\n}");
+    }
+
+    #[test]
+    fn an_evidence_less_close_is_refused_at_the_publication_seam() {
+        // The whole-graph seam refuses the write outright and the file
+        // keeps its bytes: a refusal leaves no trace on disk.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            json!({"entries": [json!({
+                "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+                "type": "feature", "status": "ready", "priority": "p2",
+            })]})
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&graph).unwrap();
+        let entries = vec![json!({
+            "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+            "type": "feature", "status": "done", "priority": "p2",
+            "completed_at": "2026-09-23T00:00:00+00:00",
+        })];
+        let input = MutateInput {
+            entries,
+            canonical_path: None,
+            base_version: file_content_version(&graph),
+            plan_rungs: None,
+        };
+        let err = locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .err()
+            .expect("an evidence-less close must refuse");
+        assert!(
+            matches!(&err, StoreError::Invalid(text) if text.contains("ab-evid0001")),
+            "expected an Invalid naming the id, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&graph).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
     }
 
     #[test]

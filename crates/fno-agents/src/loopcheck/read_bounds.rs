@@ -31,7 +31,8 @@ pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration
 /// and enough of them spend it whole (measured: a floored drain at 271ms
 /// after roughly 64 such reads). Refusing fast keeps the aggregate erosion
 /// near zero, and the bound stays positive so the read is still killable.
-const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration = std::time::Duration::from_millis(1);
+pub(crate) const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration =
+    std::time::Duration::from_millis(1);
 
 /// King fires hold this much of the fire budget back for the drain read, the
 /// last read and the one that decides completion. Drain cost scales with
@@ -57,9 +58,16 @@ thread_local! {
         const { std::cell::RefCell::new((0, None, 0)) };
 }
 
-/// The reserve a king fire holds back, in ms, for the deciding drain read.
-pub(crate) fn stopgate_drain_reserve_ms() -> u64 {
-    STOPGATE_DRAIN_RESERVE.as_millis() as u64
+/// Re-arm the drain reserve on a fire that reached `king_decide` stamped with
+/// reserve 0. The Crown route (a bound harness session whose row is crowned)
+/// enters the king path under a fire the `--driver` string called target, and
+/// the entry stamp is driver-blind now precisely so the route, not the
+/// string, decides. Mutates the already-stamped fire; override and deadline
+/// stay.
+pub(crate) fn stopgate_hold_drain_reserve() {
+    STOPGATE_READS.with(|cell| {
+        cell.borrow_mut().2 = STOPGATE_DRAIN_RESERVE.as_millis() as u64;
+    });
 }
 
 /// Stamp this fire's read-bound override, budget deadline, and drain reserve
@@ -107,20 +115,85 @@ pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     })
 }
 
+/// The drain's own floor: the smallest bound a drain read can still meet.
+/// `fno agents king drain` answers in 1.5s to 1.7s warm on this machine
+/// (the bare CLI cold start alone costs 1.36s), so the generic 250ms floor
+/// was five to seven times under the cost of STARTING the drain - a
+/// deterministic kill no cache warmth or quiet fire could pass. 5s is about
+/// 3x the measured drain; every non-drain read keeps the 250ms floor.
+pub(crate) const STOPGATE_DRAIN_FLOOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How far past the fire budget a drain may reach: the harness kills the
+/// stop hook at 60s and the fire budget is 50s, so 10s of real margin
+/// exist; 8s keeps 2s for the decision write. Inside that margin the drain
+/// keeps its floor even when the budget is spent.
+pub(crate) const STOPGATE_HARNESS_MARGIN: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The drain read's bound: the reserved read measures against the fire's
 /// full remaining budget - the reserve is what every OTHER read held back
-/// for it.
+/// for it - and keeps a floor it can actually meet for as long as the
+/// harness kill still leaves the decision writable.
 pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, deadline, _) = *cell.borrow();
         let configured = stopgate_configured_timeout(override_ms);
         match deadline {
             Some(d) => {
-                let remaining = d.saturating_duration_since(std::time::Instant::now());
-                clamp_to_fire_budget(configured, remaining)
+                let now = std::time::Instant::now();
+                let remaining = d.saturating_duration_since(now);
+                // An explicit --read-timeout-ms is an instruction, not a
+                // default: tests inject a small bound to force a kill, and
+                // the floor must not talk them out of it. The floor repairs
+                // the production DEFAULT ceiling only (override_ms == 0).
+                if override_ms > 0 {
+                    return clamp_to_fire_budget(configured, remaining);
+                }
+                let hard_remaining = d
+                    .checked_add(STOPGATE_HARNESS_MARGIN)
+                    .map(|hard| hard.saturating_duration_since(now))
+                    .unwrap_or_default();
+                // The reserved read measures against the fire's FULL
+                // remaining budget: the reserve is what every other read
+                // held back for it, so the drain's bound is whatever of the
+                // fire is left, not the 30s per-read ceiling the unreserved
+                // reads clamp to.
+                std::cmp::max(remaining, STOPGATE_DRAIN_FLOOR.min(hard_remaining))
+                    .max(STOPGATE_BOUND_FLOOR)
             }
             None => configured,
         }
+    })
+}
+
+/// True when this fire's pre-drain reads are past the reserve line: the
+/// board (and every pre-drain read) refuses instead of reading at the 1ms
+/// spent bound.
+pub(crate) fn stopgate_pre_drain_spent() -> bool {
+    STOPGATE_READS.with(|cell| {
+        let (_, deadline, reserve_ms) = *cell.borrow();
+        match deadline {
+            Some(d) => d
+                .saturating_duration_since(std::time::Instant::now())
+                .saturating_sub(std::time::Duration::from_millis(reserve_ms))
+                .is_zero(),
+            None => false,
+        }
+    })
+}
+
+/// What remains of this fire's harness margin at the moment of the call, in
+/// ms: how much past-budget reach the drain still has before the generic
+/// floor applies. 0 when no fire is stamped.
+pub(crate) fn stopgate_harness_margin_remaining_ms() -> u64 {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => d
+            .checked_add(STOPGATE_HARNESS_MARGIN)
+            .map(|hard| {
+                hard.saturating_duration_since(std::time::Instant::now())
+                    .as_millis() as u64
+            })
+            .unwrap_or(0),
+        None => 0,
     })
 }
 
@@ -171,6 +244,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn holding_the_reserve_on_a_reserve_zero_fire_arms_the_drain_slice() {
+        // AC3: the entry stamp is reserve-blind (0) the way every fire is
+        // stamped now; the hold on `king_decide` arms the drain slice, so a
+        // Crown-route fire gets exactly what a native king fire always had.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), 0);
+        });
+        stopgate_hold_drain_reserve();
+        // Pre-drain reads clamp to remaining-minus-reserve (~24s left).
+        let pre_drain = stopgate_read_timeout();
+        assert!(
+            pre_drain <= std::time::Duration::from_secs(24)
+                && pre_drain >= std::time::Duration::from_secs(23),
+            "{pre_drain:?}"
+        );
+        // The drain reads the full remaining (~40s), never the floor.
+        let reserved = stopgate_drain_timeout();
+        assert!(
+            reserved <= std::time::Duration::from_secs(40)
+                && reserved >= std::time::Duration::from_secs(39),
+            "{reserved:?}"
+        );
+    }
+
+    #[test]
     fn the_drain_reserve_holds_pre_drain_reads_back_and_spares_the_drain() {
         // King fires stamp the reserve; every read before the drain sees
         // remaining-minus-reserve, the drain sees the full remaining.
@@ -202,6 +301,22 @@ mod tests {
             *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
         });
         assert_eq!(stopgate_read_timeout(), STOPGATE_PRE_DRAIN_SPENT_BOUND);
+        // The drain keeps a floor it can meet: a fresh 30s ceiling collapsed
+        // to the deadline, but the harness margin is unspent at the line, so
+        // the drain floor still applies - never the 250ms generic floor that
+        // no CLI cold start could pass.
+        assert_eq!(stopgate_drain_timeout(), STOPGATE_DRAIN_FLOOR);
+    }
+
+    #[test]
+    fn a_drain_past_the_harness_margin_falls_to_the_generic_floor() {
+        // 9s past the budget deadline the 8s harness margin is gone: the
+        // generic 250ms floor applies so the hook still answers before the
+        // 60s harness kill, leaving ~2s for the decision write.
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(9);
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
+        });
         assert_eq!(stopgate_drain_timeout(), STOPGATE_BOUND_FLOOR);
     }
 

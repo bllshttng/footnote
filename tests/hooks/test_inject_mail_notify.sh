@@ -28,14 +28,36 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/fno" <<'STUB'
 #!/usr/bin/env bash
 [[ -n "${FNO_STUB_ARGS_LOG:-}" ]] && printf '%s\n' "$*" >> "$FNO_STUB_ARGS_LOG"
+[[ -n "${FNO_STUB_ERR:-}" ]] && printf '%s\n' "$FNO_STUB_ERR" >&2
 [[ -n "${FNO_STUB_FAIL:-}" ]] && exit 7
 [[ -n "${FNO_STUB_SLEEP:-}" ]] && sleep "$FNO_STUB_SLEEP"
 [[ -n "${FNO_STUB_OUT:-}" ]] && printf '%s\n' "$FNO_STUB_OUT"
+[[ -n "${FNO_STUB_RC:-}" ]] && exit "$FNO_STUB_RC"
 exit 0
 STUB
 chmod +x "$TMP/bin/fno"
 
-run_hook() { PATH="$TMP/bin:$PATH" bash "$HOOK" </dev/null; }
+EVENTS="$TMP/events.jsonl"
+
+# The real fno for the event-store read/write paths: the stub below shadows
+# `fno` on the hook's PATH, and the store commit inside the hook's event
+# emission must reach the REAL store, not an exit-0 stub. events.sh honors
+# FNO_BIN ahead of PATH (checkout build outranks an install, matching
+# store_client's policy).
+REAL_FNO=""
+for profile in debug release; do
+  if [[ -x "$REPO_ROOT/crates/fno/target/$profile/fno" ]]; then
+    REAL_FNO="$REPO_ROOT/crates/fno/target/$profile/fno"
+    break
+  fi
+done
+[[ -z "$REAL_FNO" ]] && REAL_FNO="$(command -v fno 2>/dev/null)"
+if [[ -z "$REAL_FNO" ]]; then
+  echo "FAIL: no real fno binary found for the event-store paths" >&2
+  exit 1
+fi
+
+run_hook() { PATH="$TMP/bin:$PATH" EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" bash "$HOOK" </dev/null; }
 
 # A PATH carrying the stub plus only what the hook genuinely needs (jq, and bash
 # + sleep for the stub), and NO timeout(1)/gtimeout(1) on any host. /usr/bin
@@ -52,7 +74,7 @@ for b in bash sleep jq dirname; do
   ln -sf "$p" "$TMP/nocu/$b"
 done
 NOCU_PATH="$TMP/bin:$TMP/nocu"
-run_hook_nocoreutils() { PATH="$NOCU_PATH" bash "$HOOK" </dev/null; }
+run_hook_nocoreutils() { PATH="$NOCU_PATH" EVENTS_FILE="$EVENTS" FNO_BIN="$REAL_FNO" bash "$HOOK" </dev/null; }
 
 # 1. The CLI-owned hook JSON is relayed byte-for-byte with one CLI invocation.
 EXPECTED='{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<system-reminder>\\n<fno_mail>complete body</fno_mail>\\n</system-reminder>"}}'
@@ -119,6 +141,52 @@ else
   (( END - START >= 1 )) && pass "timeout: actually waited for the cap (not an early exit)" || fail "timeout: returned in $((END - START))s, too fast to have run the 10s stub - it exited early and this case tested nothing"
   [[ -z "$OUT" ]] && pass "timeout: injects nothing when capped" || fail "timeout: unexpected output: $OUT"
 fi
+
+# 5b/5c/5d. Miss-event recording (AC6-HP, AC7-ERR, AC8-ERR). The event store
+# commits rows beside the journal path, never into the .jsonl itself, so rows
+# come back through the native reader against a FRESH journal per case (a
+# reused path would carry the previous case's store).
+read_miss_events() {
+  "$REAL_FNO" doctor event rows --events "$EVENTS" --type mail_notify_self_missed 2>/dev/null
+}
+# Rows come back as a JSON array of envelope STRINGS (inner quotes escaped),
+# so assertions parse instead of substring-grepping.
+miss_row_holding() {
+  read_miss_events | jq -e "any(.[]; (fromjson | .data | $1))" >/dev/null 2>&1
+}
+
+# 5b. AC6-HP: a delivered boundary records no miss event.
+EVENTS="$TMP/events-miss-ok.jsonl"
+OUT="$(FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/null)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "$EXPECTED" ]] \
+  && pass "miss-event: success relays the payload" || fail "miss-event: success rc=$RC"
+[[ "$(read_miss_events)" == "[]" ]] \
+  && pass "miss-event: success wrote no miss event" \
+  || fail "miss-event: success wrote rows: $(read_miss_events)"
+
+# 5c. AC7-ERR: a hung verb (the 2s bound fires, rc 124) is recorded, and the
+#    turn still proceeds promptly.
+EVENTS="$TMP/events-miss-timeout.jsonl"
+START=$(date +%s)
+OUT="$(FNO_STUB_SLEEP=5 run_hook 2>/dev/null)"; RC=$?
+END=$(date +%s)
+[[ $RC -eq 0 ]] && pass "miss-event: timeout exit 0" || fail "miss-event: timeout rc=$RC"
+(( END - START < 5 )) && pass "miss-event: timeout still bounded" || fail "miss-event: not bounded ($((END - START))s)"
+miss_row_holding '.rc == 124' \
+  && pass "miss-event: timeout recorded the rc-124 miss" \
+  || fail "miss-event: no rc-124 row: $(read_miss_events)"
+
+# 5d. AC8-ERR: a refusal (nonzero + stderr) records the rc and the stderr tail.
+EVENTS="$TMP/events-miss-refusal.jsonl"
+OUT="$(FNO_STUB_RC=1 FNO_STUB_ERR='error: notify-self: ambiguous' run_hook 2>/dev/null)"; RC=$?
+[[ $RC -eq 0 && -z "$OUT" ]] \
+  && pass "miss-event: refusal exit 0, no payload" || fail "miss-event: refusal rc=$RC out=$OUT"
+miss_row_holding '.rc == 1' \
+  && pass "miss-event: refusal recorded rc 1" \
+  || fail "miss-event: no rc-1 row: $(read_miss_events)"
+miss_row_holding '.stderr_tail == "error: notify-self: ambiguous"' \
+  && pass "miss-event: refusal records the stderr tail" \
+  || fail "miss-event: stderr tail missing: $(read_miss_events)"
 
 # 6. Installed-hook journey: both harness manifests select this exact script;
 # real durable mail is delivered at UserPromptSubmit and consumed for the
