@@ -293,20 +293,63 @@ def test_ask_clear_round_trip_and_idempotence(root: Path):
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "yes, widen it"])
     assert cleared.exit_code == 0, cleared.output
-    assert "1" in cleared.stdout
+    assert f"outstanding: closed {qid} (decision d-" in cleared.stdout
+    assert "recorded)" in cleared.stdout
 
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == []
 
-    # Idempotent: a second clear, and an id that was never open, are exit-0
-    # no-ops that report a count of 0 rather than failing.
+    # Idempotent clears name each id instead of returning an unlabeled count.
     again = runner.invoke(outstanding_app, ["clear", qid])
     assert again.exit_code == 0
-    assert "0" in again.stdout
+    assert f"{qid} was already closed; nothing written" in again.stdout
 
     unknown = runner.invoke(outstanding_app, ["clear", "q-neverexisted"])
-    assert unknown.exit_code == 0
-    assert "0" in unknown.stdout
+    assert unknown.exit_code == 4
+    assert "q-neverexisted is not a question id this machine knows" in unknown.stdout
+
+
+@requires_rust
+def test_clear_bridge_writes_schema_valid_rows_under_five_seconds(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno import paths
+    from fno.events import validate
+    from fno.outstanding import deliver
+    from tests._event_rows import event_rows
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            "89abcdef-full-session", "codex", (), "single"
+        ),
+    )
+    monkeypatch.setattr(deliver, "deliver_answer", lambda *args: "delivery stub")
+    asked = runner.invoke(
+        outstanding_app, ["ask", "which lane?", "--subject", "test lane", "--ask", "finish the lane"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    started = time.monotonic()
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert time.monotonic() - started < 5
+    sources = (
+        project_log("events.jsonl", project_root=root),
+        paths.decisions_jsonl(),
+        paths.questions_jsonl(),
+    )
+    written = [
+        event
+        for source in sources
+        for event in event_rows(source)
+        if event.get("type") in {"operator_decision", "operator_question_closed"}
+    ]
+    assert any(event["type"] == "operator_decision" for event in written)
+    assert any(event["type"] == "operator_question_closed" for event in written)
+    for event in written:
+        validate(event)
 
 
 def _journal_last(events_path):
@@ -1149,7 +1192,12 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coord"])
 
     assert cleared.exit_code == 0, cleared.output
-    assert recorded["asked_by"] == "89abcdef"
+    decision = next(
+        event
+        for event in _journal_events(project_log("events.jsonl", project_root=root))
+        if event["type"] == "operator_decision"
+    )
+    assert decision["data"]["asked_by"] == "89abcdef"
 
 
 @requires_rust
@@ -1403,10 +1451,11 @@ def test_question_index_dual_writes_ask_and_close(root: Path):
 
 @requires_rust
 def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
-    # The index write is best-effort Rust-side; pointing it at a directory
-    # makes the append fail while the project journal stays writable.
-    blocked = root / "index-blocked"
-    blocked.mkdir()
+    from fno.events.store_client import store_db_path
+
+    # The SQLite sidecar is the Rust append boundary.
+    blocked = root / "index-blocked.jsonl"
+    store_db_path(blocked).mkdir()
     monkeypatch.setattr("fno.paths.questions_jsonl", lambda: blocked)
 
     result = runner.invoke(outstanding_app, ["ask", "which index?", "--ask", "finish the lane"])
@@ -1418,28 +1467,30 @@ def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: py
 
 
 @requires_rust
-def test_question_close_index_failure_names_id_and_reindex(
+def test_question_close_index_failure_names_id_and_retry(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from fno import paths
-    from fno.events import append_event as real_append_event
+    from fno.events.store_client import store_db_path
 
     asked = runner.invoke(outstanding_app, ["ask", "which close path?", "--ask", "finish the lane"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
-    index_path = paths.questions_jsonl()
-
-    def fail_close_index(event, *, events_path=None):
-        if event["type"] == "operator_question_closed" and events_path == index_path:
-            raise OSError("index unavailable")
-        return real_append_event(event, events_path=events_path)
-
-    monkeypatch.setattr("fno.events.append_event", fail_close_index)
+    question_index = paths.questions_jsonl()
+    ask_event = next(
+        event
+        for event in _journal_events(question_index)
+        if event.get("data", {}).get("question_id") == qid
+    )
+    index_path = root / "close-index.jsonl"
+    index_path.write_text(json.dumps(ask_event) + "\n")
+    store_db_path(index_path).mkdir()
+    monkeypatch.setattr(paths, "questions_jsonl", lambda: index_path)
     result = runner.invoke(outstanding_app, ["clear", qid])
 
     assert result.exit_code == 1
     assert qid in result.output
-    assert "fno inbox outstanding reindex" in result.output
+    assert "index close did not land" in result.output
     project_close = _journal_last(project_log("events.jsonl", project_root=root))
     assert project_close["type"] == "operator_question_closed"
     index_last = _journal_last(index_path)
@@ -2278,6 +2329,32 @@ def test_clear_with_answer_prints_the_delivery_posture(
     assert cleared.exit_code == 0, cleared.output
     assert sent, "clear must deliver when the asker resolves"
     assert "mail to 89abcdef" in cleared.output
+
+
+@requires_rust
+def test_clear_with_answer_without_asker_prints_delivery_posture(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(None, None, (), "empty"),
+    )
+    asked = runner.invoke(outstanding_app, ["ask", "which lane?", "--ask", "finish the lane"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+    question = next(
+        event
+        for event in _journal_events(project_log("events.jsonl", project_root=root))
+        if event.get("type") == "operator_question"
+        and event.get("data", {}).get("question_id") == qid
+    )
+    assert not question["data"].get("asker")
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert "no asker on record" in cleared.output
+    assert "nobody to wake" in cleared.output
 
 
 def test_clear_with_answer_names_an_undeliverable_posture(

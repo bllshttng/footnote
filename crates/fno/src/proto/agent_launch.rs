@@ -52,6 +52,10 @@ pub struct AgentLaunchRequest {
     /// focused pane (`--split <dir>`: left/right/up/down).
     #[serde(default)]
     pub split: Option<String>,
+    /// The backlog node the launch works, set only by a board prefill;
+    /// rides as `--node`.
+    #[serde(default)]
+    pub node: Option<String>,
     /// The seed text. Empty = an intentionally interactive launch; the door
     /// owns whether the harness/substrate combination accepts one, and its
     /// refusal (never a fabricated seed) is what the operator sees.

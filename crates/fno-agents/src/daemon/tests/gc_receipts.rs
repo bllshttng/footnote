@@ -3329,7 +3329,9 @@ fn reconcile_budget_starts_after_truth_batch() {
     // and once ate the whole 5s budget (24s wall, 0 of 79 rows probed).
     // The budget's position is structural, so pin it where the source
     // cannot silently drift back: the clock line sits AFTER the truth
-    // batch and the roster load inside `run_reconcile_sweep`.
+    // batch and the roster load inside `run_reconcile_sweep`. The roster
+    // load lives in `liveness_sweep::BgRoster::load` since the witness
+    // moved off this file (shrink-only), same position, same invariant.
     let src = include_str!("../../daemon.rs");
     let sweep = src
         .split("fn run_reconcile_sweep(")
@@ -3342,7 +3344,7 @@ fn reconcile_budget_starts_after_truth_batch() {
         .find("batched_row_probes(&entries")
         .expect("truth batch call");
     let roster = sweep
-        .find("ClaudeRoster::load_default()")
+        .find("liveness_sweep::BgRoster::load()")
         .expect("roster load");
     assert!(
         truth < clock && roster < clock,

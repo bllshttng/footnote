@@ -151,6 +151,13 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
         argv.extend(["--harness".to_string(), req.harness.clone()]);
     }
     argv.extend(["--cwd".to_string(), req.cwd.clone()]);
+    // A board prefill binds the launch to its node: the roster row joins
+    // it, the card reads live, and the door's dispatch guard judges it.
+    // No prefill, no flag: the argv stays byte-identical to the plain
+    // launcher launch.
+    if let Some(id) = &req.node {
+        argv.extend(["--node".to_string(), id.clone()]);
+    }
     // An EMPTY substrate means the door's default (thread where the harness
     // seats one); only an explicit lane rides the argv, in the same
     // position it always has, so a pane request stays byte-identical.
@@ -722,6 +729,7 @@ mod tests {
             placement: Some("name:work".into()),
             portal: None,
             split: None,
+            node: None,
             message: "line one\nline \"two\" $ ` \u{1f600}".into(),
         };
         assert_eq!(
@@ -766,6 +774,7 @@ mod tests {
             placement: None,
             portal: Some(1),
             split: Some("right".into()),
+            node: None,
             message: String::new(),
         };
         assert_eq!(
@@ -804,6 +813,7 @@ mod tests {
             placement: None,
             portal: None,
             split: None,
+            node: None,
             message: String::new(),
         };
         let argv = launch_spawn_argv("fno", &row_pinned, "s");
@@ -831,6 +841,7 @@ mod tests {
             placement: Some("new".into()),
             portal: Some(2),
             split: None,
+            node: None,
             message: String::new(),
         };
         assert_eq!(
@@ -852,6 +863,48 @@ mod tests {
                 "new",
                 "--portal",
                 "2",
+                "--prompt-file",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_spawn_argv_carries_the_node_after_the_cwd() {
+        // AC1-HP: a board prefill binds the launch to its node; --node
+        // rides right after the --cwd pair and the message never rides
+        // argv (it reaches the door on stdin).
+        let req = AgentLaunchRequest {
+            request_id: 5,
+            revision: 1,
+            cwd: "/tmp/proj".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            node: Some("x-1".into()),
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/proj",
+                "--node",
+                "x-1",
+                "--mux-session",
+                "s",
+                "--no-wait",
                 "--prompt-file",
                 "-",
             ]

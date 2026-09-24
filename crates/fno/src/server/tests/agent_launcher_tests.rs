@@ -17,6 +17,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         placement: None,
         portal: None,
         split: None,
+        node: None,
         message: String::new(),
     }
 }
@@ -101,6 +102,37 @@ async fn duplicate_request_id_replays_without_a_second_attempt() {
     ));
     drop(out_tx);
     drop(exit_tx);
+}
+
+#[tokio::test]
+async fn agent_launch_refuses_an_invalid_node_id_pre_birth() {
+    // AC3-ERR: a board prefill's node id becomes an argv element, so an
+    // empty id, a flag-shaped id and a splatting id all refuse BEFORE any
+    // effect - the desk settles the refusal and no task ever spawns.
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
+    let (self_tx, mut self_rx) = mpsc::channel::<CoreMsg>(8);
+    let mut core = empty_core_with(self_tx);
+    for (i, bad) in ["", "-rf", "x 1"].iter().enumerate() {
+        let mut req = launch_req(i as u64 + 1, "/tmp", "claude");
+        req.node = Some(bad.to_string());
+        core.agent_launch(i as u64 + 1, req);
+        match core.launch_desk.settled_state(i as u64 + 1, i as u64 + 1) {
+            Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
+                assert!(
+                    reason.contains("invalid node id"),
+                    "refusal names the bad id {bad:?}: {reason}"
+                );
+            }
+            other => panic!("expected a settled refusal for {bad:?}, got {other:?}"),
+        }
+    }
+    drop(out_tx);
+    drop(exit_tx);
+    assert!(
+        self_rx.try_recv().is_err(),
+        "a pre-birth refusal never spawns a task"
+    );
 }
 
 fn empty_core_with(self_tx: mpsc::Sender<CoreMsg>) -> Core {

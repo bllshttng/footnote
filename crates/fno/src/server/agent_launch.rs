@@ -179,6 +179,17 @@ fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
     if !cwd.is_dir() {
         return Err(format!("project path {:?} does not exist", req.cwd));
     }
+    // A board prefill's node id becomes an argv element; refuse anything
+    // that could read as a flag or splat. The door stays the authority on
+    // whether the node exists.
+    if let Some(id) = &req.node {
+        if id.is_empty()
+            || id.starts_with('-')
+            || id.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(format!("invalid node id {id:?}"));
+        }
+    }
     if req.message.chars().count() > crate::proto::MAX_MAIL_TEXT {
         return Err(format!(
             "message too long (max {} chars)",
@@ -413,6 +424,7 @@ mod tests {
             placement: None,
             portal: None,
             split: None,
+            node: None,
             message: String::new(),
         }
     }
