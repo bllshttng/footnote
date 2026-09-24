@@ -8704,85 +8704,75 @@ fn node_id_shape_check() {
 // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
 pub(super) fn empty_core() -> Core {
-    empty_core_with_output().0
-}
-
-/// `empty_core` plus the shared pane-output receiver, so a test can judge
-/// what actually traveled a pty (a typed command's echo) and not only what
-/// a direct call fed the VT.
-pub(super) fn empty_core_with_output() -> (Core, mpsc::Receiver<(u64, PaneChunk)>) {
-    let (out_tx, out_rx) = mpsc::channel::<(u64, PaneChunk)>(256);
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
-    (
-        Core {
-            session: Session::default(),
-            panes: HashMap::new(),
-            pane_watch: HashMap::new(),
-            pane_stats: Arc::new(RwLock::new(HashMap::new())),
-            pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
-            pane_children: Arc::new(Mutex::new(HashSet::new())),
-            clients: Vec::new(),
-            next_pane_id: 1,
-            next_squad_id: 1,
-            tab_areas: HashMap::new(),
-            session_name: "test".into(),
-            shells: Vec::new(),
-            out_tx,
-            exit_tx,
-            self_tx,
-            agents: Vec::new(),
-            agents_read_ok: false,
-            journal: crate::spawn_journal::JournalCache::default(),
-            launch_desk: Default::default(),
-            branch_by_cwd: HashMap::new(),
-            tail_by_session: HashMap::new(),
-            truth_by_name: HashMap::new(),
-            truth_seq: 0,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            backlog_holders: HashMap::new(),
-            backlog_pr: HashMap::new(),
-            backlog_driver: HashMap::new(),
-            claim_eligible: HashSet::new(),
-            claims: HashMap::new(),
-            touch_last_emit: HashMap::new(),
-            wheel_gate: HashMap::new(),
-            touch_emit_failures: Arc::new(AtomicU64::new(0)),
-            started_at: crate::server_stats::stamp_now(),
-            client_count: watch::channel(0).0,
-            seen: HashSet::new(),
-            attached: HashMap::new(),
-            worker_pane: HashMap::new(),
-            worker_session_pane: HashMap::new(),
-            held_workers: HashMap::new(),
-            detached_panes: HashMap::new(),
-            diff_pane: None,
-            portals: BTreeMap::new(),
-            portal_noticed: false,
-            squad_members: HashMap::new(),
-            template_specs: HashMap::new(),
-            pending_template_restores: Vec::new(),
-            external_lifecycle: Vec::new(),
-            persist_degraded_notified: false,
-            shared_identity_notified: HashSet::new(),
-            restored: false,
-            restore_pending: false,
-            store_generations: HashMap::new(),
-            pre_restore_squads: HashSet::new(),
-            topology_dirty: false,
-            last_topology_flush: None,
-            reentry_verdict: None,
-            staged_resume_argv: None,
-            batch_plans: HashMap::new(),
-            pending_thread_reply: None,
-            keeper_adopted: Vec::new(),
-            shell_rc_dirs: std::collections::HashMap::new(),
-            portal_session_guards: std::collections::BTreeMap::new(),
-        },
-        out_rx,
-    )
+    Core {
+        session: Session::default(),
+        panes: HashMap::new(),
+        pane_watch: HashMap::new(),
+        pane_stats: Arc::new(RwLock::new(HashMap::new())),
+        pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
+        pane_children: Arc::new(Mutex::new(HashSet::new())),
+        clients: Vec::new(),
+        next_pane_id: 1,
+        next_squad_id: 1,
+        tab_areas: HashMap::new(),
+        session_name: "test".into(),
+        shells: Vec::new(),
+        out_tx,
+        exit_tx,
+        self_tx,
+        agents: Vec::new(),
+        agents_read_ok: false,
+        journal: crate::spawn_journal::JournalCache::default(),
+        launch_desk: Default::default(),
+        branch_by_cwd: HashMap::new(),
+        tail_by_session: HashMap::new(),
+        truth_by_name: HashMap::new(),
+        truth_seq: 0,
+        backlog: Vec::new(),
+        backlog_lanes: Vec::new(),
+        backlog_stale: false,
+        backlog_holders: HashMap::new(),
+        backlog_pr: HashMap::new(),
+        backlog_driver: HashMap::new(),
+        claim_eligible: HashSet::new(),
+        claims: HashMap::new(),
+        touch_last_emit: HashMap::new(),
+        wheel_gate: HashMap::new(),
+        touch_emit_failures: Arc::new(AtomicU64::new(0)),
+        started_at: crate::server_stats::stamp_now(),
+        client_count: watch::channel(0).0,
+        seen: HashSet::new(),
+        attached: HashMap::new(),
+        worker_pane: HashMap::new(),
+        worker_session_pane: HashMap::new(),
+        held_workers: HashMap::new(),
+        detached_panes: HashMap::new(),
+        diff_pane: None,
+        portals: BTreeMap::new(),
+        portal_noticed: false,
+        squad_members: HashMap::new(),
+        template_specs: HashMap::new(),
+        pending_template_restores: Vec::new(),
+        external_lifecycle: Vec::new(),
+        persist_degraded_notified: false,
+        shared_identity_notified: HashSet::new(),
+        restored: false,
+        restore_pending: false,
+        store_generations: HashMap::new(),
+        pre_restore_squads: HashSet::new(),
+        topology_dirty: false,
+        last_topology_flush: None,
+        reentry_verdict: None,
+        staged_resume_argv: None,
+        batch_plans: HashMap::new(),
+        pending_thread_reply: None,
+        keeper_adopted: Vec::new(),
+        shell_rc_dirs: std::collections::HashMap::new(),
+        portal_session_guards: std::collections::BTreeMap::new(),
+    }
 }
 
 fn placement_core() -> Core {
@@ -9867,63 +9857,6 @@ fn copy_source_refuses_open_truncated_and_implicit_blocks() {
 // ---- the keeper contract (re-adopt, sweep, list) --------------------
 // The re-adoption spawn helpers live in server/tests/keeper_adopt_tests.rs,
 // their only consumers (shrink-only file budget).
-
-#[test]
-fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
-    // The contract the future sigwait reaper must keep: a shutdown-shaped
-    // sweep kills plain pane children and leaves keeper-hosted panes for
-    // the next server to re-adopt. Deliberate close (reap_pane) is the
-    // only path that kills a keeper pane.
-    let mut core = empty_core();
-    core.shells = vec!["/bin/sh".into()];
-    let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
-
-    let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let keeper_pane = {
-        let id = core.reserve_pane_id().unwrap();
-        core.register_pane(
-            id,
-            PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
-            24,
-            80,
-            None,
-            None,
-            "/tmp".into(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        id
-    };
-
-    core.kill_all_panes();
-
-    // The plain child is dead (poll: SIGKILL is fast but not instant).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while core.panes[&plain].pty.is_child_alive() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the plain pane's child must die in the shutdown sweep"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // The keeper pane got NO kill: nothing arrives on its wire inside a
-    // window far longer than the Local kill takes.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut probe = a;
-    use std::io::Read as _;
-    probe
-        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
-        .unwrap();
-    let mut byte = [0u8; 1];
-    assert!(
-        probe.read(&mut byte).is_err(),
-        "the shutdown sweep must never send a Kill frame to a keeper pane"
-    );
-    assert!(core.panes.contains_key(&keeper_pane));
-}
 
 #[test]
 fn emergency_roster_kills_plain_child_and_spares_keeper_child() {

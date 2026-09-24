@@ -2218,6 +2218,16 @@ fn hold_fixture(store_name: &str) -> StoreScratch {
     s
 }
 
+/// `empty_core` plus the shared pane-output receiver, so a test can judge
+/// what actually traveled a pty (a typed command's echo) and not only what
+/// a direct call fed the VT.
+fn empty_core_with_output() -> (Core, mpsc::Receiver<(u64, PaneChunk)>) {
+    let (out_tx, out_rx) = mpsc::channel::<(u64, PaneChunk)>(256);
+    let mut core = empty_core();
+    core.out_tx = out_tx;
+    (core, out_rx)
+}
+
 #[test]
 fn restore_held_seat_feeds_the_message_and_never_types_a_command() {
     // AC1-HP: the held message paints once onto the seat's screen. No
@@ -2315,7 +2325,11 @@ fn restore_holds_a_portal_slot_idle_in_its_seat() {
         "the seat is a leaf of the restored split"
     );
     let entry = core.panes.get(&portal.seat).expect("seat pane exists");
-    assert!(entry.cmd.is_none(), "the seat is a shell until filled");
+    assert_eq!(
+        entry.portal_hold.as_deref(),
+        Some("deadbee1"),
+        "the placeholder carries its held row in its own argv"
+    );
     assert_eq!(entry.name.as_deref(), Some("portal1"), "the seat is named");
     assert!(
         entry.vt.text().contains("held across restart"),
@@ -2325,6 +2339,169 @@ fn restore_holds_a_portal_slot_idle_in_its_seat() {
     assert!(
         notices.contains("held 0 worker pane(s) and 1 portal(s)"),
         "the restore receipt names the held portal: {notices}"
+    );
+}
+
+#[test]
+fn the_held_live_reading_keys_on_provenance_not_command_presence() {
+    // AC2: one classifier behind every portal door. A marked placeholder
+    // reads held even though its wrapper argv gives it `cmd: Some` (the
+    // state a keeper re-adoption produces); a bare shell reads held; only
+    // a real command with no marker reads live.
+    let _s = hold_fixture("portal-classifier");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    assert!(
+        core.panes[&seat].cmd.is_some(),
+        "fixture: the placeholder's argv yields cmd"
+    );
+    assert!(
+        !core.portal_seat_is_viewer(seat),
+        "the marker keeps the seat held"
+    );
+    // A bare shell (no wrapper, no marker) is held too.
+    core.panes.get_mut(&seat).unwrap().cmd = None;
+    core.panes.get_mut(&seat).unwrap().portal_hold = None;
+    assert!(
+        !core.portal_seat_is_viewer(seat),
+        "a bare shell is not a viewer"
+    );
+    // A surviving viewer: a real command and no marker.
+    core.panes.get_mut(&seat).unwrap().cmd = Some("cat".into());
+    assert!(core.portal_seat_is_viewer(seat), "a real viewer is live");
+}
+
+#[test]
+fn a_surviving_viewer_rearmed_live_still_focuses_without_a_second_viewer() {
+    // AC2-EDGE: a viewer that genuinely survived the restart re-adopts
+    // with `cmd: Some` and no marker. A default reach focuses that pane
+    // instead of minting a second viewer.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-survivor");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.panes.get_mut(&seat).unwrap().portal_hold = None;
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    let panes_before = core.panes.len();
+
+    core.command(1, thread_reach_cmd("deadbee1"));
+
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices.iter().any(|t| t.contains("already showing")),
+        "the surviving viewer is the row's home: {notices:?}"
+    );
+    assert_eq!(core.panes.len(), panes_before, "no second viewer spawned");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat is untouched"
+    );
+}
+
+#[test]
+fn a_fill_under_a_foreign_session_id_refuses_naming_both_ids() {
+    // AC2-ERR: the recorded session guard binds the seat to the row's
+    // incarnation at capture. A different full id under the same key is a
+    // different thread wearing a familiar label: the fill refuses, names
+    // both ids, and the seat stays held.
+    let _s = hold_fixture("portal-guard");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.portal_session_guards
+        .insert(1, "sid-recorded".to_string());
+    let mut row = bg_row("target-a", "/tmp/seen", Some("deadbee1"));
+    row.harness_session_id = Some("sid-arrived".to_string());
+    core.agents = vec![row];
+    let panes_before = core.panes.len();
+
+    core.command(1, Command::FocusPane(seat));
+
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t.contains("sid-recorded") && t.contains("sid-arrived")),
+        "the refusal names both ids: {notices:?}"
+    );
+    assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat stays held"
+    );
+    assert!(
+        core.portal_session_guards.contains_key(&1),
+        "the guard stays armed"
+    );
+}
+
+#[test]
+fn a_fill_with_no_live_row_names_the_register_action_once_per_attempt() {
+    // AC3-ERR/EDGE: a held seat whose row is gone keeps the shell and
+    // answers an attempted fill with ONE refusal naming the index, the
+    // row, and one action. No per-frame notices: a second gesture earns
+    // exactly one more refusal, nothing between.
+    let _s = hold_fixture("portal-fill-norow");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.agents = vec![]; // no live row answers deadbee1
+    let panes_before = core.panes.len();
+
+    core.command(1, Command::FocusPane(seat));
+
+    let notices = drain_notices(&mut rx);
+    let refusals: Vec<_> = notices
+        .iter()
+        .filter(|t| t.contains("no live row answers"))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "one refusal for the attempt: {notices:?}"
+    );
+    assert!(
+        refusals[0].contains("portal 1") && refusals[0].contains("deadbee1"),
+        "the index and the row are named: {}",
+        refusals[0]
+    );
+    assert!(
+        refusals[0].contains("fno agents register"),
+        "one action is named: {}",
+        refusals[0]
+    );
+    assert_eq!(core.panes.len(), panes_before, "no viewer starts");
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat stays held"
+    );
+
+    core.command(1, Command::FocusPane(seat));
+    let notices = drain_notices(&mut rx);
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|t| t.contains("no live row answers"))
+            .count(),
+        1,
+        "one refusal per attempt, none between: {notices:?}"
     );
 }
 
