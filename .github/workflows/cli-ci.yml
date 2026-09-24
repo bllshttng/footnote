@@ -1,13 +1,12 @@
 name: cli-ci
 
-# Cancel a PR's superseded runs on re-push so iterative pushes don't each run
-# the full matrix (GitHub Actions minutes). Keyed by head_ref so PR re-pushes
-# share a group; non-PR (push) events fall back to a unique run_id, so every
-# main commit keeps its own run (a shared main group could drop an intermediate
-# run - concurrency allows only one pending).
+# PR re-pushes share a group keyed by head_ref and cancel their own running
+# run. Main pushes share a group keyed by ref with cancel-in-progress false,
+# so a new main push supersedes only the queued main run and never cancels the
+# running one (concurrency keeps one running and one pending).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
   workflow_dispatch:
