@@ -118,6 +118,8 @@ pub(crate) struct VerdictInputs {
     pub crown_age_secs: i64,
     pub generation_start: String,
     pub generation_start_source: String,
+    pub crown_inherited: Option<bool>,
+    pub crown_from_session: Option<String>,
     pub compaction_ceiling: u64,
     pub inherited_undelivered: u64,
     pub filed_undelivered: u64,
@@ -318,6 +320,11 @@ pub(crate) fn resolve_verdict_inputs(
     })?;
     let registry = crate::state::load_registry(registry_path)
         .map_err(|error| format!("{}: registry unreadable: {error}", registry_path.display()))?;
+    let holder_row = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty())
+        .and_then(|session_id| registry.find_by_session(&harness, session_id));
     let (generation_start, generation_start_source) = generation_start(
         &registry,
         &harness,
@@ -326,6 +333,20 @@ pub(crate) fn resolve_verdict_inputs(
         &created_at,
         registry_path,
     )?;
+    let (crown_inherited, crown_from_session) = match holder_row {
+        Some(row) => {
+            let parent = row
+                .spawned_by_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty());
+            let inherited = parent.is_some() && row.crown_grantor.as_deref() != Some("human");
+            (
+                Some(inherited),
+                inherited.then(|| parent.map(str::to_string)).flatten(),
+            )
+        }
+        None => (None, None),
+    };
     let current = now();
     let crown_age_secs = current
         .signed_duration_since(created_at.with_timezone(&chrono::Utc))
@@ -355,6 +376,8 @@ pub(crate) fn resolve_verdict_inputs(
         crown_age_secs,
         generation_start,
         generation_start_source,
+        crown_inherited,
+        crown_from_session,
         compaction_ceiling: ceiling as u64,
         inherited_undelivered,
         filed_undelivered,
@@ -792,6 +815,11 @@ mod tests {
                 .expect("the holder generation makes the split measurable");
         assert_eq!(inputs.generation_start, "2026-09-17T22:47:08Z");
         assert_eq!(inputs.generation_start_source, "registry");
+        assert_eq!(inputs.crown_inherited, Some(true));
+        assert_eq!(
+            inputs.crown_from_session.as_deref(),
+            Some("grantor-session")
+        );
         assert_eq!(inputs.inherited_undelivered, 0);
         assert_eq!(inputs.filed_undelivered, 2);
     }

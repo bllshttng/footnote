@@ -19,6 +19,9 @@ static PRWATCH_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_PROBE_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_ASK_RE: OnceLock<Regex> = OnceLock::new();
 
+// One check-in reads at most the existing four-mebibyte live-transcript window.
+pub(crate) const CHECKIN_TRANSCRIPT_BUDGET_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Entry {
     pub index: usize,
@@ -661,8 +664,34 @@ fn codex_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
 }
 
 pub(crate) fn entries_from_transcript(harness: &str, path: &Path) -> Result<Vec<Entry>, String> {
-    let raw = std::fs::read_to_string(path)
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)
         .map_err(|e| format!("{}: unreadable transcript: {e}", path.display()))?;
+    let size = file
+        .metadata()
+        .map_err(|e| format!("{}: unreadable transcript: {e}", path.display()))?
+        .len();
+    if size > CHECKIN_TRANSCRIPT_BUDGET_BYTES {
+        return Err(format!(
+            "{}: transcript over cap ({size} bytes exceeds {}-byte check-in budget)",
+            path.display(),
+            CHECKIN_TRANSCRIPT_BUDGET_BYTES
+        ));
+    }
+    let mut bytes = Vec::with_capacity(size.min(CHECKIN_TRANSCRIPT_BUDGET_BYTES) as usize);
+    file.take(CHECKIN_TRANSCRIPT_BUDGET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: unreadable transcript: {e}", path.display()))?;
+    if bytes.len() as u64 > CHECKIN_TRANSCRIPT_BUDGET_BYTES {
+        return Err(format!(
+            "{}: transcript over cap (more than {} bytes)",
+            path.display(),
+            CHECKIN_TRANSCRIPT_BUDGET_BYTES
+        ));
+    }
+    let raw = String::from_utf8(bytes)
+        .map_err(|e| format!("{}: transcript is not UTF-8: {e}", path.display()))?;
     match harness {
         "claude" => claude_entries(&raw, path),
         "codex" => codex_entries(&raw, path),

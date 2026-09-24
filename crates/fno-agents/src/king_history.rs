@@ -750,6 +750,10 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
     let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
+    let crown_lineage = CrownLineage {
+        inherited: inputs.crown_inherited,
+        from_session: inputs.crown_from_session.clone(),
+    };
     let crown_start = manifest.created_at.clone().unwrap_or_default();
     let (mut readings, scanned, duplicates, journals) = match scan_readings(
         &events_paths,
@@ -795,7 +799,6 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     };
     let term_reading = crate::king_term::reading(&manifest, now, term_transcript.as_deref());
     let hygiene_transcript = hygiene_transcript_for_holder(&harness, &harness_session_id);
-    let crown_lineage = hygiene_crown_lineage(&registry, &harness, &harness_session_id);
     let hygiene = hygiene_reading(
         &harness,
         &harness_session_id,
@@ -922,21 +925,6 @@ fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<Path
                 })
         }
         _ => None,
-    }
-}
-
-fn hygiene_crown_lineage(registry_path: &Path, harness: &str, session_id: &str) -> CrownLineage {
-    let Ok(registry) = crate::state::load_registry(registry_path) else {
-        return CrownLineage::default();
-    };
-    let Some(row) = registry.find_by_session(harness, session_id) else {
-        return CrownLineage::default();
-    };
-    let inherited =
-        row.spawned_by_session.is_some() && row.crown_grantor.as_deref() != Some("human");
-    CrownLineage {
-        inherited: Some(inherited),
-        from_session: inherited.then(|| row.spawned_by_session.clone()).flatten(),
     }
 }
 
@@ -2224,5 +2212,26 @@ mod tests {
             .unwrap()
             .iter()
             .any(|row| { row["check"] == "check5_context_timing_heuristic" }));
+    }
+
+    #[test]
+    fn oversized_holder_transcript_is_unmeasurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("large.jsonl");
+        let file = std::fs::File::create(&transcript).unwrap();
+        file.set_len(crate::reign_hygiene::CHECKIN_TRANSCRIPT_BUDGET_BYTES + 1)
+            .unwrap();
+        let hygiene = hygiene_reading(
+            "claude",
+            "large-session",
+            "court",
+            Some(&transcript),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "unmeasurable");
+        assert!(hygiene["reason"]
+            .as_str()
+            .unwrap()
+            .contains("transcript over cap"));
     }
 }
