@@ -88,6 +88,46 @@ def test_manifest_path_resolves_a_live_crown(court) -> None:
     assert (result.stderr or "").strip() == "", "a clean resolve is silent on stderr"
 
 
+def test_manifest_path_keys_on_the_crown_row_cwd(court, monkeypatch) -> None:
+    """The writer arms under the crown row's cwd space; the reader must key
+    the same row. A king whose shell sits outside the repo still resolves its
+    manifest with no --state-root (x-8387)."""
+    from fno.king.state import king_state_root
+
+    kingrepo = court / "kingrepo"
+    kingrepo.mkdir()
+    assert king_state_root(kingrepo) != king_state_root(), (
+        "positive control: the row cwd and the shell cwd must key different spaces"
+    )
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="crowned-king",
+                cwd=str(kingrepo),
+                log_path="",
+                harness="claude",
+                harness_session_id=CALLER_SESSION,
+                status="busy",
+                crown_level=2,
+                crown_scope=SCOPE,
+                crown_grantor="human",
+            )
+        ]
+    )
+    manifest = king_manifest_path(SCOPE, state_root=king_state_root(kingrepo))
+    write_manifest(manifest, scope=SCOPE, harness_session_id=CALLER_SESSION)
+
+    elsewhere = court / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = _manifest_path("--harness-session-id", CALLER_SESSION)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == str(manifest)
+
+
 def test_manifest_path_frees_a_stranger(court) -> None:
     """No registry row names this session: exit 1, the hook's "stranger goes
     free" contract, never the exit-2 parse failure the missing verb produced."""

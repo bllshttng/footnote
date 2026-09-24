@@ -80,10 +80,7 @@ mod tests {
     #[test]
     fn kill_bounds_a_bash_sleeper() {
         let dir = tempfile::tempdir().unwrap();
-        let stub = dir.path().join("s");
-        std::fs::write(&stub, "#!/bin/bash\nexec sleep 30\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "s", "#!/bin/bash\nexec sleep 30\n");
         let started = std::time::Instant::now();
         let out = output_with_timeout_result(std::process::Command::new(&stub), 1)
             .expect("bash stub must spawn");
@@ -98,12 +95,9 @@ mod tests {
     #[test]
     fn kill_bounds_a_forking_sleeper() {
         let dir = tempfile::tempdir().unwrap();
-        let stub = dir.path().join("s");
         // No exec: sleep is a grandchild holding the piped stdout. The group
         // kill must still return the read inside its bound.
-        std::fs::write(&stub, "#!/bin/bash\nsleep 30\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "s", "#!/bin/bash\nsleep 30\n");
         let started = std::time::Instant::now();
         let out = output_with_timeout_result(std::process::Command::new(&stub), 1)
             .expect("bash stub must spawn");

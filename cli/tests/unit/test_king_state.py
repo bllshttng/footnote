@@ -301,7 +301,7 @@ def test_a_missing_manifest_without_the_flag_skips_the_flag_advice(monkeypatch, 
     stops there instead of advising a flag the caller never used."""
     import fno.king.state as state
 
-    monkeypatch.setattr(state, "king_state_root", lambda: tmp_path)
+    monkeypatch.setattr(state, "king_state_root", lambda cwd=None: tmp_path)
     row = SimpleNamespace(
         status="live",
         crown_scope="x-f3d0",

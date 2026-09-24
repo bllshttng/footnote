@@ -865,15 +865,7 @@ mod tests {
             )
             .expect("write declaration");
             for (name, body) in producers {
-                let path = hooks.join(name);
-                std::fs::write(&path, body).expect("write producer");
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                        .expect("chmod");
-                }
-                let _ = &path;
+                crate::write_exec_stub(&hooks, name, body);
             }
             Fixture { dir }
         }

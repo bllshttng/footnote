@@ -286,6 +286,7 @@ def done_cmd(
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import load_registry, update_registry
     from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
+    from fno.king.state import _owner_state_root
 
     if scope.strip():
         # Rows store the canonical form, so the compares below must not
@@ -375,9 +376,12 @@ def done_cmd(
     # it under the manifest lock, so a successor crowned mid-vacate survives.
     # Read from the file, never the row, so a resumed king expires the manifest
     # it was armed with.
+    owner_root = _owner_state_root(getattr(caller, "cwd", None))
     try:
         expired_manifest_session = (
-            parse_manifest(king_manifest_path(scope)).get("harness_session_id") or None
+            parse_manifest(
+                king_manifest_path(scope, state_root=owner_root)
+            ).get("harness_session_id") or None
         )
     except (OSError, ValueError):
         expired_manifest_session = None
@@ -451,7 +455,7 @@ def done_cmd(
     # lock (ownership was proven by the locked vacate above). False means the
     # file is no longer the manifest this expiry targeted.
     if not remove_king_manifest(
-        scope, expected_harness_session_id=expired_manifest_session
+        scope, expected_harness_session_id=expired_manifest_session, state_root=owner_root
     ):
         typer.echo(
             f"king: row vacated, but the manifest for {scope!r} could not be "
@@ -554,7 +558,7 @@ def _own_crown_argv(verb: str, scope: str) -> tuple[list[str], str]:
             "there. Reinstall fno, run `fno doctor update --rust`, or set "
             "FNO_AGENTS_BIN."
         )
-    root = _owner_state_root(None)
+    root = _owner_state_root(getattr(caller, "cwd", None))
     argv = [str(binary), verb, "--scope", own,
             "--root", str(root.parent if root.name == ".fno" else root)]
     if session_id:
