@@ -945,7 +945,7 @@ async fn run(args: Vec<String>) -> i32 {
     // the PR-body closure line; the Python readers forward here (JSON payload
     // in, JSON answer out, binary-direct like `pr-body-check`).
     if matches!(verb, "pr-closure-parse" | "pr-closure-render") {
-        return fno_agents::king_board::pr_closure::run(args);
+        return fno_agents::king_board::pr_closure::run(&args);
     }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
