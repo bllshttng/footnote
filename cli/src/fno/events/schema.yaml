@@ -659,41 +659,32 @@ event_types:
     consumers: [fno-agents loop-check, fno do pr]
 
   - name: review_finding
-    description: "An operator annotated a node's work (via `fno backlog annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-aaaa-defanged."
+    description: "An operator recorded a blocking review finding (via `fno backlog note <node> --blocking` / `fno mux block annotate`). TELEMETRY ONLY: the durable record is the findings table in the store, and loop-check gates on that store, never on this event. The event keeps the scoreboard's review_observed count alive."
     sources: [observer]
     data:
-      required: [finding_id, node, text]
+      required: [finding_id, node_id]
       properties:
         finding_id:
           type: string
-          description: "Collision-safe short id minted at emit, never operator-supplied. loop-check quotes it in the deny reason and `fno backlog annotate resolve` clears it."
-        node:
+          description: "Collision-safe short id minted at write, never operator-supplied. `fno backlog note --resolve <id>` clears the store record."
+        node_id:
           type: string
-          description: "The backlog node the finding is scoped to. loop-check matches the session's node against this."
-        text:
-          type: string
-          description: "The operator annotation (original, un-defanged)."
-        block_cmd:
-          type: string
-          description: "The annotated block's command line, when captured via mux (optional)."
-        block_excerpt:
-          type: string
-          description: "A capped excerpt of the annotated block output (optional)."
-    consumers: [fno-agents loop-check]
+          description: "The backlog node the finding is scoped to. loop-check matches the session's node against the store record."
+    consumers: [fno-agents scoreboard]
 
   - name: review_finding_resolved
-    description: "A review_finding was explicitly resolved (by operator or self-resolving worker via `fno backlog annotate resolve`). Clears the matching finding for the loop-check gate. Idempotent: a second resolve of the same id is a warning no-op and emits nothing."
+    description: "A finding was explicitly resolved (via `fno backlog note --resolve <id>`). TELEMETRY ONLY: the store row carries resolved_at; this event keeps the scoreboard count alive."
     sources: [observer]
     data:
       required: [finding_id]
       properties:
         finding_id:
           type: string
-          description: "The review_finding id being resolved."
-        node:
+          description: "The finding id that was resolved."
+        status:
           type: string
-          description: "The finding's node (echoed for observability; optional)."
-    consumers: [fno-agents loop-check]
+          description: "resolved or already_resolved (echoed for observability)."
+    consumers: [fno-agents scoreboard]
 
   - name: review_hold_expired
     description: "A merge surface read a review hold (review:branch:<branch>) whose TTL had lapsed, whether or not the holder session was still running, and cleared past it. The hold exists so a merge cannot land while a review of that head is still executing; a hold that outlives its review would wedge the lane permanently, so it ages out - but never silently, because a lane that clears with no receipt is indistinguishable from one that was never held. Emitted where the decision was taken, not by the reaper."
@@ -3507,6 +3498,55 @@ event_types:
         top_rss: { type: [array, "null"] }
         sessions_error: { type: [string, "null"] }
     consumers: [operator]
+
+  - name: stop_decision
+    description: "The Stop hook's single correlated ownership decision for one harness fire. The control_plane_tick remains the aggregate projection; this row preserves the identity and output contract needed to audit who owned continuation."
+    sources: [hook]
+    data:
+      required: [session_id, raw_identity_candidates, turn_id, manifest, scope, node_id, driver, continuation_owner, decision, class, correlation_id, harness_output_contract]
+      properties:
+        session_id:
+          type: string
+          description: "Full harness session identity supplied by the Stop fire."
+        raw_identity_candidates:
+          type: array
+          items: { type: string }
+          description: "Every raw identity candidate considered by the resolver, in precedence order."
+        turn_id:
+          type: string
+          description: "Codex turn id from the Stop payload, or an empty string for non-Codex fires."
+        manifest:
+          type: string
+          description: "Resolved manifest path, or an empty string when no manifest owned the fire."
+        scope:
+          type: string
+          description: "Manifest scope/crown scope, or an empty string when unscoped."
+        node_id:
+          type: string
+          description: "Manifest node identity, or an empty string when no node is bound."
+        driver:
+          type: string
+          description: "The continuation driver that answered, or unknown when ownership could not be resolved."
+        continuation_owner:
+          type: string
+          enum: [goal, loop_check, none, refusal]
+          description: "The single owner selected for the next continuation."
+        decision:
+          type: string
+          enum: [allow, block, refuse]
+          description: "The Stop decision after continuation arbitration."
+        class:
+          type: string
+          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow]
+          description: "Typed reason class for the decision."
+        correlation_id:
+          type: string
+          description: "Stable id joining the project and aggregate projections for this Stop fire."
+        harness_output_contract:
+          type: string
+          enum: [empty, json_block, exit_2_stderr]
+          description: "The output contract the calling harness will consume for a block/refusal."
+    consumers: [operator, fno doctor]
 
   - name: evals_scheduled_run
     description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
@@ -6907,7 +6947,7 @@ event_types:
     consumers: [operator]
 
   - name: king_loop_check
-    description: "One king loop-check fire that found actionable work and blocked. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
     data:
       required: [session_id]
@@ -6926,6 +6966,36 @@ event_types:
         board_error:
           type: string
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
+        provider_goal_pause_error:
+          type: string
+          description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
+    consumers: [operator]
+
+  - name: king_goal_resumed
+    description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
+    sources: [loop]
+    data:
+      required: [session_id, scope, resumed, successor, provider_receipt]
+      properties:
+        session_id:
+          type: string
+          description: "The exact harness session whose provider goal resumed."
+        scope:
+          type: string
+          description: "The crown scope whose goal was resumed."
+        resumed:
+          type: boolean
+        successor:
+          type: boolean
+        reason:
+          type: string
+          description: "The admitted wake trigger, when the caller supplied one."
+        address:
+          type: string
+          description: "The matched inbox address for a mail wake, when present."
+        provider_receipt:
+          type: object
+          description: "The Codex readback confirming objective, active status and continuation owner."
     consumers: [operator]
 
   - name: king_drain_reserve
