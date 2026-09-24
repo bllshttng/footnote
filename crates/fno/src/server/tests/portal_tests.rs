@@ -3080,6 +3080,39 @@ fn close_portal_refuses_a_pane_that_is_no_portal_seat() {
 }
 
 #[test]
+fn close_portal_refuses_a_seat_that_already_closed() {
+    // AC5-ERR, the stale-seat half. The portals entry still NAMES a seat
+    // whose pane an operator close already took; the close must refuse
+    // with the same notice, not no-op through the stale entry.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    core.close_by_operator(seat);
+    assert!(
+        !core.panes.contains_key(&seat),
+        "fixture: the seat pane is gone"
+    );
+    while rx.try_recv().is_ok() {}
+
+    core.command(client_id, Command::ClosePortal { seat });
+
+    assert_eq!(
+        core.panes.len(),
+        1,
+        "nothing closed: the seat was already gone"
+    );
+    let notices = drain_notices(&mut rx);
+    assert!(
+        notices
+            .iter()
+            .any(|t| t == &format!("pane {seat} is not a portal seat")),
+        "the stale seat gets the refusal, not a silent no-op: {notices:?}"
+    );
+}
+
+#[test]
 fn close_portal_refuses_the_sessions_only_pane() {
     // AC6-EDGE. Closing the seat that is the session's last pane would
     // end the session; ClosePortal refuses and says so instead.

@@ -190,10 +190,12 @@ impl Core {
     /// last pane (its close would end the session), gets a notice and
     /// nothing else.
     pub(super) fn close_portal(&mut self, client_id: u64, seat: u64) -> Flow {
+        // Liveness in the find: a stale entry still NAMES a closed seat,
+        // and a close that lands on nothing must refuse, not no-op.
         let seat_portal = self
             .portals
             .iter()
-            .find(|(_, portal)| portal.seat == seat)
+            .find(|(_, portal)| portal.seat == seat && self.panes.contains_key(&portal.seat))
             .map(|(idx, _)| *idx);
         let Some(idx) = seat_portal else {
             self.notice(client_id, format!("pane {seat} is not a portal seat"));
