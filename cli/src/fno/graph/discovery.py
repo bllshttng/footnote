@@ -303,11 +303,7 @@ def assess(
 def expired_worklist(
     limit: int, *, graph_path: Path
 ) -> tuple[dict[str, Any], str]:
-    """Assess every expired deferred node and build the ranked worklist.
-
-    Returns ``(report, refusal)``. ``refusal`` is empty on success and
-    otherwise names a failed-instrument control. Read-only by construction.
-    """
+    """Return the ranked worklist and any failed-instrument refusal."""
     from collections import Counter
 
     from fno.graph import relatedness

@@ -108,8 +108,7 @@ def cmd_version() -> None:
 
 
 def wire_rows(*, path: Path = GRAPH_JSON, include_archived: bool = False) -> list[dict]:
-    """Wire rows; unrepresentable rows ride verbatim and archived residents
-    answer only when asked for. Keeper failures remain visible to callers."""
+    """Return keeper rows; unavailable-store errors propagate."""
     from pydantic import ValidationError
 
     reply = _api("rows", {"include_archived": include_archived}, path=path)
