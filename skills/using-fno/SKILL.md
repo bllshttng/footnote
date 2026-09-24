@@ -29,7 +29,7 @@ Invoke plugin-qualified per harness: `/fno:<verb>` on claude/opencode, `$fno:<ve
 | `target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
 | `think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
 | `review` | Review a diff. Routes: `default` (inline lane), `peer` (cross-model), `prove-it`, `cleanup`. |
-| `pr` | PR lifecycle: create, check, merged (routed create worker). |
+| `pr` | PR lifecycle: create inline, check, merged. |
 | `fix` | Repair. Routes: `fix` (default), `investigate`. |
 
 Everything else stays invocable by full name: `blueprint`, `execute` (`execute waves` for orchestration), `ship` (`ship pr` = `pr`, `ship doc`), `setup`, `triage`, `agent`, `mail`, `law`, `ship-docs`, `audit`, `speculate`. The session skill list enumerates them; this set is the entry point, not an access boundary.
@@ -105,6 +105,6 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
 | "Send my questions to my notes file" | set `[[attention]]` |
 
-Prefer the smaller surface: skills run inline by default (think, review); dispatched flows spawn.
+Skills run inline by default. A skill dispatches work only when its own instructions say to.
 
 In a worktree Bash refuses heredocs, command substitution and loops, so write the script with Write and run `bash <file>`; use Read, Grep and Glob for every read; never lead a command with `cd`, the cwd persists.
