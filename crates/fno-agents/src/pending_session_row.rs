@@ -301,7 +301,6 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
-        std::env::set_var("FNO_HOME", &dir);
         seed_row(&registry, "w1", Some("x-defr"));
         park(&park_payload(&registry, "do")).unwrap();
 
