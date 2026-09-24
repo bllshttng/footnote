@@ -5,6 +5,7 @@
 //! branch is a refusal, never a fallback to the caller's cwd.
 
 use serde_json::{json, Value};
+use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +75,7 @@ fn resolve_pr_with_timeout(
     }
     let query = format!("repos/{{owner}}/{{repo}}/pulls/{pr}");
     let out = crate::loopcheck::bounded_read(
-        gh_bin,
+        OsStr::new(gh_bin),
         &["api", query.as_str(), "--jq", ".head.ref"],
         cwd,
         "pr-worktree",
