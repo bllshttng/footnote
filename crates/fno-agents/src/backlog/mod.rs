@@ -383,17 +383,20 @@ fn archive_import_if_needed(connection: &mut Connection, graph: &Path) -> Result
 /// graph.db imports on first open, which keeps the hundreds of test files
 /// that seed graph.json fixtures working. A populated store re-imports
 /// never; it may rebuild once (see [`rebuild_if_schema_v2`]).
-fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
+fn materialized_rows(connection: &Connection) -> Result<i64, String> {
     // Raw-carried rows count as materialized: a store holding only them is
     // NOT fresh, or every open would re-fold the seed over the carry.
-    let nodes_count: i64 = connection
+    connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM nodes) + (SELECT COUNT(*) FROM nodes_raw)",
             [],
             |row| row.get(0),
         )
-        .map_err(|error| error.to_string())?;
-    if nodes_count > 0 {
+        .map_err(|error| error.to_string())
+}
+
+fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
+    if materialized_rows(connection)? > 0 {
         return rebuild_if_schema_v2(connection, graph);
     }
     let has_entries: bool = connection
@@ -428,23 +431,26 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
                 rows = entries.clone();
             }
         }
-    } else {
-        // No seed source at all: still stamp, so a materialized store never
-        // reads as "no version".
-        stamp_version_fields(connection, &content_version(&[]))?;
-        stamp_meta(connection, "schema_version", SCHEMA_VERSION)?;
-        return Ok(());
     }
     if rows.is_empty() && !has_entries {
         // An empty-or-absent graph with no blob: the store is live from
         // birth, so the version stamp lands NOW. The old contract deferred
         // it to the first shadow write, which read as "the store has no
         // version" to every reader once reads answered sqlite only.
-        if graph.exists() {
-            stamp_version_fields(connection, &content_version(&[]))?;
-            stamp_meta(connection, "schema_version", SCHEMA_VERSION)?;
+        //
+        // The count is taken again under the write lock. A first write can
+        // land between the unlocked count and this stamp, and stamping the
+        // empty version over it lets the next writer's fence pass and
+        // delete that write.
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        if materialized_rows(&transaction)? > 0 {
+            return Ok(());
         }
-        return Ok(());
+        stamp_version_fields(&transaction, &content_version(&[]))?;
+        stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
+        return transaction.commit().map_err(|error| error.to_string());
     }
     // Dedup duplicate seed slugs before the saves: two rows carrying the
     // same slug collapse on the unique index, and INSERT OR REPLACE answers
@@ -503,6 +509,11 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
+    // Another opener may have folded the seed, and a writer published over
+    // it, since the unlocked count. A second fold would revert that write.
+    if materialized_rows(&transaction)? > 0 {
+        return Ok(());
+    }
     for (ordinal, row) in rows.iter().enumerate() {
         // A row the model cannot represent (a minimal legacy fixture row with
         // no slug/status) rides the raw carry verbatim: SQLite is the only
@@ -1708,6 +1719,30 @@ mod tests {
         let graph = dir.path().join(name);
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
         (dir, graph)
+    }
+
+    /// A first write that lands between an opener's unlocked row count and
+    /// its empty-store stamp keeps its version. The stamp used to reset it
+    /// to the empty hash, so the next writer's fence passed and its publish
+    /// deleted the write.
+    #[test]
+    fn an_opener_never_restamps_the_empty_version_over_a_first_write() {
+        let (_dir, graph) = fixture("graph.json");
+        drop(open(&graph).unwrap());
+        let mut writer = open(&graph).unwrap();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        nodes::save_raw(&transaction, "x-a", 0, &serde_json::json!({"id": "x-a"})).unwrap();
+        stamp_version(&transaction, "sqlite:first-write").unwrap();
+        let opener = {
+            let graph = graph.clone();
+            std::thread::spawn(move || open(&graph).map(drop))
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        transaction.commit().unwrap();
+        opener.join().unwrap().unwrap();
+        assert_eq!(version(&graph).unwrap(), "sqlite:first-write");
     }
 
     #[test]
