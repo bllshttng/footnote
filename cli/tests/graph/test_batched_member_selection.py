@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from typer.testing import CliRunner
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.cli import cli, _is_batched_member
 
@@ -61,7 +62,7 @@ def graph_file(tmp_path, monkeypatch):
     path = tmp_path / "graph.json"
 
     def write(entries):
-        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(path, entries)
         return path
 
     # The selection decision is served by the keeper now: the graph is pinned
@@ -69,7 +70,7 @@ def graph_file(tmp_path, monkeypatch):
     # `_graph_path`, and claims resolve under a redirected root.
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[paths]\ngraph_json = "{path}"\n', encoding="utf-8"
+        f'state_dir = "{tmp_path}"\n', encoding="utf-8"
     )
     (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_CONFIG", str(config))

@@ -185,8 +185,7 @@ def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path:
     (repo / ".fno").mkdir(parents=True)
     (repo / ".fno" / "config.toml").write_text(
         'plans_dir = "target-plans"\n'
-        '[paths]\n'
-        'graph_json = "target-state/graph.json"\n'
+        'state_dir = "target-state"\n'
     )
     graph_path = repo / "target-state" / "graph.json"
     graph_path.parent.mkdir()
@@ -483,7 +482,7 @@ def _seeded_graph_repo(tmp_path: Path, entries: list[dict]) -> tuple[Path, Path]
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps({"entries": entries}) + "\n")
     (repo / ".fno" / "config.toml").write_text(
-        f'[paths]\ngraph_json = "{graph}"\n', encoding="utf-8"
+        f'state_dir = "{graph.parent}"\n', encoding="utf-8"
     )
     return repo, graph
 

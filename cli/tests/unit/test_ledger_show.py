@@ -11,6 +11,7 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
+from tests.fixtures.graph_seed import seed_graph
 import typer
 
 from fno.cost._register import LEDGER_SESSION_UNRESOLVED
@@ -58,7 +59,7 @@ def show(tmp_path, monkeypatch, capsys):
     ledger = tmp_path / "ledger.json"
     graph = tmp_path / "graph.json"
     ledger.write_text(json.dumps({"entries": ROWS}))
-    graph.write_text(json.dumps(GRAPH))
+    seed_graph(graph, GRAPH["entries"])
 
     class _P:
         ledger_json = staticmethod(lambda: ledger)

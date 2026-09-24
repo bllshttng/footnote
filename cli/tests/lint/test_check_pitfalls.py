@@ -33,7 +33,7 @@ def _run(
     # operator's live graph: pin an empty state root with an absent store.
     state = target.parent / "state"
     config = target.parent / "config.toml"
-    config.write_text(f'[paths]\nstate_dir = "{state}"\n', encoding="utf-8")
+    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
     env = {**os.environ, "FNO_CONFIG": str(config)}
     if env_extra:
         env.update(env_extra)

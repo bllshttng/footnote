@@ -288,23 +288,16 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     from fno.graph import cli as gcli
 
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-in", "title": "in", "status": "ready", "mission_id": "m-7"},
-                    {"id": "x-out", "title": "out", "status": "ready"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    seed_graph(path, [
+        {"id": "x-in", "title": "in", "status": "ready", "mission_id": "m-7"},
+        {"id": "x-out", "title": "out", "status": "ready"},
+    ])
     # The selection decision is served by the keeper now: the graph is pinned
     # through FNO_CONFIG (the client seam), and claims resolve under a
     # redirected root - never the operator's real claims.
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[paths]\\ngraph_json = "{path}"\\n', encoding="utf-8"
+        f'state_dir = "{tmp_path}"\n', encoding="utf-8"
     )
     (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_CONFIG", str(config))

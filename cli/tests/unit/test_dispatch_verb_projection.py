@@ -65,14 +65,12 @@ class Iso:
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         self.root = tmp_path
-        self.graph = tmp_path / "graph.json"
+        self.graph = tmp_path / ".fno" / "graph.json"
         cfg = tmp_path / "config.toml"
         cfg.write_text(
             f'state_dir = "{tmp_path / ".fno"}"\n'
             "\n[dispatch]\n"
             'allowed_verbs = ["/target", "/blueprint"]\n'
-            "\n[paths]\n"
-            f'graph_json = "{self.graph}"\n'
         )
         monkeypatch.setenv("FNO_CONFIG", str(cfg))
         monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
