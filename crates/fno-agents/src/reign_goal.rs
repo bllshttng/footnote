@@ -201,13 +201,7 @@ async fn apply_action(
                 .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
             verify_goal(&paused, &expected, GoalStatus::Paused, "pause")?;
             verify_usage_preserved(&current, &paused, "pause")?;
-            pause_reign_goal_receipt(
-                session_id,
-                &scope,
-                &owner,
-                &paused.objective,
-                &paused.usage,
-            )
+            pause_reign_goal_receipt(session_id, &scope, &owner, &paused.objective, &paused.usage)
         }
         GoalAction::Resume { scope, owner } => {
             let expected = crate::codex_thread::reign_objective(&scope);
@@ -261,23 +255,7 @@ async fn provider_action(
                 .await
                 .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
                 .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
-            if goal.status != GoalStatus::Active {
-                return Err(format!(
-                    "Codex provider goal is not active: {:?}",
-                    goal.status
-                ));
-            }
-            let owner = continuation_owner_for_goal(&goal.objective, scope, session_id)?;
-            Ok(json!({
-                "verified": true,
-                "action": "goal_get",
-                "provider": "codex",
-                "thread_id": session_id,
-                "status": "active",
-                "objective": goal.objective,
-                "continuation_owner": owner,
-                "usage": goal.usage.receipt_value(),
-            }))
+            provider_goal_get_receipt(session_id, &scope, &goal)
         }
         "thread/goal/set" => {
             let (objective, owner) = goal_set_contract(command, scope, session_id)?;
@@ -501,6 +479,18 @@ fn goal_receipt(
     }))
 }
 
+fn provider_goal_get_receipt(
+    session_id: &str,
+    scope: &str,
+    goal: &NativeGoal,
+) -> Result<Value, String> {
+    let owner = continuation_owner_for_goal(&goal.objective, scope, session_id)?;
+    let mut receipt = goal_receipt(session_id, scope, &owner, goal)?;
+    receipt["verified"] = json!(true);
+    receipt["action"] = json!("goal_get");
+    Ok(receipt)
+}
+
 fn verify_usage_preserved(
     before: &NativeGoal,
     after: &NativeGoal,
@@ -549,7 +539,9 @@ mod tests {
                 time_used_seconds: 5,
             },
         };
-        let receipt = goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).unwrap();
+        let receipt = provider_goal_get_receipt("thread-1", "x-aaaa", &goal).unwrap();
+        assert_eq!(receipt["verified"], true);
+        assert_eq!(receipt["action"], "goal_get");
         assert_eq!(receipt["provider"], "codex");
         assert_eq!(receipt["thread_id"], "thread-1");
         assert_eq!(receipt["scope"], "x-aaaa");

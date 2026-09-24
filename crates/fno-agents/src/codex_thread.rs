@@ -48,6 +48,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// burst of notification frames with quiet gaps while the model thinks, so
 /// this deadline is the ONLY bound on the wait for `turn/completed`.
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+/// Manual compaction runs a provider turn. Share that whole-turn bound and
+/// require the same-thread completion receipt before reporting success.
+const COMPACTION_TIMEOUT: Duration = TURN_TIMEOUT;
 /// How long the daemon's `ask` waits on a submitter's reply before answering
 /// `in_flight`. Comfortably under the client's 120s `RESPONSE_DEADLINE`
 /// (crates/fno-agents/src/bin/client.rs) so a bounded receipt, not a silent
@@ -289,12 +292,29 @@ pub fn thread_compact_start_request_json(id: u64, thread_id: &str) -> String {
 }
 
 enum CompactionLifecycle {
-    Started(String),
-    Completed(String, Value),
+    Started(String, String),
+    Completed(String, String, Value),
+    ContextCompacted(Value),
 }
 
 fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<CompactionLifecycle> {
     let method = value.get("method").and_then(Value::as_str)?;
+    if method == "thread/compacted" {
+        let params = value.get("params")?;
+        if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+            return None;
+        }
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())?;
+        return Some(CompactionLifecycle::ContextCompacted(json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "type": "contextCompaction",
+            "status": "completed",
+        })));
+    }
     if !matches!(method, "item/started" | "item/completed") {
         return None;
     }
@@ -307,6 +327,12 @@ fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<Compacti
     {
         return None;
     }
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| value.get("turnId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
     let item = params.get("item").or_else(|| value.get("item"))?;
     if item.get("type").and_then(Value::as_str) != Some("contextCompaction") {
         return None;
@@ -317,10 +343,18 @@ fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<Compacti
         .filter(|id| !id.trim().is_empty())?
         .to_string();
     match method {
-        "item/started" => Some(CompactionLifecycle::Started(item_id)),
-        "item/completed" if item.get("status").and_then(Value::as_str) == Some("completed") => {
-            Some(CompactionLifecycle::Completed(item_id, value.clone()))
-        }
+        "item/started" => Some(CompactionLifecycle::Started(turn_id, item_id)),
+        "item/completed" => Some(CompactionLifecycle::Completed(
+            turn_id,
+            item_id.clone(),
+            json!({
+                "threadId": thread_id,
+                "turnId": params.get("turnId").or_else(|| value.get("turnId")),
+                "itemId": item_id,
+                "type": "contextCompaction",
+                "status": "completed",
+            }),
+        )),
         _ => None,
     }
 }
@@ -1340,7 +1374,7 @@ impl CodexThread {
         let id_value = Value::from(id);
         self.write_frame(&thread_compact_start_request_json(id, &self.thread_id))
             .await?;
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let deadline = Instant::now() + COMPACTION_TIMEOUT;
         let mut acknowledged = false;
         let mut started_items = Vec::new();
         let mut completed_items = HashMap::new();
@@ -1372,11 +1406,22 @@ impl CodexThread {
                 continue;
             }
             match parse_compaction_lifecycle(&value, &self.thread_id) {
-                Some(CompactionLifecycle::Started(item_id)) => {
-                    started_items.push(item_id);
+                Some(CompactionLifecycle::Started(turn_id, item_id)) => {
+                    started_items.push((turn_id, item_id));
                 }
-                Some(CompactionLifecycle::Completed(item_id, receipt)) => {
-                    completed_items.insert(item_id, receipt);
+                Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) => {
+                    completed_items.insert((turn_id, item_id), receipt);
+                }
+                Some(CompactionLifecycle::ContextCompacted(receipt)) => {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
                 }
                 None => park_frame(&mut self.pending, &mut self.completed_turns, value),
             }
@@ -2561,36 +2606,71 @@ mod tests {
             "method": "item/started",
             "params": {
                 "threadId": "thread-a",
-                "item": { "id": "compact-1", "type": "contextCompaction", "status": "inProgress" }
+                "turnId": "turn-a",
+                "item": { "id": "compact-1", "type": "contextCompaction" }
             }
         });
         assert!(matches!(
             parse_compaction_lifecycle(&started, "thread-a"),
-            Some(CompactionLifecycle::Started(item_id)) if item_id == "compact-1"
+            Some(CompactionLifecycle::Started(turn_id, item_id))
+                if turn_id == "turn-a" && item_id == "compact-1"
         ));
         let completed = serde_json::json!({
             "method": "item/completed",
             "params": {
                 "threadId": "thread-a",
-                "item": { "id": "compact-1", "type": "contextCompaction", "status": "completed" }
+                "turnId": "turn-a",
+                "item": { "id": "compact-1", "type": "contextCompaction" }
             }
         });
-        assert!(matches!(
-            parse_compaction_lifecycle(&completed, "thread-a"),
-            Some(CompactionLifecycle::Completed(item_id, _)) if item_id == "compact-1"
-        ));
+        let Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) =
+            parse_compaction_lifecycle(&completed, "thread-a")
+        else {
+            panic!("item/completed proves lifecycle completion without item.status");
+        };
+        assert_eq!(
+            (turn_id.as_str(), item_id.as_str()),
+            ("turn-a", "compact-1")
+        );
+        assert_eq!(receipt["threadId"], "thread-a");
+        assert_eq!(receipt["turnId"], "turn-a");
+        assert_eq!(receipt["itemId"], "compact-1");
+        assert_eq!(receipt["status"], "completed");
+        crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap();
         assert!(parse_compaction_lifecycle(&completed, "thread-b").is_none());
         let completed_without_start = serde_json::json!({
             "method": "item/completed",
             "params": {
                 "threadId": "thread-a",
-                "item": { "id": "compact-2", "type": "contextCompaction", "status": "completed" }
+                "turnId": "turn-a",
+                "item": { "id": "compact-2", "type": "contextCompaction" }
             }
         });
         assert!(matches!(
             parse_compaction_lifecycle(&completed_without_start, "thread-a"),
-            Some(CompactionLifecycle::Completed(item_id, _)) if item_id == "compact-2"
+            Some(CompactionLifecycle::Completed(turn_id, item_id, _))
+                if turn_id == "turn-a" && item_id == "compact-2"
         ));
+    }
+
+    #[test]
+    fn compacted_notification_is_a_same_thread_completion_receipt() {
+        let event = serde_json::json!({
+            "method": "thread/compacted",
+            "params": {"threadId": "thread-a", "turnId": "turn-1"}
+        });
+        let Some(CompactionLifecycle::ContextCompacted(receipt)) =
+            parse_compaction_lifecycle(&event, "thread-a")
+        else {
+            panic!("Codex compaction notification should prove completion");
+        };
+
+        assert_eq!(
+            crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap()
+                ["turnId"],
+            "turn-1"
+        );
+        assert!(parse_compaction_lifecycle(&event, "thread-b").is_none());
     }
 
     #[test]

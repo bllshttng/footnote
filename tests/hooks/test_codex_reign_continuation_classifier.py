@@ -81,13 +81,6 @@ def verified_receipt() -> dict:
                     "thread_id": "01a00000-0000-7000-8000-000000000001",
                 },
                 "refused_retry": {"status": "refused", "manifest_unchanged": True},
-                "refused_no_goal": {
-                    "status": "refused",
-                    "thread_id": "01a00000-0000-7000-8000-000000000001",
-                    "scope": "disposable-refusal",
-                    "provider_goal_readable": False,
-                    "manifest_written": False,
-                },
             },
             "after": {
                 "status": "active",
@@ -137,17 +130,19 @@ def verified_receipt() -> dict:
                 "manifest_written_at_ns": 200,
                 "useful_action_at_ns": 300,
             },
-            "delegated": {
-                "decision": "allow",
-                "class": "delegated-to-goal",
+            "continuation": {
+                "status": "verified",
                 "continuation_owner": "goal",
                 "session_id": "01a00000-0000-7000-8000-000000000001",
+                "stop_turn_id": "turn-0001",
+                "stop_correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
                 "turn_id": "turn-0002",
-                "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0002",
-                "block_count": 0,
+                "turn_completed": True,
+                "user_message_count": 0,
+                "started_at_ns": 250,
                 "useful_action": True,
                 "useful_action_at_ns": 300,
-                "stop_at_ns": 350,
+                "action_hash": "sha256:nonce-action-0001",
             },
         },
         "proof": {
@@ -166,6 +161,9 @@ def verified_receipt() -> dict:
                 "stop_samples_during_hold": 0,
                 "turns_during_hold": 0,
                 "goal_usage_stable": True,
+                "wake_holder": "codex-thread-holder",
+                "holder_turn_completed": True,
+                "provider_thread_survived": True,
                 "paused_goal_receipt": {
                     "thread_id": "01a00000-0000-7000-8000-000000000001",
                     "status": "paused",
@@ -183,6 +181,9 @@ def verified_receipt() -> dict:
                 "session_id": "01a00000-0000-7000-8000-000000000001",
                 "scope": "disposable",
                 "reason": "board",
+                "wake_holder": "codex-thread-holder",
+                "board_changed": True,
+                "board_change_node": "x-1234",
                 "provider_receipt": {
                     "thread_id": "01a00000-0000-7000-8000-000000000001",
                     "status": "active",
@@ -207,41 +208,36 @@ def verified_receipt() -> dict:
                     "boundary": "compaction",
                     "status": "verified",
                     "same_session": True,
-                    "useful_action": True,
                     "session_id": "01a00000-0000-7000-8000-000000000001",
                     "turn_id": "turn-0002",
-                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0002",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
                     "action_hash": "sha256:nonce-action-0001",
+                    "goal_status": "paused",
+                    "provider_receipt": {"thread_id": "01a00000-0000-7000-8000-000000000001", "status": "paused", "objective": "$fno:reign disposable"},
                 },
                 {
                     "boundary": "resume",
                     "status": "verified",
                     "same_session": True,
-                    "useful_action": True,
                     "session_id": "01a00000-0000-7000-8000-000000000001",
-                    "turn_id": "turn-0003",
-                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0003",
+                    "turn_id": "turn-0002",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
                     "action_hash": "sha256:nonce-action-0001",
+                    "goal_status": "active",
+                    "provider_receipt": {"thread_id": "01a00000-0000-7000-8000-000000000001", "status": "active", "objective": "$fno:reign disposable"},
                 },
                 {
                     "boundary": "private-daemon-replacement",
                     "status": "verified",
                     "same_session": True,
-                    "useful_action": True,
                     "session_id": "01a00000-0000-7000-8000-000000000001",
-                    "turn_id": "turn-0003",
-                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0003",
+                    "turn_id": "turn-0002",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
                     "action_hash": "sha256:nonce-action-0001",
+                    "goal_status": "active",
+                    "provider_receipt": {"thread_id": "01a00000-0000-7000-8000-000000000001", "status": "active", "objective": "$fno:reign disposable"},
                 },
             ],
-            "provider_goal_refusal": {
-                "thread_id": "01a00000-0000-7000-8000-000000000001",
-                "scope": "disposable-refusal",
-                "provider_goal_readable": False,
-                "provider_error": "Codex app-server could not resume the exact thread",
-                "init_error": "provider_goal: thread unreadable",
-                "manifest_absent": True,
-            },
         },
         "status": "verified",
     }
@@ -274,6 +270,19 @@ def test_ac10_hp_accepts_visitor_stop_followed_by_goal_owned_continuation():
     assert result["class"] == "verified-continuation"
 
 
+def test_ac2_2_requires_promptless_goal_action_after_the_independent_stop():
+    receipt = verified_receipt()
+    receipt["stop"]["continuation"]["started_at_ns"] = 200
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "parser-rejected",
+        "failed_reader": "stop.continuation.action_order",
+    }
+
+
 def test_ac11_hp_rejects_a_manifest_written_before_provider_goal_ensure():
     receipt = verified_receipt()
     receipt["goal"]["init"]["manifest_written_at_ns"] = 99
@@ -297,19 +306,6 @@ def test_ac11_edge_rejects_a_retry_that_replaces_the_verified_crown():
         "ok": False,
         "class": "identity-miss",
         "failed_reader": "goal.init.refused_retry",
-    }
-
-
-def test_ac11_edge_rejects_unreadable_goal_init_that_writes_a_manifest():
-    receipt = verified_receipt()
-    receipt["goal"]["init"]["refused_no_goal"]["manifest_written"] = True
-
-    result = load_diagnostic().classify_receipt(receipt)
-
-    assert result == {
-        "ok": False,
-        "class": "identity-miss",
-        "failed_reader": "goal.init.refused_no_goal",
     }
 
 

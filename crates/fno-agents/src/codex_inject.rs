@@ -69,6 +69,7 @@ pub fn codex_app_server_socket_path() -> PathBuf {
 /// positive liveness signal.
 pub struct CodexDaemonAdapter {
     provider_state_path: PathBuf,
+    provider_state_fallback_path: Option<PathBuf>,
     state_path: PathBuf,
     lock_path: PathBuf,
     socket_path: PathBuf,
@@ -82,10 +83,22 @@ impl CodexDaemonAdapter {
             .unwrap_or_else(|| PathBuf::from("fno-harness-daemon.json"));
         Self {
             provider_state_path,
+            provider_state_fallback_path: None,
             state_path,
             lock_path,
             socket_path,
         }
+    }
+
+    fn with_provider_state_fallback(
+        provider_state_path: PathBuf,
+        fallback_path: PathBuf,
+        lock_path: PathBuf,
+        socket_path: PathBuf,
+    ) -> Self {
+        let mut adapter = Self::new(provider_state_path, lock_path, socket_path);
+        adapter.provider_state_fallback_path = Some(fallback_path);
+        adapter
     }
 
     pub fn from_environment() -> Self {
@@ -93,8 +106,10 @@ impl CodexDaemonAdapter {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
             .unwrap_or_else(|| PathBuf::from(".codex"));
-        Self::new(
-            home.join("app-server-daemon").join("app-server.pid"),
+        let daemon_dir = home.join("app-server-daemon");
+        Self::with_provider_state_fallback(
+            daemon_dir.join("daemon.pid"),
+            daemon_dir.join("app-server.pid"),
             home.join("app-server-daemon")
                 .join("fno-harness-daemon.lock"),
             home.join("app-server-control")
@@ -122,8 +137,18 @@ impl CodexDaemonAdapter {
     }
 
     fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
-        let raw = std::fs::read_to_string(&self.provider_state_path)
-            .map_err(|error| format!("read Codex daemon state: {error}"))?;
+        let raw = match std::fs::read_to_string(&self.provider_state_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(fallback) = &self.provider_state_fallback_path else {
+                    return Err(format!("read Codex daemon state: {error}"));
+                };
+                std::fs::read_to_string(fallback).map_err(|fallback_error| {
+                    format!("read Codex daemon state: {fallback_error}")
+                })?
+            }
+            Err(error) => return Err(format!("read Codex daemon state: {error}")),
+        };
         <Self as crate::harness_daemon::HarnessDaemonAdapter>::parse_state(self, &raw)
     }
 }
@@ -2732,6 +2757,22 @@ mod tests {
             .unwrap();
         assert_eq!(state.endpoint, "/tmp/codex.sock");
         assert_eq!(state.incarnation, "123:456");
+    }
+
+    #[test]
+    fn codex_daemon_state_reads_legacy_provider_file_when_current_file_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("daemon.pid");
+        let legacy = temp.path().join("app-server.pid");
+        std::fs::write(&legacy, r#"{"pid":123,"processStartTime":456}"#).unwrap();
+        let adapter = CodexDaemonAdapter::with_provider_state_fallback(
+            current,
+            legacy,
+            temp.path().join("fno.lock"),
+            temp.path().join("codex.sock"),
+        );
+
+        assert_eq!(adapter.provider_pid_start(), Some((123, 456)));
     }
 
     #[test]

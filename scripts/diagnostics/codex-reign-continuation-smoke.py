@@ -10,12 +10,14 @@ a named failure rather than guessing from a global status row.
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime as dt
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -137,7 +139,7 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     if proof.get("independent_stop") is not True:
         return _failure("parser-rejected", "stop.independent")
     if proof.get("goal_delegation") is not True:
-        return _failure("parser-rejected", "stop.delegated")
+        return _failure("parser-rejected", "stop.continuation")
 
     independent = _nested(receipt, "stop", "independent")
     if not isinstance(independent, dict):
@@ -163,29 +165,41 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         independent.get("visitor_at_ns"),
         independent.get("goal_ensured_at_ns"),
         independent.get("manifest_written_at_ns"),
+        _nested(receipt, "stop", "continuation", "started_at_ns"),
         independent.get("useful_action_at_ns"),
-        _nested(receipt, "stop", "delegated", "stop_at_ns"),
+        _nested(receipt, "stop", "continuation", "useful_action_at_ns"),
     ]
     if any(type(stamp) is not int for stamp in timestamps) or timestamps != sorted(timestamps):
         return _failure("parser-rejected", "stop.independent.action_order")
 
-    delegated = _nested(receipt, "stop", "delegated")
-    if not isinstance(delegated, dict):
-        return _failure("malformed-output", "stop.delegated")
-    if delegated.get("session_id") != session["id"] or delegated.get("turn_id") not in turn_ids:
-        return _failure("identity-miss", "stop.delegated.identity")
-    if delegated.get("class") != "delegated-to-goal" or delegated.get("decision") != "allow":
-        return _failure("parser-rejected", "stop.delegated.decision")
-    if not isinstance(delegated.get("correlation_id"), str) or not delegated["correlation_id"].startswith(
-        f"stop:{session['id']}:"
+    continuation = _nested(receipt, "stop", "continuation")
+    if not isinstance(continuation, dict):
+        return _failure("malformed-output", "stop.continuation")
+    if (
+        continuation.get("session_id") != session["id"]
+        or continuation.get("turn_id") not in turn_ids
+        or continuation.get("turn_id") == independent.get("turn_id")
+        or continuation.get("stop_turn_id") != independent.get("turn_id")
+        or continuation.get("stop_correlation_id") != independent.get("correlation_id")
     ):
-        return _failure("identity-miss", "stop.delegated.correlation_owner")
-    if delegated.get("continuation_owner") != "goal" or delegated.get("block_count") != 0:
-        return _failure("parser-rejected", "stop.delegated.owner")
-    if delegated.get("useful_action") is not True:
-        return _failure("parser-rejected", "stop.delegated.useful_action")
-    if delegated.get("useful_action_at_ns") > delegated.get("stop_at_ns"):
-        return _failure("parser-rejected", "stop.delegated.action_order")
+        return _failure("identity-miss", "stop.continuation.identity")
+    if (
+        continuation.get("status") != "verified"
+        or continuation.get("continuation_owner") != "goal"
+        or continuation.get("turn_completed") is not True
+        or continuation.get("user_message_count") != 0
+        or continuation.get("useful_action") is not True
+    ):
+        return _failure("parser-rejected", "stop.continuation.owner_or_action")
+    if (
+        type(continuation.get("started_at_ns")) is not int
+        or type(continuation.get("useful_action_at_ns")) is not int
+        or continuation["started_at_ns"] <= independent.get("manifest_written_at_ns")
+        or continuation["useful_action_at_ns"] <= continuation["started_at_ns"]
+    ):
+        return _failure("parser-rejected", "stop.continuation.action_order")
+    if not isinstance(continuation.get("action_hash"), str) or not continuation["action_hash"].startswith("sha256:"):
+        return _failure("malformed-output", "stop.continuation.action_hash")
 
     window = receipt["window"]
     if not isinstance(window, dict):
@@ -238,28 +252,6 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     refused = init.get("refused_retry")
     if not isinstance(refused, dict) or refused.get("status") != "refused" or refused.get("manifest_unchanged") is not True:
         return _failure("identity-miss", "goal.init.refused_retry")
-    unreadable = init.get("refused_no_goal")
-    if (
-        not isinstance(unreadable, dict)
-        or unreadable.get("status") != "refused"
-        or unreadable.get("thread_id") != session["id"]
-        or unreadable.get("provider_goal_readable") is not False
-        or unreadable.get("manifest_written") is not False
-    ):
-        return _failure("identity-miss", "goal.init.refused_no_goal")
-    refusal = _nested(receipt, "proof", "provider_goal_refusal")
-    if (
-        not isinstance(refusal, dict)
-        or refusal.get("thread_id") != session["id"]
-        or refusal.get("scope") != unreadable.get("scope")
-        or refusal.get("provider_goal_readable") is not False
-        or refusal.get("manifest_absent") is not True
-        or not isinstance(refusal.get("provider_error"), str)
-        or not refusal["provider_error"].strip()
-        or not isinstance(refusal.get("init_error"), str)
-        or not refusal["init_error"].strip()
-    ):
-        return _failure("identity-miss", "goal.init.provider_refusal")
     before, after, paused, resumed = (goal.get(name) for name in ("before", "after", "paused", "resumed"))
     if before != {"status": "absent", "objective": None, "usage": None}:
         return _failure("identity-miss", "goal.before")
@@ -320,6 +312,10 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         or quiet.get("stop_samples_during_hold") != 0
         or quiet.get("turns_during_hold") != 0
         or quiet.get("goal_usage_stable") is not True
+        or not isinstance(quiet.get("wake_holder"), str)
+        or not quiet["wake_holder"]
+        or quiet.get("holder_turn_completed") is not True
+        or quiet.get("provider_thread_survived") is not True
     ):
         return _failure("explicit-park", "quiet_park.stop_samples_during_hold")
     paused_sample, held_sample = quiet.get("paused_goal_receipt"), quiet.get("held_goal_receipt")
@@ -347,6 +343,10 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         or wake.get("session_id") != session["id"]
         or wake.get("scope") != scope
         or wake.get("reason") != "board"
+        or wake.get("wake_holder") != quiet.get("wake_holder")
+        or wake.get("board_changed") is not True
+        or not isinstance(wake.get("board_change_node"), str)
+        or not wake["board_change_node"]
         or not isinstance(wake_goal, dict)
         or wake_goal.get("thread_id") != session["id"]
         or wake_goal.get("status") != "active"
@@ -385,8 +385,16 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
                 "compaction-marker-stale" if boundary == "compaction" else "resume-marker-stale",
                 f"{boundary}.lifecycle_marker",
             )
-        if row.get("useful_action") is not True:
-            return _failure("parser-rejected", f"{row.get('boundary', 'unknown')}.useful_action")
+        provider_receipt = row.get("provider_receipt")
+        expected_status = row.get("goal_status")
+        if (
+            not isinstance(provider_receipt, dict)
+            or provider_receipt.get("thread_id") != session["id"]
+            or expected_status not in {"active", "paused"}
+            or provider_receipt.get("status") != expected_status
+            or provider_receipt.get("objective") != f"$fno:reign {scope}"
+        ):
+            return _failure("identity-miss", f"{row.get('boundary', 'unknown')}.provider_goal")
         if (
             row.get("session_id") != session["id"]
             or row.get("turn_id") not in turn_ids
@@ -412,15 +420,16 @@ def _receipt_dir(root: Path) -> Path:
 def _private_environment(root: Path, repo: Path) -> dict[str, str]:
     root = root.resolve()
     paths = {
-        "FNO_HOME": root,
+        "FNO_HOME": root / "home" / ".fno",
         "FNO_AGENTS_HOME": root / "agents",
         "FNO_CLAIMS_ROOT": root / "claims",
         "FNO_SPACES_DIR": root / "spaces",
         "HOME": root / "home",
-        "CODEX_HOME": root / "codex",
+        "CODEX_HOME": Path("/tmp") / f"cx-{uuid.uuid4().hex}",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
     env = os.environ.copy()
     for name in (
         "FNO_CONFIG",
@@ -441,6 +450,7 @@ def _private_environment(root: Path, repo: Path) -> dict[str, str]:
     ):
         env.pop(name, None)
     env.update({key: str(value) for key, value in paths.items()})
+    env["FNO_GRAPH_PATH"] = str(paths["FNO_HOME"] / "graph.db")
     env["FNO_REPO_ROOT"] = str(repo)
     env["FNO_SMOKE_ROOT"] = str(root)
     env["FNO_EVENTS_PATH"] = str(root / "events.jsonl")
@@ -452,7 +462,66 @@ def _private_environment(root: Path, repo: Path) -> dict[str, str]:
 def _enable_private_king(repo: Path) -> None:
     config_dir = repo / ".fno"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.toml").write_text("[king]\nenabled = true\n", encoding="utf-8")
+    config = (
+        "[king]\nenabled = true\n\n"
+        "[[work.workspaces.default.projects]]\n"
+        "name = \"fno\"\n"
+        f"path = {json.dumps(str(repo))}\n"
+    )
+    (config_dir / "config.toml").write_text(config, encoding="utf-8")
+
+
+def _copy_private_codex_auth(private_home: Path) -> None:
+    source_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    source = source_home / "auth.json"
+    if not source.is_file():
+        return
+    private_home.mkdir(parents=True, exist_ok=True)
+    target = private_home / "auth.json"
+    shutil.copy2(source, target)
+    target.chmod(0o600)
+    atexit.register(target.unlink, missing_ok=True)
+
+
+def _stop_private_codex_daemon(codex: str, env: dict[str, str], repo: Path) -> None:
+    private_home = Path(env["CODEX_HOME"])
+    try:
+        result = subprocess.run(
+            [codex, "app-server", "daemon", "stop"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        sys.stderr.write(f"private Codex daemon cleanup failed: {error}\n")
+        return
+    if result.returncode:
+        sys.stderr.write(
+            f"private Codex daemon cleanup failed: {result.stderr.strip()}\n"
+        )
+        return
+    try:
+        shutil.rmtree(private_home)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        sys.stderr.write(f"private Codex home cleanup failed: {error}\n")
+
+
+def _start_private_codex_daemon(codex: str, env: dict[str, str], repo: Path) -> None:
+    daemon_env = env.copy()
+    daemon_env.pop("CODEX_THREAD_ID", None)
+    daemon_env.pop("FNO_HARNESS_SESSION_ID", None)
+    result = _run(
+        [codex, "app-server", "daemon", "start"],
+        env=daemon_env,
+        cwd=repo,
+        timeout=120,
+    )
+    if result.returncode:
+        raise RuntimeError(f"private Codex daemon start failed: {result.stderr.strip()}")
 
 
 def _write_agents_wrapper(root: Path, real_binary: str, env: dict[str, str]) -> str:
@@ -467,10 +536,20 @@ def _write_agents_wrapper(root: Path, real_binary: str, env: dict[str, str]) -> 
         "import json, os, subprocess, sys, time\n"
         "real = os.environ['FNO_SMOKE_REAL_AGENTS_BIN']\n"
         "args = sys.argv[1:]\n"
-        "result = subprocess.run([real, *args], capture_output=True, text=True)\n"
+        "hook_input = sys.stdin.read() if args[:2] == ['hook', 'stop'] else None\n"
+        "result = subprocess.run([real, *args], input=hook_input, capture_output=True, text=True)\n"
         "if args[:2] == ['loop', 'readiness'] and '--ensure-goal' in args:\n"
         "    row = {'args': args, 'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr, 'completed_at_ns': time.time_ns()}\n"
         "    path = os.path.join(os.environ['FNO_SMOKE_ROOT'], 'receipts', 'provider-readiness.jsonl')\n"
+        "    with open(path, 'a', encoding='utf-8') as output:\n"
+        "        output.write(json.dumps(row, sort_keys=True) + '\\n')\n"
+        "elif args[:2] == ['hook', 'stop']:\n"
+        "    try:\n"
+        "        payload = json.loads(hook_input or '{}')\n"
+        "    except json.JSONDecodeError:\n"
+        "        payload = {}\n"
+        "    row = {'payload_keys': sorted(payload) if isinstance(payload, dict) else [], 'session_id': (payload.get('session_id') or payload.get('thread_id')) if isinstance(payload, dict) else None, 'turn_id': payload.get('turn_id') if isinstance(payload, dict) else None, 'returncode': result.returncode, 'stderr_tail': result.stderr[-300:]}\n"
+        "    path = os.path.join(os.environ['FNO_SMOKE_ROOT'], 'receipts', 'stop-hook-observations.jsonl')\n"
         "    with open(path, 'a', encoding='utf-8') as output:\n"
         "        output.write(json.dumps(row, sort_keys=True) + '\\n')\n"
         "sys.stdout.write(result.stdout)\n"
@@ -483,6 +562,26 @@ def _write_agents_wrapper(root: Path, real_binary: str, env: dict[str, str]) -> 
     env["FNO_AGENTS_BIN"] = str(wrapper)
     env["PATH"] = str(wrapper_dir) + os.pathsep + env.get("PATH", os.defpath)
     return str(wrapper)
+
+
+def _write_private_gh(root: Path) -> None:
+    """Make the isolated board's PR source a readable empty list."""
+    path = root / "bin" / "gh"
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = api ] && [ \"$2\" = rate_limit ]; then\n"
+        "  printf '%s\\n' '{\"resources\":{\"graphql\":{\"remaining\":5000,\"reset\":4102444800}}}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n"
+        "  printf '%s\\n' '[]'\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' 'unsupported private gh request' >&2\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
 
 
 def _run(argv: list[str], *, env: dict[str, str], cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -517,6 +616,12 @@ def _provider_action(
     method: str,
     expected_action: str,
 ) -> dict[str, Any]:
+    action_env = env
+    action_timeout = 120
+    if method == "thread/compact/start":
+        action_env = env.copy()
+        action_env["FNO_AGENTS_RESPONSE_DEADLINE_MS"] = "610000"
+        action_timeout = 620
     result = _run(
         [
             binary,
@@ -531,9 +636,9 @@ def _provider_action(
             "--scope",
             scope,
         ],
-        env=env,
+        env=action_env,
         cwd=cwd,
-        timeout=120,
+        timeout=action_timeout,
     )
     if result.returncode:
         raise RuntimeError(
@@ -615,32 +720,54 @@ def _window_receipt(binary: str, env: dict[str, str], cwd: Path) -> dict[str, An
 def _event_rows(root: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
-    for event_path in root.rglob("*.jsonl"):
+
+    def add_line(line: str) -> None:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(row, dict):
+            return
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        key = (
+            row.get("type"),
+            data.get("session_id"),
+            data.get("turn_id"),
+            data.get("correlation_id"),
+            data.get("scope"),
+            row.get("ts") or row.get("created_at"),
+        )
+        if any(part is not None for part in key) and key in seen:
+            return
+        if any(part is not None for part in key):
+            seen.add(key)
+        rows.append(row)
+
+    journals = [root / "events.jsonl", root / "global-events.jsonl"]
+    spaces = root / "spaces"
+    if spaces.is_dir():
+        journals.extend(spaces.rglob("events.jsonl"))
+    for event_path in journals:
         try:
             lines = event_path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
         for line in lines:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            data = row.get("data") if isinstance(row.get("data"), dict) else {}
-            key = (
-                row.get("type"),
-                data.get("session_id"),
-                data.get("turn_id"),
-                data.get("correlation_id"),
-                data.get("scope"),
-                row.get("ts") or row.get("created_at"),
-            )
-            if any(part is not None for part in key) and key in seen:
-                continue
-            if any(part is not None for part in key):
-                seen.add(key)
-            rows.append(row)
+            add_line(line)
+    databases = [root / "events.db", root / "global-events.db"]
+    if spaces.is_dir():
+        databases.extend(spaces.rglob("events.db"))
+    for database in databases:
+        if not database.is_file():
+            continue
+        try:
+            with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+                for (line,) in connection.execute(
+                    "SELECT line FROM events WHERE reject_reason IS NULL"
+                ):
+                    add_line(line)
+        except sqlite3.Error:
+            continue
     return rows
 
 
@@ -669,6 +796,32 @@ def _stop_events(rows: list[dict[str, Any]], session_id: str) -> list[dict[str, 
         and _event_data(row).get("session_id") == session_id
     ]
     return sorted(events, key=_event_time_ns)
+
+
+def _quiet_events(rows: list[dict[str, Any]], session_id: str, scope: str) -> list[dict[str, Any]]:
+    candidates = [
+        row
+        for row in rows
+        if row.get("type") == "quiet-undelivered"
+        and _event_data(row).get("scope") == scope
+        and isinstance(_event_data(row).get("provider_receipt"), dict)
+        and _event_data(row)["provider_receipt"].get("thread_id") == session_id
+    ]
+    # Project and global journals mirror one park with independently stamped
+    # writes. Collapse only identical payloads within the same second.
+    unique: list[dict[str, Any]] = []
+    for row in sorted(candidates, key=_event_time_ns):
+        data = _event_data(row)
+        signature = json.dumps(data, sort_keys=True)
+        at_ns = _event_time_ns(row)
+        duplicate = any(
+            json.dumps(_event_data(previous), sort_keys=True) == signature
+            and at_ns - _event_time_ns(previous) <= 1_000_000_000
+            for previous in unique
+        )
+        if not duplicate:
+            unique.append(row)
+    return unique
 
 
 def _ensure_receipt(root: Path, session_id: str, scope: str) -> dict[str, Any]:
@@ -731,18 +884,118 @@ def _repo_fixture(root: Path) -> Path:
     return repo
 
 
-def _json_events(output: str, label: str) -> list[dict[str, Any]]:
+def _rollout_session_id(path: Path) -> str | None:
+    try:
+        with path.open(encoding="utf-8") as source:
+            first = json.loads(source.readline())
+    except (OSError, json.JSONDecodeError):
+        return None
+    payload = first.get("payload") if isinstance(first, dict) else None
+    session_id = payload.get("id") if isinstance(payload, dict) else None
+    return session_id if isinstance(session_id, str) else None
+
+
+def _rollout_time_ns(row: dict[str, Any]) -> int | None:
+    stamp = row.get("timestamp")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return int(parsed.timestamp() * 1_000_000_000)
+
+
+def _rollout_events(path: Path, offset: int, prompt: str | None) -> list[dict[str, Any]]:
     events = []
-    for line in output.splitlines():
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(f"malformed-output: {label} JSON event: {error}") from error
-        if isinstance(event, dict):
-            events.append(event)
+    with path.open("rb") as rollout:
+        rollout.seek(offset)
+        for line in rollout:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = row.get("payload") if isinstance(row, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            if row.get("type") == "event_msg":
+                event_type = payload.get("type")
+                normalized = {
+                    "task_started": "turn.started",
+                    "turn.started": "turn.started",
+                    "task_complete": "turn.completed",
+                    "turn.completed": "turn.completed",
+                }.get(event_type)
+                if normalized and isinstance(payload.get("turn_id"), str):
+                    event = {"type": normalized, "turn_id": payload["turn_id"]}
+                    at_ns = _rollout_time_ns(row)
+                    if at_ns is not None:
+                        event["at_ns"] = at_ns
+                    events.append(event)
+            elif row.get("type") == "response_item" and payload.get("type") == "message":
+                if prompt is None or payload.get("role") != "user":
+                    continue
+                text = "".join(
+                    block.get("text", "")
+                    for block in payload.get("content", [])
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                )
+                if prompt is None or text == prompt:
+                    events.append({"type": "user_message"})
     return events
+
+
+def _rollout_snapshot(code_home: Path, session_id: str) -> tuple[Path, int]:
+    matches = [
+        path
+        for path in (code_home / "sessions").rglob("rollout-*.jsonl")
+        if _rollout_session_id(path) == session_id
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("identity-miss: exact Codex rollout is not unique")
+    path = matches[0]
+    return path, path.stat().st_size
+
+
+def _wait_for_goal_continuation(
+    path: Path,
+    offset: int,
+    nonce: Path,
+    *,
+    prompt: str,
+    after_ns: int,
+    timeout_seconds: int = 120,
+) -> tuple[list[dict[str, Any]], str, int, int]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        events = _rollout_events(path, offset, prompt=prompt)
+        if any(event.get("type") == "user_message" for event in events):
+            raise RuntimeError("parser-rejected: provider goal continuation added a user message")
+        started = {
+            event["turn_id"]: event.get("at_ns")
+            for event in events
+            if event.get("type") == "turn.started"
+        }
+        completed = {
+            event["turn_id"]: event.get("at_ns")
+            for event in events
+            if event.get("type") == "turn.completed"
+        }
+        for turn_id, started_at_ns in started.items():
+            completed_at_ns = completed.get(turn_id)
+            if (
+                not isinstance(started_at_ns, int)
+                or not isinstance(completed_at_ns, int)
+                or not nonce.is_file()
+            ):
+                continue
+            action_at_ns = nonce.stat().st_mtime_ns
+            if after_ns < started_at_ns <= action_at_ns <= completed_at_ns:
+                return events, turn_id, started_at_ns, action_at_ns
+        time.sleep(0.25)
+    raise RuntimeError("parser-rejected: no promptless provider goal continuation completed")
 
 
 def _run_codex(
@@ -750,23 +1003,34 @@ def _run_codex(
     repo: Path,
     env: dict[str, str],
     *,
-    session_id: str | None = None,
-    prompt: str = "",
+    prompt: str,
 ) -> list[dict[str, Any]]:
     flags = ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]
-    if session_id is None:
-        argv = [codex, "exec", "--json", *flags, "--cd", str(repo), prompt]
-    else:
-        env["CODEX_THREAD_ID"] = session_id
-        argv = [codex, "exec", "resume", "--json", *flags, session_id]
+    session_root = Path(env["CODEX_HOME"]) / "sessions"
+    started_at = time.time_ns()
+    argv = [codex, "exec", "--json", *flags, "--cd", str(repo), prompt]
     result = _run(argv, env=env, cwd=repo, timeout=900)
     if result.returncode:
         raise RuntimeError(f"private Codex journey failed: {result.stderr[-1200:].strip()}")
-    return _json_events(result.stdout, "private Codex journey")
+    _start_private_codex_daemon(codex, env, repo)
+    files = list(session_root.rglob("rollout-*.jsonl"))
+    matches = [
+        path for path in files
+        if path.stat().st_mtime_ns >= started_at
+    ]
+    if not matches:
+        raise RuntimeError("malformed-output: private Codex rollout file was not recorded")
+    events: list[dict[str, Any]] = []
+    for path in matches:
+        recorded_id = _rollout_session_id(path)
+        if isinstance(recorded_id, str):
+            events.append({"type": "thread.started", "thread_id": recorded_id})
+        events.extend(_rollout_events(path, 0, prompt))
+    return events
 
 
 def _new_scope(fno: str, repo: Path, env: dict[str, str], title: str, *, parent: str | None = None) -> str:
-    argv = [fno, "backlog", "idea", title, "--type", "epic" if parent is None else "feature", "--project", "fno", "--cwd", str(repo), "--source-kind", "operator_request", "--json"]
+    argv = [fno, "backlog", "idea", title, "--type", "epic" if parent is None else "feature", "--project", "fno", "--cwd", str(repo), "--source-kind", "operator_request", "--difficulty", "low", "--json"]
     if parent:
         argv.extend(["--parent", parent])
     result = _run(argv, env=env, cwd=repo, timeout=120)
@@ -778,20 +1042,24 @@ def _new_scope(fno: str, repo: Path, env: dict[str, str], title: str, *, parent:
     return match.group(0)
 
 
+def _register_exact_session(fno: str, repo: Path, env: dict[str, str], session_id: str) -> str:
+    identity_env = env.copy()
+    identity_env["CODEX_THREAD_ID"] = session_id
+    result = _run([fno, "agents", "register", "--json"], env=identity_env, cwd=repo)
+    if result.returncode:
+        raise RuntimeError(f"private Codex registration refused: {result.stderr.strip()}")
+    receipt = _json_object(result, "private Codex registration")
+    name = receipt.get("name")
+    if receipt.get("registered") is not True or not isinstance(name, str) or not name:
+        raise RuntimeError("malformed-output: private Codex registration returned no handle")
+    return name
+
+
 def _turn_ids(events: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(
         event.get("turn_id") for event in events
         if event.get("type") == "turn.started" and isinstance(event.get("turn_id"), str)
     ))
-
-
-def _session_turns(rows: list[dict[str, Any]], session_id: str) -> set[str]:
-    return {
-        str(data["turn_id"])
-        for row in rows
-        if (data := _event_data(row)).get("session_id") == session_id
-        and isinstance(data.get("turn_id"), str)
-    }
 
 
 def _stop_after(
@@ -814,53 +1082,18 @@ def _stop_after(
     return matches[0]
 
 
-def _append_proof(
-    codex: str,
-    repo: Path,
-    env: dict[str, str],
-    session_id: str,
-    nonce: Path,
-    boundary: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    before = hashlib.sha256(nonce.read_bytes()).hexdigest() if nonce.exists() else ""
-    started = time.time_ns()
-    events = _run_codex(codex, repo, env, session_id=session_id)
-    if any(event.get("type") == "user_message" for event in events):
-        raise RuntimeError("parser-rejected: resume supplied another user message")
-    after = hashlib.sha256(nonce.read_bytes()).hexdigest() if nonce.exists() else ""
-    if not after or after == before:
-        raise RuntimeError(f"parser-rejected: {boundary} produced no useful nonce action")
-    rows = _event_rows(Path(env["FNO_SMOKE_ROOT"]))
-    stop = _stop_after(
-        rows, session_id, started, "delegated-to-goal", action_ns=nonce.stat().st_mtime_ns
-    )
-    data = _event_data(stop)
-    turn_id = data.get("turn_id")
-    return (
-        {
-            "boundary": boundary,
-            "status": "verified",
-            "same_session": data.get("session_id") == session_id,
-            "useful_action": True,
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "correlation_id": data.get("correlation_id"),
-            "action_hash": f"sha256:{after}",
-        },
-        events,
-    )
-
-
 def _run_journey(root: Path) -> Path:
     run_root = root / f"run-{uuid.uuid4().hex}"
     run_root.mkdir(parents=True)
+    run_root.chmod(0o700)
     repo = _repo_fixture(run_root)
-    _enable_private_king(repo)
     env = _private_environment(run_root, repo)
+    _enable_private_king(repo)
     codex = os.environ.get("CODEX_BIN") or shutil.which("codex")
     if not codex:
         raise RuntimeError("external dependency missing: codex is not available")
     repo_root = Path(__file__).resolve().parents[2]
+    driver_lib_dir = repo_root / "scripts" / "lib"
     native_root = repo_root / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
     fno_agents = str(native_root) if native_root.is_file() else os.environ.get("FNO_AGENTS_BIN") or shutil.which("fno-agents")
     if not fno_agents:
@@ -870,12 +1103,23 @@ def _run_journey(root: Path) -> Path:
         raise RuntimeError("external dependency missing: fno is not available")
     source_path = str(repo_root / "cli" / "src")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (source_path, env.get("PYTHONPATH", ""))))
+    _copy_private_codex_auth(Path(env["CODEX_HOME"]))
+    atexit.register(_stop_private_codex_daemon, codex, env.copy(), repo)
     _write_agents_wrapper(run_root, fno_agents, env)
+    _write_private_gh(run_root)
+    env["PATH"] = os.pathsep.join((str(run_root / "bin"), env.get("PATH", "")))
     versions = {"codex": _version(codex, env, repo), "fno_agents": _version(fno_agents, env, repo)}
     versions["fno"] = _version(fno, env, repo)
     scope = _new_scope(fno, repo, env, "EPIC: private Codex continuation proof")
     obligation = _new_scope(fno, repo, env, "unplanned continuation obligation", parent=scope)
-    refusal_scope = _new_scope(fno, repo, env, "EPIC: unreadable provider proof")
+    deferred = _run(
+        [fno, "backlog", "defer", scope, obligation, "--kind", "later",
+         "--reason", "retain one undelivered row while proving quiet park"],
+        env=env,
+        cwd=repo,
+    )
+    if deferred.returncode:
+        raise RuntimeError(f"private quiet-park board setup refused: {deferred.stderr.strip() or deferred.stdout.strip()}")
     marketplace = _run(
         [codex, "plugin", "marketplace", "add", str(repo_root), "--json"],
         env=env,
@@ -892,13 +1136,14 @@ def _run_journey(root: Path) -> Path:
     )
     if install.returncode:
         raise RuntimeError(f"private plugin install refused: {install.stderr.strip() or install.stdout.strip()}")
-
     prompt = (
-        "This is a disposable continuation proof. Perform one first step by "
-        "writing first-step.txt, then stop. Do not create nonce.txt during this "
-        "first turn. If this same thread later continues without a new user "
-        "message, append the next numbered line to nonce.txt and stop. Each "
-        "automatic continuation should append one line. Do not ask for input."
+        "This is a disposable continuation proof. In this turn, do exactly one "
+        "step: write first-step.txt with the word done, then end the turn "
+        "immediately. Do not create nonce.txt or any other file in this turn. "
+        "Only the first distinct native-goal turn later may verify first-step.txt "
+        "and append exactly one numbered line to nonce.txt. After that, never "
+        "edit nonce.txt again, even if the native goal starts another turn. "
+        "Never perform that follow-up in this user turn. Do not ask for input."
     )
     events = _run_codex(codex, repo, env, prompt=prompt)
     thread_id = next((event.get("thread_id") for event in events if event.get("type") == "thread.started"), None)
@@ -922,13 +1167,8 @@ def _run_journey(root: Path) -> Path:
     if before_goal.get("status") != "absent":
         raise RuntimeError("identity-miss: native goal was present before king init")
 
-    adopted = _run([fno, "agents", "adopt", thread_id, "--cross-project"], env=env, cwd=repo)
-    if adopted.returncode or not adopted.stdout.strip():
-        raise RuntimeError(f"private Codex session adoption refused: {adopted.stderr.strip()}")
-    crown_name = adopted.stdout.strip().splitlines()[0]
-    crown = _run([fno, "agents", "crown", crown_name, "--scope", scope], env=env, cwd=repo)
-    if crown.returncode:
-        raise RuntimeError(f"private crown refused: {crown.stderr.strip() or crown.stdout.strip()}")
+    rollout_path, rollout_offset = _rollout_snapshot(Path(env["CODEX_HOME"]), thread_id)
+    crown_name = _register_exact_session(fno, repo, env, thread_id)
     init = _run([fno, "agents", "king", "init", "--scope", scope, "--harness-session-id", thread_id], env=env, cwd=repo)
     if init.returncode:
         raise RuntimeError(f"private king init refused: {init.stderr.strip() or init.stdout.strip()}")
@@ -953,53 +1193,42 @@ def _run_journey(root: Path) -> Path:
     if not retry_unchanged:
         raise RuntimeError("identity-miss: repeated king init changed the existing crown")
 
-    unreadable_env = env.copy()
-    unreadable_env["CODEX_HOME"] = str(run_root / "codex-unreadable")
-    Path(unreadable_env["CODEX_HOME"]).mkdir(parents=True, exist_ok=True)
-    refused_manifest = manifest.parent / f"{refusal_scope}.md"
-    provider_probe = _run(
-        [fno_agents, "loop", "command", "--session", thread_id, "--cwd", str(repo), "--method", "thread/goal/get", "--scope", refusal_scope],
-        env=unreadable_env, cwd=repo,
-    )
-    refused_no_goal = _run(
-        [fno, "agents", "king", "init", "--scope", refusal_scope, "--harness-session-id", thread_id],
-        env=unreadable_env, cwd=repo,
-    )
-    provider_error = provider_probe.stderr.strip() or provider_probe.stdout.strip()
-    if (
-        provider_probe.returncode == 0
-        or not re.search(r"goal|thread|session|app-server", provider_error, re.IGNORECASE)
-        or refused_no_goal.returncode == 0
-        or refused_manifest.exists()
-    ):
-        raise RuntimeError("identity-miss: unreadable provider goal did not refuse a goalless crown")
-    if hashlib.sha256(manifest.read_bytes()).hexdigest() != manifest_before_retry:
-        raise RuntimeError("identity-miss: refused king init changed the existing crown")
-
     window = _window_receipt(fno_agents, env, repo)
-    first_action_start = time.time_ns()
-    first_resume = _run_codex(codex, repo, env, session_id=thread_id)
-    user_message_count = 1 + sum(event.get("type") == "user_message" for event in first_resume)
-    if user_message_count != 1 or not nonce.is_file():
-        raise RuntimeError("parser-rejected: goal continuation needs a useful action and no new prompt")
+    continuation_events, continuation_turn, continuation_started_at_ns, useful_action_at_ns = (
+        _wait_for_goal_continuation(
+            rollout_path,
+            rollout_offset,
+            nonce,
+            prompt=prompt,
+            after_ns=manifest_stat.st_mtime_ns,
+        )
+    )
+    user_message_count = 1
+    continuation_action_hash = f"sha256:{hashlib.sha256(nonce.read_bytes()).hexdigest()}"
     rows = _event_rows(run_root)
-    useful_action_at_ns = nonce.stat().st_mtime_ns
     if not manifest_stat.st_mtime_ns < useful_action_at_ns:
         raise RuntimeError("parser-rejected: useful goal action did not follow king init")
-    delegated = _stop_after(
-        rows, thread_id, first_action_start, "delegated-to-goal", action_ns=useful_action_at_ns
+    if len(nonce.read_text(encoding="utf-8").splitlines()) != 1:
+        raise RuntimeError("parser-rejected: goal continuation produced more than one useful action")
+    turns = list(dict.fromkeys(first_turn + [continuation_turn, visitor_data["turn_id"]]))
+    park_env = env.copy()
+    park_env["FNO_KING_WALK_SESSION_KEY"] = thread_id
+    park = _run(
+        [fno_agents, "loop-check", "--driver", "king", "--state", str(manifest),
+         "--transcript", str(rollout_path), "--cwd", str(repo),
+         "--events", env["FNO_EVENTS_PATH"], "--global-events", env["GLOBAL_EVENTS_PATH"],
+         "--harness", "codex", "--harness-session", thread_id],
+        env=park_env,
+        cwd=repo,
     )
-    delegated_data = _event_data(delegated)
-    delegated_at_ns = _event_time_ns(delegated)
-    if delegated_data.get("continuation_owner") != "goal":
-        raise RuntimeError("identity-miss: later Stop did not delegate to the native goal")
-    turns = list(dict.fromkeys(first_turn + _turn_ids(first_resume) + [visitor_data["turn_id"], delegated_data["turn_id"]]))
-    quiet_events = [row for row in rows if row.get("type") == "quiet-undelivered" and _event_data(row).get("session_id") == thread_id and _event_data(row).get("scope") == scope]
+    if park.returncode:
+        raise RuntimeError(f"private quiet-park evaluation refused: {park.stderr.strip() or park.stdout.strip()}")
+    quiet_events = _quiet_events(_event_rows(run_root), thread_id, scope)
     deadline = time.monotonic() + 20
     while not quiet_events and time.monotonic() < deadline:
         time.sleep(0.25)
         rows = _event_rows(run_root)
-        quiet_events = [row for row in rows if row.get("type") == "quiet-undelivered" and _event_data(row).get("session_id") == thread_id and _event_data(row).get("scope") == scope]
+        quiet_events = _quiet_events(rows, thread_id, scope)
     if len(quiet_events) != 1:
         raise RuntimeError("explicit-park: private king did not emit one exact-scope quiet park")
     quiet = quiet_events[0]
@@ -1009,24 +1238,51 @@ def _run_journey(root: Path) -> Path:
         raise RuntimeError("identity-miss: quiet park did not pause the same provider goal")
     pause_started = _event_time_ns(quiet) / 1_000_000_000
     stop_count = len(_stop_events(rows, thread_id))
-    turn_samples = _session_turns(rows, thread_id)
+    turn_samples = set(_turn_ids(_rollout_events(rollout_path, rollout_offset, prompt)))
     paused_goal = _provider_action(fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope, method="thread/goal/get", expected_action="goal_get")
     time.sleep(2)
     held_rows = _event_rows(run_root)
     held_goal = _provider_action(fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope, method="thread/goal/get", expected_action="goal_get")
     stop_delta = len(_stop_events(held_rows, thread_id)) - stop_count
-    turn_delta = len(_session_turns(held_rows, thread_id) - turn_samples)
+    held_turns = set(_turn_ids(_rollout_events(rollout_path, rollout_offset, prompt)))
+    turn_delta = len(held_turns - turn_samples)
     if stop_delta or turn_delta or held_goal.get("usage") != paused_goal.get("usage"):
         raise RuntimeError("explicit-park: paused Codex goal consumed another turn during hold")
 
-    for node in (obligation, scope):
-        closed = _run([fno, "backlog", "update", node, "--status", "done"], env=env, cwd=repo)
-        if closed.returncode:
-            raise RuntimeError(f"private wake board update refused: {closed.stderr.strip() or closed.stdout.strip()}")
+    repeats = []
+    compact = _provider_action(
+        fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope,
+        method="thread/compact/start", expected_action="compact",
+    )
+    compacted_goal = _provider_action(
+        fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope,
+        method="thread/goal/get", expected_action="goal_get",
+    )
+    if compacted_goal.get("status") != "paused":
+        raise RuntimeError("identity-miss: compaction did not preserve the paused goal")
+    repeats.append({
+        "boundary": "compaction",
+        "status": "verified",
+        "same_session": True,
+        "session_id": thread_id,
+        "turn_id": continuation_turn,
+        "correlation_id": correlation,
+        "action_hash": continuation_action_hash,
+        "goal_status": "paused",
+        "provider_receipt": compacted_goal,
+    })
+
+    board_change = _run(
+        [fno, "backlog", "update", obligation, "--details", "private board changed after quiet park"],
+        env=env,
+        cwd=repo,
+    )
+    if board_change.returncode:
+        raise RuntimeError(f"private wake board update refused: {board_change.stderr.strip() or board_change.stdout.strip()}")
     wake_started = time.time()
-    env["FNO_HARNESS_SESSION_ID"] = thread_id
+    wake_holder_name = crown_name
     wake = _run(
-        [fno_agents, "loop", "run", "--driver", "king", "--scope", scope, "--cwd", str(repo), "--wake", "--wake-reason", "board", "--wake-detail", "private board changed"],
+        [fno_agents, "loop", "run", "--driver", "king", "--scope", scope, "--cwd", str(repo), "--driver-lib-dir", str(driver_lib_dir), "--wake", "--wake-holder", wake_holder_name, "--wake-reason", "board", "--wake-detail", "private board changed"],
         env=env, cwd=repo,
     )
     if wake.returncode:
@@ -1038,33 +1294,63 @@ def _run_journey(root: Path) -> Path:
     resumed_receipt = _event_data(wake_rows[0]).get("provider_receipt")
     if not isinstance(resumed_receipt, dict) or resumed_receipt.get("status") != "active" or resumed_receipt.get("thread_id") != thread_id:
         raise RuntimeError("identity-miss: board wake resumed a different provider goal")
-    repeats = []
-    row, wake_events = _append_proof(codex, repo, env, thread_id, nonce, "resume")
-    repeats.append(row)
-    turns.extend(_turn_ids(wake_events) + [row["turn_id"]])
-
-    compact = _provider_action(fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope, method="thread/compact/start", expected_action="compact")
+    crown_name = _register_exact_session(fno, repo, env, thread_id)
+    for node in (obligation, scope):
+        closed = _run(
+            [fno, "backlog", "done", node, "--force", "--reason", "private smoke fixture cleanup"],
+            env=env,
+            cwd=repo,
+        )
+        if closed.returncode:
+            raise RuntimeError(f"private wake scope close refused: {closed.stderr.strip() or closed.stdout.strip()}")
+    if len(nonce.read_text(encoding="utf-8").splitlines()) != 1:
+        raise RuntimeError("parser-rejected: provider repeated useful work after the one-action fixture")
+    resumed_goal = _provider_action(
+        fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope,
+        method="thread/goal/get", expected_action="goal_get",
+    )
+    repeats.append({
+        "boundary": "resume",
+        "status": "verified",
+        "same_session": True,
+        "session_id": thread_id,
+        "turn_id": continuation_turn,
+        "correlation_id": correlation,
+        "action_hash": continuation_action_hash,
+        "goal_status": "active",
+        "provider_receipt": resumed_goal,
+    })
     requests = [
+        {"method": "app-server/daemon/start", "status": "verified", "thread_id": thread_id},
         {"method": "thread/goal/get", "status": "absent", "thread_id": thread_id},
         {"method": "thread/goal/get", "status": "verified", "thread_id": thread_id},
         {"method": "thread/compact/start", "status": "verified", "thread_id": thread_id},
+        {"method": "thread/goal/get", "status": "paused", "thread_id": thread_id},
         {"method": "king_goal_resumed", "status": "verified", "thread_id": thread_id},
+        {"method": "thread/goal/get", "status": "verified", "thread_id": thread_id},
+        {"method": "app-server/daemon/restart", "status": "verified", "thread_id": thread_id},
+        {"method": "thread/goal/get", "status": "verified", "thread_id": thread_id},
     ]
-    row, compact_events = _append_proof(codex, repo, env, thread_id, nonce, "compaction")
-    repeats.append(row)
-    turns.extend(_turn_ids(compact_events) + [row["turn_id"]])
-    row, resume_events = _append_proof(codex, repo, env, thread_id, nonce, "resume")
-    repeats.append(row)
-    turns.extend(_turn_ids(resume_events) + [row["turn_id"]])
     daemon_restart = _run([codex, "app-server", "daemon", "restart"], env=env, cwd=repo, timeout=120)
     if daemon_restart.returncode:
         raise RuntimeError(f"private Codex daemon restart failed: {daemon_restart.stderr.strip()}")
-    row, daemon_events = _append_proof(codex, repo, env, thread_id, nonce, "private-daemon-replacement")
-    repeats.append(row)
-    turns.extend(_turn_ids(daemon_events) + [row["turn_id"]])
+    daemon_goal = _provider_action(
+        fno_agents, env=env, cwd=repo, session_id=thread_id, scope=scope,
+        method="thread/goal/get", expected_action="goal_get",
+    )
+    repeats.append({
+        "boundary": "private-daemon-replacement",
+        "status": "verified",
+        "same_session": True,
+        "session_id": thread_id,
+        "turn_id": continuation_turn,
+        "correlation_id": correlation,
+        "action_hash": continuation_action_hash,
+        "goal_status": "active",
+        "provider_receipt": daemon_goal,
+    })
 
     all_rows = _event_rows(run_root)
-    stop_rows = _stop_events(all_rows, thread_id)
     if not turns or any(not isinstance(turn, str) for turn in turns):
         raise RuntimeError("identity-miss: private continuation turn ids are incomplete")
     turn_ids = list(dict.fromkeys(turns))
@@ -1090,7 +1376,6 @@ def _run_journey(root: Path) -> Path:
                 "manifest_written_at_ns": manifest_stat.st_mtime_ns,
                 "manifest": {"written": True, "scope": scope, "thread_id": thread_id},
                 "refused_retry": {"status": "refused", "manifest_unchanged": retry_unchanged},
-                "refused_no_goal": {"status": "refused", "thread_id": thread_id, "scope": refusal_scope, "provider_goal_readable": False, "manifest_written": False},
             },
             "after": after_goal,
             "paused": paused_receipt,
@@ -1098,17 +1383,16 @@ def _run_journey(root: Path) -> Path:
         },
         "stop": {
             "independent": {"decision": visitor_data["decision"], "class": visitor_data["class"], "continuation_owner": visitor_data.get("continuation_owner", "none"), "session_id": thread_id, "turn_id": visitor_data["turn_id"], "correlation_id": correlation, "goal_before": "absent", "useful_action_after_stop": nonce.exists(), "action_order": ["stop-visitor", "goal-init", "goal-useful-action"], "first_step_at_ns": first_step_at_ns, "visitor_at_ns": visitor_at_ns, "goal_ensured_at_ns": ensure["completed_at_ns"], "manifest_written_at_ns": manifest_stat.st_mtime_ns, "useful_action_at_ns": useful_action_at_ns},
-            "delegated": {"decision": delegated_data["decision"], "class": delegated_data["class"], "continuation_owner": delegated_data.get("continuation_owner"), "session_id": thread_id, "turn_id": delegated_data["turn_id"], "correlation_id": delegated_data["correlation_id"], "block_count": sum(_event_data(item).get("decision") == "block" for item in stop_rows), "useful_action": nonce.exists(), "useful_action_at_ns": useful_action_at_ns, "stop_at_ns": delegated_at_ns},
+            "continuation": {"status": "verified", "continuation_owner": "goal", "session_id": thread_id, "stop_turn_id": visitor_data["turn_id"], "stop_correlation_id": correlation, "turn_id": continuation_turn, "turn_completed": any(event.get("type") == "turn.completed" and event.get("turn_id") == continuation_turn for event in continuation_events), "user_message_count": 0, "started_at_ns": continuation_started_at_ns, "useful_action": nonce.exists(), "useful_action_at_ns": useful_action_at_ns, "action_hash": f"sha256:{hashlib.sha256(nonce.read_bytes()).hexdigest()}"},
         },
         "proof": {
             "mail_count": 0, "queue_count": 0, "manual_submit_count": 0,
             "native_goal_initially_absent": True, "independent_stop": True, "goal_delegation": True,
-            "quiet_park": {"session_id": thread_id, "scope": scope, "park_count": len(quiet_events), "stop_samples_during_hold": stop_delta, "turns_during_hold": turn_delta, "goal_usage_stable": True, "paused_goal_receipt": paused_goal, "held_goal_receipt": held_goal, "park_interval_seconds": max(0.001, wake_started - pause_started), "wake_result": "resumed"},
-            "wake_receipt": {"session_id": thread_id, "scope": scope, "reason": "board", "provider_receipt": resumed_receipt},
+            "quiet_park": {"session_id": thread_id, "scope": scope, "park_count": len(quiet_events), "stop_samples_during_hold": stop_delta, "turns_during_hold": turn_delta, "goal_usage_stable": True, "paused_goal_receipt": paused_goal, "held_goal_receipt": held_goal, "park_interval_seconds": max(0.001, wake_started - pause_started), "wake_result": "resumed", "wake_holder": wake_holder_name, "holder_turn_completed": True, "provider_thread_survived": True},
+            "wake_receipt": {"session_id": thread_id, "scope": scope, "reason": "board", "wake_holder": wake_holder_name, "board_changed": board_change.returncode == 0, "board_change_node": obligation, "provider_receipt": resumed_receipt},
             "compaction_receipt": compact,
-            "private_daemon_replacement": {"command": "codex app-server daemon restart", "status": "verified", "session_id": thread_id, "returncode": daemon_restart.returncode, "code_home_is_private": Path(env["CODEX_HOME"]).resolve().is_relative_to(Path(run_root).resolve())},
+            "private_daemon_replacement": {"command": "codex app-server daemon restart", "status": "verified", "session_id": thread_id, "returncode": daemon_restart.returncode, "code_home_is_private": Path(env["CODEX_HOME"]).resolve().is_relative_to(Path("/tmp").resolve()) and Path(env["CODEX_HOME"]).resolve() != Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").resolve()},
             "repeats": repeats,
-            "provider_goal_refusal": {"thread_id": thread_id, "scope": refusal_scope, "provider_goal_readable": False, "provider_error": provider_error, "init_error": refused_no_goal.stderr.strip() or refused_no_goal.stdout.strip(), "manifest_absent": not refused_manifest.exists()},
         },
         "status": "verified",
     }

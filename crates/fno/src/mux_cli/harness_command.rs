@@ -557,7 +557,8 @@ fn run_provider_action(
         return Err("provider action needs an app-server transport, exact session and cwd".into());
     }
     let binary = crate::digest_overlay::fno_agents_bin();
-    let mut child = Command::new(binary)
+    let mut child_command = Command::new(binary);
+    child_command
         .args([
             "loop",
             "command",
@@ -573,7 +574,18 @@ fn run_provider_action(
         .args(scope.into_iter().flat_map(|scope| ["--scope", scope]))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if method == "thread/compact/start"
+        && timeout > Duration::from_secs(120)
+        && std::env::var_os("FNO_AGENTS_RESPONSE_DEADLINE_MS").is_none()
+    {
+        let response_deadline = timeout.saturating_sub(Duration::from_secs(5));
+        child_command.env(
+            "FNO_AGENTS_RESPONSE_DEADLINE_MS",
+            response_deadline.as_millis().to_string(),
+        );
+    }
+    let mut child = child_command
         .spawn()
         .map_err(|error| format!("provider lane could not start fno-agents: {error}"))?;
     let started = std::time::Instant::now();
@@ -1037,7 +1049,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
     let mut after = String::new();
     let mut verified = false;
-    let mut last_read_error = None;
+    let mut last_read_error: Option<String>;
     loop {
         match pane_text(&sock, &session, pane) {
             Ok(text) => {

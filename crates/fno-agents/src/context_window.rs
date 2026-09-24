@@ -322,8 +322,8 @@ mod tests {
         ContextWindowError, ContextWindowReceipt, ASTRA_DEFAULT_CONTEXT_WINDOW,
         ASTRA_EFFECTIVE_PERCENT, ASTRA_MAX_CONTEXT_WINDOW, EXPANDED_TAIL_BYTES,
     };
-    use std::io::Write;
     use serde_json::Value;
+    use std::io::Write;
 
     #[test]
     fn ac3_hp_rust_owns_the_provider_effective_window_calculation() {
