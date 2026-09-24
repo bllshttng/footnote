@@ -629,7 +629,3 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
         );
     }
 }
-
-/// x-786d: the default read is strict, so a starved store can never answer
-/// empty; the soft answers stay reachable only through the explicit opts
-/// spelling the keeper and the rows reader take.

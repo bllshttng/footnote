@@ -2435,12 +2435,10 @@ pub fn locked_mutate_with_hook(
         hook(&raw)?;
     }
 
-    let (version, _retries) = crate::backlog::retry_on_busy(|| {
-        crate::backlog::authoritative_sync(path, &raw, &entries)
-    })
-    .map_err(StoreError::Sqlite)?;
-    crate::backlog::snapshot_db(path, crate::backlog::now_ms())
-        .map_err(StoreError::Sqlite)?;
+    let (version, _retries) =
+        crate::backlog::retry_on_busy(|| crate::backlog::authoritative_sync(path, &raw, &entries))
+            .map_err(StoreError::Sqlite)?;
+    crate::backlog::snapshot_db(path, crate::backlog::now_ms()).map_err(StoreError::Sqlite)?;
     let backup: Option<PathBuf> = None;
     let shadow_warning = None;
 
@@ -2729,11 +2727,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let good = dir.join("graph.db.20260914T000000000000");
         std::fs::write(&good, vec![b'x'; 10_000]).unwrap();
-        std::fs::write(
-            dir.join("graph.db.20260914T000001000000"),
-            vec![b'y'; 64],
-        )
-        .unwrap();
+        std::fs::write(dir.join("graph.db.20260914T000001000000"), vec![b'y'; 64]).unwrap();
 
         let pin = rotate_backups(&dir, "graph.db.").expect("pin on collapse");
 
@@ -3279,7 +3273,11 @@ mod tests {
         })
         .unwrap();
         assert!(landed.is_none(), "no publish on a domain refusal");
-        assert_eq!(crate::backlog::version(&graph).unwrap(), before, "version unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
     }
 
     #[test]
@@ -3331,7 +3329,11 @@ mod tests {
             message.contains("backlog.epic_max_open_children"),
             "{message}"
         );
-        assert_eq!(crate::backlog::version(&graph).unwrap(), before, "version unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
         // The same child under a fresh epic lands.
         let pre = read_rows(&graph).unwrap();
         let mut entries = pre.clone();
@@ -3399,7 +3401,11 @@ mod tests {
         };
         assert!(message.contains("idea cap:"), "{message}");
         assert!(message.contains("i-01, i-02, i-03"), "{message}");
-        assert_eq!(crate::backlog::version(&graph).unwrap(), before, "version unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
         assert!(!read_rows(&graph)
             .unwrap()
             .iter()
@@ -3464,7 +3470,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("graph-archive.json");
         std::fs::write(&archive, raw).unwrap();
-        assert!(matches!(read_archive_raw(&archive), Ok(RawRead::Entries(_))));
+        assert!(matches!(
+            read_archive_raw(&archive),
+            Ok(RawRead::Entries(_))
+        ));
     }
 
     fn readiness_fixture(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {

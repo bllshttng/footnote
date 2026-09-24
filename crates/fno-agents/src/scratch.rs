@@ -2049,7 +2049,9 @@ mod tests {
     fn node_statuses_follow_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        let rows = vec![serde_json::json!({"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"})];
+        let rows = vec![
+            serde_json::json!({"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"}),
+        ];
         crate::graph_store::seed_rows(&graph, &rows).unwrap();
         let store = crate::backlog::api::Store::new(&graph);
         crate::backlog::api::node_create(

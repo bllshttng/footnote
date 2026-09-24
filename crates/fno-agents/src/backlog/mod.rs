@@ -282,7 +282,7 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     if nodes_count > 0 {
-        return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
+        return upgrade_populated_schema(connection);
     }
     let has_entries: bool = connection
         .query_row(
@@ -314,21 +314,37 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
     drop(statement);
     let mut taken: std::collections::HashSet<String> = Default::default();
     for row in rows.iter_mut() {
-        let Some(obj) = row.as_object_mut() else { continue };
-        let mut slug = obj.get("slug").and_then(Value::as_str).unwrap_or("").to_string();
-        if slug.is_empty() { continue; }
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        let mut slug = obj
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if slug.is_empty() {
+            continue;
+        }
         if taken.contains(&slug) {
             let mut n = 2;
-            while taken.contains(&format!("{slug}-{n}")) { n += 1; }
+            while taken.contains(&format!("{slug}-{n}")) {
+                n += 1;
+            }
             slug = format!("{slug}-{n}");
             obj.insert("slug".to_string(), Value::String(slug.clone()));
         }
         taken.insert(slug);
     }
     for row in rows.iter_mut() {
-        let Some(obj) = row.as_object_mut() else { continue };
-        if obj.contains_key("locked_at") { continue; }
-        let Some(stamp) = obj.get("claimed_at").and_then(Value::as_str) else { continue };
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        if obj.contains_key("locked_at") {
+            continue;
+        }
+        let Some(stamp) = obj.get("claimed_at").and_then(Value::as_str) else {
+            continue;
+        };
         if !stamp.trim().is_empty()
             && chrono::DateTime::parse_from_rfc3339(&stamp.replace('Z', "+00:00")).is_ok()
         {
@@ -340,7 +356,9 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     for (ordinal, row) in rows.iter().enumerate() {
         let Ok(mut node) = Node::from_json(row) else {
-            let Some(id) = row.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = row.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             nodes::save_raw(&transaction, id, ordinal as i64, row)
                 .map_err(|error| format!("import: {error}"))?;
             continue;
@@ -348,13 +366,45 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
         node.ordinal = ordinal as i64;
         save_aggregate(&transaction, &node).map_err(|error| format!("import: {error}"))?;
     }
-    transaction.execute("DROP TABLE entries", []).map_err(|error| error.to_string())?;
+    transaction
+        .execute("DROP TABLE entries", [])
+        .map_err(|error| error.to_string())?;
     stamp_version_fields(&transaction, &content_version(&rows))?;
-    transaction.execute(
-        "INSERT INTO graph_meta(key, value) VALUES('schema_version', ?1)
+    transaction
+        .execute(
+            "INSERT INTO graph_meta(key, value) VALUES('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![SCHEMA_VERSION],
-    ).map_err(|error| error.to_string())?;
+            params![SCHEMA_VERSION],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+const CLEAR_SOAK_METADATA_SQL: &str = "DELETE FROM graph_meta WHERE key IN (
+    'soak_clean_since_ms', 'soak_clean_days', 'soak_last_sample_ms', 'soak_last_divergent')";
+
+/// Schema 3 keeps SQLite rows authoritative and restarts the parity soak.
+fn upgrade_populated_schema(connection: &mut Connection) -> Result<(), String> {
+    let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
+    let current: i64 = meta(connection, "schema_version")?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(2);
+    if current >= target {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let raced: i64 = meta(&transaction, "schema_version")?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(2);
+    if raced >= target {
+        return Ok(());
+    }
+    transaction
+        .execute(CLEAR_SOAK_METADATA_SQL, [])
+        .map_err(|error| error.to_string())?;
+    stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
     transaction.commit().map_err(|error| error.to_string())
 }
 
@@ -376,22 +426,23 @@ fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String
         )
         .map_err(|error| error.to_string())?;
     if stored_rows == 0 {
-        let rows = match crate::graph_store::read_archive_raw(graph).map_err(|error| error.to_string())? {
-            crate::graph_store::RawRead::Empty => Vec::new(),
-            crate::graph_store::RawRead::Entries(rows) => rows,
-            crate::graph_store::RawRead::MalformedRoot => {
-                return Err(format!(
-                    "{} has no entries array and was never imported; refusing to retire it",
-                    graph.display()
-                ));
-            }
-            crate::graph_store::RawRead::Corrupt(reason) => {
-                return Err(format!(
+        let rows =
+            match crate::graph_store::read_archive_raw(graph).map_err(|error| error.to_string())? {
+                crate::graph_store::RawRead::Empty => Vec::new(),
+                crate::graph_store::RawRead::Entries(rows) => rows,
+                crate::graph_store::RawRead::MalformedRoot => {
+                    return Err(format!(
+                        "{} has no entries array and was never imported; refusing to retire it",
+                        graph.display()
+                    ));
+                }
+                crate::graph_store::RawRead::Corrupt(reason) => {
+                    return Err(format!(
                     "{} was never imported and cannot be read ({reason}); refusing to retire it",
                     graph.display()
                 ));
-            }
-        };
+                }
+            };
         if !rows.is_empty() {
             return Err(format!(
                 "{} contains rows that were never imported; refusing to retire it",
@@ -404,7 +455,10 @@ fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String
         .ok_or_else(|| format!("{} has no parent directory", graph.display()))?
         .join("backups");
     std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
-    let retired = backup_dir.join(format!("graph.json.retired.{}", crate::graph_store::backup_stamp()));
+    let retired = backup_dir.join(format!(
+        "graph.json.retired.{}",
+        crate::graph_store::backup_stamp()
+    ));
     match std::fs::rename(graph, retired) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1146,14 +1200,13 @@ mod tests {
     fn an_unimported_nonempty_graph_json_refuses_without_moving_it() {
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            r#"{"entries":[{"id":"x-old","title":"old"}]}"#,
-        )
-        .unwrap();
+        std::fs::write(&graph, r#"{"entries":[{"id":"x-old","title":"old"}]}"#).unwrap();
 
         let result = crate::graph_store::read_rows(&graph);
-        assert!(result.is_err(), "a nonempty unimported file must refuse: {result:?}");
+        assert!(
+            result.is_err(),
+            "a nonempty unimported file must refuse: {result:?}"
+        );
         let error = result.unwrap_err();
 
         assert!(error.to_string().contains("never imported"), "{error}");
@@ -1199,12 +1252,19 @@ mod tests {
 
         let read = crate::graph_store::read_rows(&graph).unwrap();
 
-        assert!(read.iter().any(|row| row.get("id") == Some(&json!("x-live"))));
+        assert!(read
+            .iter()
+            .any(|row| row.get("id") == Some(&json!("x-live"))));
         assert!(!graph.exists());
         let retired = std::fs::read_dir(dir.path().join("backups"))
             .unwrap()
             .filter_map(Result::ok)
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("graph.json.retired."));
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("graph.json.retired.")
+            });
         assert!(retired, "the empty file is retained as a retired backup");
     }
 
@@ -1249,7 +1309,8 @@ mod tests {
 
     fn two_node_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
-        let rows: Vec<Value> = serde_json::from_str(r#"[
+        let rows: Vec<Value> = serde_json::from_str(
+            r#"[
             {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
              "status": "idea", "priority": "p2", "domain": "code",
              "created_at": "2026-09-11T00:00:00+00:00", "tags": [],
@@ -1261,7 +1322,9 @@ mod tests {
             {"id": "ab-two", "slug": "two", "title": "Two", "type": "bug",
              "status": "ready", "priority": "p1", "domain": "code",
              "created_at": "2026-09-11T00:00:00+00:00"}
-        ]"#).unwrap();
+        ]"#,
+        )
+        .unwrap();
         crate::graph_store::seed_rows(&graph, &rows).unwrap();
         graph
     }
@@ -1365,6 +1428,53 @@ mod tests {
     }
 
     #[test]
+    fn populated_schema_v2_clears_soak_metadata_without_rewriting_rows() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = read_entries(&graph).unwrap();
+        let connection = open(&graph).unwrap();
+        connection
+            .execute(
+                "UPDATE graph_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        for key in [
+            "soak_clean_since_ms",
+            "soak_clean_days",
+            "soak_last_sample_ms",
+            "soak_last_divergent",
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO graph_meta(key, value) VALUES(?1, 'stale')",
+                    [key],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(read_entries(&graph).unwrap(), before);
+        let connection = open(&graph).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, SCHEMA_VERSION);
+        let stale_samples: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM graph_meta WHERE key LIKE 'soak_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_samples, 0);
+    }
+
+    #[test]
     fn normalization_only_change_reaches_the_store() {
         // AC1-HP: the seeded row lacks the default lists; a mutation on a
         // DIFFERENT node publishes the defaulted form. The diff must see
@@ -1372,16 +1482,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
-        // The seed is the UN-defaulted form: no tags key, what an older
-        // file's row looked like before the defaults pipeline ran.
-        raw[0].as_object_mut().unwrap().remove("tags");
-        authoritative_sync(&graph, &[], &raw).unwrap();
+        let one = raw[0].as_object_mut().unwrap();
+        for key in [
+            "tags",
+            "locked_by",
+            "locked_at",
+            "dispatch_verb",
+            "sessions",
+        ] {
+            one.remove(key);
+        }
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
+        // Keep the raw row un-defaulted and unlocked so owner normalization
+        // cannot change its status while this test isolates missing tags.
+        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
-        after[0]
-            .as_object_mut()
-            .unwrap()
-            .insert("tags".to_string(), Value::Array(vec![]));
+        crate::graph_store::apply_defaults(&mut after, false);
+        assert_eq!(after[0]["tags"], Value::Array(vec![]));
         // A change on the other node is what triggers the publish.
         after[1]
             .as_object_mut()
@@ -1404,7 +1522,7 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // The store is the only source for the assertion.
+        // graph.db is the only store; graph.json is frozen under it.
         let stored = read_entries(&graph).unwrap();
         let one = stored
             .iter()
@@ -1467,7 +1585,7 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; the settle is read back from it.
+        // graph.db is the only store; read the settled row back from it.
         let stored = read_entries(&graph).unwrap();
         let two = stored
             .iter()
@@ -1676,12 +1794,15 @@ mod tests {
 
     fn seeded_sqlite_fixture() -> (TempDir, PathBuf) {
         let (dir, graph) = fixture("graph.json");
-        let rows: Vec<Value> = serde_json::from_str(r#"[
+        let rows: Vec<Value> = serde_json::from_str(
+            r#"[
             {"id": "ab-one", "slug": "ab-one", "title": "One", "type": "feature",
              "status": "idea", "priority": "p2", "domain": "code"},
             {"id": "ab-two", "slug": "ab-two", "title": "Two", "type": "feature",
              "status": "ready", "priority": "p2", "domain": "code"}
-        ]"#).unwrap();
+        ]"#,
+        )
+        .unwrap();
         crate::graph_store::seed_rows(&graph, &rows).unwrap();
         (dir, graph)
     }

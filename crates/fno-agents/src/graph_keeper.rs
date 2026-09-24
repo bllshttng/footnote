@@ -50,7 +50,6 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
 pub(crate) const TAG_SHUTDOWN: u8 = 2;
@@ -3382,7 +3381,10 @@ mod tests {
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#);
+        seed_graph_json(
+            &graph,
+            r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
+        );
         let state = row_commit_state(graph.clone());
         let begin = handle_begin(&state).unwrap();
         let mut left = begin["entries"][0].clone();
@@ -3404,7 +3406,10 @@ mod tests {
         // version reads its base from the publish, not from the cache.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#);
+        seed_graph_json(
+            &graph,
+            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
+        );
         let state = row_commit_state(graph.clone());
         let first = handle_begin(&state).unwrap();
         let mut a = first["entries"][0].clone();
@@ -3622,7 +3627,10 @@ mod tests {
         // only after release), never on a timeout absence.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, "{\"entries\": [{\"id\": \"x-1\", \"title\": \"before\"}]}");
+        seed_graph_json(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"before\"}]}",
+        );
         let state = Arc::new(read_state(&graph));
         let gate = Arc::clone(&state);
         let writer = std::thread::spawn(move || {
@@ -3679,15 +3687,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         let rows = json!([
-                    {
-                        "id": "x-1",
-                        "slug": "with-plan",
-                        "status": "ready",
-                        "details": "stale fix path",
-                        "plan_path": "plans/one.md",
-                    },
-                    {"id": "x-2", "slug": "plain", "status": "ready", "details": "plain filing"},
-                ]);
+            {
+                "id": "x-1",
+                "slug": "with-plan",
+                "status": "ready",
+                "details": "stale fix path",
+                "plan_path": "plans/one.md",
+            },
+            {"id": "x-2", "slug": "plain", "status": "ready", "details": "plain filing"},
+        ]);
         graph_store::seed_rows(&graph, rows.as_array().unwrap()).unwrap();
         (dir, graph)
     }
@@ -3764,7 +3772,10 @@ mod tests {
         // across two identical reads.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, "{\"entries\": [{\"id\": \"x-1\", \"title\": \"t\"}]}");
+        seed_graph_json(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"t\"}]}",
+        );
         let state = read_state(&graph);
         let r1 = handle_read(&state, &json!({})).unwrap();
         let r2 = handle_read(&state, &json!({})).unwrap();
@@ -3785,13 +3796,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         let rows = json!([
-                {"id": "x-planned", "title": "planned", "status": "ready",
-                 "plan_path": "docs/plans/p.md", "cwd": "/tmp/proj",
-                 "progress_notes": [{"ts": "t", "text": "x"}]},
-                {"id": "x-bare", "title": "bare", "status": "idea"},
-                {"id": "x-anchored", "slug": "third-node", "title": "third",
-                 "plan_path": "p.md#anchor", "cwd": "~/proj"},
-            ]);
+            {"id": "x-planned", "title": "planned", "status": "ready",
+             "plan_path": "docs/plans/p.md", "cwd": "/tmp/proj",
+             "progress_notes": [{"ts": "t", "text": "x"}]},
+            {"id": "x-bare", "title": "bare", "status": "idea"},
+            {"id": "x-anchored", "slug": "third-node", "title": "third",
+             "plan_path": "p.md#anchor", "cwd": "~/proj"},
+        ]);
         graph_store::seed_rows(&graph, rows.as_array().unwrap()).unwrap();
         let state = read_state(&graph);
         let reply = handle_plan_refs(&state).unwrap();
@@ -4033,7 +4044,10 @@ mod tests {
     fn spliced_frames_equal_handle_request_frames_on_store() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, r#"{"entries":[{"id":"x-1","slug":"s1","title":"t","status":"ready"}]}"#);
+        seed_graph_json(
+            &graph,
+            r#"{"entries":[{"id":"x-1","slug":"s1","title":"t","status":"ready"}]}"#,
+        );
         let state = read_state(&graph);
         assert_splice_frame_byte_equal(&state);
     }
@@ -4139,7 +4153,10 @@ mod tests {
         // peer ranks.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_graph_json(&graph, "{\"entries\": [{\"id\": \"ab-a\", \"title\": \"a\", \"rank\": 5.0}]}");
+        seed_graph_json(
+            &graph,
+            "{\"entries\": [{\"id\": \"ab-a\", \"title\": \"a\", \"rank\": 5.0}]}",
+        );
         let state = StoreState {
             graph: graph.clone(),
             canonical: false,

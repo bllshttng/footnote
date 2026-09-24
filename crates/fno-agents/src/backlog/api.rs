@@ -532,8 +532,7 @@ fn mutate(
     mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))
-        .map_err(ApiError)
+    crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows)).map_err(ApiError)
 }
 
 fn fresh_version(store: &Store) -> i64 {

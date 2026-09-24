@@ -111,7 +111,7 @@ mod tests {
 
     /// This module is only worth having if `loopcheck` actually routes
     /// through it, so the guard for that lives here rather than there. A
-    /// direct `.spawn()` in `loopcheck.rs` is a transport with no retry
+    /// direct `.spawn()` in the loopcheck module is a transport with no retry
     /// beneath it, and a transient EAGAIN there reports the world unreadable
     /// on a machine that was merely busy: the exact failure this module
     /// exists to delete.
@@ -135,7 +135,7 @@ mod tests {
                 .next()
                 .expect("test module marker")
         }
-        let loopcheck = production(include_str!("loopcheck.rs"));
+        let loopcheck = crate::loopcheck::production_source();
         let acceptance = production(include_str!("acceptance_evidence.rs"));
         // Positive control first: a zero-hit scan of the wrong haystack reads
         // identical to a clean one, so prove the routed sites are in view

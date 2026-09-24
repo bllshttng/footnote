@@ -8,9 +8,9 @@ fn split_store_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let graph = root.path().join("graph.json");
     let rows = vec![serde_json::json!({
-            "id": "x-old", "title": "pre-flip", "slug": "pre-flip",
-            "type": "feature", "status": "ready", "priority": "p2",
-        })];
+        "id": "x-old", "title": "pre-flip", "slug": "pre-flip",
+        "type": "feature", "status": "ready", "priority": "p2",
+    })];
     graph_store::seed_rows(&graph, &rows).unwrap();
     let store = Store::new(&graph);
     api::node_create(

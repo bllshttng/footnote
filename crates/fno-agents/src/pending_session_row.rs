@@ -332,11 +332,14 @@ mod tests {
         let dir = tmp_dir("claim");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
-        crate::graph_store::seed_rows(&graph, &[json!({
+        crate::graph_store::seed_rows(
+            &graph,
+            &[json!({
                 "id": "x-clai", "title": "t", "status": "in_progress",
                 "sessions": [{"phase": "do", "harness": "claude", "session_id": "sid-2",
                               "started_at": "2026-09-22T00:00:00Z"}],
-            })])
+            })],
+        )
         .unwrap();
         seed_row(&registry, "w1", Some("x-clai"));
         park(&park_payload(&registry, "do")).unwrap();
