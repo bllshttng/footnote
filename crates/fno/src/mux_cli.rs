@@ -5340,7 +5340,7 @@ const ANNOTATE_EXCERPT_CAP: usize = 2048;
 
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
-/// as an operator review finding against `--node` via `fno backlog annotate add`.
+/// as an operator review finding against `--node` via `fno backlog note <node> --blocking`.
 /// Unlike `block pipe` there is NO target-idle guard (nothing enters a
 /// recipient PTY - delivery is a mail inject the daemon queues); it reuses the
 /// same typed-block gate (an open/truncated/markerless block refuses) and caps
@@ -5412,38 +5412,27 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    review) and there is nothing to clean up.
     let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
 
-    // 2b. Resolve the --from pane's cwd so `fno backlog annotate add` records the finding
-    //     into THAT worktree's .fno/events.jsonl - the one loop-check reads for
-    //     the node - not the caller's cwd (codex P1: a mismatched cwd lands the
-    //     durable finding in the wrong project and never gates). Best-effort: on
-    //     a PaneLs miss inherit the caller cwd (the mail inject still lands).
-    let pane_cwd = pane_cwd_via_ls(&sock, &session, parsed.from);
-
-    // 3. Shell the Python core (`fno backlog annotate add`) via this binary's own `fno`
-    //    entrypoint, so the finding recording + claim-holder delivery ladder
-    //    lives in one place. The
-    //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
+    // 3. Shell the note verb (`fno backlog note <node> --blocking`) via this
+    //    binary's own `fno` entrypoint, so the finding recording + claim-holder
+    //    delivery ladder lives in one place. The excerpt rides stdin
+    //    (`--block-excerpt-file -`), never a temp file. The findings store is
+    //    not cwd-bound, so the caller's cwd is fine.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
     let mut cmd = crate::process_admission::std_command(&fno);
     cmd.args([
         OsString::from("backlog"),
-        OsString::from("annotate"),
-        OsString::from("add"),
-        OsString::from("--node"),
+        OsString::from("note"),
         OsString::from(&parsed.node),
-        OsString::from("--message"),
+        OsString::from("--blocking"),
         OsString::from(&parsed.message),
         OsString::from("--block-excerpt-file"),
         OsString::from("-"),
     ])
     .stdin(std::process::Stdio::piped());
-    if let Some(cwd) = pane_cwd {
-        cmd.current_dir(cwd);
-    }
     let mut child = match crate::process_admission::std_spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             return EXIT_ERROR;
         }
     };
@@ -5456,23 +5445,9 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     match child.wait() {
         Ok(s) => s.code().unwrap_or(EXIT_ERROR),
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             EXIT_ERROR
         }
-    }
-}
-
-/// Resolve `pane`'s cwd via a `PaneLs` round-trip. Returns `None` on any miss
-/// (unreachable server, pane absent, empty cwd) so the caller degrades to the
-/// inherited cwd rather than failing the annotation outright.
-fn pane_cwd_via_ls(sock: &Path, session: &str, pane: u64) -> Option<String> {
-    match control_roundtrip(sock, session, ControlVerb::PaneLs) {
-        Ok(ServerMsg::PaneList { panes }) => panes
-            .into_iter()
-            .find(|p| p.pane_id == pane)
-            .map(|p| p.cwd)
-            .filter(|c| !c.is_empty()),
-        _ => None,
     }
 }
 
