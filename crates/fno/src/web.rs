@@ -1286,7 +1286,6 @@ async fn backlog_act(
 
 /// The gathered inputs, cached under [`backlog_model::REGATHER_AFTER`] while
 /// the store version holds; the lock is held for the whole call so one
-
 /// gather runs at a time. A gather with a failed source read is returned
 /// uncached, so the next request retries it.
 async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
@@ -1764,6 +1763,7 @@ mod tests {
             axum::serve(listener, router(state)).await.unwrap();
         });
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // AC9-ERR: no token, 401 on both routes, before any store read.
         stream
             .write_all(b"GET /backlog/model.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
