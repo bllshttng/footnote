@@ -66,11 +66,27 @@ export HOME="$TMP"
 export FNO_HOME="$TMP/.fno"
 mkdir -p "$FNO_HOME"
 
-# Create a temp git repo so git rev-parse works
+# Create a temp canonical checkout and the PR's linked worktree. The raw
+# merge guard is invoked from canonical, then resolves PR 42 onto this branch.
 REPO="$TMP/repo"
 mkdir -p "$REPO/.fno"
 cd "$REPO"
 git init -q
+git config user.email hook-test@example.com
+git config user.name hook-test
+git commit -q --allow-empty -m base
+PR_WORKTREE="$TMP/pr-worktree"
+git worktree add -q -b feature/pr-42 "$PR_WORKTREE"
+mkdir -p "$PR_WORKTREE/.fno"
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/fno-agents" <<'RESOLVER'
+#!/bin/sh
+cat >/dev/null
+printf '{"worktree":"%s"}\n' "$FNO_PR_WORKTREE"
+RESOLVER
+chmod +x "$TMP/bin/fno-agents"
+export FNO_AGENTS_BIN="$TMP/bin/fno-agents"
+export FNO_PR_WORKTREE="$PR_WORKTREE"
 
 # Helper: send a Bash tool call through the hook
 run_hook() {
@@ -84,13 +100,11 @@ run_hook() {
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 1: no state file -> deny" "$result"
 
-# ---- Case 2: fresh state file, spawn-time grant + external skipped -> allowed ----
-# Two-factor: the run's env-grant stamp satisfies the live-switch arm (it
-# needs no resolver call, so this stays deterministic under the sandbox's
-# system python3 and temp HOME) + external_review_passed: skipped (factor 2a,
-# the --no-external path) authorizes without an artifact.
+# ---- Case 2: fresh PR-worktree state, spawn-time grant + external skipped -> allowed ----
+# The hook starts from canonical, resolves PR 42 through the test resolver to
+# feature/pr-42, then reads this branch's manifest.
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
@@ -108,7 +122,7 @@ assert_allow "case 2: env-grant + external skipped -> allow" "$result"
 # a grant that mirrored config fails closed here - exactly the posture an
 # operator disarm produces on a real machine.
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
@@ -122,7 +136,7 @@ assert_deny "case 2b: config-sourced approval, live switch unreadable -> deny" "
 
 # ---- Case 3: state file with auto_merge_approved: false -> denied ----
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: false
@@ -134,20 +148,20 @@ assert_deny "case 3: auto_merge_approved: false -> deny" "$result"
 
 # ---- Case 4: state file with approval but 2 hours old -> denied (stale) ----
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 auto_merge_approved: true
 ---
 STATE
 # Push mtime back 2 hours - macOS touch -A or GNU touch -d
-touch -A -020000 "$REPO/.fno/target-state.md" 2>/dev/null || \
-    touch -d "2 hours ago" "$REPO/.fno/target-state.md"
+touch -A -020000 "$PR_WORKTREE/.fno/target-state.md" 2>/dev/null || \
+    touch -d "2 hours ago" "$PR_WORKTREE/.fno/target-state.md"
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 4: stale state file (2h old) -> deny" "$result"
 
 # Clean up state file for regression tests
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Regression 1: git commit --no-verify still denied ----
 
@@ -206,7 +220,7 @@ rm -f "$REPO/.fno/megawalk-state.md"
 
 # ---- Case 6: COMPLETE status with auto_merge_approved: true -> denied ----
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: COMPLETE
 auto_merge_approved: true
@@ -215,11 +229,11 @@ STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 6: COMPLETE status -> deny" "$result"
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Case 7: body contains auto_merge_approved: true but frontmatter does not -> denied ----
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 ---
@@ -230,11 +244,11 @@ STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 7: auto_merge_approved in body only -> deny" "$result"
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Case 8: auto_merge_approved: true + status: COMPLETE -> denied ----
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: COMPLETE
 auto_merge_approved: true
@@ -243,23 +257,23 @@ STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 8: terminal status COMPLETE + approved -> deny" "$result"
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Case 9: corrupt/binary state file -> hook must not crash and must deny ----
 
 # Write a file with binary-like content (null bytes etc.)
-printf -- '---\nstatus: IN_PROGRESS\n---\n\x00\x01\x02 corrupt data' > "$REPO/.fno/target-state.md"
+printf -- '---\nstatus: IN_PROGRESS\n---\n\x00\x01\x02 corrupt data' > "$PR_WORKTREE/.fno/target-state.md"
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 9: corrupt state file -> deny (no crash)" "$result"
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Case 10: env-grant + external skipped + IN_PROGRESS -> allowed ----
 # Same authorize shape as case 2, holding the spawn-time grant stamp: the
 # sandbox cannot read a live config switch, so the stamp is the deterministic
 # arm.
 
-cat > "$REPO/.fno/target-state.md" <<'STATE'
+cat > "$PR_WORKTREE/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
@@ -270,7 +284,7 @@ STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
 assert_allow "case 10: IN_PROGRESS + env-grant + external skipped -> allow" "$result"
-rm -f "$REPO/.fno/target-state.md"
+rm -f "$PR_WORKTREE/.fno/target-state.md"
 
 # ---- Summary ----
 
