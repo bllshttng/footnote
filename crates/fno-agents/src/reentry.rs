@@ -659,11 +659,36 @@ pub fn resolve_reentry(
     )
 }
 
+/// The `holder <session-id>...` action: recognized when the first arg is the
+/// word, at least one id follows, and every id is a lowercase UUID. The shape
+/// check keeps the word off the agent-name path: `reentry-plan holder` alone
+/// still resolves an agent named `holder`, and `holder <uuid>` is an
+/// "unexpected argument" error today, so nothing that works now changes. A
+/// `holder` arg followed by a non-UUID falls through to the existing parser
+/// and its error.
+fn holder_action_ids(args: &[String]) -> Option<&[String]> {
+    match args.split_first() {
+        Some((first, rest)) if first == "holder" => {
+            if !rest.is_empty() && rest.iter().all(|a| crate::resume_wake::is_uuid_shaped(a)) {
+                Some(rest)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The `fno-agents reentry-plan` machine action:
-/// `reentry-plan <name> [--transition attach|resume|recover] [--session <id>]`.
-/// Exit 0 prints the plan as one JSON object; exit 3 prints the refusal on
-/// stderr and constructs no argv.
+/// `reentry-plan <name> [--transition attach|resume|recover] [--session <id>]`
+/// or the `reentry-plan holder <session-id>...` action, which answers the
+/// claude session records without naming a registry row. Exit 0 prints the
+/// answer as one JSON object; exit 3 prints the refusal on stderr and
+/// constructs no argv.
 pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32 {
+    if let Some(ids) = holder_action_ids(args) {
+        return crate::claude_sessions::run_holder_action(ids);
+    }
     let mut name: Option<&str> = None;
     let mut transition = ReentryTransition::Resume;
     let mut select_session: Option<String> = None;
@@ -1900,5 +1925,30 @@ mod tests {
         let returned = bare.carry_pins(&mut untouched);
         assert_eq!(untouched, vec!["claude".to_string()]);
         assert_eq!(returned.argv, vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn holder_action_ids_recognizes_only_the_word_plus_uuids() {
+        let uuid = "bb2731c9-ad46-4303-a80d-152c68e91a4e";
+        let good = vec!["holder".to_string(), uuid.to_string()];
+        assert_eq!(
+            holder_action_ids(&good).map(|r| r.to_vec()),
+            Some(vec![uuid.to_string()])
+        );
+
+        let two = vec![
+            "holder".to_string(),
+            uuid.to_string(),
+            "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".to_string(),
+        ];
+        assert!(holder_action_ids(&two).is_some());
+
+        // `holder` alone resolves an agent named holder on the name path.
+        assert!(holder_action_ids(&["holder".to_string()]).is_none());
+        // A non-UUID after the word falls through to the parser's error.
+        assert!(holder_action_ids(&["holder".to_string(), "repro-row".to_string()]).is_none());
+        // Other first words never route here.
+        assert!(holder_action_ids(&["resume".to_string(), uuid.to_string()]).is_none());
+        assert!(holder_action_ids(&[]).is_none());
     }
 }
