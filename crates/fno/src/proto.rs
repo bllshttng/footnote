@@ -328,7 +328,9 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 87;
+/// v88: `AgentRow.crown_name` (serde default), the crown's display name from
+/// the crown-name store file; floor stays 58.
+pub const PROTO_VERSION: u32 = 88;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1256,6 +1258,12 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
+    /// (v88) The crown's display name (`Barnaby II`), read from the mux's
+    /// crown-name store file (`crown_names.json` beside the registry).
+    /// `None` = unnamed or no store file. Additive, `#[serde(default)]`,
+    /// so the floor stays put.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_name: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
@@ -4100,7 +4108,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 87);
+        assert_eq!(PROTO_VERSION, 88);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4440,6 +4448,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
@@ -4482,6 +4491,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
