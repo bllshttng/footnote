@@ -104,7 +104,7 @@ VALUES ('x-a', 0, 'a', 'Alpha', 'feature', 'ready', 'p2', 'code', '2026-09-11T00
   '2026-09-12T00:00:00+00:00', '20260911T051456Z-cl67883-05ec5f',
   '{"child_lists_present":["sessions","encounters","blocked_by"],"request_origin":"operator_request","origin_evidence":"said so","cost_sessions":[{"session_id":"s-1","cost_usd":1.5,"timestamp":"2026-09-11T01:00:00+00:00"},{"session_id":"s-2","cost_usd":0.5}]}'),
   ('x-b', 1, 'b', 'Beta', 'bug', 'ready', 'p1', 'code', '2026-09-11T00:00:00Z', NULL, NULL,
-  '{"cost_sessions":[{"session_id":"s-3","cost_usd":2.0,"timestamp":"2026-08-21T13:10:35.335800"}]}');
+  '{"child_lists_present":["comments"],"cost_sessions":[{"session_id":"s-3","cost_usd":2.0,"timestamp":"2026-08-21T13:10:35.335800"}]}');
 INSERT INTO node_claims VALUES ('x-a', 'holder-1', 'claude', 's-1', '2026-09-11T01:00:00+00:00');
 INSERT INTO node_provenance (node_id, source, source_kind, source_session_id, source_harness)
 VALUES ('x-a', 'idea', 'operator_request', 's-1', 'claude');
