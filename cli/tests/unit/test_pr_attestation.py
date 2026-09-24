@@ -286,15 +286,25 @@ def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' feature/pr-42\n", encoding="utf-8")
-    fake_gh.chmod(0o755)
+    requests = tmp_path / "requests.jsonl"
+    fake_agents = fake_bin / "fno-agents"
+    fake_agents.write_text(
+        "#!/bin/sh\ncat >> \"$FNO_REQUESTS\"\n"
+        "printf '{\"worktree\":\"%s\"}\\n' \"$FNO_WORKTREE\"\n",
+        encoding="utf-8",
+    )
+    fake_agents.chmod(0o755)
 
     script = Path(__file__).parents[3] / "skills/review/scripts/resolve-pr-worktree.sh"
     result = subprocess.run(
         ["bash", str(script), "42"],
         cwd=canonical,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_REQUESTS": str(requests),
+            "FNO_WORKTREE": str(feature),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -305,13 +315,21 @@ def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path
     branch_result = subprocess.run(
         ["bash", str(script), "feature/pr-42"],
         cwd=canonical,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_REQUESTS": str(requests),
+            "FNO_WORKTREE": str(feature),
+        },
         capture_output=True,
         text=True,
         check=False,
     )
     assert branch_result.returncode == 0, branch_result.stderr
     assert branch_result.stdout.strip() == str(feature)
+    payloads = [json.loads(line) for line in requests.read_text().splitlines()]
+    assert payloads[0]["pr"] == 42
+    assert payloads[1]["branch"] == "feature/pr-42"
 
 
 def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):

@@ -5,6 +5,7 @@ whose `true` merely mirrored config an operator had since flipped off, making
 the raw path the weaker gate (the sanctioned verb refused what raw gh merged).
 """
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,15 +56,16 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
 
     def fake_run(argv, **kwargs):
         seen.append((argv, Path.cwd()))
-        if argv[0] == "gh":
-            return SimpleNamespace(returncode=0, stdout="feature/pr-42\n", stderr="")
-        assert argv == ["git", "worktree", "list", "--porcelain"]
+        assert argv == ["fno-agents", "pr-worktree"]
+        assert kwargs["timeout"] == 2
+        assert json.loads(kwargs["input"]) == {
+            "cwd": str(canonical),
+            "pr": 42,
+            "timeout_secs": 1,
+        }
         return SimpleNamespace(
             returncode=0,
-            stdout=(
-                f"worktree {canonical}\nHEAD a\nbranch refs/heads/main\n\n"
-                f"worktree {feature}\nHEAD b\nbranch refs/heads/feature/pr-42\n\n"
-            ),
+            stdout=json.dumps({"worktree": str(feature)}),
             stderr="",
         )
 
@@ -79,8 +81,7 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
     assert state_file == feature / ".fno" / "target-state.md"
     assert fm == _fm()
     assert repo_root == feature
-    assert seen[0][0][0:2] == ["gh", "api"]
-    assert seen[1] == (["git", "worktree", "list", "--porcelain"], canonical)
+    assert seen == [(["fno-agents", "pr-worktree"], canonical)]
 
 
 def test_live_switch_arms_from_project_config(gp, tmp_path):

@@ -490,49 +490,27 @@ def _candidate_repo_roots():
     return roots
 
 
-def _worktree_for_branch(branch):
-    """Resolve one checked-out branch from git's worktree registry."""
-    try:
-        result = subprocess.run(
-            ['git', 'worktree', 'list', '--porcelain'],
-            capture_output=True, text=True, timeout=1,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    matches = []
-    path = None
-    listed_branch = None
-    for line in result.stdout.splitlines() + ['']:
-        if line.startswith('worktree '):
-            if path is not None and listed_branch == branch and Path(path).is_dir():
-                matches.append(Path(path).resolve())
-            path = line[len('worktree '):]
-            listed_branch = None
-        elif line.startswith('branch refs/heads/'):
-            listed_branch = line[len('branch refs/heads/'):]
-        elif not line and path is not None:
-            if listed_branch == branch and Path(path).is_dir():
-                matches.append(Path(path).resolve())
-            path = None
-            listed_branch = None
-    return matches[0] if len(matches) == 1 else None
-
-
 def _pr_worktree_root(pr_number):
-    """Resolve the exact local worktree for a PR's GitHub head branch."""
+    """Resolve the PR worktree through the Rust-owned branch selector."""
     if not str(pr_number).isdigit():
         return None
     try:
-        head = subprocess.run(
-            ['gh', 'api', f'repos/{{owner}}/{{repo}}/pulls/{pr_number}', '--jq', '.head.ref'],
-            capture_output=True, text=True, timeout=1,
+        proc = subprocess.run(
+            [os.environ.get("FNO_AGENTS_BIN", "fno-agents"), "pr-worktree"],
+            input=json.dumps(
+                {"cwd": os.getcwd(), "pr": int(pr_number), "timeout_secs": 1}
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
+        if proc.returncode != 0:
+            return None
+        value = json.loads(proc.stdout)
+        worktree = Path(value["worktree"])
+        return worktree.resolve() if worktree.is_dir() else None
     except Exception:
         return None
-    branch = head.stdout.strip() if head.returncode == 0 else ''
-    return _worktree_for_branch(branch) if branch else None
 
 
 def _parse_active_state(state_file, freshness_limit=3600):

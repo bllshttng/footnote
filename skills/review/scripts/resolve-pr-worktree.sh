@@ -6,29 +6,18 @@ target="${1:-}"
   echo "resolve-pr-worktree: expected a PR number or head branch" >&2
   exit 2
 }
-
-branch="$target"
-if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
-  branch="$(gh api "repos/{owner}/{repo}/pulls/${target}" --jq '.head.ref')" || {
-    echo "resolve-pr-worktree: could not read PR ${target} head branch" >&2
-    exit 3
-  }
-fi
-[[ -n "$branch" ]] || {
-  echo "resolve-pr-worktree: target ${target} returned no head branch" >&2
+request="$(jq -cn --arg cwd "$PWD" --arg target "$target" \
+  '{cwd:$cwd} + (if ($target | test("^[1-9][0-9]*$")) then {pr:($target|tonumber)} else {branch:$target} end)')"
+response="$(printf '%s\n' "$request" | "${FNO_AGENTS_BIN:-fno-agents}" pr-worktree)" || {
+  echo "resolve-pr-worktree: Rust worktree resolver refused target ${target}" >&2
   exit 3
 }
-
-listing="$(git worktree list --porcelain)" || {
-  echo "resolve-pr-worktree: git worktree list failed" >&2
+worktree="$(printf '%s\n' "$response" | jq -er '.worktree')" || {
+  echo "resolve-pr-worktree: resolver returned no worktree for ${target}" >&2
   exit 4
 }
-worktree="$(printf '%s\n' "$listing" | awk -v branch="refs/heads/${branch}" '
-  /^worktree / { path = substr($0, 10) }
-  $1 == "branch" && $2 == branch { print path; exit }
-')"
-[[ -n "$worktree" && -d "$worktree" ]] || {
-  echo "resolve-pr-worktree: no local worktree on PR branch ${branch}" >&2
+[[ -d "$worktree" ]] || {
+  echo "resolve-pr-worktree: resolved worktree is unavailable" >&2
   exit 5
 }
 printf '%s\n' "$worktree"

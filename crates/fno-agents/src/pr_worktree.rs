@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 fn parse_worktrees(stdout: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut entries = Vec::new();
@@ -57,7 +58,12 @@ pub fn resolve(cwd: &Path, branch: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("no local worktree on PR branch {branch}"))
 }
 
-pub fn resolve_pr_with(cwd: &Path, pr: &str, gh_bin: &str) -> Result<PathBuf, String> {
+fn resolve_pr_with_timeout(
+    cwd: &Path,
+    pr: &str,
+    gh_bin: &str,
+    timeout: Duration,
+) -> Result<PathBuf, String> {
     if pr
         .parse::<u64>()
         .ok()
@@ -72,7 +78,7 @@ pub fn resolve_pr_with(cwd: &Path, pr: &str, gh_bin: &str) -> Result<PathBuf, St
         &["api", query.as_str(), "--jq", ".head.ref"],
         cwd,
         "pr-worktree",
-        std::time::Duration::from_secs(30),
+        timeout,
     )
     .map_err(|err| crate::loopcheck::bounded_read_diagnostic("pr-worktree", &err))?;
     if !out.status.success() {
@@ -83,6 +89,10 @@ pub fn resolve_pr_with(cwd: &Path, pr: &str, gh_bin: &str) -> Result<PathBuf, St
     }
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     resolve(cwd, &branch)
+}
+
+pub fn resolve_pr_with(cwd: &Path, pr: &str, gh_bin: &str) -> Result<PathBuf, String> {
+    resolve_pr_with_timeout(cwd, pr, gh_bin, Duration::from_secs(30))
 }
 
 pub fn run() -> i32 {
@@ -113,8 +123,14 @@ pub fn run() -> i32 {
                 .and_then(Value::as_u64)
                 .map(|number| number.to_string())
         });
+    let timeout = payload
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30));
     let result = match pr {
-        Some(pr) => resolve_pr_with(&cwd, &pr, "gh"),
+        Some(pr) => resolve_pr_with_timeout(&cwd, &pr, "gh", timeout),
         None => payload
             .get("branch")
             .and_then(Value::as_str)
