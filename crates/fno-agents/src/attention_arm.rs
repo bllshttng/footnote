@@ -187,19 +187,7 @@ pub fn tick_pages(
         }
     }
     // Closed pages live in done/ under their id (or <id>-2 when taken).
-    let done_dir = dir.join("done");
-    let mut done_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut done_pages: Vec<(PathBuf, PageFront)> = Vec::new();
-    for path in io.list_md(&done_dir) {
-        let Ok(text) = io.read(&path) else {
-            continue;
-        };
-        let Some((front, _)) = parse_page(&text) else {
-            continue;
-        };
-        done_ids.insert(front.question_id.clone());
-        done_pages.push((path, front));
-    }
+    let (done_ids, _) = list_done(dir, io);
 
     // Prune state for ids no longer open (keeps the file bounded).
     state.retain(|id, _| all_open.contains(id.as_str()));
@@ -237,6 +225,9 @@ pub fn tick_pages(
             Err(e) => routing_err = Some(e),
         }
     }
+    // A degraded beat never rewrites the generated views: an empty index
+    // would push to the user's devices as "nothing needs you" (AC4-ERR).
+    let routing_broken = routing_err.is_some();
     if let Some(e) = routing_err {
         tick.skip = Some("routing_unreadable".to_string());
         tick.detail.push(e);
@@ -263,11 +254,15 @@ pub fn tick_pages(
         settle_page(page, item, dir, state, now, settle_secs, io, &mut tick);
     }
 
-    // 7. The index and the Base: generated files, rewritten only when the
-    // content changed and the current file is ours.
+    // 7. The index and the done listing are rebuilt after the settle pass:
+    // a page this beat closed must not linger under Open (AC5-HP).
+    let (done_ids_now, done_pages) = list_done(dir, io);
     let mut open_entries: Vec<IndexEntry> = Vec::new();
     for page in &pages {
-        if page.front.status == "open" && all_open.contains(page.front.question_id.as_str()) {
+        if page.front.status == "open"
+            && all_open.contains(page.front.question_id.as_str())
+            && !done_ids_now.contains(page.front.question_id.as_str())
+        {
             open_entries.push(IndexEntry {
                 stem: page.stem.clone(),
                 id: page.front.question_id.clone(),
@@ -308,20 +303,22 @@ pub fn tick_pages(
         })
         .collect();
     done_entries.sort_by(|a, b| b.answered_at.cmp(&a.answered_at));
-    write_generated(
-        &dir.join("questions.md"),
-        &render_index(&open_entries, &done_entries),
-        "questions.md",
-        io,
-        &mut tick,
-    );
-    write_generated(
-        &dir.join("questions.base"),
-        attention_file::BASE,
-        "questions.base",
-        io,
-        &mut tick,
-    );
+    if !routing_broken {
+        write_generated(
+            &dir.join("questions.md"),
+            &render_index(&open_entries, &done_entries),
+            "questions.md",
+            io,
+            &mut tick,
+        );
+        write_generated(
+            &dir.join("questions.base"),
+            attention_file::BASE,
+            "questions.base",
+            io,
+            &mut tick,
+        );
+    }
     tick
 }
 
@@ -563,6 +560,27 @@ fn close_and_move(
         return;
     }
     move_to_done(dir, &page.path, &page.front.question_id, io, tick, count);
+}
+
+/// Read `done/`: the closed ids and their parsed pages, so the delivery
+/// dedup and the index agree on what a closed page is.
+fn list_done(
+    dir: &Path,
+    io: &mut dyn SinkIo,
+) -> (std::collections::HashSet<String>, Vec<(PathBuf, PageFront)>) {
+    let mut ids = std::collections::HashSet::new();
+    let mut pages: Vec<(PathBuf, PageFront)> = Vec::new();
+    for path in io.list_md(&dir.join("done")) {
+        let Ok(text) = io.read(&path) else {
+            continue;
+        };
+        let Some((front, _)) = parse_page(&text) else {
+            continue;
+        };
+        ids.insert(front.question_id.clone());
+        pages.push((path, front));
+    }
+    (ids, pages)
 }
 
 /// Rename a closed page into `done/<id>.md` (`<id>-2.md`, `-3.md`, ... when
@@ -1772,7 +1790,11 @@ mod tests {
         let path = io.path_of("q-a1").unwrap();
         let ticked = io.files[&path].replace("- [ ] 2.", "- [x] 2.");
         io.files.insert(path.clone(), ticked);
-        tick_pages(
+        // The changed page restarts the settle window, so this beat records
+        // nothing (the skip in the test's name). MemIo's read always matches,
+        // so the mid-beat write race itself is approximated by the re-read
+        // compare inside close_and_move.
+        let t2 = tick_pages(
             &items,
             &HashMap::new(),
             dir.path(),
@@ -1781,11 +1803,20 @@ mod tests {
             120,
             &mut io,
         );
-        // Simulate another writer between the arm's read and its write: the
-        // re-read compare must see a page that differs from the text the
-        // settle pass read. MemIo's read always matches, so approximate the
-        // race with a slower build: a mid-beat edit is covered by the
-        // close-and-move compare below; here assert the normal path closed.
+        assert_eq!(t2.recorded, 0, "the changed page skipped this beat");
+        assert!(io.path_of("done/q-a1").is_none(), "still settling");
+        // The next beat closes it: the window restarted at 1300, and 1500 is
+        // 200 s past it.
+        let t3 = tick_pages(
+            &items,
+            &HashMap::new(),
+            dir.path(),
+            &mut state,
+            1500,
+            120,
+            &mut io,
+        );
+        assert_eq!(t3.recorded, 1, "AC5-ERR: the next beat closes it");
         assert!(io.path_of("done/q-a1").is_some());
     }
 

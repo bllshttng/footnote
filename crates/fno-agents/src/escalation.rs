@@ -531,6 +531,9 @@ The king waits. A force push cannot be undone.
         std::env::set_var("HOME", &base);
         std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
         let questions_fallback = questions_dir(&repo);
+        // The expected side must resolve inside the same env window: after
+        // the restore it reads a parallel test's pins, not this test's (CI).
+        let expected = crate::paths::space_dir(&repo).join("questions");
         match q_home_backup {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
@@ -541,7 +544,7 @@ The king waits. A force push cannot be undone.
         }
         assert_eq!(
             questions_fallback,
-            crate::paths::space_dir(&repo).join("questions"),
+            expected,
             "AC1-HP space fallback: {}",
             questions_fallback.display()
         );

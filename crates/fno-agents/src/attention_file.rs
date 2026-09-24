@@ -849,9 +849,11 @@ mod tests {
     #[test]
     fn ac3_err_plugin_stamp_survives_close() {
         let page = render_page(&item(), &routing());
+        // A vault plugin's stamp rewrites the `updated` property in place;
+        // the close must keep it.
         let stamped = page.replacen(
-            "king: king-fno",
-            "king: king-fno\nupdated: 2026-09-22T09:05",
+            "updated: 2026-09-22T12:00:00Z",
+            "updated: 2026-09-22T09:05",
             1,
         );
         let closed = close_page(
@@ -871,15 +873,16 @@ mod tests {
             closed.contains("updated: 2026-09-22T09:05"),
             "the plugin stamp survives: {closed}"
         );
-        assert!(closed.ends_with("Recorded: option 2 (file)"));
+        assert!(closed.trim_end().ends_with("Recorded: option 2 (file)"));
     }
 
     #[test]
     fn body_hash_ignores_a_frontmatter_stamp() {
         let page = render_page(&item(), &routing());
+        // A vault plugin's stamp adds an unknown key; the body is untouched.
         let stamped = page.replacen(
             "king: king-fno",
-            "king: king-fno\nupdated: 2026-09-22T09:05",
+            "king: king-fno\nplugin_stamp: 2026-09-22T09:05",
             1,
         );
         assert_eq!(body_hash(&page), body_hash(&stamped));
@@ -991,7 +994,7 @@ mod tests {
         assert_ne!(key0, settle_key(&typed));
         let stamped = page.replacen(
             "king: king-fno",
-            "king: king-fno\nupdated: 2026-09-23T10:00:00Z",
+            "king: king-fno\nplugin_stamp: 2026-09-23T10:00:00Z",
             1,
         );
         assert_eq!(key0, settle_key(&stamped));
