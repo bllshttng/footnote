@@ -16,16 +16,17 @@ use super::*;
 /// message keeps the Fill(3) surplus. Read by the Table and - through
 /// [`sideline_column_rects`] - by the callers that need the solver's answer
 /// beside the paint: one geometry authority, and it is the solver.
+const SIDELINE_RIGHT_SLOT_W: u16 = 6;
 pub(super) const SIDELINE_COLUMNS: [Constraint; 5] = [
     Constraint::Length(5),
     Constraint::Min(22),
     Constraint::Fill(3),
-    Constraint::Length(6),
+    Constraint::Length(SIDELINE_RIGHT_SLOT_W),
     // 6, not the plan's 4: the density button overlays the last two
     // columns, and a 4-wide age cell leaves the sort arrow nowhere to hide
     // under it (the regression `age_sort_arrow_survives_the_density_button`
     // pins). The two spare columns are the padding the old COL_TIME=6 gave.
-    Constraint::Length(6),
+    Constraint::Length(SIDELINE_RIGHT_SLOT_W),
 ];
 
 /// The solver's column rects for a text width: the same call the Table makes
@@ -259,6 +260,9 @@ impl View {
             };
             if let Some((text, flags)) = legacy {
                 paint_legacy_row(cells, r, cols, text_w, &text, flags);
+            }
+            if card {
+                Self::paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
             }
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
@@ -695,6 +699,42 @@ impl View {
             None => base,
         };
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
+    }
+
+    /// A narrow Regular panel can clip every Table column after the name.
+    /// Keep a fitting card PR visible at the right edge when its cells are
+    /// otherwise empty, without overwriting the status or identity.
+    fn paint_card_pr_if_it_fits(
+        cells: &mut [Cell],
+        row: usize,
+        cols: usize,
+        text_w: usize,
+        drow: &DisplayRow<'_>,
+    ) {
+        let DisplayRow::Agent(agent) = drow else {
+            return;
+        };
+        let Some(number) = agent.pr else {
+            return;
+        };
+        let label = format!("#{number}");
+        let width = label.width();
+        if width > SIDELINE_RIGHT_SLOT_W as usize || width > text_w {
+            return;
+        }
+        let line = &mut cells[row * cols..row * cols + text_w];
+        let start = text_w - width;
+        if line[start..].iter().any(|cell| cell.c != ' ') {
+            return;
+        }
+        let Some(style) = line.iter().find(|cell| cell.c != ' ').cloned() else {
+            return;
+        };
+        for (offset, ch) in label.chars().enumerate() {
+            let mut cell = style.clone();
+            cell.c = ch;
+            line[start + offset] = cell;
+        }
     }
 
     /// Line 2 of a card: two spaces, then `harness · king · message`, with
