@@ -9,7 +9,7 @@ The fno eval bank (`evals/bank`) and the trend reader in `crates/fno-agents` gra
 Each positive case has a `fixture.sh` that builds a small git repo before Claude starts, and two graders:
 
 - `skill-fired` (`tool_used: Skill`, pinned to the fno skill name) records whether the skill fired. In a two-arm run it is an indicator only and does not count toward the score.
-- `outcome` (`llm`) grades the result with concrete PASS and FAIL conditions: the fixed `calc.py`, the rate limit in `app.py`, the cited `findings.md`, the review verdict on an off-by-one, or an honest reply to a PR request in a repo with no remote.
+- `outcome` (`llm`) grades the result with concrete PASS and FAIL conditions. It reads the fixed `calc.py`, the rate limit in `app.py`, or the cited `findings.md`. For `review` and `pr` it reads the reply. It checks the off-by-one verdict, or an honest answer about the missing remote.
 
 The `fix`, `target`, and `think` fixtures end on a feature branch. On `main`, the fno write guard refuses every edit and asks for a worktree outside the workspace, and the eval sandbox cannot write there.
 
@@ -22,7 +22,7 @@ claude plugin eval . --eval-dir evals/claude-plugin --model claude-opus-5-5 \
   --judge-model claude-sonnet-5 --scaffold --allow-tools Bash Edit Write --max-cost-usd 20
 ```
 
-`--scaffold` runs each `fixture.sh` as you, outside the sandbox. Read them first; they only write inside the run's workspace. `--allow-tools` lets Claude edit files and run the tests. Use a Sonnet judge: the default small judge failed a correct `findings.md`. Every run is a real model call on your account. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
+`--scaffold` runs each `fixture.sh` as you, outside the sandbox. Read them first. They only write inside the run's workspace. `--allow-tools` lets Claude edit files and run the tests. Use a Sonnet judge: the default small judge failed a correct `findings.md`. Every run is a real model call on your account. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
 
 ## Read the table
 
