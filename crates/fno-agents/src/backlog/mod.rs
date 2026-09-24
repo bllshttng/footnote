@@ -2002,10 +2002,16 @@ mod tests {
         // that change against the raw baseline and save the row.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
-        let raw = raw_rows(&graph);
+        let mut raw = raw_rows(&graph);
+        // The shared fixture already carries this default; remove it so this
+        // case starts from the raw shape it claims to normalize.
+        raw[0].as_object_mut().unwrap().remove("tags");
         // Seed the store from the raw file: the db now holds ab-one with no
         // tags key, exactly what the last publish wrote.
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        // This exercises the JSON-backed shadow path; a new db defaults to
+        // the SQLite backend until the rollback door is named explicitly.
+        set_backend(&graph, Backend::Json).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         after[0]
