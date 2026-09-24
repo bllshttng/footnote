@@ -2023,10 +2023,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
-        // The seed is the UN-defaulted form: no tags key, what an older
-        // file's row looked like before the defaults pipeline ran.
+        // The shared fixture carries this default; remove it to model an older
+        // raw file before the defaults pipeline ran.
         raw[0].as_object_mut().unwrap().remove("tags");
+        // Seed the store from the raw file: the db now holds ab-one with no
+        // tags key, exactly what the last publish wrote.
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        // This exercises the JSON-backed shadow path; a new db defaults to
+        // the SQLite backend until the rollback door is named explicitly.
+        set_backend(&graph, Backend::Json).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         after[0]
@@ -2055,8 +2060,8 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; graph.json is frozen under it, so the
-        // assertion reads the store, never file-vs-store parity.
+        // Assert the relational shadow while the JSON backend is selected;
+        // read the stored rows directly instead of comparing file parity.
         let stored = read_entries(&graph).unwrap();
         let one = stored
             .iter()
@@ -2096,6 +2101,7 @@ mod tests {
             Value::String("pending supersession".into()),
         );
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw.clone();
         after[0]
@@ -2119,7 +2125,8 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; the settle is read back from it.
+        // Assert the relational shadow while the JSON backend is selected;
+        // read back the settle directly from the store.
         let stored = read_entries(&graph).unwrap();
         let two = stored
             .iter()
