@@ -4,32 +4,21 @@ Operator finding 2026-08-11: "it keeps cutting out scope without me knowing unti
 
 Two holes caused it, and the second made the first unfixable. This doc is the contract for both fixes. It also covers the carveout-severity and ratio-measurement work that shipped with them.
 
-## The denominator: count is a declaration, never a detection
+## The denominator: derived from the node's own details
 
-Detection of multi-deliverable scope from node prose is impossible. Three real specimens prove it. One enumerates with an ordinal run. One uses a cardinal governing a plural. The one that actually failed carries a coordinated noun phrase with zero numerals.
+Detection of multi-deliverable scope from node prose is impossible with high recall. Three real specimens prove it. One enumerates with an ordinal run. One uses a cardinal governing a plural. The one that actually failed carries a coordinated noun phrase with zero numerals.
 
-A regex tight enough to skip that node's measurement digits misses its ask. A regex loose enough to catch the ask fires on every measurement bullet. Keying a refusal on detection is keying it on a coin flip.
+A regex tight enough to skip that node's measurement digits misses its ask. A regex loose enough to catch the ask fires on every measurement bullet. Keying any behavior on full detection is keying it on a coin flip.
 
-So the gate never asks how many deliverables a node has. It asks whether a denominator exists at all:
+The gate era is over. `fno do target init` on a plan-less code node now states its own scope: it derives `deliverables: N` from the node's own details and proceeds, never refusing. The derivation reads only the unambiguous structures (highest ordinal marker, a two-member construction, else 1), so the count is falsifiable - a reader can recount the node's enumeration. An explicit `--deliverables N` still wins. `shipped M of N` stays expressible without a blueprint, which is what the refusal existed to force.
 
-```
-denominator_absent := payload_is_code AND plan_path == "" AND deliverables is None
-```
+### The enumerated_scope predicate
 
-Three structured field reads, zero prose. `payload_is_code` is `domain == "code"` at init. The merge gate uses the real PR diff. `fno do target init` refuses a code node with no plan and no declared count. It names both exits that create a denominator:
+`enumerated_scope` lives in `cli/src/fno/target/denominator.py`. It is a narrow, high-precision predicate over a node's title and details. It fires on an ordinal run like `(1)…(2)` or a numbered list. It fires on a cardinal 2-10 governing a plural noun within three tokens. It fires on `both X and Y`. `derive_deliverables` in the same module turns the same reads into the count init stamps.
 
-1. `/fno:blueprint quick "..."` writes a plan enumerating the tasks. `plan_path` fills. The denominator is the task count.
-2. `fno do target init --deliverables N` stamps `deliverables: N` into the immutable manifest.
+It gates nothing on its own. It feeds the `target_denominator` event's `enumerated` flag and the derivation.
 
-Exit 2 is deliberately cheap. A run that stamps 1 and ships one of four leaves a falsifiable claim on the record. That is exactly what that failed node lacked. A missing band and a never-planned band stop being indistinguishable.
-
-### The enumerated_scope ratchet
-
-`enumerated_scope` lives in `cli/src/fno/target/denominator.py`. It is a narrow, high-precision predicate over a node's title and details. It fires on an ordinal run like `(1)…(2)` or a numbered list. It fires on a cardinal 2-10 governing a plural noun within three tokens. It fires on `both X and Y`.
-
-It gates nothing on its own. Its only power is to withdraw exit 2 for an unambiguously enumerated node. That forces a real plan instead of a declared count.
-
-A non-fire asserts nothing. The pinned miss does not fire, and that is correct. That failed node's coordinated-noun-phrase ask is protected by `denominator_absent`, not by this ratchet.
+A non-fire asserts nothing. The pinned miss does not fire, and that is correct. That failed node derives a count of 1, and the init echo names the `--deliverables` override.
 
 ## The fidelity gate: one join, two dispositions
 
