@@ -2036,9 +2036,12 @@ mod tests {
             outcome.shadow_warning
         );
         let report = parity(&graph).unwrap();
+        let json_rows = raw_rows(&graph);
+        let sqlite_rows = crate::backlog::read_entries(&graph).unwrap();
         assert_eq!(
             report.divergent, 0,
-            "defaulted row reached the store: {report:?}"
+            "defaulted row reached the store: {report:?}; json={:?}; sqlite={:?}",
+            json_rows[0], sqlite_rows[0]
         );
     }
 

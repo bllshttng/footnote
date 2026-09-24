@@ -1306,11 +1306,12 @@ for a in "$@"; do case "$a" in
   */check-runs)
     if [ -f "$D/timeout-run" ]; then
       echo '{"check_runs":[{"id":123,"name":"stress","status":"completed","conclusion":"cancelled","output":{"annotations_count":1},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:40:00Z","html_url":"https://github.com/o/r/actions/runs/123/job/456","check_suite":{"id":88}}]}'
-      exit 0 ;;
+      exit 0
     fi
     if [ -f "$D/cancel-run" ]; then
       echo '{"check_runs":[{"id":124,"name":"cancelled","status":"completed","conclusion":"cancelled","output":{"annotations_count":0},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:10:00Z","html_url":"https://github.com/o/r/actions/runs/124/job/457","check_suite":{"id":89}}]}'
-      exit 0 ;;
+      exit 0
+    fi
     echo '{"check_runs":[{"name":"rust-ci","status":"completed","conclusion":"success","started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:05:00Z","html_url":"https://github.com/o/r/actions/runs/35344488345/job/99","check_suite":{"id":7}}]}'
     exit 0 ;;
   */status)
