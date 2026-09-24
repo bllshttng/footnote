@@ -1977,7 +1977,9 @@ fn canonical_row_digests_with_rungs(
     // Both sides pass the defaults pass here: a ring snapshot is either the
     // defaulted begin view or a raw publish outcome, and the current rows
     // are the raw export. Without it an untouched-but-defaulted row reads as
-    // changed and disjoint writers conflict.
+    // changed and disjoint writers conflict. The hash reads sorted keys for
+    // the same reason: canonicalize_entries keeps unknown keys in source
+    // order, and the two sources order them differently.
     let mut canonical = entries.to_vec();
     graph_store::apply_defaults(&mut canonical, false);
     graph_store::ensure_slugs(&mut canonical);
@@ -1987,7 +1989,7 @@ fn canonical_row_digests_with_rungs(
         .iter()
         .filter_map(|row| {
             let id = graph_store::entry_id(row)?.to_string();
-            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
+            let digest = sha2::Sha256::digest(crate::evals_macro::canonical_json(row).as_bytes());
             Some((id, format!("{digest:x}")[..16].to_string()))
         })
         .collect()
