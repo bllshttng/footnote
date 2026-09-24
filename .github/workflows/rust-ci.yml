@@ -5,12 +5,12 @@ name: rust-ci
 # is not a duplicate heavy suite: formatting, the warnings ratchet, the PR
 # stress trials, and dependency audit.
 
-# Cancel a PR's superseded runs on re-push (Actions minute conservation). Keyed by head_ref so PR re-pushes share a
-# group; non-PR events use a unique run_id, so every main commit keeps its own
-# run.
+# PR re-pushes share a group keyed by head_ref and cancel their own running
+# run. Main pushes share a group keyed by ref, so a new main push supersedes
+# only the queued main run and never cancels the running one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
   workflow_dispatch:

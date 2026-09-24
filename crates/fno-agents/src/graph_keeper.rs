@@ -708,6 +708,12 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
+    // Open the store before the seat serves: first contact takes the
+    // creation lock, and a request paying it flattens a busy lock into an
+    // unreadable answer instead of lock_timeout.
+    if let Err(error) = crate::backlog::version(&cfg.graph) {
+        eprintln!("store keeper: store not opened at startup: {error}");
+    }
     let listener = match UnixListener::bind(&cfg.sock) {
         Ok(l) => l,
         // A listener appeared between the probe and the bind: the seat filled.
@@ -1978,7 +1984,14 @@ fn canonical_row_digests_with_rungs(
 ) -> std::collections::BTreeMap<String, String> {
     use sha2::Digest as _;
 
+    // Both sides pass the defaults pass here: a ring snapshot is either the
+    // defaulted begin view or a raw publish outcome, and the current rows
+    // are the raw export. Without it an untouched-but-defaulted row reads as
+    // changed and disjoint writers conflict. The hash reads sorted keys for
+    // the same reason: canonicalize_entries keeps unknown keys in source
+    // order, and the two sources order them differently.
     let mut canonical = entries.to_vec();
+    graph_store::apply_defaults(&mut canonical, false);
     graph_store::ensure_slugs(&mut canonical);
     graph_store::recompute_statuses_with_plan_rungs(&mut canonical, plan_rungs);
     graph_store::canonicalize_entries(&mut canonical);
@@ -1986,7 +1999,7 @@ fn canonical_row_digests_with_rungs(
         .iter()
         .filter_map(|row| {
             let id = graph_store::entry_id(row)?.to_string();
-            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
+            let digest = sha2::Sha256::digest(crate::evals_macro::canonical_json(row).as_bytes());
             Some((id, format!("{digest:x}")[..16].to_string()))
         })
         .collect()
@@ -3574,14 +3587,16 @@ mod tests {
         })
     }
 
+    // The fixtures seed each row at the status the publish derives for a
+    // planless node under an empty rung map: a row the first publish
+    // re-derives really moved underneath the second writer, and conflicts.
     #[test]
-    #[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         std::fs::write(
             &graph,
-            r#"{"entries":[{"id":"x-left","title":"left"},{"id":"x-right","title":"right"}]}"#,
+            r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
         )
         .unwrap();
         let state = row_commit_state(graph.clone());
@@ -3594,9 +3609,44 @@ mod tests {
         handle_commit_rows(&state, &row_commit_params(&begin, left)).unwrap();
         handle_commit_rows(&state, &row_commit_params(&begin, right)).unwrap();
 
-        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        let rows = graph_store::read_rows(&graph).unwrap();
         assert_eq!(rows[0]["title"], json!("left changed"));
         assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn commit_rows_disjoint_from_a_publish_seeded_snapshot_no_conflict() {
+        // The ring also holds publish outcomes, so a begin at a just-published
+        // version reads its base from the publish, not from the cache.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
+        )
+        .unwrap();
+        let state = row_commit_state(graph.clone());
+        let first = handle_begin(&state).unwrap();
+        let mut a = first["entries"][0].clone();
+        a["title"] = json!("a changed");
+        handle_commit_rows(&state, &row_commit_params(&first, a)).unwrap();
+
+        let begin = handle_begin(&state).unwrap();
+        let mut b = begin["entries"][1].clone();
+        b["title"] = json!("b changed");
+        let mut c = begin["entries"][2].clone();
+        c["title"] = json!("c changed");
+        handle_commit_rows(&state, &row_commit_params(&begin, b)).unwrap();
+        handle_commit_rows(&state, &row_commit_params(&begin, c)).unwrap();
+
+        let rows = graph_store::read_rows(&graph).unwrap();
+        let title = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == json!(id))
+                .map(|row| row["title"].clone())
+        };
+        assert_eq!(title("x-b"), Some(json!("b changed")));
+        assert_eq!(title("x-c"), Some(json!("c changed")));
     }
 
     #[test]
@@ -3690,7 +3740,7 @@ mod tests {
             status["result"]["reply"]["result"]["entries_elided"],
             json!(true)
         );
-        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        let rows = graph_store::read_rows(&graph).unwrap();
         assert_eq!(rows[0]["id"], json!("x-written"));
     }
 
@@ -4332,6 +4382,9 @@ mod tests {
         let sock = dir.path().join("backend.store.sock");
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        // The keeper opens the store before it serves, and an unnamed store
+        // is sqlite from birth: the json leg answers only the explicit name.
+        crate::backlog::set_backend(&graph, Backend::Json).unwrap();
         let cfg = KeeperConfig {
             sock: sock.clone(),
             graph: graph.clone(),
@@ -4351,7 +4404,11 @@ mod tests {
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
         };
-        assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
+        assert_eq!(
+            identify_backend(&mut stream),
+            "json",
+            "named json reads json"
+        );
         crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
         assert_eq!(
             identify_backend(&mut stream),
