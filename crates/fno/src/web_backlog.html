@@ -1,14 +1,17 @@
 <!doctype html>
 <!--
-  fno backlog web board (read-only). Vendored inline by `fno mux serve --web`
+  fno backlog web board. Vendored inline by `fno mux serve --web`
   (include_str!), so no external resource exists and the strict CSP holds
   offline. It draws the Rust read model (backlog_model) through
   /backlog/model.json and /backlog/node.json, computing nothing the model
   already answered, polling while the tab is visible and keeping the last
   good board when a poll fails. Titles, details, notes and decisions are
   free text any session writes, so every node string lands through
-  textContent: no HTML is ever built from data. Read-only: the page runs
-  nothing and shows each session's attach or resume command to copy.
+  textContent: no HTML is ever built from data. When the serving bridge
+  stamps <body data-writable="true"> the panel adds act controls that POST
+  the same verbs the agents run (the write_guard gates them server-side);
+  on a read-only bridge the page runs nothing and shows each session's
+  attach or resume command to copy.
 -->
 <html lang="en">
 <head>
@@ -16,7 +19,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>fno backlog (read-only)</title>
+<title>fno backlog</title>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -70,6 +73,14 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 .fields { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; }
 .fields .k { color: #6f7a8f; }
 .fields .v { overflow-wrap: anywhere; }
+.actrow { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+.actrow .albl { color: #6f7a8f; font-size: 12px; min-width: 48px; }
+.actrow .ainput { font: inherit; font-size: 12px; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 8px; max-width: 220px; min-height: 26px; }
+.actrow button { font: inherit; font-size: 12px; cursor: pointer; background: #141a26; color: #9aa4b6; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 10px; min-height: 26px; }
+.actrow button:hover { border-color: #3763ac; }
+.actrow button:disabled { opacity: .45; cursor: default; }
+.actnote { color: #c99b45; font-size: 11px; min-height: 14px; overflow-wrap: anywhere; }
+.actnote:empty { display: none; }
 .pre { margin: 4px 0 0; padding: 6px 8px; background: #10141d; border: 1px solid #1c2230; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 260px; overflow-y: auto; }
 .links { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
 .linkbtn { font: inherit; font-size: 11px; text-align: left; cursor: pointer; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 8px; overflow-wrap: anywhere; }
@@ -152,6 +163,9 @@ function sessionCommand(s) {
   let dead = false;
   let openId = initial.get("node") || "";
   let openSeq = 0;
+  // The bridge stamps the flag only when it is bound to loopback; the
+  // server-side write_guard decides every write, the flag only draws.
+  const writable = document.body.dataset.writable === "true";
   const panel = document.getElementById("panel");
   const panelBody = document.getElementById("panelbody");
   const noteEl = document.getElementById("note");
@@ -422,6 +436,46 @@ function sessionCommand(s) {
     p.set("id", id);
     return p.toString();
   }
+  // One backlog act: POST the JSON body, then show the verb's own last
+  // line (or the refusal body). Every act control disables for the flight;
+  // on a landed write the board and the open node re-read.
+  let acting = false;
+  async function act(body) {
+    if (acting) return;
+    acting = true;
+    for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = true;
+    let resp;
+    try {
+      resp = await fetch(base + "backlog/act?t=" + encodeURIComponent(t), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      showActLine("bridge unreachable: " + (e && e.message ? e.message : e));
+      acting = false;
+      return;
+    }
+    const text = await resp.text();
+    let ok = resp.ok, notice = text;
+    try {
+      const v = JSON.parse(text);
+      ok = resp.ok && v.ok !== false;
+      notice = v.notice || text;
+    } catch { }
+    showActLine((resp.ok ? "" : resp.status + ": ") + notice);
+    acting = false;
+    for (const b of panelBody.querySelectorAll("[data-act]")) b.disabled = false;
+    if (ok) {
+      fetchBoard();
+      openNode(body.id);
+    }
+  }
+  function showActLine(text) {
+    const line = document.getElementById("actnote");
+    if (!line) return;
+    line.textContent = text;
+  }
   // Open a node: fetch its answer and draw the panel. A non-200 or a failed
   // read names the status and the response text; the panel never goes blank.
   async function openNode(id) {
@@ -475,9 +529,119 @@ function sessionCommand(s) {
     for (const item of items) render(box, item);
     panelBody.appendChild(g);
   }
+  // The act group: title, priority, size, status, rank and launches, drawn
+  // only when the serving bridge stamped data-writable. A control whose
+  // feature the backend cannot answer (or whose card is already being
+  // worked) renders disabled with its reason as the tooltip.
+  function renderActs(view) {
+    if (!view) return;
+    const card = view.card || {};
+    const g = document.createElement("div");
+    g.className = "pgroup";
+    const h = document.createElement("h3");
+    h.textContent = "act";
+    g.appendChild(h);
+    const note = document.createElement("div");
+    note.id = "actnote";
+    note.className = "actnote";
+    g.appendChild(note);
+    const unavail = (feature) => (view.unavailable || []).find((u) => u.feature === feature);
+    const fieldUn = unavail("field edits");
+    const moveUn = unavail("card moves");
+    const busy = card.claimed || card.live;
+    const rowFor = (label) => {
+      const row = document.createElement("div");
+      row.className = "actrow";
+      const labelEl = document.createElement("span");
+      labelEl.textContent = label;
+      labelEl.className = "albl";
+      row.appendChild(labelEl);
+      return [row, labelEl];
+    };
+    const addSelect = (label, field, value, options, un) => {
+      const [row, labelEl] = rowFor(label);
+      const sel = document.createElement("select");
+      sel.className = "ainput";
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "";
+      sel.appendChild(blank);
+      for (const o of options) {
+        const o0 = document.createElement("option");
+        o0.value = o;
+        o0.textContent = o;
+        sel.appendChild(o0);
+      }
+      sel.value = value || "";
+      if (sel.value !== (value || "")) {
+        const cur = document.createElement("option");
+        cur.value = value;
+        cur.textContent = value;
+        sel.appendChild(cur);
+        sel.value = value;
+      }
+      sel.addEventListener("change", () => {
+        if (!sel.value) return;
+        act({ act: "field", id: card.id, field: field, value: sel.value });
+      });
+      if (un) {
+        sel.disabled = true;
+        labelEl.title = un.reason;
+      }
+      g.appendChild(row);
+    };
+    // Title: input + save.
+    const [trow, tlabel] = rowFor("title");
+    const tinput = document.createElement("input");
+    tinput.className = "ainput";
+    tinput.value = card.title || "";
+    const tsave = document.createElement("button");
+    tsave.textContent = "save";
+    tsave.setAttribute("data-act", "1");
+    tsave.addEventListener("click", () => act({ act: "field", id: card.id, field: "title", value: tinput.value }));
+    if (fieldUn) {
+      tinput.disabled = true;
+      tsave.disabled = true;
+      tlabel.title = fieldUn.reason;
+    }
+    trow.append(tinput, tsave);
+    g.appendChild(trow);
+    addSelect("priority", "priority", card.priority, ["p0", "p1", "p2", "p3"], fieldUn);
+    addSelect("size", "size", card.size, ["S", "M", "L"], fieldUn);
+    addSelect("status", "status", card.status, ["idea", "design", "ready", "deferred", "done"], fieldUn);
+    // Rank and launches.
+    const [lrow, llabel] = rowFor("rank");
+    for (const word of ["top", "bottom"]) {
+      const b = document.createElement("button");
+      b.textContent = word;
+      b.setAttribute("data-act", "1");
+      b.addEventListener("click", () => act({ act: "rank", id: card.id, place: word }));
+      if (moveUn) {
+        b.disabled = true;
+      }
+      lrow.appendChild(b);
+      llabel.title = moveUn ? moveUn.reason : "";
+    }
+    g.appendChild(lrow);
+    const [brow, blabel] = rowFor("launch");
+    for (const kind of ["blueprint", "target"]) {
+      const b = document.createElement("button");
+      b.textContent = kind === "blueprint" ? "blueprint" : "launch target";
+      b.setAttribute("data-act", "1");
+      b.addEventListener("click", () => act({ act: kind, id: card.id }));
+      if (busy) {
+        b.disabled = true;
+        blabel.title = "already being worked; open its session instead";
+      }
+      brow.appendChild(b);
+    }
+    g.appendChild(brow);
+    panelBody.appendChild(g);
+  }
   // The node panel, top to bottom: id and title, unavailable notes, the
-  // field list, details, link groups, sessions with their commands, PRs,
-  // notes, decisions. Nothing here builds HTML from data.
+  // field list, act controls when the bridge can write, details, link
+  // groups, sessions with their commands, PRs, notes, decisions. Nothing
+  // here builds HTML from data.
   function renderPanel(view) {
     panelBody.textContent = "";
     const card = view.card || {};
@@ -519,6 +683,7 @@ function sessionCommand(s) {
     addFieldRow(grid, "king", king);
     addFieldRow(grid, "plan_path", view.plan_path);
     panelBody.appendChild(g);
+    if (writable) renderActs(view);
     if (view.details !== null && view.details !== undefined) {
       const dg = document.createElement("div");
       dg.className = "pgroup";
