@@ -647,7 +647,7 @@ mod tests {
     /// manifest stands and the reason names the orphan for the court.
     #[test]
     fn a_reboot_absent_holder_with_an_old_transcript_keeps_the_crown() {
-        let (dir, manifest, registry, session) =
+        let (dir, manifest, registry, _session) =
             dead_fixture("reboot-keeps", "aaaa1111-0000-4000-8000-000000000001");
         let emitter = events_of(&dir);
         let out = sweep(
