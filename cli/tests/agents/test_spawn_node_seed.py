@@ -86,7 +86,7 @@ def _invoke(runner, *args):
     return runner.invoke(agents_app, ["spawn", "--name", "w1", *args])
 
 
-def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner):
+def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner, loop_admission_ready):
     """AC1-HP: no typed message + encoded node -> the pane seed is the node's
     rendered verb command, the brief rides TARGET_BRIEF, and the receipt names
     both sources."""
@@ -130,7 +130,9 @@ def test_typed_message_without_a_node_is_never_consulted(monkeypatch, runner):
     assert "TARGET_BRIEF" not in received["provenance"]
 
 
-def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runner):
+def test_typed_message_with_a_node_composes_the_nodes_command(
+    monkeypatch, runner, loop_admission_ready
+):
     """with `--node`, a prose message gains the node's derived
     command in front; the node row is read and the brief rides along."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -140,7 +142,9 @@ def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runne
     assert "brief_source" not in result.output
 
 
-def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runner):
+def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(
+    monkeypatch, runner, loop_admission_ready
+):
     """The dispatch-next porcelain pins its lane: --mux-session reaches
     dispatch_spawn_bounded_pane as `session`, and a non-pane substrate refuses."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -155,7 +159,7 @@ def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runn
     assert "pane-only" in result.output
 
 
-def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
+def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner, loop_admission_ready):
     """(x-c914) The pane's birth account rides the provenance env so the mux
     reads it back for the sideline glyph; claude-gated like the row axis."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -176,7 +180,7 @@ def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
 # ---- x-3873 change 1: the door ensures the worktree (AC1-*) ----------------
 
 
-def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path):
+def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path, loop_admission_ready):
     """AC1-HP: no typed message and no explicit cwd source -> the ensure seam
     runs once with the node's recorded cwd, the NODE id and the resolved
     harness, and the worker launches in the path it printed."""
@@ -211,7 +215,7 @@ def test_ensure_refusal_holds_the_node(monkeypatch, runner):
     assert received == {}
 
 
-def test_typed_here_skips_the_ensure(monkeypatch, runner):
+def test_typed_here_skips_the_ensure(monkeypatch, runner, loop_admission_ready):
     """AC1-EDGE (--here): the caller opted in; the ensure is never consulted."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
@@ -227,7 +231,7 @@ def test_typed_here_skips_the_ensure(monkeypatch, runner):
     assert result.exit_code == 0, result.output
 
 
-def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path):
+def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path, loop_admission_ready):
     """AC1-EDGE (--cwd): the caller's explicit dir wins, unchanged."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
@@ -550,7 +554,9 @@ def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row, _
 
 
 @requires_rust
-def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _target_row, _rust_graph):
+def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
+    monkeypatch, runner, _target_row, _rust_graph, loop_admission_ready
+):
     """x-8d88 Task 2: a /fno:target x-1 seed and no --node reaches the pane
     mint with the node resolved: provenance carries FNO_NODE and the seed
     passes through unchanged (agreement, so no compose rewrite)."""

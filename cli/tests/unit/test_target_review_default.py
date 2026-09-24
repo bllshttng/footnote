@@ -89,10 +89,8 @@ def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output)
     assert receipt["outcome"] == "started"
-    # One recommendation for every harness: the fno lane, level sized from the
-    # diff, with the explicit PR head pinning. Raw Codex review routing uses the
-    # native slash verb because `$fno:review` is a skill spelling, not a raw RPC.
-    assert calls[0]["payload"].startswith("/review ")
+    # The inline fno lane is rendered in the active harness's spelling.
+    assert calls[0]["payload"].startswith("$fno:review ")
     # The bare PR number leads the target slot; HEAD and base are trailing
     # context a strict reader never mistakes for the target.
     assert calls[0]["payload"].endswith(

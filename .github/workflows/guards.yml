@@ -301,6 +301,14 @@ jobs:
           bash scripts/ci/check-disposable-rm.sh
           bash tests/ci/test-check-disposable-rm.sh
 
+      # The commit-msg session-URL strip: the CI gate (check-no-session-urls)
+      # only catches the trailer after a push, where a force-push does not
+      # retract it, so the strip has to happen at commit time.
+      - name: Session-URL strip commit-msg hook test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/test-strip-claude-session.sh
+
       # The state canary's own positive control. `verify` is not run here: it
       # needs a planted HOME with a suite run between plant and verify, and the
       # smoke runner owns that bracket. `self-test` is self-contained and cheap,
@@ -425,6 +433,12 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
+
+      # Keep the human address in skills aligned with the shared vocabulary.
+      - name: Skill operator-address check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-operator-address.sh
 
       # A command form named by a live law must reach the skill that teaches it.
       - name: Law command-form check

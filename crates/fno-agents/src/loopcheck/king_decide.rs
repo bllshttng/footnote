@@ -5,6 +5,13 @@
 use super::*;
 
 pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
+    // The drain reserve arms HERE, on the shared king entry, and not at the
+    // fire stamp: both king routes (the `--driver king` hook and the bound
+    // Crown row) converge on this function, so the route into it, not the
+    // driver string the fire was stamped with, decides who pays for the
+    // drain. A missing manifest allows right after the hold - an uncrowned
+    // session pays nothing.
+    super::stopgate_hold_drain_reserve();
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
     // would trap every ordinary session here.
@@ -278,22 +285,78 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 &[],
             );
         }
-        let message =
+        // A readable quiet-undelivered fire is a park edge. Codex owns the
+        // preserved objective, so verify it is paused before finishing NoWork;
+        // any provider refusal keeps the existing bounded block.
+        let provider_goal_error =
+            if should_pause_codex_goal(manifest.harness.as_deref(), drain_error.is_none()) {
+                match crate::reign_goal::pause_codex_reign_goal(&manifest, &parsed.cwd) {
+                    Ok(provider_receipt) => {
+                        emit(
+                            "quiet-undelivered",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "scope": manifest.scope,
+                                "undelivered": undelivered,
+                                "provider_receipt": provider_receipt,
+                            }),
+                        );
+                        return terminate(
+                            TerminationReason::NoWork,
+                            "board quiet; provider goal paused with undelivered scope delivery",
+                            0,
+                            dry,
+                            &[],
+                        );
+                    }
+                    Err(error) => Some(error),
+                }
+            } else {
+                None
+            };
+        let mut message =
             crate::king_termination::king_quiet_message(undelivered, drain_error.as_ref());
+        if let Some(error) = provider_goal_error.as_deref() {
+            message = format!("{message}; Codex provider goal pause refused: {error}");
+        }
         let shrank = undelivered != i64::MAX
             && history
                 .last_undelivered
                 .is_some_and(|prev| undelivered < prev);
         let dry = if shrank { 0 } else { dry };
-        let reading = match &drain_error {
-            Some(_) => crate::king_escalation::reading_delivery_unreadable(&manifest.scope),
-            None => crate::king_escalation::reading_undelivered(&manifest.scope),
+        let mut readings = Vec::new();
+        if drain_error.is_some() {
+            readings.push(crate::king_escalation::reading_delivery_unreadable(
+                &manifest.scope,
+            ));
+        } else if provider_goal_error.is_none() {
+            readings.push(crate::king_escalation::reading_undelivered(&manifest.scope));
+        }
+        if provider_goal_error.is_some() {
+            readings.push(format!(
+                "reading:provider-goal-pause:{}",
+                manifest.scope.replace(',', "+")
+            ));
+        }
+        let body = match provider_goal_error.as_deref() {
+            Some(error) if drain_error.is_none() => {
+                provider_goal_pause_refusal_body(&session_id, error)
+            }
+            Some(error) => {
+                let mut body = crate::king_termination::king_undelivered_body(
+                    &session_id,
+                    undelivered,
+                    shrank,
+                );
+                body["provider_goal_pause_error"] = serde_json::json!(error);
+                body
+            }
+            None => {
+                crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank)
+            }
         };
-        emit(
-            "king_loop_check",
-            crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank),
-        );
-        if drain_error.is_none() {
+        emit("king_loop_check", body);
+        if drain_error.is_none() && provider_goal_error.is_none() {
             return terminate(
                 TerminationReason::NoWork,
                 &format!(
@@ -305,7 +368,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             );
         }
         if let Some(b) = bounded(dry, &message) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
+            return terminate(b.reason, &b.message, 0, b.fires, &readings);
         }
         return (0, king_output("block", None, &message, 0, dry + 1));
     }
@@ -395,6 +458,20 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             dry + 1,
         ),
     )
+}
+
+fn provider_goal_pause_refusal_body(session_id: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "actionable": 0,
+        "actionable_ids": [],
+        "cleared": false,
+        "provider_goal_pause_error": error,
+    })
+}
+
+fn should_pause_codex_goal(harness: Option<&str>, drain_readable: bool) -> bool {
+    harness == Some("codex") && drain_readable
 }
 
 fn king_board_block_message(board: &crate::king_termination::KingBoard) -> String {
@@ -513,6 +590,54 @@ mod stale_crown_doc_tests {
     use std::time::Duration;
 
     const CROWN_START: &str = "2026-09-15T00:00:00Z";
+
+    #[test]
+    fn king_decide_holds_the_drain_reserve_on_entry() {
+        // The Crown route enters the king path under a fire stamped reserve 0
+        // (the entry stamp is driver-blind now). The hold on the first line
+        // is what arms the drain slice on BOTH king routes; a missing
+        // manifest lets the call return at its first read with the hold
+        // already landed.
+        let dir = tempfile::tempdir().unwrap();
+        let parsed = LoopCheckArgs {
+            state_path: dir.path().join("no-such-king.md"),
+            transcript_path: dir.path().join("t.jsonl"),
+            cwd: dir.path().to_path_buf(),
+            global_settings_path: None,
+            events_path: Some(dir.path().join("events.jsonl")),
+            global_events_path: Some(dir.path().join("global-events.jsonl")),
+            settings_path: None,
+            ledger_path: None,
+            gh_budget_ledger: None,
+            now_override: None,
+            gh_bin: "/nonexistent-gh".into(),
+            git_bin: "/nonexistent-git".into(),
+            author_harness_override: Some("none".into()),
+            hook_input_stdin: false,
+            driver: "target".into(),
+            fno_bin: "/nonexistent-fno".into(),
+            read_timeout_ms: None,
+            harness: None,
+            harness_session: None,
+        };
+        super::stopgate_stamp_fire(0, std::time::Instant::now() + Duration::from_secs(50), 0);
+        let (code, out) = king_decide(&parsed);
+        assert_eq!(code, 0);
+        assert!(out.contains("no king manifest"), "{out}");
+        // The reserve is armed despite the driver-blind stamp: pre-drain
+        // reads clamp to remaining-minus-reserve (34s) under the 30s read
+        // ceiling, so 30s stands; the drain reads the full remaining.
+        let pre_drain = super::stopgate_read_timeout();
+        assert!(
+            pre_drain <= Duration::from_secs(30) && pre_drain >= Duration::from_secs(29),
+            "{pre_drain:?}"
+        );
+        let drain = super::stopgate_drain_timeout();
+        assert!(
+            drain <= Duration::from_secs(50) && drain >= Duration::from_secs(49),
+            "{drain:?}"
+        );
+    }
 
     fn manifest(harness: &str) -> KingManifest {
         KingManifest {
@@ -659,6 +784,43 @@ mod stale_crown_doc_tests {
         assert!(
             stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_goal_pause_tests {
+    use super::{provider_goal_pause_refusal_body, should_pause_codex_goal};
+    use crate::loop_king::king_fire_history;
+
+    #[test]
+    fn unreadable_drain_never_enters_the_codex_quiet_park() {
+        assert!(should_pause_codex_goal(Some("codex"), true));
+        assert!(!should_pause_codex_goal(Some("codex"), false));
+        assert!(!should_pause_codex_goal(Some("claude"), true));
+    }
+
+    #[test]
+    fn pause_refusal_is_counted_without_recording_a_quiet_baseline() {
+        let directory = tempfile::tempdir().unwrap();
+        let events = directory.path().join("events.jsonl");
+        let body = provider_goal_pause_refusal_body("king-session", "app-server unavailable");
+        assert_eq!(body["provider_goal_pause_error"], "app-server unavailable");
+        assert!(body.get("undelivered").is_none());
+        std::fs::write(
+            &events,
+            serde_json::json!({
+                "ts": "2026-09-23T21:00:00Z",
+                "type": "king_loop_check",
+                "data": body,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let history = king_fire_history(&events, "king-session");
+        assert_eq!(history.total, 1);
+        assert_eq!(history.dry, 1);
+        assert_eq!(history.last_undelivered, None);
     }
 }
 

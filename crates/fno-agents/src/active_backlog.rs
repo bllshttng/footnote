@@ -262,7 +262,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    value_has_usable_pr_ref(&v)
+    crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
@@ -527,6 +527,27 @@ fn reconcile_pending(
     });
 }
 
+/// The close note the drain records when it closes a PR-less node: which
+/// terminal closed it and, when the event carries one, its first message
+/// line. Capped at 200 chars so a chatty message cannot bloat the graph
+/// row's completion_note.
+fn drain_close_note(reason: &TerminationReason, message: &str) -> String {
+    let mut note = format!("closed by the backlog drain on {reason:?}");
+    let first_line = message.lines().next().unwrap_or("").trim();
+    if !first_line.is_empty() {
+        note.push_str(": ");
+        note.push_str(first_line);
+    }
+    if note.len() > 200 {
+        let mut cut = 200;
+        while !note.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        note.truncate(cut);
+    }
+    note
+}
+
 /// Apply a polled termination event to the breaker via the shared `map_outcome`
 /// policy, mirroring the supervised path's `queue.close` side effects.
 fn resolve_dispatch(
@@ -547,16 +568,38 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if classify(ev.reason.clone()).projection().merge_armable
-        && !node_has_pr_ref(cfg, node_id)
-    {
+    let merge_armable = classify(ev.reason.clone()).projection().merge_armable;
+    // The park guard and the close note ask the same question, so the node
+    // is read once per event and the answer is shared. Non-close terminals
+    // (a crash, NoProgress) spawn no read at all.
+    let close_eligible = merge_armable || is_done_reason(&ev.reason);
+    let has_pr_ref = if close_eligible {
+        node_has_pr_ref(cfg, node_id)
+    } else {
+        false
+    };
+    let close = if merge_armable && !has_pr_ref {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
     } else if is_done_reason(&ev.reason) {
+        // The store refuses an evidence-less close, so a PR-less node
+        // (DoneAdvisory, DoneDelivery) closes with a note carrying the
+        // terminal and the event's first line. A node with a PR ref keeps
+        // the bare argv: the canonical close and its gates stay as they are.
+        let mut args = vec![
+            "backlog".to_string(),
+            "done".to_string(),
+            node_id.to_string(),
+        ];
+        if !has_pr_ref {
+            let note = drain_close_note(&ev.reason, &ev.message);
+            args.push("--note".to_string());
+            args.push(note);
+        }
         match retry_etxtbsy(|| {
             fno_cmd(&cfg.fno_bin)
-                .args(["backlog", "done", node_id])
+                .args(&args)
                 .current_dir(&cfg.cwd)
                 .output()
         }) {
@@ -620,25 +663,6 @@ fn resolve_crash(
     );
 }
 
-/// Does a parsed `fno backlog get` node carry a USABLE PR reference? `pr_number`
-/// an integer and `pr_url` a non-empty string, matching what the CLI's
-/// node_pr_refs can actually derive a ref from. An empty pr_url is not evidence
-/// of a ship.
-fn value_has_usable_pr_ref(v: &serde_json::Value) -> bool {
-    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
-        return true;
-    }
-    if v.get("pr_url")
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| !u.trim().is_empty())
-    {
-        return true;
-    }
-    v.get("additional_prs")
-        .and_then(|a| a.as_array())
-        .is_some_and(|a| !a.is_empty())
-}
-
 /// Did a SYNCHRONOUS (headless) child already reach a terminal state? The
 /// one-shot worker ran to completion before its dispatch returned, so graph
 /// state is the only evidence left. FAIL-OPEN: an unreadable or unparseable
@@ -666,7 +690,9 @@ fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
             .and_then(|t| t.as_str())
             .is_some_and(|t| !t.trim().is_empty())
     };
-    stamped("completed_at") || stamped("deferred_at") || value_has_usable_pr_ref(&v)
+    stamped("completed_at")
+        || stamped("deferred_at")
+        || crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Resolve a synchronous (headless) child on the spot instead of holding it
@@ -2690,6 +2716,50 @@ mod tests {
         assert_eq!(breaker.consecutive_failures("x-doc00001"), 0);
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(calls.contains("backlog done x-doc00001"), "calls: {calls}");
+        assert!(
+            calls.contains("--note"),
+            "a PR-less advisory close records why: {calls}"
+        );
+        assert!(
+            !calls.contains("--force"),
+            "the drain never force-closes: {calls}"
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_pr_green_close_carries_no_note() {
+        // AC4-ERR: a node with a PR ref keeps the bare argv, so the
+        // canonical close and its strand guard stay as they are.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-prgr0001","status":"in_review","pr_number":424}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-prgr0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "pr green".to_string(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-prgr0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-prgr0001"), "calls: {calls}");
+        assert!(
+            !calls.contains("--note"),
+            "a PR-bearing close never carries a note: {calls}"
+        );
     }
 
     #[test]

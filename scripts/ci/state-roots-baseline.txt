@@ -32,7 +32,6 @@ A	cli/src/fno/agents/context.py	target-state.md	unowned	target-state.md has NO r
 A	cli/src/fno/agents/spawn_gate.py	claims	unowned	call the resolver STATE_FILES names for this file.
 A	cli/src/fno/agents/truth_status.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/agents/whoami.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	cli/src/fno/annotate/core.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/advance.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/batch.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/capture.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
@@ -88,7 +87,6 @@ A	crates/fno-agents/src/active_backlog.rs	events.jsonl	unowned	surviving Rust Pr
 A	crates/fno-agents/src/claims.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/daemon.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/finalize.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
-A	crates/fno-agents/src/hook/stop.rs	events.jsonl	unowned	the control-plane arm row's global-journal fallback (GLOBAL_EVENTS_PATH overrides, HOME/.fno is the default); the bash hook this replaced wrote the same line.
 A	crates/fno-agents/src/hook/stop.rs	target-state.md	unowned	the legacy checkout fallback beside state_path.rs and the delivery-pending worktree scan; target-state.md has NO resolver today (STATE_FILES records resolver=None).
 A	crates/fno-agents/src/kill_criteria.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/loop_runtime.rs	events.jsonl	unowned	canonical Rust ProjectJournalPath constructor; owns the shared caller-root path seam.

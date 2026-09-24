@@ -10,8 +10,10 @@ pub mod api;
 pub mod commands;
 pub mod comments;
 pub mod decisions;
+pub mod done_evidence;
 pub mod encounters;
 pub mod epic_cap;
+pub mod findings;
 pub mod idea_cap;
 pub mod model;
 pub mod node_state;
@@ -190,6 +192,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     sessions::ensure_table(&connection)?;
     comments::ensure_table(&connection)?;
     encounters::ensure_table(&connection)?;
+    findings::ensure_table(&connection)?;
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
     search::ensure_table(&connection)?;
@@ -896,6 +899,10 @@ fn mutate_single_row_once(
         }
     }
     crate::graph_store::ensure_slugs(&mut working);
+    // The close-evidence rule at the single-row seam: judged over the
+    // transaction's pre rows and the mutation's output, before anything is
+    // written, so a refusal rolls back with the dropped transaction.
+    crate::backlog::done_evidence::enforce(&rows, &working)?;
     let now_iso = crate::graph_store::now_isoformat();
     for row in working.iter_mut() {
         let (Some(id), true) = (
@@ -977,6 +984,11 @@ fn save_aggregate(connection: &Connection, node: &Node) -> Result<(), String> {
         &node.id,
         node.comments.as_deref().unwrap_or(&[]),
     )?;
+    findings::save(
+        connection,
+        &node.id,
+        node.findings.as_deref().unwrap_or(&[]),
+    )?;
     encounters::save(
         connection,
         &node.id,
@@ -998,6 +1010,7 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
     sessions::delete(connection, id)?;
     comments::delete(connection, id)?;
     encounters::delete(connection, id)?;
+    findings::delete(connection, id)?;
     pull_requests::delete(connection, id)?;
     relations::delete(connection, id)?;
     Ok(())

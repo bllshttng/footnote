@@ -24,21 +24,30 @@ impl Budget {
             last: None,
         }
     }
-    /// The slice this next source may spend, or None once spent.
-    pub(crate) fn slice(&self) -> Option<Duration> {
-        let left = self
+    /// The deadline every source bounds against: the board deadline minus
+    /// the serialization reserve, while it is still in the future. A point in
+    /// time, never a slice: a slice captured at claim time lets a source that
+    /// spawns late spend its whole slice PAST the deadline (measured: 7.87s
+    /// wall against a 3,000ms budget).
+    pub(crate) fn source_deadline(&self) -> Option<Instant> {
+        let dl = self
             .deadline
-            .checked_duration_since(Instant::now())
-            .and_then(|d| d.checked_sub(Duration::from_millis(SERIALIZE_RESERVE_MS)));
-        left.filter(|d| !d.is_zero())
+            .checked_sub(Duration::from_millis(SERIALIZE_RESERVE_MS))?;
+        (dl > Instant::now()).then_some(dl)
     }
-    /// Claim the budget for `name`; returns its slice or None once spent.
-    pub(crate) fn start(&mut self, name: &'static str) -> Option<Duration> {
-        let s = self.slice();
-        if s.is_some() {
+    /// Claim the budget for `name`; returns its deadline or None once spent.
+    pub(crate) fn start(&mut self, name: &'static str) -> Option<Instant> {
+        let dl = self.source_deadline();
+        if dl.is_some() {
             self.last = Some(name);
         }
-        s
+        dl
+    }
+
+    /// What a source spawning NOW may still spend of its deadline: the bound
+    /// is measured at the spawn, never at the moment the deadline was claimed.
+    pub(crate) fn spawn_bound(deadline: Instant) -> Duration {
+        deadline.saturating_duration_since(Instant::now())
     }
     pub(crate) fn spent_error(&self) -> String {
         match self.last {
@@ -245,11 +254,14 @@ mod tests {
     use crate::king_board::{SRC_PRS, SRC_READY};
 
     #[test]
-    fn budget_slices_shrink_and_exhaustion_names_the_last_source() {
+    fn sources_derive_from_one_deadline_and_exhaustion_names_the_last_source() {
         let mut b = Budget::new(5_000);
-        assert!(b.start("claims").is_some());
+        let first = b.start("claims");
         std::thread::sleep(Duration::from_millis(10));
-        assert!(b.start(SRC_READY).is_some());
+        // Every source reads the SAME deadline: the wall each one gets is
+        // whatever remains at ITS spawn, never a slice banked at claim time.
+        assert_eq!(b.start(SRC_READY), first);
+        assert!(first.is_some());
         // A zero budget is spent before any source.
         let mut b = Budget::new(0);
         assert!(b.start("claims").is_none());
@@ -257,6 +269,17 @@ mod tests {
             b.spent_error(),
             "not-read: board budget exhausted before any source"
         );
+    }
+
+    #[test]
+    fn a_spawn_bound_is_the_remaining_deadline_and_zero_once_spent() {
+        let dl = Instant::now() + Duration::from_secs(2);
+        let bound = Budget::spawn_bound(dl);
+        assert!(
+            bound <= Duration::from_secs(2) && bound > Duration::from_secs(1),
+            "{bound:?}"
+        );
+        assert!(Budget::spawn_bound(Instant::now() - Duration::from_secs(2)).is_zero());
     }
 
     #[test]

@@ -181,10 +181,11 @@ def test_reign_branches_on_harness_capability_before_arming():
     text = _skill("skills/reign/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "On Claude, arm ONE monitor, not six" in arm
-    assert "Nudge-escalation wake" in arm
-    assert "arm nothing native" in arm
-    assert "wake arm" in arm  # the codex beat is the external wake contract
+    assert "Claude gets the native `/loop` heartbeat and a shell watch" in arm
+    assert "Codex uses provider-backed goal actions" in arm
+    assert "positive `provider_goal` receipt" in arm
+    assert "separate positive `stop` receipt" in arm
+    assert "Every Codex wake runs the check-in body" in arm
 
 
 def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
@@ -259,7 +260,7 @@ def test_execute_kill_criteria_reads_frontmatter_owner():
 def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
     text = _skill("docs/architecture/review-lanes.md")
     assert "d-384d967c" in text
-    assert "No spawned-reviewer lane" in text
+    assert "No spawned-reviewer lane (operator law d-384d967c)" in text
     assert "--model opus" not in text
     assert "the peer lane" in text
     assert "NO `--fix` remains the review contract" in text
@@ -302,13 +303,14 @@ def test_audit_deliverable_is_bounded_artifact_plans_only_when_authorized():
     assert "the resolved `--perspectives` set" in text
 
 
-def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
+def test_pr_create_and_using_fno_run_inline():
     ship = _skill("skills/ship/SKILL.md")
     assert "Haiku-capable provider" not in ship
     assert "configured role routing" in ship
     using = _skill("skills/using-fno/SKILL.md")
     assert "Haiku worker" not in using
-    assert "routed create worker" in using
+    assert "PR lifecycle: create inline" in using
+    assert "routed create worker" not in using
     assert "a skill spawns a new agent context" not in using
 
 
