@@ -239,6 +239,60 @@ def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
     ]
 
 
+def test_on_confirmed_merge_defer_close_syncs_status_and_skips_reconcile(
+    tmp_path, monkeypatch
+):
+    # The watcher's durable-grant merge cannot hold the 79-179s whole-graph
+    # reconcile inside its phase slice: defer_close still syncs merge_status
+    # but fires no reconcile child, and the queued owners (the sweep ritual's
+    # reconcile leg and the daemon's merge_close arm) close the node instead.
+    url = f"{_FOOT}/556"
+    g = _make_graph(tmp_path, [{"id": "ab-defer01", "title": "t",
+                                "pr_number": 556, "pr_url": url}])
+    _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
+    _clear_env(monkeypatch)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    calls = []
+    monkeypatch.setattr(M, "run", _stub_run(calls))
+    closed = M._on_confirmed_merge(556, str(tmp_path), defer_close=True)
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-defer01")
+    assert node.get("merge_status") == "merged"
+    assert calls == []
+    assert closed == []
+
+
+def test_on_confirmed_merge_without_the_keyword_still_closes_inline(
+    tmp_path, monkeypatch
+):
+    # No defer_close keyword -> today's behavior unchanged: exactly one
+    # `backlog reconcile --pr-number` child, so a standalone merge still
+    # closes its own node before returning.
+    url = f"{_FOOT}/557"
+    g = _make_graph(tmp_path, [{"id": "ab-inline01", "title": "t",
+                                "pr_number": 557, "pr_url": url}])
+    _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
+    _clear_env(monkeypatch)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    calls = []
+    monkeypatch.setattr(M, "run", _stub_run(calls))
+    M._on_confirmed_merge(557, str(tmp_path))
+    assert len(calls) == 1
+    assert calls[0][-7:] == [
+        "backlog", "reconcile", "--pr-number", "557", "--repo", "bllshttng/footnote", "--json",
+    ]
+
+
 def test_reconcile_merged_pr_node_closes_via_seam_under_external(
     tmp_path, monkeypatch
 ):
@@ -626,7 +680,6 @@ def test_merge_mint_recovers_node_ids_from_sidecar(tmp_path, monkeypatch):
     # AC1-HP: a merge whose reconcile bound nothing recovers the PR's node
     # ids from the sidecar store (repo-scoped off the PR url), so the request
     # names what it can reap instead of holding on no-node-ids for a day.
-    import fno.agents.events as E
     import fno.pr._merge as M
 
     log = _patch_events_log(monkeypatch, tmp_path)
