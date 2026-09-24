@@ -3031,8 +3031,11 @@ mod tests {
         let prev = std::env::var_os("FNO_PY");
         std::env::set_var("FNO_PY", &script);
         let start = std::time::Instant::now();
+        // The cwd too: from the crate dir the needs fold reads the canonical
+        // checkout's live journal, which measured 20s in a debug build.
         let payload = read_board(&BoardOpts {
             budget_ms: 2_000,
+            cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
         let elapsed = start.elapsed();
