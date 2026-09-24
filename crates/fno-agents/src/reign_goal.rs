@@ -569,7 +569,7 @@ mod tests {
             status: GoalStatus::Active,
             usage: GoalUsage::default(),
         };
-        assert!(goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).is_err());
+        assert!(goal_receipt("thread-1", "x-aaaa", "king:x-bbbb", &goal).is_err());
     }
 
     #[test]
