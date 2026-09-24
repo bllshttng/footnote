@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 import fno.agents.crown as crown_mod
 from fno.agents.registry import AgentEntry, update_registry
-from fno.king.state import king_manifest_path, write_manifest
+from fno.king.state import king_manifest_path, king_state_root, write_manifest
 from fno.paths_testing import use_tmpdir
 
 CALLER_SESSION = "5d2b9c1a-3333-4000-8000-000000000017"
@@ -63,13 +63,15 @@ def captured_argv(monkeypatch):
     return board_argv
 
 
-def _seat_crown():
+def _seat_crown(court):
+    # The resolver keys the manifest root on the seated row's cwd, so the row
+    # must carry the dir the fixture writes under.
     update_registry(
         lambda rows: rows
         + [
             AgentEntry(
                 name="crowned-king",
-                cwd="/tmp",
+                cwd=str(court),
                 log_path="",
                 harness="claude",
                 harness_session_id=CALLER_SESSION,
@@ -80,7 +82,7 @@ def _seat_crown():
             )
         ]
     )
-    return king_manifest_path(SCOPE)
+    return king_manifest_path(SCOPE, state_root=king_state_root(court))
 
 
 def _board(monkeypatch, *args: str, caller=None):
@@ -101,7 +103,7 @@ def _crowned_caller():
 def test_crowned_caller_defaults_to_its_own_manifest(
     court, captured_argv, monkeypatch
 ) -> None:
-    manifest = _seat_crown()
+    manifest = _seat_crown(court)
     write_manifest(manifest, scope=SCOPE, harness_session_id=CALLER_SESSION)
 
     result = _board(monkeypatch, caller=_crowned_caller())
@@ -132,7 +134,7 @@ def test_crown_without_manifest_file_stays_fleet_wide(
     court, captured_argv, monkeypatch
 ) -> None:
     """Row crowned, file absent: presence alone was never the authority."""
-    _seat_crown()
+    _seat_crown(court)
 
     result = _board(monkeypatch, caller=_crowned_caller())
 
@@ -143,7 +145,7 @@ def test_crown_without_manifest_file_stays_fleet_wide(
 def test_explicit_state_wins_over_the_default(
     court, captured_argv, monkeypatch
 ) -> None:
-    manifest = _seat_crown()
+    manifest = _seat_crown(court)
     write_manifest(manifest, scope=SCOPE, harness_session_id=CALLER_SESSION)
     explicit = court / "other-king.md"
 

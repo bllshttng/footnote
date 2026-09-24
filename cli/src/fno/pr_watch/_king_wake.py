@@ -59,8 +59,7 @@ class CrownTarget:
 def _crowned(
     court_fn: Callable, rows_fn: Optional[Callable] = None
 ) -> tuple[list[CrownTarget], str]:
-    """Crowned scopes with holder, root, manifest; no-manifest and disputed
-    rows are skipped."""
+    """Crowned scopes use registry rows for roots; drops are named by scope."""
     if rows_fn is None:
         from fno.agents.registry import load_registry
 
@@ -77,34 +76,35 @@ def _crowned(
     for entry in crowns:
         by_scope.setdefault(entry.get("scope") or "", []).append(entry)
     out: list[CrownTarget] = []
-    dropped: dict[str, int] = {}
+    dropped: list[str] = []
     for scope, entries in by_scope.items():
         if not scope:
-            dropped["empty scope(s)"] = dropped.get("empty scope(s)", 0) + 1
+            dropped.append("(no scope): empty scope")
             continue
         if len(entries) > 1:
-            dropped["conflicting scope(s)"] = dropped.get("conflicting scope(s)", 0) + 1
+            holders = ", ".join(str(e.get("holder") or "?") for e in entries)
+            dropped.append(f"{scope}: conflicting holders {holders}")
             continue
         holder = entries[0].get("holder") or ""
         if not holder:
-            dropped["holderless crown(s)"] = dropped.get("holderless crown(s)", 0) + 1
+            dropped.append(f"{scope}: holderless crown")
             continue
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
         if not cwd:
-            dropped["unregistered holder(s)"] = dropped.get("unregistered holder(s)", 0) + 1
+            dropped.append(f"{scope}: unregistered holder")
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
         # must refuse, not escape .fno/kings.
         try:
             manifest = king_manifest_path(scope, state_root=king_state_root(root))
-        except ValueError:
-            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
+        except ValueError as exc:
+            dropped.append(f"{scope}: {exc}")
             continue
         if not manifest.is_file():
-            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
+            dropped.append(f"{scope}: manifest missing at {manifest}")
             continue
         out.append(
             CrownTarget(
@@ -115,8 +115,7 @@ def _crowned(
                 short_id=short_id,
             )
         )
-    note = "; ".join(f"{n} {word}" for word, n in sorted(dropped.items())) if dropped else ""
-    return out, note
+    return out, "; ".join(dropped)
 
 
 def _holder_absent(truth: dict) -> "str | None":

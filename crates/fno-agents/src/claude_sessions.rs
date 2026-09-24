@@ -20,7 +20,7 @@ pub fn row_liveness(entry: &crate::state::RegistryEntry, claude_home: &ClaudeHom
     row_liveness_indexed(entry, &sockets)
 }
 
-/// One scan of claude's sessions dir: `jobId -> messagingSocketPath` for
+/// One scan of claude's session records: `jobId -> messagingSocketPath` for
 /// every live-shaped bg session file, first-sorted-wins (the same pick
 /// `locate_session` makes). The socket rung's cost is this walk, so a sweep
 /// probing N rows pays it once, not N times.
@@ -28,20 +28,7 @@ pub fn sessions_socket_index(
     claude_home: &ClaudeHome,
 ) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    let dir = claude_home.sessions_dir();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    let mut paths: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        // The dir holds the bg records this index wants plus the session
-        // transcript markdown (measured: 11k files, 99.6% of the walk's
-        // bytes in .md). The records are `.json`; skip everything else
-        // before reading.
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
+    for path in claude_home.session_records() {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -75,36 +62,10 @@ pub(crate) fn row_liveness_indexed(
     row_liveness_with_indexed(entry, sockets, None, family1_truth_state)
 }
 
-/// Every dir claude writes its per-process records to: the ambient home's
-/// `sessions` dir (see [`ClaudeHome::sessions_dir`]), then each isolated
-/// account's `sessions`, deduped. Dedup compares what the path IS
-/// (`fs::canonicalize`), because an account dir can be a symlink onto the
-/// ambient store.
-pub(crate) fn session_record_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![ClaudeHome::from_env().sessions_dir()];
-    for (_, dir) in crate::claude_roster::isolated_account_dirs() {
-        let sessions = dir.join("sessions");
-        if !dirs.contains(&sessions) {
-            dirs.push(sessions);
-        }
-    }
-    let mut seen: Vec<std::path::PathBuf> = Vec::new();
-    let mut out = Vec::new();
-    for dir in dirs {
-        let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
-        out.push(dir);
-    }
-    out
-}
-
 /// Which live claude process holds `session_id`, read from claude's own
-/// per-process records (one `<pid>.json` per running process under the
-/// sessions dir, removed on clean exit). `create_ms` answers the pid's
-/// epoch create time, so a record's
+/// per-process records (one `<pid>.json` per running process under each
+/// root's sessions dir, removed on clean exit). `create_ms` answers the
+/// pid's epoch create time, so a record's
 /// `procStart` proves the incarnation: a pid whose create time disagrees
 /// with the record is a recycle, and a pid with no create time is a crash
 /// leftover. Both are skipped, never named as the holder.
@@ -343,6 +304,49 @@ mod tests {
                 "{why}"
             ),
             other => panic!("expected Held pid 24896, got {other:?}"),
+        }
+    }
+
+    /// A live bg record under an account root feeds the socket index from a
+    /// ClaudeHome carrying that root, and the holder read walks the same
+    /// root's sessions dir.
+    #[test]
+    fn x1530_ac8_socket_index_and_holder_read_account_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let acct = tempfile::tempdir().unwrap();
+        let sessions = acct.path().join("sessions");
+        stage(
+            &sessions,
+            "4242.json",
+            r#"{"jobId":"feedc0de","kind":"bg","messagingSocketPath":"/tmp/acct-live.sock","sessionId":"bbbb2222-1111-2222-3333-444444444444","pid":4242}"#,
+        );
+        stage(
+            &sessions,
+            "24896.json",
+            &record_json(24896, SID, T0, "interactive"),
+        );
+        let ch = ClaudeHome::at(home.path()).with_extra_roots([acct.path().to_path_buf()]);
+
+        let sockets = sessions_socket_index(&ch);
+        assert_eq!(
+            sockets.get("feedc0de").map(String::as_str),
+            Some("/tmp/acct-live.sock")
+        );
+
+        let answer = session_record_holder(&ch.sessions_dirs(), SID, &|pid| {
+            if pid == 24896 {
+                Some(T0_MS)
+            } else {
+                None
+            }
+        });
+        match answer {
+            SessionHolder::Held {
+                pid: Some(24896),
+                proven: true,
+                ..
+            } => {}
+            other => panic!("expected Held pid 24896 via account root, got {other:?}"),
         }
     }
 

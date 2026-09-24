@@ -110,3 +110,26 @@ def test_ready_claim_refusal_never_reaches_the_keeper(monkeypatch):
     with pytest.raises(ClaimsUnavailableError) as exc:
         store.ready()
     assert "claims root unreadable" in str(exc.value)
+
+
+def test_ready_forwards_filter_args_to_keeper(monkeypatch):
+    keeper = _Keeper()
+    monkeypatch.setattr(store, "_client_for", lambda _path: keeper)
+
+    store.ready(filter_args=["--touched-before", "60d"], occupancy=set())
+
+    assert keeper.params["filter_args"] == ["--touched-before", "60d"]
+
+
+def test_ready_maps_date_filter_refusal_to_value_error(monkeypatch):
+    class _RefusingKeeper:
+        def request(self, method, params):
+            assert method == "ready"
+            raise RuntimeError("store error: ready filter: unknown flag --bogus")
+
+    monkeypatch.setattr(store, "_client_for", lambda _path: _RefusingKeeper())
+
+    with pytest.raises(ValueError) as exc:
+        store.ready(filter_args=["--bogus"], occupancy=set())
+
+    assert str(exc.value).startswith("ready filter: ")

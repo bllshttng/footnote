@@ -44,10 +44,7 @@ fn states_walk_refreshes_a_stale_lane_and_rows_read_the_judged_map() {
 #[test]
 fn states_walk_survives_a_failing_refresh_and_judges_the_stale_map() {
     let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-    let stub = env.dir.path().join("fail-stub.sh");
-    std::fs::write(&stub, "#!/bin/sh\nexit 1\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stub = crate::write_exec_stub(env.dir.path(), "fail-stub.sh", "#!/bin/sh\nexit 1\n");
     std::env::set_var("FNO_BIN", &stub);
     let out = resolve_slot_payload(&slot_env_payload(json!({
         "mode": "states",

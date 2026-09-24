@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 /// Write an executable stub script.
 ///
-/// Published atomically: the body is written to a temp sibling, chmod'd,
-/// then renamed onto the final path (same fix as tests/loop_check.rs). The
-/// published path is complete and closed from birth, so an exec can never
-/// hit ETXTBSY (needs a write-open fd on the inode, including via a fork
-/// that inherited one) or a partial file - no probe-exec loop required.
+/// The temp sibling plus rename does NOT make ETXTBSY unreachable: a sibling
+/// thread that forks while the temp fd is open copies it, and the copied fd
+/// follows the inode the rename publishes. These integration binaries run
+/// with `--test-threads=1` in CI (cli-ci.yml), so no sibling thread forks in
+/// that window; under local parallel runs the lib helper
+/// `write_exec_stub` (child-writer) is the race-free form.
 pub fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
