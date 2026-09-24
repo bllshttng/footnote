@@ -1492,10 +1492,9 @@ mod tests {
         ] {
             one.remove(key);
         }
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         // Keep the raw row un-defaulted and unlocked so owner normalization
         // cannot change its status while this test isolates missing tags.
-        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        authoritative_sync(&graph, &[], &raw).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         crate::graph_store::apply_defaults(&mut after, false);
