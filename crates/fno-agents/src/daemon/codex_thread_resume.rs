@@ -57,6 +57,7 @@ pub(super) async fn ensure_codex_thread_handle(
         entry.requested_permission_mode.as_deref(),
         entry.sandbox_posture.as_deref(),
     );
+    let config = carry.config;
     let driver = crate::codex_thread::CodexThread::resume_with_state_dirs(
         cwd,
         &session_id,
@@ -64,7 +65,7 @@ pub(super) async fn ensure_codex_thread_handle(
         &posture,
         entry.effort.as_deref(),
         &recorded_roots,
-        Some(&carry.config),
+        Some(&config),
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;

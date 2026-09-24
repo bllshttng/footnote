@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
@@ -1561,32 +1561,36 @@ def _finish_confirmed_merge(
 
 _MergeLockState = Literal["acquired", "held", "unavailable"]
 
+_MergeLockYield = tuple[_MergeLockState, Optional[Callable[[], None]], Optional[dict]]
+
 
 @contextmanager
-def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]]]]:
-    """Serialize merges repo-wide; yield ``(state, release_now)``.
+def _merge_lock(pr_number: int) -> Iterator[_MergeLockYield]:
+    """Serialize merges repo-wide; yield ``(state, release_now, held_detail)``.
 
     One ``merge:<canonical-root>`` claim per project (repo-local routing, so
     every worktree lane contends on the SAME lock - like ``walker:<root>``),
     pid-liveness anchored so a crashed merger frees it instantly. Acquisition
     polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
-    yields ``held``. A claims-layer error yields ``unavailable`` and the merge
+    yields ``held`` with ``held_detail`` naming the holder PR and claim age.
+    Stale claims are stolen by the claims layer, so ``held`` reports a holder
+    live at the last poll. A claims-layer error yields ``unavailable`` and the merge
     proceeds unserialized: the lock is coordination, GitHub stays the merge
-    authority, and our own tooling failing must never block a merge. Yields
-    ``(state, release_now)``; the early fire and the finally release are the
-    same idempotent call, so both firing is safe.
+    authority, and our own tooling failing must never block a merge.
     """
     state: Literal["acquired", "held", "unavailable"] = "acquired"
+    held_detail: Optional[dict] = None
     key = holder = release = None
     # Acquisition happens fully BEFORE the yield: an exception the consumer
     # body throws into the generator must reach the finally-release, never an
     # except-then-yield-again (which would RuntimeError inside contextmanager).
     try:
-        from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
+        from fno.claims.core import CLAIM_UNAVAILABLE, ClaimHeldByOther, acquire_claim, release_claim
+        from fno.claims.io import claim_path, read_claim_file
         from fno.paths import resolve_canonical_repo_root
 
         key = f"merge:{resolve_canonical_repo_root()}"
-        holder = f"pr-merge:{os.getpid()}"
+        holder = f"pr-merge:pr{pr_number}:{os.getpid()}"
 
         def _release_now() -> None:
             try:
@@ -1600,21 +1604,27 @@ def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]
                 acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
                 release = release_claim
                 break
-            except CLAIM_UNAVAILABLE:
+            except CLAIM_UNAVAILABLE as exc:
                 # At the exact moment two mergers are racing hardest, the
                 # outer except Exception below yields "unavailable" (lock
                 # disabled entirely), which is the wrong degrade for
                 # contention specifically when the whole point is LD#9's
                 # merge serialization under exactly this condition.
+                if isinstance(exc, ClaimHeldByOther):
+                    held_detail = {"holder": exc.holder, "pid": exc.pid, "host": exc.host}
                 if time.monotonic() >= deadline:
                     state = "held"
                     break
                 time.sleep(_MERGE_LOCK_POLL_S)
+        if state == "held" and held_detail is not None:
+            with suppress(Exception):
+                rec = read_claim_file(claim_path(key))
+                held_detail["age_s"] = max(0, int(time.time() * 1000 - rec.acquired_at) // 1000)
     except Exception as exc:  # noqa: BLE001 - fail-open: lock is best-effort
         sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
         state = "unavailable"
     try:
-        yield state, (_release_now if state == "acquired" else None)
+        yield state, (_release_now if state == "acquired" else None), held_detail
     finally:
         if release is not None and state == "acquired":
             assert key is not None and holder is not None  # set together before release
@@ -1863,15 +1873,16 @@ def run_merge(
     # between the freshness read and our merge is exactly the race the lock
     # exists to close. Sequential runs (no live lanes) skip the freshness hold
     # and see only an uncontended lock - behavior unchanged.
-    with _merge_lock() as (lock, release_now):
+    with _merge_lock(pr_number) as (lock, release_now, held_detail):
         if lock == "held":
-            _emit(
-                pr_number,
-                "held",
-                "merge serialized: another merge holds the lock; retry",
-                "none",
-                err=False,
-            )
+            reason = "merge serialized: another merge holds the lock; retry"
+            if held_detail:
+                age_part = f", held {held_detail['age_s']}s" if "age_s" in held_detail else ""
+                reason = (
+                    f"merge serialized: held by {held_detail['holder']} "
+                    f"(live at last poll{age_part}; waited {_MERGE_LOCK_WAIT_S}s); retry"
+                )
+            _emit(pr_number, "held", reason, "none", err=False)
             return 2
         return _do_merge(
             pr_number,
