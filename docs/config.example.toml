@@ -402,6 +402,9 @@ enforce_inventory = false
 # The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.
 operator_access = "unknown"
 
+[sideline]
+layout = "list"
+
 [sideline.colors]
 # Lane colors keyed by harness name (e.g. codex = "cyan"). The cascade's coarsest config key; see sideline.colors.route.
 harness = {}
