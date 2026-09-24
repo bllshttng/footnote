@@ -217,7 +217,30 @@ candidate_python() {
     fi
 }
 
-GLOBAL_EVENTS_PATH="$(candidate_fno do pr global-receipt-events-path)" || {
+# The receipt path writes the live events store under ~/.fno. The candidate
+# build is fenced out of live stores (live_store_fence in both crates), so the
+# store-touching receipt calls ride the INSTALLED fno: FNO_BIN outranks the
+# checkout build in the Python store client. Candidate code still serves every
+# command that touches no live store.
+INSTALLED_FNO_BIN="$(command -v fno 2>/dev/null || true)"
+
+receipt_fno() {
+    if [[ -n "$INSTALLED_FNO_BIN" ]]; then
+        FNO_BIN="$INSTALLED_FNO_BIN" candidate_fno "$@"
+    else
+        candidate_fno "$@"
+    fi
+}
+
+receipt_python() {
+    if [[ -n "$INSTALLED_FNO_BIN" ]]; then
+        FNO_BIN="$INSTALLED_FNO_BIN" candidate_python "$@"
+    else
+        candidate_python "$@"
+    fi
+}
+
+GLOBAL_EVENTS_PATH="$(receipt_fno do pr global-receipt-events-path)" || {
     echo "preflight: canonical receipt journal path unavailable" >&2
     exit 1
 }
@@ -278,7 +301,7 @@ emit_verification_receipt() {
 
 append_receipt_journal() {
     local events_path="$1" event="$2"
-    candidate_python -c '
+    receipt_python -c '
 import json
 import sys
 from pathlib import Path
@@ -296,7 +319,7 @@ emit_setup_unavailable() {
 }
 
 next_receipt_generation() {
-    candidate_fno do pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
+    receipt_fno do pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
 }
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
@@ -335,7 +358,7 @@ reuse_attestation() {
     # The text file is only a fast cache carrier. Authority stays in the typed
     # event journal, so a matching carrier with missing, malformed, subset,
     # void, stale, or otherwise non-passing evidence cannot bless this SHA.
-    if ! candidate_fno do pr evidence-check >/dev/null 2>&1; then
+    if ! receipt_fno do pr evidence-check >/dev/null 2>&1; then
         echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
         return 1
     fi
