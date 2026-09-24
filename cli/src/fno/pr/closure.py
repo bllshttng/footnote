@@ -14,14 +14,10 @@ runtime-recognized closure grammar, so a claim is either the literal line or
 it does not exist.
 
 The LINE FORMAT lives in one leg: the Rust parser (`crates/fno-agents/src/
-king_board/pr_closure.rs`), exposed as `fno-agents pr closure parse|render`.
+king_board/pr_closure.rs`, verbs `pr-closure-parse` / `pr-closure-render`);
 `parse_closure_trailer` and `render_closure_trailer` are thin forwarders to
-that verb, so the Python and Rust readers can never disagree about what a
-body claims. The keyword sits at the start of a line, case-insensitive, with
-or without a colon; every token after it is a well-formed node id, split by
-commas and/or spaces; one malformed token makes the line prose and it claims
-nothing; the LAST well-formed line wins. Writers emit only `Fixes`; readers
-also accept the retired `Backlog-Closure:` spelling while open PRs carry it.
+it, so the Python and Rust readers can never disagree. Writers emit only
+`Fixes`; readers also accept the retired `Backlog-Closure:` spelling.
 """
 from __future__ import annotations
 
@@ -35,64 +31,25 @@ from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
 
 
 class ClosureBinaryError(RuntimeError):
-    """The Rust closure leg failed or is missing; callers stop loudly rather
-    than read a claim with a broken parser."""
-
-
-def closure_call(args: list[str], payload: Optional[str]) -> str:
-    """One call to `fno-agents pr closure <mode>`. `payload` rides stdin when
-    given (parse); otherwise the ids come as argv (render). Module-level so
-    tests can pin the leg without a binary."""
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        raise ClosureBinaryError(
-            "fno-agents binary not found; the closure-line parser is the Rust "
-            "leg (fno-agents pr closure). Reinstall fno, run `fno doctor update "
-            "--rust`, or set FNO_AGENTS_BIN."
-        )
-    proc = subprocess.run(
-        [str(binary), "pr", "closure", *args],
-        input=payload,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    if proc.returncode != 0:
-        raise ClosureBinaryError(
-            f"pr closure {args[0] if args else '?'} failed "
-            f"(rc={proc.returncode}): {(proc.stderr or '').strip()}"
-        )
-    return proc.stdout
+    """The Rust closure leg failed or is missing; never a silent empty."""
 
 
 def parse_closure_trailer(body: str) -> list[str]:
-    """Well-formed node ids named on the LAST closure line of ``body``.
-
-    A thin forwarder to the Rust leg (`fno-agents pr closure parse`); the
-    grammar and its edge cases live there and in the shared corpus fixture
-    (`tests/fixtures/pr-closure-cases.json`). Raises ``ClosureBinaryError``
-    when the leg is missing or fails.
-    """
+    """Forward to the Rust leg: ids on the LAST closure line of ``body``."""
     if not isinstance(body, str) or not body:
         return []
-    import json
+    from fno.rust_binary import verb_call
 
-    out = closure_call(["parse"], body).strip()
-    return json.loads(out) if out else []
+    return verb_call("pr-closure-parse", {"body": body}, ClosureBinaryError)["ids"]
 
 
 def render_closure_trailer(node_ids: list[str]) -> str:
-    """The one place a trailer LINE is built, so parse<->render round-trips.
+    """Forward to the Rust leg: the one ``Fixes`` line ("" when nothing well-formed)."""
+    from fno.rust_binary import verb_call
 
-    A thin forwarder to the Rust leg (`fno-agents pr closure render`); the
-    Rust renderer drops malformed/duplicate ids and returns "" (no line) when
-    nothing well-formed remains, so a caller can safely append the result to
-    a body unconditionally. Emits only the ``Fixes`` spelling.
-    """
-    return closure_call(["render", *[n for n in node_ids]], None).strip()
+    return verb_call(
+        "pr-closure-render", {"ids": list(node_ids)}, ClosureBinaryError
+    )["line"]
 
 
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:

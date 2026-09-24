@@ -14,6 +14,7 @@
 //! earlier good one.
 
 use super::queues::NODE_ID_BODY;
+use serde_json::{json, Value};
 
 /// The keywords a closure line may start with. `Fixes` is the only spelling
 /// writers render; `Backlog-Closure` is read for PRs opened before the rename.
@@ -110,38 +111,56 @@ where
     }
 }
 
-/// `fno-agents pr closure parse|render`: the Python forwarders' door.
-/// `parse` reads a PR body on stdin and prints a JSON array of node ids;
-/// `render` takes ids as arguments and prints the line (empty output when
-/// nothing well-formed remains).
+/// `fno-agents pr-closure-parse|pr-closure-render`: the Python forwarders'
+/// door. One JSON payload on stdin, one JSON answer on stdout (the house
+/// transport `fno.rust_binary.verb_call` speaks). Parse reads `{"body": s}`
+/// and answers `{"ids": [...]}`; render reads `{"ids": [...]}` and answers
+/// `{"line": s}` (empty when nothing well-formed remains).
 pub fn run(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) != Some("closure") {
-        eprint!(
-            "usage: fno-agents pr closure parse   (PR body on stdin; JSON node ids out)\n       fno-agents pr closure render <id> [id...]\n"
-        );
+    use std::io::Read;
+
+    let mut payload = String::new();
+    if std::io::stdin().read_to_string(&mut payload).is_err() {
+        eprint!("pr-closure: cannot read stdin\n");
         return 2;
     }
-    match args.get(1).map(String::as_str) {
-        Some("parse") => {
-            use std::io::Read;
-            let mut body = String::new();
-            if std::io::stdin().read_to_string(&mut body).is_err() {
-                eprint!("pr closure parse: cannot read stdin\n");
-                return 2;
-            }
+    let parsed: Value = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            eprint!("pr-closure: bad payload: {e}\n");
+            return 2;
+        }
+    };
+    match args.first().map(String::as_str) {
+        Some("pr-closure-parse") => {
+            let body = parsed.get("body").and_then(Value::as_str).unwrap_or("");
             println!(
                 "{}",
-                serde_json::to_string(&parse(&body)).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(&json!({ "ids": parse(body) }))
+                    .unwrap_or_else(|_| "{\"ids\":[]}".into())
             );
             0
         }
-        Some("render") => {
-            println!("{}", render(&args[2..]));
+        Some("pr-closure-render") => {
+            let ids: Vec<String> = parsed
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string(&json!({ "line": render(ids) }))
+                    .unwrap_or_else(|_| "{\"line\":\"\"}".into())
+            );
             0
         }
         _ => {
             eprint!(
-                "usage: fno-agents pr closure parse   (PR body on stdin; JSON node ids out)\n       fno-agents pr closure render <id> [id...]\n"
+                "usage: fno-agents pr-closure-parse   (JSON {{body}} in; {{ids}} out)\n       fno-agents pr-closure-render  (JSON {{ids}} in; {{line}} out)\n"
             );
             2
         }

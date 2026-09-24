@@ -1,7 +1,6 @@
 """Shared pytest fixtures for fno CLI tests."""
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import time
@@ -926,22 +925,24 @@ def _closure_leg_hermetic(monkeypatch):
     """Hermetic default for the closure-line forwarders.
 
     `fno.pr.closure.parse_closure_trailer`/`render_closure_trailer` are thin
-    forwarders to the Rust leg (`fno-agents pr closure parse|render`). In the
-    test environment that resolver can find an installed binary without the
-    new verb, or none at all, so the default answers from a test-local copy
-    of the shared-corpus grammar; tests that pin the forwarder WIRING stub
-    `fno.pr.closure.closure_call` themselves, and the corpus test runs the
-    real dev binary when one exists (skip otherwise, the same contract as
-    `native_backlog_door`).
+    forwarders to the Rust leg (`fno-agents pr-closure-parse|render`, through
+    `fno.rust_binary.verb_call`). In the test environment that resolver can
+    find an installed binary without the new verb, or none at all, so the
+    default answers from a test-local copy of the shared-corpus grammar;
+    tests that pin the forwarder WIRING re-stub `fno.rust_binary.verb_call`
+    themselves, and the corpus test runs the real dev binary when one exists
+    (skip otherwise, the same contract as `native_backlog_door`).
     """
     from fno.graph._constants import is_wellformed_node_id
-    from fno.pr import closure as closure_mod
 
-    def _fake_call(args, payload):
-        mode = args[0] if args else ""
-        if mode == "render":
-            ids = [t for t in dict.fromkeys(args[1:]) if is_wellformed_node_id(t)]
-            return f"Fixes {' '.join(ids)}\n" if ids else "\n"
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        if verb == "pr-closure-render":
+            ids = [
+                t
+                for t in dict.fromkeys(payload.get("ids") or [])
+                if is_wellformed_node_id(t)
+            ]
+            return {"line": f"Fixes {' '.join(ids)}" if ids else ""}
 
         def _line_ids(line):
             stripped = line.strip()
@@ -959,13 +960,13 @@ def _closure_leg_hermetic(monkeypatch):
             return None
 
         best = None
-        for line in (payload or "").splitlines():
+        for line in (payload.get("body") or "").splitlines():
             ids = _line_ids(line)
             if ids is not None:
                 best = ids
-        return f"{json.dumps(best or [])}\n"
+        return {"ids": best or []}
 
-    monkeypatch.setattr(closure_mod, "closure_call", _fake_call)
+    monkeypatch.setattr("fno.rust_binary.verb_call", _fake_verb_call)
 
 
 @pytest.fixture(autouse=True)
