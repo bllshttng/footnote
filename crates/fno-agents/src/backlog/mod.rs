@@ -465,14 +465,16 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     Ok(())
 }
 
+const CLEAR_SOAK_METADATA_SQL: &str = "DELETE FROM graph_meta WHERE key IN (
+    'soak_clean_since_ms', 'soak_clean_days', 'soak_last_sample_ms', 'soak_last_divergent')";
+
 /// Schema 3: a populated schema-2 store under the json backend rebuilds
 /// its rows once from authoritative graph.json. The raw-baseline shadow
 /// diff and the child-extras columns stop NEW drift; this rebuild visits
 /// the rows that already drifted while normalization-only changes were
 /// being skipped. It is also the soak restart: the rebuild deletes the
 /// graph_meta soak keys, so the next clean sample starts a fresh 7-day
-/// clock. Under the sqlite backend graph.json is not authoritative, so
-/// the stamp moves and nothing is rewritten.
+/// clock. The sqlite path also clears soak metadata without rewriting rows.
 fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
     let current: i64 = meta(connection, "schema_version")?
@@ -482,7 +484,21 @@ fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(),
         return Ok(());
     }
     if backend(graph) == Backend::Sqlite {
-        return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let raced: i64 = meta(&transaction, "schema_version")?
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .unwrap_or(2);
+        if raced >= target {
+            return Ok(());
+        }
+        transaction
+            .execute(CLEAR_SOAK_METADATA_SQL, [])
+            .map_err(|error| error.to_string())?;
+        stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(());
     }
     // The rebuild reads graph.json; a file that does not parse, or that
     // carries no entries ARRAY, is left for the next open, and parity
