@@ -105,6 +105,6 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
 | "Send my questions to my notes file" | set `[[attention]]` |
 
-Skills run inline by default. A skill dispatches work only when its own instructions say to.
+Skills run inline by default. When a skill's instructions require dispatch, it dispatches work.
 
 In a worktree Bash refuses heredocs, command substitution and loops, so write the script with Write and run `bash <file>`; use Read, Grep and Glob for every read; never lead a command with `cd`, the cwd persists.
