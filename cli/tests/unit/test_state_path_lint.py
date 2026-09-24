@@ -17,7 +17,7 @@ def test_state_path_lint_catches_a_known_bad_fixture_line(tmp_path: Path):
     source.write_text(
         "from pathlib import Path\n\n"
         "def bad_state_reader(root):\n"
-        "    return root / '.fno' / 'graph.db'\n",
+        "    return root / '.fno' / 'ledger.json'\n",
         encoding="utf-8",
     )
 
@@ -26,7 +26,7 @@ def test_state_path_lint_catches_a_known_bad_fixture_line(tmp_path: Path):
     assert len(violations) == 1
     rel, filename, message = violations[0]
     assert rel == "cli/src/fno/bad.py"
-    assert filename == "graph.db"
+    assert filename == "ledger.json"
     assert "cli/src/fno/bad.py:4" in message
     assert "fno.paths.graph_json" in message
 

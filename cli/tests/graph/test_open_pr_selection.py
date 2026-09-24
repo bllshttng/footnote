@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from typer.testing import CliRunner
 
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph.cli import cli, _has_unmerged_open_pr
 
 

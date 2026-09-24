@@ -6,8 +6,6 @@ the MARKER is printed - never a blank, never a fabricated resume command.
 """
 
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
-
 import json
 
 import pytest

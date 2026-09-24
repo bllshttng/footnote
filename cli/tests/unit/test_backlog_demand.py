@@ -13,7 +13,7 @@ subprocess per row would be measuring the wrong thing slowly.
 Two properties carry the ordering contract. Distinct SESSIONS are the numerator,
 so a node that somehow accumulated two rows from one session still counts once.
 And the read touches nothing: `demand` never writes rank, never consults a
-kanban column, and leaves graph.json byte for byte as it found it.
+kanban column, and leaves the graph store rows unchanged.
 """
 from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
@@ -25,6 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -190,10 +191,10 @@ def test_the_read_leaves_the_graph_untouched(tmp_graph):
         _node("zz-0001", "p3", encounters=[_enc("s1"), _enc("s2")]),
         _node("zz-0002", "p0", encounters=[_enc("s3")]),
     )
-    before = tmp_graph.read_bytes()
+    before = read_graph_strict(tmp_graph)
     result = runner.invoke(app, ["backlog", "demand"])
     assert result.exit_code == 0, result.output
-    assert tmp_graph.read_bytes() == before
+    assert read_graph_strict(tmp_graph) == before
 
 
 def test_the_table_names_the_node_and_its_counts(tmp_graph):

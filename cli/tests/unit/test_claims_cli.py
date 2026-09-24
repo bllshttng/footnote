@@ -724,8 +724,10 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "%s", "title": "t", '
-                 '"domain": "code", "project": "p"}]}\n' % node_id)
+    seed_graph(
+        g,
+        [{"id": node_id, "title": "t", "domain": "code", "project": "p"}],
+    )
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
     return g
 
@@ -1196,7 +1198,7 @@ def _write_claim_file(key, *, expires_at):
 
     from fno.claims.hostid import machine_id
     from fno.claims.io import claim_path, serialize_claim
-    from fno.claims.types import Claim, now_ms
+    from fno.claims.types import Claim
 
     # The verdict reads PID reuse when the pid's create time EXCEEDS
     # acquired_at, so pin acquired_at a beat after THIS process's birth: the

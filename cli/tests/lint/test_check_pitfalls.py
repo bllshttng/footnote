@@ -34,7 +34,11 @@ def _run(
     state = target.parent / "state"
     config = target.parent / "config.toml"
     config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
-    env = {**os.environ, "FNO_CONFIG": str(config)}
+    env = {
+        **os.environ,
+        "FNO_CONFIG": str(config),
+        "FNO_GRAPH_JSON": str(state / "graph.json"),
+    }
     if env_extra:
         env.update(env_extra)
     return subprocess.run(

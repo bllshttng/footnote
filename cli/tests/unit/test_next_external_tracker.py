@@ -13,10 +13,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -275,7 +275,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
         "EXT-hi": {"plan_path": "/plans/hi.md"},
         "EXT-lo": {"plan_path": "/plans/lo.md"},
     })
-    before = g.read_text()
+    before = read_graph_strict(g)
 
     r = runner.invoke(
         app, ["backlog", "next", "--claim", "sess-ext-1"],
@@ -284,8 +284,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     assert r.exit_code == 0, r.output
     doc = json.loads(r.output)
     assert doc["id"] == "EXT-hi"
-    # The graph file is untouched.
-    assert g.read_text() == before
+    assert read_graph_strict(g) == before
     # The claim exists in the claims dir under the opaque id.
     claims_root = tmp_path / "claims"
     locks = list(claims_root.rglob("*EXT-hi*"))

@@ -33,8 +33,6 @@ schema_version = 1
 prefix = "fno"
 
 [paths]
-# Override path to the backlog graph.json.
-# graph_json = <unset>   # optional; no default
 # Override path to ledger.json.
 # ledger_json = <unset>   # optional; no default
 # Override path to the evals-history.jsonl bank-run ledger.

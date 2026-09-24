@@ -44,6 +44,7 @@ from fno.graph.cli import (
     _strandable_contained_ids,
     _strandable_epic_ids,
 )
+from fno.graph.store import read_graph_strict
 
 CHILD_CLOSE = "2026-09-04T20:35:52+00:00"
 BEFORE_CLOSE = "2026-09-04T19:00:00+00:00"
@@ -410,7 +411,7 @@ def test_reconcile_holds_a_reopen_postdating_the_merge(routed, tmp_path, monkeyp
     payload = json.loads(r.output)
     assert any(h["node_id"] == "ab-reopen1" for h in payload["reopen_held"]), r.output
     assert all(c.get("node_id") != "ab-reopen1" for c in payload["closed"])
-    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    entry = next(e for e in read_graph_strict(routed) if e["id"] == "ab-reopen1")
     assert entry.get("completed_at") is None
 
 
@@ -460,9 +461,9 @@ def test_reconcile_closes_when_a_later_additional_merge_expires_the_hold(
 
     monkeypatch.setattr(rec, "query_pr_merge_state", per_number)
     plan = _seed_merged_world(routed, tmp_path, reopened_at=AFTER_MERGE)
-    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    entry = next(e for e in read_graph_strict(routed) if e["id"] == "ab-reopen1")
     entry["additional_prs"] = [{"number": 43, "url": "https://github.com/o/r/pull/43"}]
-    routed.write_text(json.dumps({"entries": [entry]}, indent=2) + "\n", encoding="utf-8")
+    seed_graph(routed, [entry])
     _stub_scan(monkeypatch, plan)
     from fno.graph.cli import cli
 
@@ -497,5 +498,5 @@ def test_locked_mutation_rechecks_the_reopen(routed, tmp_path, monkeypatch):
     assert len(calls) == 2, r.output
     assert all(c.get("node_id") != "ab-reopen1" for c in payload["closed"])
     assert any(h["node_id"] == "ab-reopen1" for h in payload["reopen_held"]), r.output
-    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    entry = next(e for e in read_graph_strict(routed) if e["id"] == "ab-reopen1")
     assert entry.get("completed_at") is None

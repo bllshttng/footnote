@@ -512,7 +512,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-    import fno.paths as paths_mod
 
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
@@ -612,7 +611,7 @@ def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
     )
 
     _, rows, _ = list_decisions(
-        "x-7d94", state="all", entries=entries["entries"]
+        "x-7d94", state="all", entries=entries
     )
     assert rows[0]["lifecycle"] == "expired"
 

@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 import fno.graph._constants as gc
 import fno.graph.store as gs
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -54,7 +55,7 @@ def operator_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_backlo
 
 
 def _entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text(encoding="utf-8"))["entries"]
+    return read_graph_strict(g)
 
 
 def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path, operator_turn: None):
@@ -77,8 +78,6 @@ def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path, operator_tu
     )
     assert promoted.exit_code == 0, promoted.output
     node_id = json.loads(promoted.output)["node_id"]
-
-    from fno.graph.store import read_graph_strict
 
     node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
     assert node["source_kind"] == "operator_request"

@@ -5,7 +5,7 @@ it declines rather than the case it permits. A correction verb that permits
 everything is a hand-edit with a nicer name, and hand-editing the graph is what
 the PreToolUse hook already forbids.
 
-Graph fixture follows test_done.py: a temp graph.json routed through the
+Graph fixture follows test_done.py: a temporary SQLite graph routed through the
 monkeypatchable `_constants` module, with gh stubbed so no test touches GitHub.
 """
 from __future__ import annotations
@@ -404,11 +404,11 @@ def test_a_routing_refusal_does_not_reopen_the_node(tmp_graph, monkeypatch):
 def test_a_node_that_is_not_done_warns_and_changes_nothing(tmp_graph):
     """Idempotent in the safe direction, matching unsupersede's shape."""
     _write(tmp_graph, _node("ab-11111111", completed_at=None, status="ready"))
-    before = tmp_graph.read_text()
+    before = read_graph_strict(tmp_graph)
     res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
     assert res.exit_code == 0
     assert "not done" in res.output
-    assert tmp_graph.read_text() == before
+    assert read_graph_strict(tmp_graph) == before
 
 
 def test_a_blank_reason_is_a_usage_error(tmp_graph):

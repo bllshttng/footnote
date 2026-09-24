@@ -351,6 +351,7 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
             obj.insert("locked_at".to_string(), Value::String(stamp.to_string()));
         }
     }
+    crate::graph_store::apply_defaults(&mut rows, false);
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;

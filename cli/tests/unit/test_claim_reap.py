@@ -40,6 +40,7 @@ from fno.claims.core import (
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.claims.verdict import claim_verdicts
+from fno.graph.store import read_graph_strict
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
@@ -355,7 +356,7 @@ class TestReapDeadClaims:
 
         claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
         assert claim_status(claim.key, root=tmp_path)["state"] == "live"
-        before = json.loads(graph_path.read_text())["entries"][0]
+        before = read_graph_strict(graph_path)[0]
         assert before["locked_by"] == holder
         assert before["session_id"] == holder
 
@@ -368,7 +369,7 @@ class TestReapDeadClaims:
 
         assert isinstance(released, Claim)
         assert claim_status(claim.key, root=tmp_path)["state"] == "free"
-        after = json.loads(graph_path.read_text())["entries"][0]
+        after = read_graph_strict(graph_path)[0]
         assert after["locked_by"] is None
         assert after["session_id"] is None
         assert after["locked_at"] is None
@@ -406,7 +407,7 @@ class TestReapDeadClaims:
             assert _clear_lock_mirror_for_reaped(
                 [node_id], claim_roots=[tmp_path]
             ) == 0
-            row = json.loads(graph_path.read_text())["entries"][0]
+            row = read_graph_strict(graph_path)[0]
             assert row["locked_by"] == holder
             assert row["session_id"] == holder
         finally:
@@ -452,7 +453,7 @@ class TestReapDeadClaims:
         err = capsys.readouterr().err
         assert f"cleared locked_by='{holder}' on {node_id}" in err
         assert f"fno agents claim acquire node:{node_id}" in err
-        row = json.loads(graph_path.read_text())["entries"][0]
+        row = read_graph_strict(graph_path)[0]
         assert row["locked_by"] is None
 
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
@@ -597,7 +598,6 @@ class TestReapDeadClaims:
         # that, like this one, needs append_event's cwd-derived events.jsonl
         # path to follow the chdir). Clear it post-chdir so the write (or
         # non-write, which is what this test asserts) lands under tmp_path.
-        from fno.paths import resolve_repo_root
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
@@ -646,13 +646,11 @@ class TestReapDeadClaims:
         # pre-chdir cwd by an unrelated fixture's first-use import, order-
         # dependent on what ran earlier in the session. Order-dependent here
         # means this test passes as part of the suite but fails run alone.
-        from fno.paths import resolve_repo_root
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
         # name that same file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        import json
 
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap
 

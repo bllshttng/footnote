@@ -120,6 +120,7 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
     assert all(
         name.startswith("graph")
         or name == "spaces"
+        or name == "backups"
         or name.endswith(".lock")
         or name.endswith(".bak")
         for name in created

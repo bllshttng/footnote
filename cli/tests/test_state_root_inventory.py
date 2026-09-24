@@ -13,7 +13,7 @@ DOC = REPO_ROOT / "docs" / "state-root-inventory.md"
 
 def test_positive_control_names_the_undocumented_file(tmp_path):
     # A bare zero from the gate proves nothing; prove it can name a violation.
-    (tmp_path / "graph.json").touch()
+    (tmp_path / "graph.db").touch()
     marker = "totally-undocumented-marker-file"
     (tmp_path / marker).touch()
     assert undocumented(tmp_path, DOC) == [marker]

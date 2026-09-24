@@ -104,6 +104,7 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
     import fno.graph._constants as gc
     import fno.graph.store as gs
     from fno.cli import app
+    from fno.graph.store import read_graph_strict
 
     entries = [
         {**epic("x-mux0001", "mux pane layout polish"), "project": "fno",
@@ -129,4 +130,4 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
     assert "rollup candidate x-orph0001 -> x-mux0001" in res.stdout
     assert "--parent x-mux0001" in res.stdout
     # Propose-only: the graph is untouched.
-    assert json.loads(g.read_text())["entries"][1].get("parent") is None
+    assert read_graph_strict(g)[1].get("parent") is None

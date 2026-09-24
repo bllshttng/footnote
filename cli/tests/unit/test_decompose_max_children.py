@@ -223,9 +223,9 @@ def test_relative_plan_path_resolved_against_epic_cwd(graph_env, tmp_path, monke
     # Point the epic's plan_path at a RELATIVE path (basename), cwd = tmp_path.
     import fno.graph._constants as gc
 
-    g = json.loads(Path(gc.GRAPH_JSON).read_text())
-    g["entries"][0]["plan_path"] = "big.md#c1-anchor"  # relative
-    Path(gc.GRAPH_JSON).write_text(json.dumps(g) + "\n")
+    entries = read_entries()
+    entries[0]["plan_path"] = "big.md#c1-anchor"  # relative
+    seed_graph(Path(gc.GRAPH_JSON), entries)
     # Run from a DIFFERENT cwd so a process-cwd read would miss big.md.
     other = tmp_path / "elsewhere"
     other.mkdir()

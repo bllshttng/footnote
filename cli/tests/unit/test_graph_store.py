@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 import types
 from pathlib import Path
@@ -17,7 +16,6 @@ import pytest
 from fno.rust_binary import find_dev_binary
 from tests.fixtures.graph_seed import seed_graph
 from fno.graph.store import (
-    GraphCorruptError,
     _apply_graph_defaults,
     append_session_record,
     _read_json,
@@ -112,13 +110,10 @@ def test_the_raw_flock_helpers_are_retired():
     assert not hasattr(store_mod, "_release_flock")
 
 
-def test_read_json_missing_store_raises_store_unavailable(tmp_path):
-    """A missing store is unavailable, not an empty board."""
-    from fno.graph.store import StoreUnavailable
-
+def test_read_json_missing_store_is_an_empty_graph(tmp_path):
+    """Opening a missing SQLite store creates its empty graph."""
     p = tmp_path / "nonexistent.json"
-    with pytest.raises(StoreUnavailable):
-        _read_json(p)
+    assert _read_json(p) == []
 
 
 def test_ac1_hp_read_json_empty_entries(tmp_path):
@@ -410,7 +405,6 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
-    from fno.graph.store import _worker_binary
 
 
     state_dir = tmp_path / "state"
@@ -891,9 +885,9 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
     def stale_request(self, method, params):
         raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
 
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
     monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
-    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
 
