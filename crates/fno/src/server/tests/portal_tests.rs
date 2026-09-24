@@ -1713,12 +1713,16 @@ fn portal_repoint_keeps_its_geometry_and_says_so() {
 fn portal_stale_seat_prefers_the_remembered_tab_over_the_caller_tab() {
     // (x-d545 via x-9b60, AC3-REG) A stale seat's remembered tab still
     // wins on a fresh open, even once a caller can supply a tab: the
-    // replacement viewer lands where the operator had it.
+    // replacement viewer lands where the operator had it. The seat's tab
+    // keeps a second pane so the operator close leaves the tab alive: an
+    // operator close of a LONE-leaf tab closes the tab (the AC7 rule),
+    // and a gone tab can win nothing.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, mut rx) = thread_core();
     core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
     core.command(client_id, thread_reach_cmd("deadbee1"));
     let tab_a = core.portals.get(&0).expect("portal 0 open").tab;
+    let seat_a = core.portals.get(&0).unwrap().seat;
     // A second, real tab for the caller to name: mint the id so it
     // cannot collide the way a manual push would.
     let tab_b = core.session.mint_tab_id();
@@ -1729,10 +1733,33 @@ fn portal_stale_seat_prefers_the_remembered_tab_over_the_caller_tab() {
         root: Node::Leaf(shell_b),
         focus: shell_b,
     });
+    // A neighbour pane shares the seat's tab, so the operator close below
+    // stales the seat without removing the tab.
+    let (sid_a, ti_a) = core.session.find_pane(seat_a).unwrap();
+    let neighbour = core
+        .spawn_pane(24, 40, "/tmp/seen")
+        .expect("neighbour pane");
+    {
+        let squad = core.session.squad_mut(sid_a).unwrap();
+        let tab = &mut squad.tabs[ti_a];
+        let leaf = std::mem::replace(&mut tab.root, Node::Leaf(neighbour));
+        tab.root = Node::Branch {
+            axis: crate::tree::Axis::Horizontal,
+            children: vec![(0.5, leaf), (0.5, Node::Leaf(neighbour))],
+        };
+    }
     // An operator close is what leaves the entry stale now: the entry
-    // goes stale on purpose, the remembered tab (tab_a) survives.
-    let seat_a = core.portals.get(&0).unwrap().seat;
+    // goes stale on purpose, and the tab (with the neighbour) survives.
     core.close_pane(seat_a);
+    assert!(
+        core.session
+            .squad(sid_a)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == tab_a),
+        "fixture: the shared tab survives the operator close"
+    );
 
     core.command(
         client_id,
