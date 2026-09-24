@@ -342,6 +342,11 @@ fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<Compacti
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())?
         .to_string();
+    let completed_at_ms = if method == "item/completed" {
+        Some(params.get("completedAtMs").and_then(Value::as_u64)?)
+    } else {
+        None
+    };
     match method {
         "item/started" => Some(CompactionLifecycle::Started(turn_id, item_id)),
         "item/completed" => Some(CompactionLifecycle::Completed(
@@ -353,6 +358,7 @@ fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<Compacti
                 "itemId": item_id,
                 "type": "contextCompaction",
                 "status": "completed",
+                "completedAtMs": completed_at_ms,
             }),
         )),
         _ => None,
@@ -2620,6 +2626,7 @@ mod tests {
             "params": {
                 "threadId": "thread-a",
                 "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
                 "item": { "id": "compact-1", "type": "contextCompaction" }
             }
         });
@@ -2636,6 +2643,7 @@ mod tests {
         assert_eq!(receipt["turnId"], "turn-a");
         assert_eq!(receipt["itemId"], "compact-1");
         assert_eq!(receipt["status"], "completed");
+        assert_eq!(receipt["completedAtMs"], 1_790_000_000_000_u64);
         crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap();
         assert!(parse_compaction_lifecycle(&completed, "thread-b").is_none());
         let completed_without_start = serde_json::json!({
@@ -2643,6 +2651,7 @@ mod tests {
             "params": {
                 "threadId": "thread-a",
                 "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
                 "item": { "id": "compact-2", "type": "contextCompaction" }
             }
         });
