@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # check-no-skill-local-evals.sh - CI gate: skills/<name>/evals/ is a dead
-# convention. The sole home for an eval task is the repo-root bank
-# (evals/bank/*.yaml), graded by `fno doctor evals`. A skills/<name>/evals/ directory
+# convention. An eval task lives in the repo-root bank (evals/bank/*.yaml),
+# graded by `fno doctor evals`. The one other home is evals/claude-plugin/,
+# the suite that `claude plugin eval --eval-dir evals/claude-plugin` runs.
+# A skills/<name>/evals/ directory
 # has zero consumers - no runner reads it - so a file placed there looks
 # adopted but runs never, which is how this node once concluded the eval system
 # had "one user" when it had none. Deleting the last instance without a gate
@@ -30,7 +32,7 @@ if ! offenders=$(git ls-files -- 'skills/*/evals/*'); then
 fi
 
 if [[ -z "$offenders" ]]; then
-    echo "check-no-skill-local-evals: no skill-local evals directories (bank is the sole location)"
+    echo "check-no-skill-local-evals: no skill-local evals directories (evals live in evals/bank and evals/claude-plugin)"
     exit 0
 fi
 
