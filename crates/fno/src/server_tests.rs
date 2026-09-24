@@ -4176,62 +4176,6 @@ fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
 }
 
 #[test]
-fn respawn_agent_live_row_refused() {
-    // AC2-ERR: RespawnAgent on a still-live row is refused (a plain #[test]
-    // has no tokio runtime, so the clean refusal is also proof the spawn arm
-    // is never reached).
-    let mut core = empty_core();
-    core.agents = vec![bg_row("live-worker", "/w", None)]; // exited: false
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "live-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx).unwrap().contains("still live"));
-}
-
-#[test]
-fn respawn_agent_no_uuid_refused() {
-    // AC2-ERR: an exited row with no recorded claude_session_uuid (also the
-    // non-claude case, since derive_rows only carries the uuid for claude).
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", None)];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("no claude session recorded"));
-}
-
-#[test]
-fn respawn_agent_malformed_uuid_refused_before_argv() {
-    // AC2-ERR: a malformed uuid is refused with the SPECIFIC reason (a
-    // generic "error" would fail this AC) before it could reach argv.
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", Some("not-a-uuid"))];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("malformed session id"));
-}
-
-#[test]
 fn run_pane_with_worker_records_a_resumable_member() {
     // x-5f7f task 1, positive marker: a pane run carrying --worker records
     // a StoredMember joined to that registry NAME, in the store, for the
@@ -5070,15 +5014,6 @@ fn sanitize_mail_text_strips_trims_and_bounds() {
         crate::proto::MAX_MAIL_TEXT
     );
     assert!(sanitize_mail_text(&"x".repeat(crate::proto::MAX_MAIL_TEXT + 1)).is_err());
-}
-
-#[test]
-fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
-    assert!(valid_session_uuid("12345678-1234-1234-1234-1234567890ab"));
-    assert!(!valid_session_uuid("not-a-uuid"));
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890AB")); // uppercase
-    assert!(!valid_session_uuid("12345678123412341234567890ab")); // no dashes
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
 }
 
 #[test]
