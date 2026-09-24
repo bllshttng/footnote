@@ -470,7 +470,16 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
     let mut command = mux_command(fno_bin());
     command
-        .args(["agents", "mail", "send", "--", name, text])
+        .args([
+            "agents",
+            "mail",
+            "send",
+            "--from-name",
+            "mux-peek",
+            "--",
+            name,
+            text,
+        ])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
@@ -747,6 +756,60 @@ mod tests {
         write_fake_bin(&bin, body);
         let env = PinnedAgentEnv::set(&bin, &tmp);
         (tmp, env)
+    }
+
+    struct FnoBinGuard(Option<std::ffi::OsString>);
+
+    impl FnoBinGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("FNO_BIN");
+            std::env::set_var("FNO_BIN", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for FnoBinGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_BIN", value),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mux_mail_send_names_its_arm_without_operator_origin() {
+        let _serial = fno_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_log = tmp.path().join("argv.log");
+        let fake_bin = tmp.path().join("fake-fno.sh");
+        write_fake_bin(
+            &fake_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf 'msg-1 delivered (hosted)\\n'\n",
+                argv_log.display()
+            ),
+        );
+        let _fno_bin = FnoBinGuard::set(&fake_bin);
+
+        let receipt = run_mail_send("worker", "--reply-looking-body").await;
+
+        assert_eq!(receipt, "msg-1 delivered (hosted)");
+        let argv = std::fs::read_to_string(argv_log).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            [
+                "agents",
+                "mail",
+                "send",
+                "--from-name",
+                "mux-peek",
+                "--",
+                "worker",
+                "--reply-looking-body",
+            ]
+        );
+        assert!(!argv.lines().any(|arg| arg == "--origin"));
     }
 
     #[tokio::test]

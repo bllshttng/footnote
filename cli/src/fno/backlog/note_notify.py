@@ -63,16 +63,24 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer; the sender handle is this session's own (provenance by from_name)."""
-    from fno.agents.dispatch import dispatch_send
-    from fno.harness_identity import canonical_handle
+    """Send one pointer through the Rust machine-mail provenance door."""
+    import subprocess
 
-    session = own_session()
-    from_name = canonical_handle(session) if session else "fno"
-    result = dispatch_send(
-        address, body, None, cwd=Path.cwd(), from_name=from_name, lock_timeout=5.0
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise RuntimeError("fno-agents binary unavailable")
+    argv = [str(binary), "machine-mail-send", "--arm", "note-pointer"]
+    argv.extend(["--timeout-secs", "30", "--to", address, "--", body])
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=_SEND_TIMEOUT_SECONDS
     )
-    return f"{result.delivery} {result.msg_id}"
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or f"machine-mail-send exited {result.returncode}"
+        )
+    return result.stdout.strip()
 
 
 def pointer(node_id: str, text: str) -> str:
