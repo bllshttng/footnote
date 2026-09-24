@@ -10,6 +10,13 @@ The verbs below are fno's own.
 In an environment whose pane layer is something other than fno mux, the crowning brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
 The pane layer owns placement, lifecycle, and I/O; fno stays the authority for identity, claims, the graph, and dispatch.
 
+Codex app-server threads do not have a prompt line. Their native provider
+actions are controller-owned and must be proved by provider receipts: a raw
+`/compact`, `/model`, or `/status` mail is refused, while ordinary wrapped
+text and structured review mail keep their own transports. A mux-hosted Codex
+pane is the measured fallback: press Escape, then type `/compact`, and read
+the pane receipt before sending the next task.
+
 ## The five primitives
 
 | Duty | Verb | Notes |
@@ -149,7 +156,7 @@ fno backlog update --add-blocker   # if a merge-order constraint applies
 - **You never create a workspace first.** The first placement into a name creates it; there is no create verb. A blank name is a CLI error, not a fallback to the default.
 - **Moving a running pane is a layout operation, not a pane verb.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. `fno mux layout apply` does relocate a bound live pane, PTY intact, but it applies a whole shape to the destination tab and needs that template's full slot set, so use it to shape a tab rather than to shuffle a worker. A human at the TUI also has lighter paths you do not: move-pane, move-tab, and recruiting a running agent into a named workspace as a watch-only member (create-if-absent, persisted). Default to adopting an already-running worker logically (claim + mail), and do not kill a healthy one for layout.
 - **Sweep at boundaries, not on a repeating clock.** A heartbeat poll re-reads context every pass. It surfaces nothing the teammate's projected events do not. But never stop with a live teammate and no armed wake. A report can land `queued (durable)`. A pane can die reporting nothing. So an expected report is not coverage. The teammate you counted on to write is the one that strands you. Cover every live teammate you have not yet reconciled, owed report or not. Use one `wait` each, or one `subscribe` stream for the whole fleet. A reconciled `done` row matches instantly and spins, so it leaves the set. One armed wake is a backstop. A timer that fires regardless is the poll.
-- **never batch a task with an order to compact.** Compaction drops the rest of that turn. Send `fno agents mail send <handle> '/compact' --raw`, confirm it landed, and only then send the task in a separate message.
+- **never batch a task with an order to compact.** A Codex app-server compact uses the provider controller and its completed receipt; it is not a raw mail command. On a mux pane only, the measured fallback is manual Escape followed by `/compact`; confirm the pane receipt before sending the task in a separate message.
 - **Read decisions before dispatch.** Before dispatching any node, run `fno backlog decisions <id>` in addition to reading status and `plan_path`. A recorded verdict is the same stop signal as a closure. Reconcile it before deciding whether work remains.
 - **Qualified verbs, always.** Bare `/execute`, `/think`, `/blueprint` in a mixed-plugin session can resolve to a different plugin. Use `/fno:...` in every payload, routing mail, and `--dispatch-verb`.
 - **`/fno:target` is the execution verb, all sizes.** Raw `/fno:execute` has no claim, no gates, no ship, no finalize. A small PR is not an exemption.
