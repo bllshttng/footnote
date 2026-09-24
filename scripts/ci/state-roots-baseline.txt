@@ -32,7 +32,6 @@ A	cli/src/fno/agents/context.py	target-state.md	unowned	target-state.md has NO r
 A	cli/src/fno/agents/spawn_gate.py	claims	unowned	call the resolver STATE_FILES names for this file.
 A	cli/src/fno/agents/truth_status.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/agents/whoami.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	cli/src/fno/annotate/core.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/advance.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/batch.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/backlog/capture.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().

@@ -151,15 +151,15 @@ def cmd_note(
             extra.extend(["--block-cmd", block_cmd])
         if block_excerpt_file:
             extra.extend(["--block-excerpt-file", block_excerpt_file])
-    code, receipt = _write_state(
-        node_target,
-        text,
-        quiet=quiet,
-        session_id=session_id,
-        graph_path=graph_path,
-        reads=read_rows,
-        extra=extra,
-    )
+    write_kwargs: dict = {
+        "quiet": quiet,
+        "session_id": session_id,
+        "graph_path": graph_path,
+        "reads": read_rows,
+    }
+    if extra:
+        write_kwargs["extra"] = extra
+    code, receipt = _write_state(node_target, text, **write_kwargs)
     if code != 0:
         # 1 = budget refusal, 3 = a stale revision conflict; the child
         # printed the reason on stderr.
@@ -327,6 +327,13 @@ def cmd_notes(ctx: typer.Context) -> None:
     from fno._subprocess_util import propagate_returncode
     from fno.rust_binary import resolve_binary
 
+    # The findings import enumerates its journals in one place: here. The Rust
+    # importer takes explicit --journal paths and never re-derives the list.
+    if "import" in ctx.args:
+        from fno.paths import event_journals
+
+        for journal in event_journals():
+            ctx.args.extend(["--journal", str(journal)])
     binary = resolve_binary()
     if binary is None:
         typer.echo(

@@ -738,11 +738,12 @@ pub fn run_notes(args: &[String]) -> i32 {
                     }
                 }
             }
+            "import" if action == "findings" => {
+                // The two-word action: `backlog-notes findings import`.
+                action = "import".to_string();
+            }
             other
-                if (action == "history"
-                    || action == "stale"
-                    || action == "findings"
-                    || action == "import")
+                if (action == "history" || action == "stale" || action == "findings")
                     && positional.is_none()
                     && !other.starts_with('-') =>
             {
@@ -802,11 +803,15 @@ pub fn run_notes(args: &[String]) -> i32 {
     }
 }
 
-
 /// `backlog-notes findings [<node>] [--open] [--json]`: the public reader.
 /// One count line first, even for zero; exit 1 with the error on stderr
 /// and no count line when the store cannot be read.
-fn run_findings(graph: &std::path::Path, node: Option<&str>, open_only: bool, json_out: bool) -> i32 {
+fn run_findings(
+    graph: &std::path::Path,
+    node: Option<&str>,
+    open_only: bool,
+    json_out: bool,
+) -> i32 {
     let list = match super::api::findings(&super::api::Store::new(graph), node, false) {
         Ok(l) => l,
         Err(e) => {
@@ -817,8 +822,10 @@ fn run_findings(graph: &std::path::Path, node: Option<&str>, open_only: bool, js
     let open = list.iter().filter(|f| f.resolved_at.is_none()).count();
     let resolved = list.len() - open;
     if json_out {
-        let items: Vec<Value> =
-            list.iter().map(crate::backlog::model::finding_to_json).collect();
+        let items: Vec<Value> = list
+            .iter()
+            .map(crate::backlog::model::finding_to_json)
+            .collect();
         let out = json!({
             "node": node, "open": open, "resolved": resolved, "findings": items,
         });
@@ -829,8 +836,18 @@ fn run_findings(graph: &std::path::Path, node: Option<&str>, open_only: bool, js
         Some(id) => println!("findings {id}: {open} open, {resolved} resolved"),
         None => println!("findings: {open} open, {resolved} resolved"),
     }
-    for f in list.iter().filter(|f| !open_only || f.resolved_at.is_none()) {
-        let head: String = f.body.lines().next().unwrap_or("").chars().take(80).collect();
+    for f in list
+        .iter()
+        .filter(|f| !open_only || f.resolved_at.is_none())
+    {
+        let head: String = f
+            .body
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
         match &f.resolved_at {
             Some(when) => println!("  {} resolved {when} {head}", f.finding_id),
             None => println!("  {} OPEN {head}", f.finding_id),
@@ -843,12 +860,7 @@ fn run_findings(graph: &std::path::Path, node: Option<&str>, open_only: bool, js
 /// `review_finding` / `review_finding_resolved` journal rows into the
 /// findings store, preserving ids. Preview without `--apply`: the receipt
 /// projects the outcome and writes nothing. `errors > 0` exits 1.
-fn run_import(
-    graph: &std::path::Path,
-    journals: &[PathBuf],
-    apply: bool,
-    json_out: bool,
-) -> i32 {
+fn run_import(graph: &std::path::Path, journals: &[PathBuf], apply: bool, json_out: bool) -> i32 {
     let mut journals_scanned = 0usize;
     let mut rows_scanned = 0usize;
     let mut imported = 0usize;
@@ -901,7 +913,10 @@ fn run_import(
                     finding_id: fid.to_string(),
                     created_at: ev.get("ts").and_then(Value::as_str).map(str::to_string),
                     body: text.to_string(),
-                    block_cmd: data.get("block_cmd").and_then(Value::as_str).map(str::to_string),
+                    block_cmd: data
+                        .get("block_cmd")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     block_excerpt: data
                         .get("block_excerpt")
                         .and_then(Value::as_str)
