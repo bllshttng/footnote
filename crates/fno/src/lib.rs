@@ -9,6 +9,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 pub mod agents_view;
+pub mod backlog_model;
 pub mod backlog_view;
 pub mod board_reader;
 pub mod bootstrap;
@@ -29,6 +30,7 @@ pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
 pub mod link;
+pub mod live_store_fence;
 pub mod mouse;
 pub mod mux_cli;
 pub mod mux_rows;

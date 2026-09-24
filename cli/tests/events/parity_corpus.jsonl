@@ -264,3 +264,6 @@
 {"expect":"valid","reason":"fleet_task_closed happy path: the condition cleared","event":{"ts":"2026-09-22T10:00:02Z","type":"fleet_task_closed","source":"daemon","data":{"task_id":"ft-1a2b3c4d","reason":"rebased","closed_by":"heal"}}}
 {"expect":"invalid","reason":"fleet_task_closed missing the required task_id","event":{"ts":"2026-09-22T10:00:03Z","type":"fleet_task_closed","source":"daemon","data":{"reason":"rebased","closed_by":"heal"}}}
 {"expect":"valid","reason":"machine sample carries the verdict and nullable measurements","event":{"ts":"2026-09-21T22:00:00Z","type":"machine_sample","source":"loop","data":{"sample_id":"ms-1-2","verdict":"unreadable","took_ms":4,"unresolved":[]}}}
+{"expect":"valid","reason":"mail_notify_self_missed bound fired with a stderr tail","event":{"ts":"2026-09-22T10:00:04Z","type":"mail_notify_self_missed","source":"hook","data":{"rc":124,"stderr_tail":"error: notify-self: ambiguous identity"}}}
+{"expect":"valid","reason":"mail_notify_self_missed timeout with no stderr","event":{"ts":"2026-09-22T10:00:05Z","type":"mail_notify_self_missed","source":"hook","data":{"rc":124}}}
+{"expect":"invalid","reason":"mail_notify_self_missed missing the required rc","event":{"ts":"2026-09-22T10:00:06Z","type":"mail_notify_self_missed","source":"hook","data":{"stderr_tail":"boom"}}}
