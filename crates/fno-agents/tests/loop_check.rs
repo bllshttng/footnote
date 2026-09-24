@@ -2552,41 +2552,17 @@ fn operator_review_finding_blocks_until_resolved() {
     fs::write(&manifest_path, &manifest).unwrap();
     fs::write(cwd.join("transcript.jsonl"), transcript_with_promise()).unwrap();
 
-    // Seed one OPEN finding for x-gate in the findings store: the gate reads
-    // the store now, not a journal. FNO_HOME pins the graph that read
-    // resolves; the guard restores it even on a failed assert, so the
-    // suite's other tests never see this tempdir.
-    struct EnvGuard(std::ffi::OsString);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            std::env::set_var("FNO_HOME", &self.0);
-        }
-    }
-    let prior_home = std::env::var_os("FNO_HOME").unwrap_or_default();
-    let _env = EnvGuard(prior_home);
+    // Seed through the store the gate reads; the tail restores FNO_HOME (CI is single-threaded).
+    let restore_home = std::env::var_os("FNO_HOME").unwrap_or_default();
     let home = TempDir::new().unwrap();
     std::env::set_var("FNO_HOME", home.path());
     let graph = home.path().join("graph.json");
-    fs::write(
-        &graph,
-        serde_json::json!({"entries": [
-            {"id": "x-gate", "slug": "x-gate", "title": "n", "type": "feature",
-             "status": "ready", "priority": "p1"}
-        ]})
-        .to_string(),
-    )
-    .unwrap();
+    fs::write(&graph, serde_json::json!({"entries": [{"id": "x-gate", "slug": "x-gate", "title": "n", "type": "feature", "status": "ready", "priority": "p1"}]}).to_string()).unwrap();
     let store = fno_agents::backlog::api::Store::new(&graph);
     let receipt = fno_agents::backlog::api::finding_create(
-        &store,
-        "x-gate",
-        fno_agents::backlog::api::FindingInput {
-            body: "operator says fix the retry".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let finding_id = receipt.finding_id;
+        &store, "x-gate",
+        fno_agents::backlog::api::FindingInput { body: "operator says fix the retry".into(), ..Default::default() },
+    ).unwrap();
 
     let mock = MockBins::green();
     let manifest_before = fs::read(&manifest_path).unwrap();
@@ -2600,8 +2576,8 @@ fn operator_review_finding_blocks_until_resolved() {
     );
     assert!(d.termination_reason.is_none());
     assert!(
-        d.message.contains(&finding_id)
-            && d.message.contains(&format!("fno backlog note --resolve {finding_id}")),
+        d.message.contains(&receipt.finding_id)
+            && d.message.contains(&format!("fno backlog note --resolve {}", receipt.finding_id)),
         "reason must quote the finding id + resolve remedy; got: {}",
         d.message
     );
@@ -2612,10 +2588,11 @@ fn operator_review_finding_blocks_until_resolved() {
     );
 
     // Resolve it -> the gate clears and the promise terminates DonePRGreen.
-    fno_agents::backlog::api::finding_resolve(&store, &finding_id, Some("sess-finding"))
+    fno_agents::backlog::api::finding_resolve(&store, &receipt.finding_id, Some("sess-finding"))
         .unwrap();
 
     let (_, d2) = fire_findings(cwd, &mock);
+    std::env::set_var("FNO_HOME", restore_home);
     assert_eq!(
         d2.decision, "allow",
         "a resolved finding must no longer block: {}",

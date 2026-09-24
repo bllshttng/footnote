@@ -623,6 +623,10 @@ def test_done_clears_queued_state(tmp_graph):
     r = _invoke("backlog", "add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "queue", nid)
+    # Evidence first, then the canonical bare close: its mutation is what
+    # clears the queued ghost fields, and the subject of this test is that
+    # clear, not the note path.
+    _invoke("backlog", "update", nid, "--completion-note", "queued-state fixture")
     _invoke("backlog", "done", nid)
     data = json.loads(_invoke("backlog", "get", nid).output)
     assert data.get("queued_at") is None
@@ -641,7 +645,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
         lambda action_type, **kw: captured.update(type=action_type, kw=kw),
     )
     nid = json.loads(_invoke("backlog", "add", "DriveDone").output)["id"]
-    _invoke("backlog", "done", nid)
+    _invoke("backlog", "done", nid, "--note", "drive fixture")
     assert captured.get("type") == "backlog_done_operator_initiated"
     assert captured["kw"]["task_id"] == nid
     assert captured["kw"]["source"] == "backlog"
@@ -657,7 +661,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
         da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
     )
     nid = json.loads(_invoke("backlog", "add", "NoDriveDone").output)["id"]
-    _invoke("backlog", "done", nid)
+    _invoke("backlog", "done", nid, "--note", "no-drive fixture")
     assert calls["n"] == 0
 
 
@@ -1318,7 +1322,8 @@ def test_ac1_hp_graph_archive(tmp_graph):
     # Seed completed_at through the store rather than a CLI verb: closing is
     # merge-gated now, and archive only cares that the node reads done.
     commit_rows_via_store(tmp_graph, lambda rows: [
-        {**row, "completed_at": "2026-01-01T00:00:00+00:00"} if row["id"] == node_id else row
+        {**row, "completed_at": "2026-01-01T00:00:00+00:00",
+         "artifact_url": "https://example.test/artifact"} if row["id"] == node_id else row
         for row in rows
     ])
 
@@ -2409,7 +2414,8 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
          "parent": "ab-epic0000", "completed_at": "2026-01-01T00:00:00Z", "blocked_by": []},
         # Last open child, no PR refs -> `done` closes it with no gh cross-check.
         {"id": "ab-clast002", "title": "Last child", "status": "ready", "project": "p",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-clast002")
@@ -2427,7 +2433,8 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
         {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-cdone001", "title": "Child A", "status": "ready", "project": "p",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
         {"id": "ab-cstill02", "title": "Child B (stays open)", "status": "ready",
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
@@ -2448,7 +2455,8 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
         {"id": "ab-sub00001", "title": "Sub-epic", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
         {"id": "ab-leaf0002", "title": "Leaf", "status": "ready", "project": "p",
-         "parent": "ab-sub00001", "blocked_by": []},
+         "parent": "ab-sub00001", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0002")
@@ -2467,7 +2475,8 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
         {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "web",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-leaf0001", "title": "Leaf", "status": "ready", "project": "etl",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0001")

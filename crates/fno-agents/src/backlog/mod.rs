@@ -10,6 +10,7 @@ pub mod api;
 pub mod commands;
 pub mod comments;
 pub mod decisions;
+pub mod done_evidence;
 pub mod encounters;
 pub mod epic_cap;
 pub mod findings;
@@ -898,6 +899,10 @@ fn mutate_single_row_once(
         }
     }
     crate::graph_store::ensure_slugs(&mut working);
+    // The close-evidence rule at the single-row seam: judged over the
+    // transaction's pre rows and the mutation's output, before anything is
+    // written, so a refusal rolls back with the dropped transaction.
+    crate::backlog::done_evidence::enforce(&rows, &working)?;
     let now_iso = crate::graph_store::now_isoformat();
     for row in working.iter_mut() {
         let (Some(id), true) = (
