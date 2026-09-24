@@ -98,6 +98,51 @@ pub struct ReadyOpts {
     pub now_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateKey {
+    Created,
+    Touched,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DateFilter {
+    created_before: Option<i64>,
+    created_after: Option<i64>,
+    touched_before: Option<i64>,
+    touched_after: Option<i64>,
+    sort: Option<DateKey>,
+}
+
+impl DateFilter {
+    pub fn apply(&self, rows: &mut Vec<Value>) {
+        rows.retain(|entry| {
+            let created = entry.get("created_at").and_then(parse_iso_ms);
+            let touched = touched_ms(entry);
+            Self::within(created, self.created_before, self.created_after)
+                && Self::within(touched, self.touched_before, self.touched_after)
+        });
+        if let Some(key) = self.sort {
+            rows.sort_by_key(|entry| {
+                let stamp = match key {
+                    DateKey::Created => entry.get("created_at").and_then(parse_iso_ms),
+                    DateKey::Touched => touched_ms(entry),
+                };
+                (stamp.is_none(), stamp.unwrap_or_default())
+            });
+        }
+    }
+
+    fn within(stamp: Option<i64>, before: Option<i64>, after: Option<i64>) -> bool {
+        if before.is_none() && after.is_none() {
+            return true;
+        }
+        let Some(stamp) = stamp else {
+            return false;
+        };
+        before.map_or(true, |limit| stamp < limit) && after.map_or(true, |limit| stamp >= limit)
+    }
+}
+
 /// One narrowed-out candidate: the first cascade filter that removed it plus
 /// the inner reason where the filter carries one (the selection-guard drops
 /// name `dead-ancestor:<id>`, `design-stage`, `idea-stage`,
@@ -207,6 +252,111 @@ fn parse_iso_str(s: &str) -> Option<i64> {
         return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis());
     }
     None
+}
+
+const DATE_FILTER_USAGE: &str = "accepted: --created-before, --created-after, --touched-before, --touched-after <Nd|YYYY-MM-DD[THH:MM:SSZ]>, --sort created|touched";
+
+fn date_filter_error(reason: impl std::fmt::Display) -> String {
+    format!("ready filter: {reason}; {DATE_FILTER_USAGE}")
+}
+
+fn parse_filter_cutoff(value: &str, now_ms: i64) -> Result<i64, String> {
+    if let Some(days) = value.strip_suffix('d') {
+        if days.is_empty() || !days.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(date_filter_error(format!("invalid date {value:?}")));
+        }
+        let days = days
+            .parse::<i64>()
+            .map_err(|_| date_filter_error(format!("invalid date {value:?}")))?;
+        return days
+            .checked_mul(86_400_000)
+            .and_then(|delta| now_ms.checked_sub(delta))
+            .ok_or_else(|| date_filter_error(format!("invalid date {value:?}")));
+    }
+    parse_iso_str(value).ok_or_else(|| date_filter_error(format!("invalid date {value:?}")))
+}
+
+pub fn parse_date_filter(args: &[String], now_ms: i64) -> Result<DateFilter, String> {
+    let mut filter = DateFilter::default();
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, inline_value) = args[index]
+            .split_once('=')
+            .map(|(flag, value)| (flag, Some(value)))
+            .unwrap_or((args[index].as_str(), None));
+        if !matches!(
+            flag,
+            "--created-before"
+                | "--created-after"
+                | "--touched-before"
+                | "--touched-after"
+                | "--sort"
+        ) {
+            return Err(date_filter_error(format!("unknown flag {flag}")));
+        }
+        let value = match inline_value {
+            Some(value) => value,
+            None => {
+                index += 1;
+                args.get(index)
+                    .map(String::as_str)
+                    .ok_or_else(|| date_filter_error(format!("{flag} needs a value")))?
+            }
+        };
+        match flag {
+            "--created-before" => {
+                filter.created_before = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--created-after" => {
+                filter.created_after = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--touched-before" => {
+                filter.touched_before = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--touched-after" => {
+                filter.touched_after = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--sort" => {
+                filter.sort = Some(match value {
+                    "created" => DateKey::Created,
+                    "touched" => DateKey::Touched,
+                    _ => return Err(date_filter_error(format!("invalid sort {value:?}"))),
+                });
+            }
+            _ => unreachable!("flags were validated above"),
+        }
+        index += 1;
+    }
+    Ok(filter)
+}
+
+pub fn date_filter_from_params(params: &Value, now_ms: i64) -> Result<DateFilter, String> {
+    let Some(value) = params.get("filter_args") else {
+        return Ok(DateFilter::default());
+    };
+    let args = value
+        .as_array()
+        .ok_or_else(|| date_filter_error("filter_args must be an array of strings"))?;
+    if args.is_empty() {
+        return Ok(DateFilter::default());
+    }
+    let args = args
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| date_filter_error("filter_args must be an array of strings"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    parse_date_filter(&args, now_ms)
+}
+
+fn touched_ms(entry: &Value) -> Option<i64> {
+    entry
+        .get("touched_at")
+        .and_then(parse_iso_ms)
+        .or_else(|| entry.get("created_at").and_then(parse_iso_ms))
 }
 
 /// Whole days from `ts` to `now`, flooring like Python's `timedelta.days`.
@@ -987,10 +1137,7 @@ fn importance_score(entry: &Value, effective_priority: &str, now_ms: i64) -> f64
         weight
     };
     let divergence = voters.len() as f64 * weight;
-    let stamp = entry
-        .get("touched_at")
-        .and_then(parse_iso_ms)
-        .or_else(|| entry.get("created_at").and_then(parse_iso_ms));
+    let stamp = touched_ms(entry);
     let Some(stamp) = stamp else {
         return divergence;
     };
@@ -1882,5 +2029,120 @@ mod tests {
             refusal.starts_with("dispatch verb cannot be derived for node x-planless:"),
             "{refusal}"
         );
+    }
+
+    #[test]
+    fn touched_before_keeps_only_old_rows_and_falls_back_to_created() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut rows = vec![
+            json!({
+                "id": "x-10",
+                "created_at": "2026-09-13T00:00:00Z",
+                "touched_at": "2026-09-13T00:00:00Z"
+            }),
+            json!({
+                "id": "x-45",
+                "created_at": "2026-08-09T00:00:00Z",
+                "touched_at": "2026-08-09T00:00:00Z"
+            }),
+            json!({
+                "id": "x-90",
+                "created_at": "2026-06-25T00:00:00Z",
+                "touched_at": null
+            }),
+        ];
+        let filter = parse_date_filter(&["--touched-before".into(), "60d".into()], now_ms).unwrap();
+
+        filter.apply(&mut rows);
+
+        assert_eq!(
+            rows.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-90")]
+        );
+    }
+
+    #[test]
+    fn created_sort_orders_oldest_first() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut rows = vec![
+            json!({"id": "x-10", "created_at": "2026-09-13T00:00:00Z"}),
+            json!({"id": "x-90", "created_at": "2026-06-25T00:00:00Z"}),
+            json!({"id": "x-45", "created_at": "2026-08-09T00:00:00Z"}),
+        ];
+        let filter = parse_date_filter(&["--sort".into(), "created".into()], now_ms).unwrap();
+
+        filter.apply(&mut rows);
+
+        assert_eq!(
+            rows.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-90"), Some("x-45"), Some("x-10")]
+        );
+    }
+
+    #[test]
+    fn invalid_date_has_prefix_value_and_usage() {
+        let error = parse_date_filter(
+            &["--touched-before".into(), "soon".into()],
+            1_800_000_000_000,
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("ready filter: "), "{error}");
+        assert!(error.contains("soon"), "{error}");
+        assert!(error.ends_with(DATE_FILTER_USAGE), "{error}");
+    }
+
+    #[test]
+    fn unknown_sort_and_missing_values_are_refused() {
+        for args in [
+            vec!["--bogus".to_string()],
+            vec!["--sort".to_string(), "priority".to_string()],
+            vec!["--created-after".to_string()],
+        ] {
+            let error = parse_date_filter(&args, 1_800_000_000_000).unwrap_err();
+            assert!(error.starts_with("ready filter: "), "{error}");
+            assert!(error.ends_with(DATE_FILTER_USAGE), "{error}");
+        }
+    }
+
+    #[test]
+    fn missing_touched_stamp_drops_for_filter_but_sorts_last() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut filtered = vec![
+            json!({"id": "x-missing"}),
+            json!({"id": "x-recent", "created_at": "2026-09-13T00:00:00Z"}),
+        ];
+        parse_date_filter(&["--touched-after".into(), "30d".into()], now_ms)
+            .unwrap()
+            .apply(&mut filtered);
+        assert_eq!(
+            filtered.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-recent")]
+        );
+
+        let mut sorted = vec![
+            json!({"id": "x-missing"}),
+            json!({
+                "id": "x-recent", "created_at": "2026-09-13T00:00:00Z"
+            }),
+        ];
+        parse_date_filter(&["--sort=touched".into()], now_ms)
+            .unwrap()
+            .apply(&mut sorted);
+        assert_eq!(
+            sorted.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-recent"), Some("x-missing")]
+        );
+    }
+
+    #[test]
+    fn split_and_inline_iso_dates_parse_to_the_same_cutoff() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let split =
+            parse_date_filter(&["--created-after".into(), "2026-09-01".into()], now_ms).unwrap();
+        let inline =
+            parse_date_filter(&["--created-after=2026-09-01T00:00:00Z".into()], now_ms).unwrap();
+
+        assert_eq!(split.created_after, inline.created_after);
     }
 }
