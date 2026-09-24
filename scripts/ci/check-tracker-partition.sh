@@ -255,7 +255,16 @@ for name in projections:
 rust_projections = ["TrackerNode", "Candidate"]
 rust_fields: set = set()
 for name in rust_projections:
-    rust_fields |= extract_rust_fields(rust_src, name)
+    try:
+        rust_fields |= extract_rust_fields(rust_src, name)
+    except KeyError:
+        print(
+            "check-tracker-partition: FAIL - Rust projection "
+            f"{name!r} not found in {sys.argv[3]}; the gate inspects the "
+            "Rust structs, so a missing one is a refusal, never a pass.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 tracker |= rust_fields
 overlap = tracker & sidecar
 # Require the overlap to be EXACTLY {id}: the join key must be present on both
