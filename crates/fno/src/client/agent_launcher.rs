@@ -457,7 +457,12 @@ pub(crate) fn open_with(
     cwd: Option<&str>,
     node: String,
 ) -> Result<(), String> {
-    open(view);
+    // A dock already on screen keeps its state: open() only ever ran on a
+    // closed dock before this seam, and re-running it would wipe a held
+    // draft with a fresh one.
+    if view.launcher.is_none() {
+        open(view);
+    }
     let launcher = view
         .launcher
         .as_mut()

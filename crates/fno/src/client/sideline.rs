@@ -885,7 +885,10 @@ pub(super) async fn show_composer(
             .await
             .map_err(|e| format!("resize send failed: {e}"))?;
     }
-    agent_launcher::open(show);
+    // An already-open dock keeps its held draft; open() replaces it.
+    if show.launcher.is_none() {
+        agent_launcher::open(show);
+    }
     Ok(true)
 }
 
