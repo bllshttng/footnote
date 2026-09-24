@@ -9,6 +9,7 @@ The specimen refs are real: PR 981 shipped from `x-4271-x-5a83-pr-status-tally`
 (two ids, `--extra` needed by hand) and PR 971 from `feature/x-76d1`.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import importlib.util
 import json
@@ -1365,7 +1366,7 @@ def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
     from fno.graph._constants import GRAPH_JSON as graph
 
     graph.parent.mkdir(parents=True, exist_ok=True)
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {"id": "x-1a2b", "title": "new"},
         {"id": "x-9f0c", "title": "old"},
     ]}))

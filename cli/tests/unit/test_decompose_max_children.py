@@ -11,6 +11,7 @@ Covers US1-US5 / AC1-HP, AC2-HP, AC1-ERR, AC2-ERR, AC1-UI, AC1-EDGE, AC2-EDGE,
 AC3-EDGE, AC1-FR from the plan.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -88,7 +89,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         cwd=str(tmp_path),
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")

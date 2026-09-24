@@ -140,7 +140,7 @@ fn graph_keeper_dies_within_5s_of_its_test_owner() {
     let dir = scratch_dir("graph");
     let sock = dir.join("store.sock");
     let graph = dir.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
     let (owner, owner_pid, owner_birth) = OwnerProcess::spawn();
 
     let mut keeper = Command::new(worker_bin())

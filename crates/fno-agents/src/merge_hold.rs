@@ -448,11 +448,7 @@ mod tests {
             }
         }
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::to_string(&json!({"entries": [entry]})).unwrap(),
-        )
-        .unwrap();
+        crate::graph_store::seed_rows(&graph, &[entry]).unwrap();
         Fixture {
             _dir: dir,
             graph,
@@ -627,15 +623,11 @@ mod tests {
         let child_plan = dir.path().join("child.md");
         std::fs::write(&child_plan, PLAN_BODY).unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::to_string(&json!({"entries": [
-                {"id": "t-parent", "slug": "parent", "plan_path": parent_plan.display().to_string(), "cwd": dir.path().display().to_string()},
-                {"id": "t-0001", "slug": "a-plan", "parent": "t-parent", "plan_path": child_plan.display().to_string(), "cwd": dir.path().display().to_string()},
-            ]}))
-            .unwrap(),
-        )
-        .unwrap();
+        let rows = vec![
+            json!({"id": "t-parent", "slug": "parent", "plan_path": parent_plan.display().to_string(), "cwd": dir.path().display().to_string()}),
+            json!({"id": "t-0001", "slug": "a-plan", "parent": "t-parent", "plan_path": child_plan.display().to_string(), "cwd": dir.path().display().to_string()}),
+        ];
+        crate::graph_store::seed_rows(&graph, &rows).unwrap();
         let fx = Fixture {
             _dir: dir,
             graph,

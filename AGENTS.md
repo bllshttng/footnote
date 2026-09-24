@@ -124,7 +124,7 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
-| `paths.graph_db()` | `~/.fno/graph.db` (+ `.md` Kanban) | Feature dependency graph | backlog |
+| `paths.graph_json()` anchor | `~/.fno/graph.db` (+ `.md` Kanban; `.db` sibling of the stable `graph.json` anchor) | Feature dependency graph | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |

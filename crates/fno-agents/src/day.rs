@@ -566,10 +566,7 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     };
     let decisions_path = state_dir.join("decisions.jsonl");
     let decisions_raw = crate::event_store::journal_text(&decisions_path, &[]);
-    let graph_entries = match crate::graph_store::read_raw(&graph_path(home)) {
-        Ok(crate::graph_store::RawRead::Entries(entries)) => entries,
-        _ => Vec::new(),
-    };
+    let graph_entries = crate::graph_store::read_rows(&graph_path(home)).unwrap_or_default();
     let mut journals: Vec<(String, String)> = Vec::new();
     let mut journal_states: Vec<(String, String)> = Vec::new();
     for path in &event_paths {

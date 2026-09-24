@@ -27,6 +27,7 @@ replaces that one prover and leaves the verb, typer's exit codes, the graph
 lock, and the render fanout running for real.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -82,7 +83,7 @@ def probe(tmp_path: Path):
     settings.write_text(f"schema_version: 1\nconfig:\n  state_dir: {state}\n", encoding="utf-8")
 
     graph = state / "graph.json"
-    graph.write_text('{"entries": []}\n', encoding="utf-8")
+    seed_graph(graph, '{"entries": []}\n')
 
     def run(
         *args: str,
@@ -611,7 +612,7 @@ def test_append_encounter_names_the_existing_timestamp(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -640,7 +641,7 @@ def test_append_encounter_reports_a_missing_node(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": []}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -657,7 +658,7 @@ def test_a_reason_symbol_not_prose_picks_the_exit_code(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -676,7 +677,7 @@ def test_append_encounter_dedupes_operator_without_session_id(tmp_path, monkeypa
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")

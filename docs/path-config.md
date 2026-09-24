@@ -62,7 +62,6 @@ plans_dir = ".fno/plans/"   # the legacy default; unset it resolves to <space>/p
 # Per-resource overrides. TOML has no null: OMIT a key to derive it from
 # state_dir. Each line below names the default an omitted key resolves to.
 [paths]
-# graph_json      = ...   # default: <state_dir>/graph.json, the on-demand export (refresh with fno doctor graph export --now; the store is graph.db)
 # ledger_json     = ...   # default: <state_dir>/ledger.json
 # briefs_dir      = ...   # default: <state_dir>/briefs/
 # fleet_dir       = ...   # default: <state_dir>/fleet/
@@ -149,11 +148,13 @@ All paths derive from `~/.fno/`. This is also what `fno config setup migrate-pat
 
 ## Lookup order for path resolution
 
-For each accessor call (e.g. `paths.graph_json()`):
+For each configurable accessor call:
 
-1. If `config.paths.graph_json` is set in settings, resolve that value.
+1. If its `config.paths.<key>` is set in settings, resolve that value.
 2. Otherwise, derive from `state_dir`.
 3. Apply `$VAR` expansion, template substitution, `~` expansion, then `Path.resolve()`.
+
+`paths.graph_json()` is the stable store anchor at `<state_dir>/graph.json`; the live SQLite store is its `.db` sibling. It has no path override.
 
 Under `FNO_TEST_HERMETIC=1`, state accessors reject a resolved path outside the test sandbox. The fence reuses the events `HermeticEscapeError` and allowed-root calculation. `locks_dir()` is the deliberate config-free exception.
 

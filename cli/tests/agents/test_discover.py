@@ -10,6 +10,7 @@ host-independent.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import builtins
 import fcntl
@@ -2766,8 +2767,7 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
 
     sid = "ccdd1122-3344-5566-7788-99aabbccddee"
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {
@@ -2776,9 +2776,7 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
                     }
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
 
     empty_projects = tmp_path / "no-projects"
@@ -3153,7 +3151,7 @@ def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch)
     # marks the path as existing, so the wire read raises instead of
     # answering an empty (absence-proven) store.
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{"id": "x-0001", "sessions": []}]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [{"id": "x-0001", "sessions": []}]}))
     graph.with_suffix(".db").write_bytes(b"{broken")
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
     daemon = tmp_path / "daemon"

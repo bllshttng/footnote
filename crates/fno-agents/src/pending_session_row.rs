@@ -295,10 +295,9 @@ mod tests {
         let dir = tmp_dir("open");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
-        fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            json!({"entries": [{"id": "x-defr", "title": "t", "status": "in_progress"}]})
-                .to_string(),
+            &[json!({"id": "x-defr", "title": "t", "status": "in_progress"})],
         )
         .unwrap();
         std::env::set_var("FNO_HOME", &dir);
@@ -333,15 +332,11 @@ mod tests {
         let dir = tmp_dir("claim");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
-        fs::write(
-            &graph,
-            json!({"entries": [{
+        crate::graph_store::seed_rows(&graph, &[json!({
                 "id": "x-clai", "title": "t", "status": "in_progress",
                 "sessions": [{"phase": "do", "harness": "claude", "session_id": "sid-2",
                               "started_at": "2026-09-22T00:00:00Z"}],
-            }]})
-            .to_string(),
-        )
+            })])
         .unwrap();
         seed_row(&registry, "w1", Some("x-clai"));
         park(&park_payload(&registry, "do")).unwrap();
@@ -349,8 +344,8 @@ mod tests {
         let answer = open(&open_payload(&registry, &graph, "sid-2")).unwrap();
         assert_eq!(answer["opened"], json!(true));
         assert_eq!(answer["cleared"], json!(true));
-        let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
-        let sessions = body["entries"][0]["sessions"].as_array().unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
+        let sessions = rows[0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1, "no duplicate row");
         assert_eq!(sessions[0]["started_at"], json!("2026-09-22T00:00:00Z"));
         let _ = fs::remove_dir_all(&dir);
@@ -361,7 +356,7 @@ mod tests {
         let dir = tmp_dir("absent");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
-        fs::write(&graph, json!({"entries": []}).to_string()).unwrap();
+        crate::graph_store::seed_rows(&graph, &[]).unwrap();
         seed_row(&registry, "w1", Some("x-gone"));
         park(&park_payload(&registry, "review")).unwrap();
 

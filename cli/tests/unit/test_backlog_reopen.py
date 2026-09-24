@@ -9,6 +9,7 @@ Graph fixture follows test_done.py: a temp graph.json routed through the
 monkeypatchable `_constants` module, with gh stubbed so no test touches GitHub.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -57,7 +58,7 @@ def no_plan_projection(monkeypatch, request):
 
 
 def _write(graph: Path, *entries: dict) -> None:
-    graph.write_text(json.dumps({"entries": list(entries)}))
+    seed_graph(graph, json.dumps({"entries": list(entries)}))
 
 
 def _read(graph: Path) -> dict[str, dict]:

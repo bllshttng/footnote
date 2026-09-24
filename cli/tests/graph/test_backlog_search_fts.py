@@ -8,6 +8,7 @@ Filter: ``fno doctor test cli/tests/graph/test_backlog_search_fts.py``
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -40,7 +41,7 @@ def _row(node_id: str, **overrides):
 
 
 def _seed(graph, *rows) -> None:
-    graph.write_text(json.dumps({"entries": list(rows)}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": list(rows)}))
 
 
 @pytest.fixture()

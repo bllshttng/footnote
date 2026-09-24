@@ -6,6 +6,7 @@ A distinct non-zero code means "could not read the graph cleanly", so the
 "absent") can tell a typo apart from a wedged graph.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -30,13 +31,11 @@ def scratch_graph(tmp_path, monkeypatch):
 
 
 def _populated(g: Path) -> None:
-    g.write_text(
-        json.dumps(
+    seed_graph(g, json.dumps(
             {"entries": [{"id": "x-aaaa", "title": "n", "_status": "ready",
                           "project": "fno", "slug": "n"}]}
         )
-        + "\n"
-    )
+        + "\n")
 
 
 def test_ac2hp_cmd_get_clean_miss_is_exit_1_unchanged(scratch_graph):

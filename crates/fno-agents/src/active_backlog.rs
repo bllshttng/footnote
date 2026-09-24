@@ -4245,7 +4245,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(tmp.join("graph.json"), "{\"entries\": []}").unwrap();
+        crate::graph_store::seed_rows(&tmp.join("graph.json"), &[]).unwrap();
         let registry = crate::paths::AgentsHome::from_env().registry_json();
         if let Some(parent) = registry.parent() {
             std::fs::create_dir_all(parent).unwrap();

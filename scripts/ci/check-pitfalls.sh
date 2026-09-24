@@ -175,13 +175,13 @@ done <<< "$PINNED_PHRASES"
 # when the value, or any one sentence of it, equals a filed node's title after
 # whitespace-collapse, trailing-period strip, and case-folding. The read goes
 # through the store api (the typed client is import-light; this checkout's
-# `cli/src` is on the path), never the file. No graph file is the legitimate
+# `cli/src` is on the path), never the file. No graph.db is the legitimate
 # skip (a consumer repo without a working store); a graph that exists but
 # cannot be read fails loud, on the shipped-verb registry precedent above.
-# FNO_GRAPH_JSON (or GRAPH_JSON) pins the store, so a sandbox or a consumer
-# repo can point the gate at its own graph.
+# FNO_GRAPH_JSON (or GRAPH_JSON) names the store anchor, so a sandbox or a
+# consumer repo can point the gate at its own graph.db.
 GRAPH_TARGET="${FNO_GRAPH_JSON:-${GRAPH_JSON:-$HOME/.fno/graph.json}}"
-if [[ -n "$GRAD_LINES" && -f "$GRAPH_TARGET" ]]; then
+if [[ -n "$GRAD_LINES" && -f "${GRAPH_TARGET%.json}.db" ]]; then
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   if ! GRAD_REPORT="$(GRAPH_TARGET="$GRAPH_TARGET" GRAD_LINES="$GRAD_LINES" PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 import os

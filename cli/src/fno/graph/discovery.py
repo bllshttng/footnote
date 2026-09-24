@@ -305,18 +305,14 @@ def expired_worklist(
 ) -> tuple[dict[str, Any], str]:
     """Assess every expired deferred node and build the ranked worklist.
 
-    Returns ``(report, refusal)``.  ``refusal`` is empty on success and
-    otherwise names a failed-instrument control (all-match, empty positive
-    control, or graph bytes that changed mid-read), each an exit-2 condition
-    the caller renders.  Read-only by construction, and the re-read at the end
-    proves it.
+    Returns ``(report, refusal)``. ``refusal`` is empty on success and
+    otherwise names a failed-instrument control. Read-only by construction.
     """
     from collections import Counter
 
     from fno.graph import relatedness
     from fno.graph.api import wire_rows
 
-    before = graph_path.read_bytes()
     entries = wire_rows(path=graph_path)
     expired = [
         entry
@@ -400,13 +396,6 @@ def expired_worklist(
                 "failed instrument: the positive control matched nothing, so "
                 "the all-empty worklist is not trusted",
             )
-
-    after = graph_path.read_bytes()
-    if after != before:
-        return (
-            {},
-            "failed instrument: graph bytes changed during read-only discovery",
-        )
 
     report = {
         "population": "deferred_kind=expired",

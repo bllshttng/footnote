@@ -44,7 +44,7 @@ GRAPH_JSON="$HOME/.fno/graph.json"
 export FNO_REPO_ROOT="$TMP/repo"
 mkdir -p "$FNO_REPO_ROOT/.fno"
 cd "$TMP" || exit 1
-echo '{"entries": []}' > "$GRAPH_JSON"
+printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
 
 PASS=0
 FAIL=0

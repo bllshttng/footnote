@@ -10,6 +10,7 @@ Read-only, so it emits nothing; the conftest per-module pin sets
 FNO_EVENTS_PATH to a per-test tmp journal regardless.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -58,7 +59,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
 
     def _write(entries):
-        g.write_text(json.dumps({"entries": entries}) + "\n")
+        seed_graph(g, json.dumps({"entries": entries}) + "\n")
 
     return tmp_path, _write
 

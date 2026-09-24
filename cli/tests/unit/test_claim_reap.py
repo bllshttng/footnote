@@ -9,6 +9,7 @@ subprocess and kills it. A test that only exercises a clean release proves
 nothing about the leak that was measured.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -330,8 +331,7 @@ class TestReapDeadClaims:
         node_id = "x-release-mirror"
         holder = "target-session:release-mirror"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -349,8 +349,7 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 
@@ -380,8 +379,7 @@ class TestReapDeadClaims:
         node_id = "x-reacquired-mirror"
         holder = "target-session:reacquired-mirror"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -399,8 +397,7 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
         claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
@@ -427,8 +424,7 @@ class TestReapDeadClaims:
         node_id = "x-named-clear"
         holder = "target-session:named-clear"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -446,8 +442,7 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 
@@ -911,7 +906,7 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
     import fno.claims.core as claims_core
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(_json.dumps({"entries": []}) + "\n")
+    seed_graph(graph_path, _json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "ledger.json")

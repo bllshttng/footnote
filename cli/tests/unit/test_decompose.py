@@ -9,6 +9,7 @@ AC1-ERR, AC1-UI, AC1-EDGE, AC1-FR from
 internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import tempfile
@@ -83,7 +84,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         cwd=str(tmp_path),
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -649,7 +650,7 @@ def graph_env_real_doc(
         priority="p1",
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -708,7 +709,7 @@ def _wire_graph(tmp_path, monkeypatch, epic):
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
     monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [epic]}) + "\n")
 
     def read_entries():
         return read_graph_strict(tmp_path / "graph.json")

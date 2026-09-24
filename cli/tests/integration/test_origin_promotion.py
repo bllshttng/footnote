@@ -6,6 +6,7 @@ capture's producing reference and an in-vocabulary origin. AC2-HP / AC2-EDGE.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -28,7 +29,7 @@ def _invoke(*args):
 def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Route the graph AND the capture inbox into tmp roots."""
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    seed_graph(g, json.dumps({"entries": []}))
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")

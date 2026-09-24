@@ -10,6 +10,7 @@ absence, and each refusal test carries a positive control proving the same
 instrument succeeds on the healthy path.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -71,8 +72,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claims_root: Path
     """A two-node scratch graph: one with a bound plan, one without."""
     plan = _plan_with(tmp_path)
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps(
+    seed_graph(g, json.dumps(
             {
                 "entries": [
                     {
@@ -89,9 +89,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claims_root: Path
                 ]
             }
         )
-        + "\n",
-        encoding="utf-8",
-    )
+        + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -305,7 +303,7 @@ def test_unreadable_plan_is_a_named_refusal(
 
     entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
     entries[0]["plan_path"] = str(tmp_path / "gone.md")
-    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}))
     before = tmp_graph.read_text(encoding="utf-8")
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
@@ -490,7 +488,7 @@ def test_malformed_plan_is_a_named_refusal(
     )
     entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
     entries[0]["plan_path"] = str(plan)
-    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}))
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
     assert result.exit_code == 1
@@ -517,7 +515,7 @@ def test_idless_plan_poll_never_takes_the_lock(
     )
     entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
     entries[0]["plan_path"] = str(plan)
-    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}))
     before = tmp_graph.read_text(encoding="utf-8")
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])

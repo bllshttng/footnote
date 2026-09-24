@@ -11,6 +11,7 @@ Covers:
 - ``fno backlog triage trend`` history readout
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone, timedelta
@@ -85,7 +86,7 @@ def _write_idea_nodes(graph_path: Path, n: int) -> None:
             }
         )
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": entries}, indent=2))
+    seed_graph(graph_path, json.dumps({"entries": entries}, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -772,7 +773,7 @@ def _make_pending_node(
 
 def _write_nodes(graph_path: Path, nodes: list[dict]) -> None:
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": nodes}, indent=2))
+    seed_graph(graph_path, json.dumps({"entries": nodes}, indent=2))
 
 
 def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):

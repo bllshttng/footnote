@@ -6,6 +6,7 @@ routes all graph I/O to a temp file so the real ~/.fno/graph.json
 is never touched.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from types import SimpleNamespace
@@ -41,7 +42,7 @@ def _recent_iso(days_ago: int = 1) -> str:
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json; monkeypatches fno.graph constants to use it."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     # Patch the module-level constants so all operations hit this temp file
     import fno.graph._constants as gc
     import fno.graph.store as gs
@@ -77,7 +78,7 @@ def _read_graph(g: Path) -> list[dict]:
 
 def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     """AC3: observer reap fills the exact open row and reads it back."""
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-reap0001",
             "title": "Reap me",
@@ -110,7 +111,7 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
 def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
     """The death-cascade form: no node named, every node with an open row
     for the identity settles and node_ids names them all."""
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {
                 "id": "x-reap0002",
@@ -411,9 +412,7 @@ def test_update_difficulty_supersedes_retired_model_tier(tmp_graph):
 def test_update_blocks_everything_alone_acks_existing_p0(tmp_graph):
     """Standalone --blocks-everything acknowledges an already-p0 node (the
     migrate-priorities ack spelling) instead of silently writing nothing."""
-    tmp_graph.write_text(
-        json.dumps({"entries": [{"id": "ab-aaaa1111", "title": "Legacy p0", "status": "idea", "priority": "p0"}]})
-    )
+    seed_graph(tmp_graph, json.dumps({"entries": [{"id": "ab-aaaa1111", "title": "Legacy p0", "status": "idea", "priority": "p0"}]}))
     r = _invoke("backlog", "update", "ab-aaaa1111", "--blocks-everything")
     assert r.exit_code == 0, r.output
     assert _read_graph(tmp_graph)[0]["blocks_everything"] is True
@@ -512,7 +511,7 @@ def test_ac1_hp_graph_ready_returns_json_array(tmp_graph):
 
 def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph, monkeypatch):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-known-undispatched",
             "title": "Known",
@@ -742,14 +741,11 @@ def test_snapshot_mode_joins_tracker_and_sidecar_sentinels(
     default graph file for values. The graph file carries contradictory
     sentinels; if the snapshot returned any of them, this test fails."""
     # The graph file exists and is NON-empty with contradictory values.
-    tmp_graph.write_text(
-        json.dumps({"entries": [{
+    seed_graph(tmp_graph, json.dumps({"entries": [{
             "id": "EXT-1", "title": "graph-title-sentinel",
             "cwd": "/graph-cwd-sentinel", "plan_path": "/graph-plan-sentinel",
             "pr_number": 999,
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
     sidecars = tmp_path / "sidecars"
     sidecars.mkdir()
     (sidecars / "EXT-1.json").write_text(
@@ -957,7 +953,7 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
         "_drain_receipt",
         lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "x-beef", "title": "Mission", "type": "epic",
              "status": "in_progress", "priority": "p1", "project": "fno"},
@@ -988,7 +984,7 @@ def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
         "_drain_receipt",
         lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "x-beef", "title": "Mission", "type": "epic",
              "status": "in_progress", "priority": "p1", "project": "fno"},
@@ -1017,7 +1013,7 @@ def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeyp
         "_drain_receipt",
         lambda: {"targets": [], "missions": 6, "skip_reason": "drain_disabled"},
     )
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "x-beef", "title": "Mission", "type": "epic",
              "status": "in_progress", "priority": "p1", "project": "fno"},
@@ -1043,7 +1039,7 @@ def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monk
         "_drain_receipt",
         lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "x-beef", "title": "Mission", "type": "epic",
              "status": "in_progress", "priority": "p1", "project": "fno"},
@@ -1068,7 +1064,7 @@ def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
         raise RuntimeError("scope read failed")
 
     monkeypatch.setattr(rank, "_drain_receipt", _raise_scope_error)
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-0abc", "title": "Unknown", "status": "ready",
             "priority": "p1", "project": "fno",
@@ -1112,7 +1108,7 @@ def test_rank_child_defaults_to_within_epic_scope(tmp_graph):
         {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
          "priority": "p1", "project": "fno", "rank": 1.0},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     result = _invoke("backlog", "rank", "ab-child01", "--before", "ab-sibl001")
 
@@ -1136,7 +1132,7 @@ def test_rank_child_anchor_outside_epic_refused(tmp_graph):
         {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
          "priority": "p1", "project": "fno", "rank": 1.0},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     for anchor in ("ab-anchor1", "ab-other01"):
         result = _invoke("backlog", "rank", "ab-child01", "--before", anchor)
@@ -1158,7 +1154,7 @@ def test_rank_within_epic_refused_without_live_epic_parent(tmp_graph):
         {"id": "ab-loose01", "title": "Loose", "status": "ready",
          "priority": "p1", "project": "fno"},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     for target in ("ab-loose01", "ab-child02"):
         result = _invoke("backlog", "rank", target, "--top", "--within-epic")
@@ -1177,7 +1173,7 @@ def test_rank_within_epic_orders_children_on_board(tmp_graph):
         {"id": "ab-first1", "title": "FirstCard", "status": "ready",
          "priority": "p2", "project": "fno", "parent": "ab-epic004"},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     r = _invoke("backlog", "rank", "ab-first1", "--top", "--within-epic")
     assert r.exit_code == 0, r.output
@@ -1197,7 +1193,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
         {"id": "ab-anchor2", "title": "Active anchor", "status": "in_progress",
          "priority": "p1", "project": "fno", "rank": 5.0},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     result = _invoke("backlog", "rank", "ab-epic002", "--before", "ab-anchor2")
 
@@ -1387,7 +1383,7 @@ def test_priority_migration_on_mutation(tmp_graph):
     """Legacy high/medium/low values are backfilled to p1/p2/p3 on the
     next graph mutation (recompute_statuses runs inside commit_rows_via_store).
     """
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-old00001", "title": "Was high", "priority": "high",
              "plan_path": "x.md", "status": "ready",
@@ -1442,7 +1438,7 @@ def test_priority_order_sort(tmp_graph):
 
 def test_priority_migration_idempotent(tmp_graph):
     """Running the backfill twice is a no-op (the plan's claim)."""
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-old00001", "title": "Was high", "priority": "high",
              "plan_path": "x.md", "status": "ready",
@@ -1463,7 +1459,7 @@ def test_priority_migration_idempotent(tmp_graph):
 
 def test_priority_migration_command_is_dry_run_then_idempotent(tmp_graph):
     """AC11-HP: the migration command has explicit dry-run/apply receipts."""
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-old00001", "title": "Legacy", "priority": "p0"},
             {"id": "ab-old00002", "title": "Legacy 2", "priority": "p0"},
@@ -1487,7 +1483,7 @@ def test_priority_missing_key_backfill(tmp_graph):
     rather than being touched by the backfill loop (which only rewrites legacy
     string values).
     """
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-nokey0001", "title": "No priority key",
              "plan_path": "x.md", "status": "ready",
@@ -1564,7 +1560,7 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
     lane-fill (`_ready_nodes`) and sequential-drain (`fno backlog next`)
     dispatchers can thread it into the spawn they build (AC1-HP / AC2-HP)."""
     plan = _write_plan(tmp_graph.parent, "pinned.md", "Pinned")
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
              "plan_path": str(plan), "status": "ready", "model": "fable",
@@ -1589,7 +1585,7 @@ def test_dispatch_hold_is_absent_from_ready_and_next_destinations(tmp_graph, tmp
         "  set_by: king:119e3c52\n---\n",
         encoding="utf-8",
     )
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-5a5c", "title": "Held", "status": "ready", "priority": "p0", "plan_path": str(plan), "created_at": _recent_iso(1)},
         {"id": "ab-1a2b", "title": "Unheld", "status": "ready", "priority": "p1", "created_at": _recent_iso(1)},
     ]}))
@@ -1611,7 +1607,7 @@ def test_dispatch_hold_on_owner_hides_parent_and_contained_descendants(tmp_graph
         {"id": "ab-1a2b", "title": "Parent child", "status": "ready", "parent": "ab-5a5c", "created_at": _recent_iso(1)},
         {"id": "ab-3c4d", "title": "Contained", "status": "ready", "contained_in": "ab-5a5c", "created_at": _recent_iso(1)},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}))
+    seed_graph(tmp_graph, json.dumps({"entries": entries}))
     ready_ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--all").stdout)]
     assert ready_ids == []
     next_result = _invoke("backlog", "next", "--all")
@@ -1625,7 +1621,7 @@ def test_priority_read_path_backfill(tmp_graph):
     rewrites legacy values in memory.
     """
     plan = _write_plan(tmp_graph.parent, "priority.md", "Priority")
-    tmp_graph.write_text(json.dumps({
+    seed_graph(tmp_graph, json.dumps({
         "entries": [
             {"id": "ab-mem00low", "title": "Was low", "priority": "low",
              "plan_path": str(plan), "status": "ready",
@@ -1713,7 +1709,7 @@ def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
     # so the offered row is seeded ready outright.
     plan = tmp_graph.parent / "ready.md"
     plan.write_text("---\nstatus: ready\n---\n\n# Ready\n")
-    tmp_graph.write_text(json.dumps({"entries": [{
+    seed_graph(tmp_graph, json.dumps({"entries": [{
         "id": "ab-offered1", "title": "Still offered", "status": "ready",
         "project": "p", "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-09-01T00:00:00Z",
@@ -1772,8 +1768,7 @@ def test_owner_and_pr_receipt_reads_all_fields_from_stored_row(tmp_graph, monkey
 def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     old = "2020-01-01T00:00:00+00:00"
     node_id = "ab-oldowner1"
-    tmp_graph.write_text(
-        json.dumps(
+    seed_graph(tmp_graph, json.dumps(
             {
                 "entries": [
                     {
@@ -1788,8 +1783,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
                     }
                 ]
             }
-        )
-    )
+        ))
 
     replaced = _invoke(
         "backlog", "update", node_id, "--locked-by", "worker-replacement"
@@ -1913,7 +1907,7 @@ def test_add_pr_metadata_without_add_pr_errors(tmp_graph):
 
 def test_legacy_entry_without_additional_prs_loads_with_default(tmp_graph):
     """Old graph.json entries (no additional_prs key) get [] on read."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-12345678", "title": "Legacy", "priority": "p2",
          "type": "feature", "domain": "code", "parent": None,
          "plan_path": "x.md", "completed_at": "2026-01-01T00:00:00Z",
@@ -1959,7 +1953,7 @@ def test_render_html_renders_non_http_pr_url_as_plain_text(tmp_path):
 
 def test_render_md_includes_additional_prs_on_done_nodes(tmp_graph):
     """Tree rendering surfaces additional_prs URLs for done nodes."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-87878787", "title": "Multi", "priority": "p2",
          "type": "feature", "domain": "code", "parent": None,
          "plan_path": "x.md", "completed_at": "2026-01-01T00:00:00Z",
@@ -2187,7 +2181,7 @@ def _add_with_parent_chain(g: Path) -> tuple[str, str, str]:
          "domain": "code", "type": "feature",
          "created_at": "2026-01-03T00:00:00Z"},
     ]
-    g.write_text(json.dumps({"entries": entries}))
+    seed_graph(g, json.dumps({"entries": entries}))
     return "ab-aaaaaaaa", "ab-bbbbbbbb", "ab-cccccccc"
 
 
@@ -2210,7 +2204,7 @@ def test_update_parent_sets_value_on_orphan(tmp_graph):
          "parent": None, "domain": "code", "type": "feature",
          "created_at": "2026-01-04T00:00:00Z"},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}))
+    seed_graph(tmp_graph, json.dumps({"entries": entries}))
 
     r = _invoke("backlog", "update", "ab-orphan00", "--parent", a_id)
     assert r.exit_code == 0, r.output
@@ -2338,7 +2332,7 @@ def _epics_first_entries(plan_path: str):
 def test_graph_next_picks_epic_child_over_higher_priority_loose(tmp_graph):
     """C3: `fno graph next` selects the epic child over a p0 loose node."""
     plan = _write_plan(tmp_graph.parent, "epic-next.md", "Epic next")
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
@@ -2348,7 +2342,7 @@ def test_graph_next_picks_epic_child_over_higher_priority_loose(tmp_graph):
 def test_graph_ready_orders_epic_children_before_loose(tmp_graph):
     """C3: `fno graph ready` lists epic children ahead of loose nodes."""
     plan = _write_plan(tmp_graph.parent, "epic-order.md", "Epic order")
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert ids.index("ab-child") < ids.index("ab-loose")
@@ -2360,7 +2354,7 @@ def test_graph_ready_excludes_epics(tmp_graph):
     container, or that path would launch a /target worker against the box.
     Shares the epic filter with `next` so the two surfaces agree."""
     plan = _write_plan(tmp_graph.parent, "epic-ready.md", "Epic ready")
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert "ab-epic" not in ids        # the container is excluded
@@ -2386,7 +2380,7 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
          "created_at": _recent_iso(1), "project": "p", "parent": "ab-epic",
              "blocked_by": [], "plan_path": str(plan)},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
@@ -2411,7 +2405,7 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
         {"id": "ab-clast002", "title": "Last child", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-clast002")
     assert r.exit_code == 0, r.stdout + r.stderr
     nodes = _by_id(tmp_graph)
@@ -2431,7 +2425,7 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
         {"id": "ab-cstill02", "title": "Child B (stays open)", "status": "ready",
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-cdone001")
     assert r.exit_code == 0, r.stdout + r.stderr
     nodes = _by_id(tmp_graph)
@@ -2450,7 +2444,7 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
         {"id": "ab-leaf0002", "title": "Leaf", "status": "ready", "project": "p",
          "parent": "ab-sub00001", "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0002")
     assert r.exit_code == 0, r.stdout + r.stderr
     nodes = _by_id(tmp_graph)
@@ -2469,7 +2463,7 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
         {"id": "ab-leaf0001", "title": "Leaf", "status": "ready", "project": "etl",
          "parent": "ab-epic0000", "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0001")
     assert r.exit_code == 0, r.stdout + r.stderr
     nodes = _by_id(tmp_graph)
@@ -2496,7 +2490,7 @@ def test_resolved_cwd_uses_work_map_root_when_project_mapped(tmp_graph):
     from unittest.mock import patch
 
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     # Write a tmp settings file mapping myproject -> /mapped/root
     settings_path = tmp_graph.parent / "settings.yaml"
@@ -2528,7 +2522,7 @@ def test_resolved_cwd_falls_back_to_recorded_cwd_when_unmapped(tmp_graph):
     from unittest.mock import patch
 
     node = _make_node_with_project_cwd("unmapped-project", "/recorded/cwd")
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     settings_path = tmp_graph.parent / "settings.yaml"
     settings_path.write_text(textwrap.dedent("""\
@@ -2560,7 +2554,7 @@ def test_resolved_cwd_falls_back_to_recorded_cwd_when_project_null(tmp_graph):
         "project": None,
         "cwd": "/recorded/cwd",
     }
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     r = _invoke("backlog", "get", "ab-resolvetest")
     assert r.exit_code == 0, r.output
@@ -2574,7 +2568,7 @@ def test_resolved_cwd_field_flag_works(tmp_graph):
     from unittest.mock import patch
 
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     settings_path = tmp_graph.parent / "settings.yaml"
     settings_path.write_text(textwrap.dedent("""\
@@ -2600,7 +2594,7 @@ def test_resolved_cwd_never_persisted_to_graph_json(tmp_graph):
     from unittest.mock import patch
 
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     settings_path = tmp_graph.parent / "settings.yaml"
     settings_path.write_text(textwrap.dedent("""\
@@ -2758,7 +2752,7 @@ def test_ac2_ui_update_unmapped_project_warns_cwd_unchanged(tmp_graph, tmp_path,
         "cwd": original_cwd,
         "status": "idea",
     }
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     settings_path = tmp_graph.parent / "settings.yaml"
     _settings_yaml_for_project(settings_path, "other-project", "/some/root")
@@ -2794,7 +2788,7 @@ def test_ac2_fr_update_mapped_project_derives_cwd(tmp_graph, tmp_path):
         "cwd": "/old/cwd",
         "status": "idea",
     }
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     with patch(
         "fno.graph._intake._settings_candidate_paths",
@@ -2824,7 +2818,7 @@ def test_ac2_update_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
         "cwd": "/old/cwd",
         "status": "idea",
     }
-    tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
     with patch(
         "fno.graph._intake._settings_candidate_paths",
@@ -3013,7 +3007,7 @@ def test_dispatch_fields_default_absent(tmp_graph):
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}))
+    seed_graph(g, json.dumps({"entries": entries}))
 
 
 def test_next_excludes_stale_ready_with_receipt(tmp_graph):
@@ -3165,7 +3159,7 @@ def test_reconcile_close_applies_the_ledger_rollup(tmp_graph, tmp_path, monkeypa
          "pr_number": 777, "pr_url": "https://github.com/o/r/pull/777",
          "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     from fno.graph import _reconcile as rec
     monkeypatch.setattr(
@@ -3207,7 +3201,7 @@ def test_reconcile_rollup_preserves_an_existing_cost(tmp_graph, tmp_path, monkey
          "cost_usd": 9.99, "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
          "blocked_by": []},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     from fno.graph import _reconcile as rec
     monkeypatch.setattr(
@@ -3246,13 +3240,10 @@ def test_get_external_reads_tracker_and_sidecar_sentinels(
     the OPAQUE id exactly (no prefix-hex grammar), renders the five tracker
     fields plus sidecar sentinels, derives status at read time, and never
     returns the contradictory graph values."""
-    tmp_graph.write_text(
-        json.dumps({"entries": [{
+    seed_graph(tmp_graph, json.dumps({"entries": [{
             "id": "EXT-1", "title": "graph-title-sentinel",
             "cwd": "/graph-cwd-sentinel", "pr_number": 999,
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
     sidecars = tmp_path / "sidecars"
     sidecars.mkdir()
     (sidecars / "EXT-1.json").write_text(
@@ -3296,13 +3287,10 @@ def test_provenance_external_reads_sidecar_edges(
     """AC2-HP (provenance path): `backlog provenance` under an external backend
     reads birth/spawn edges from the sidecar, joins the origin title from the
     tracker, and never reports the graph file's rows."""
-    tmp_graph.write_text(
-        json.dumps({"entries": [{
+    seed_graph(tmp_graph, json.dumps({"entries": [{
             "id": "EXT-1", "source_session_id": "graph-sess",
             "sessions": [{"phase": "graph-only"}],
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
     sidecars = tmp_path / "sidecars"
     sidecars.mkdir()
     (sidecars / "EXT-1.json").write_text(

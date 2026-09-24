@@ -1,5 +1,6 @@
 """Gate: the state root may hold nothing the inventory doc does not name (x-a469)."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from pathlib import Path
 
@@ -29,6 +30,6 @@ def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch)
     # A real writer's output must also read as documented, not just the
     # materialized mirror: the mutation emits the graph, its render, and the
     # backups/ rotation beside it.
-    (root / "graph.json").write_text('{"entries": []}\n', encoding="utf-8")
+    seed_graph(root / "graph.json", '{"entries": []}\n')
     commit_rows_via_store(root / "graph.json", lambda entries: entries)
     assert undocumented(root, DOC) == []

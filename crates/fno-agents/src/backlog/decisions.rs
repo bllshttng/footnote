@@ -76,39 +76,6 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
         }
     }
 
-    if graph.exists() {
-        let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
-        if !text.trim().is_empty() {
-            let document: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-            if let Some(entries) = document.get("entries").and_then(Value::as_array) {
-                for entry in entries {
-                    let Some(node_id) = entry.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(decisions) = entry.get("decisions").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    for (position, reference) in decisions.iter().enumerate() {
-                        let Some(event_id) = reference.get("decision_id").and_then(Value::as_str)
-                        else {
-                            return Err(format!(
-                                "decisions import: node {node_id} decision at position {} has no decision_id",
-                                position + 1
-                            ));
-                        };
-                        if !event_exists(&transaction, event_id)? {
-                            return Err(format!(
-                                "decisions import: node {node_id} references missing decision {event_id}"
-                            ));
-                        }
-                        attach_node(&transaction, node_id, event_id)?;
-                    }
-                }
-            }
-        }
-    }
-
     super::stamp_meta(&transaction, "decisions_imported", "1")?;
     transaction.commit().map_err(|error| error.to_string())
 }
@@ -249,18 +216,6 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
         )
         .map_err(|error| error.to_string())?;
     Ok(event_id.to_string())
-}
-
-fn event_exists(connection: &Connection, event_id: &str) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT 1 FROM decisions WHERE event_id = ?1",
-            params![event_id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string())
 }
 
 fn attach_subject(connection: &Connection, event: &Value, event_id: &str) -> Result<(), String> {

@@ -6,6 +6,7 @@ is registered (and the deprecated `adopt` alias is gone), the `done` verb
 works, and the nested `triage` sub-app surface is present.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -22,7 +23,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json routed to tmp_path via monkeypatch."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 

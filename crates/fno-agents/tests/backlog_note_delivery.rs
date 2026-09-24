@@ -18,11 +18,7 @@ fn fixture(id: &str, status: &str) -> serde_json::Value {
 }
 
 fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(path, entries).unwrap();
 }
 
 /// The landed rows, read from the store: graph.json is a frozen mirror

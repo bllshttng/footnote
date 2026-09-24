@@ -8,6 +8,7 @@ needs the compiled runtime and skips whole where the smoke harness deleted
 the worker binary (the parity-test convention).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import pytest
 
@@ -108,7 +109,7 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     # _constants serves these names through module __getattr__, so they are
     # NOT real attributes. monkeypatch.setattr would save the resolved value
     # and its undo would setattr it back, BAKING a frozen path into the module
@@ -129,7 +130,7 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}) + "\n")
 
 
 def test_get_read_through_resolves_archived_node(tmp_path, monkeypatch):

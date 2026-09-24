@@ -8,6 +8,7 @@ retryable. A contradictory local graph file rides along: completion must
 never answer from it.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -83,10 +84,10 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     monkeypatch.setattr(sidecar_store, "sidecar_path",
                         lambda i: sidecar_dir / f"{i}.json")
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": r["id"], "title": "GRAPH-SENTINEL", "completed_at": None}
         for r in rows
-    ]}), encoding="utf-8")
+    ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: g)
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")

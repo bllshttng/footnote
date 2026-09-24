@@ -5,6 +5,7 @@ Tests for:
 - Task 1.3: query_by_source_inbox_msg helper in load.py
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": complete}, indent=2) + "\n")
     return g
 
 

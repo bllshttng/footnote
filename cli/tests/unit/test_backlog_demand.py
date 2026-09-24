@@ -16,6 +16,7 @@ And the read touches nothing: `demand` never writes rank, never consults a
 kanban column, and leaves graph.json byte for byte as it found it.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -55,7 +56,7 @@ def _node(node_id: str, priority: str = "p2", **over) -> dict:
 @pytest.fixture
 def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}\n', encoding="utf-8")
+    seed_graph(graph, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -67,7 +68,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _write(graph: Path, *entries: dict) -> None:
-    graph.write_text(json.dumps({"entries": list(entries)}, indent=2) + "\n", encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": list(entries)}, indent=2) + "\n")
 
 
 # --- the score ---------------------------------------------------------------

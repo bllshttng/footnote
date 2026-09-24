@@ -6,6 +6,7 @@ subprocess calls (git, gh) are stubbed via monkeypatch.setattr at module level
 so we never hit the real filesystem or GitHub.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -36,7 +37,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     unless a test explicitly writes ledger fixture data.
     """
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
@@ -107,7 +108,7 @@ def _seed(g: Path, entries: list[dict]) -> None:
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
-    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": complete}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:

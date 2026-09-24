@@ -481,17 +481,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = dir.join("graph.json");
-        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
         std::env::set_var(
             "FNO_AGENTS_WORKER",
             stub_worker(
                 &dir,
                 "worker-ok",
-                "printf '{\"ok\":true,\"result\":{\"store_backend\":\"sqlite\"}}\n'",
+                "printf '{\"ok\":true,\"result\":{\"backend\":\"sqlite\",\"version\":\"v1\"}}\n'",
             ),
         );
-        let reply = call(&graph, "backend_status", json!({})).unwrap();
-        assert_eq!(reply["store_backend"], json!("sqlite"));
+        let reply = call(&graph, "export_status", json!({})).unwrap();
+        assert_eq!(reply["backend"], json!("sqlite"));
         assert!(
             !dir.join("graph.json.store.sock").exists(),
             "no resident keeper was minted, so no socket exists"
@@ -507,7 +507,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = dir.join("graph.json");
-        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
         std::env::set_var(
             "FNO_AGENTS_WORKER",
             stub_worker(

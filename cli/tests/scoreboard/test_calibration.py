@@ -5,6 +5,7 @@ Denominator honesty: error / not_applicable / unattributed reported, never table
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -143,9 +144,7 @@ def test_cli_table_at_ten(tmp_path, monkeypatch):
     (tmp_path / "events.jsonl").write_text(
         "\n".join(json.dumps(e) for e in events) + "\n"
     )
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-0", "reverted": True}]})
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-0", "reverted": True}]}))
     _wire(monkeypatch, tmp_path, ledger)
     res = runner.invoke(_app(), ["--calibration"])
     assert res.exit_code == 0, res.output

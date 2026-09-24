@@ -10,6 +10,7 @@ which spawned a /think on every autonomous decompose rather than offering one;
 inverse is pinned below.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -78,7 +79,7 @@ def test_decompose_never_fires_birth_hook(tmp_path, monkeypatch, capture_born):
     its own unless the operator flags the group `needs_think`.
     """
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
     _route_graph(g, tmp_path, monkeypatch)
 
     # First pass: 2 children created, still no births.
@@ -95,7 +96,7 @@ def test_decompose_never_fires_birth_hook(tmp_path, monkeypatch, capture_born):
 
 def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     _route_graph(g, tmp_path, monkeypatch)
 
     plan = tmp_path / "plan.md"
@@ -112,7 +113,7 @@ def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
 
 def test_add_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     _route_graph(g, tmp_path, monkeypatch)
 
     r = _invoke("backlog", "add", "A new feature", "--project", "fno", "--cwd", "/tmp/proj")

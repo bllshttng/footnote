@@ -1,5 +1,6 @@
 """Unit tests for the deterministic relatedness map (node x-c2e9)."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone
@@ -204,7 +205,7 @@ def _wire_paths(tmp_path, monkeypatch, entries):
     from fno.graph import cli as _cli
 
     graph = tmp_path / "graph.json"
-    graph.write_text(_json.dumps({"entries": entries}))
+    seed_graph(graph, _json.dumps({"entries": entries}))
     sidecar = tmp_path / "relatedness.json"
     monkeypatch.setattr(_cli, "_graph_path", lambda: graph)
     # relatedness build reads through the guarded display seam, which

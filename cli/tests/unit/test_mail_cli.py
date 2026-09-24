@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.paths_testing import use_tmpdir
+from tests.fixtures.graph_seed import seed_graph
 
 
 @pytest.fixture
@@ -53,26 +54,15 @@ def mailbox(tmp_path, monkeypatch):
 @pytest.fixture
 def ruling_graph(mailbox, monkeypatch):
     graph_path = mailbox / ".fno" / "graph.json"
-    graph_path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-511a",
-                        "slug": "mailed-ruling",
-                        "title": "mailed ruling",
-                        "status": "ready",
-                        "type": "feature",
-                        "priority": "p2",
-                        "details": "Original node details.",
-                    }
-                ]
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    seed_graph(graph_path, [{
+        "id": "x-511a",
+        "slug": "mailed-ruling",
+        "title": "mailed ruling",
+        "status": "ready",
+        "type": "feature",
+        "priority": "p2",
+        "details": "Original node details.",
+    }])
     import fno.graph._constants as graph_constants
     import fno.graph.store as graph_store
 
@@ -139,31 +129,20 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
     foreign_repo = tmp_path / "foreign-répo"
     foreign_graph = foreign_repo / "state" / "graph.json"
     foreign_graph.parent.mkdir(parents=True)
-    foreign_graph.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-511a",
-                        "slug": "foreign-mailed-ruling",
-                        "title": "foreign mailed ruling",
-                        "status": "ready",
-                        "type": "feature",
-                        "priority": "p2",
-                        "details": "Foreign node details.",
-                    }
-                ]
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    seed_graph(foreign_graph, [{
+        "id": "x-511a",
+        "slug": "foreign-mailed-ruling",
+        "title": "foreign mailed ruling",
+        "status": "ready",
+        "type": "feature",
+        "priority": "p2",
+        "details": "Foreign node details.",
+    }])
     foreign_settings = foreign_repo / ".fno" / "settings.yaml"
     foreign_settings.parent.mkdir(parents=True)
     foreign_settings.write_text(
-        "schema_version: 1\nconfig:\n  paths:\n    graph_json: "
-        + json.dumps(str(foreign_graph))
+        "schema_version: 1\nconfig:\n  state_dir: "
+        + json.dumps(str(foreign_graph.parent))
         + "\n",
         encoding="utf-8",
     )

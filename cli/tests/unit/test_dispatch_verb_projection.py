@@ -18,6 +18,7 @@ Every spawn case asserts the recorder is non-empty BEFORE asserting on its
 contents, so a zero can never read as a pass.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import subprocess as real_subprocess
@@ -147,7 +148,7 @@ def _write_graph(
         row.setdefault("priority", "p2")
         row.setdefault("status", "idea")
         row.setdefault("slug", row["id"].lower())
-    graph.write_text(json.dumps({"entries": [epic, child]}, indent=2) + "\n")
+    seed_graph(graph, json.dumps({"entries": [epic, child]}, indent=2) + "\n")
 
 
 def _events(p: Path) -> list[dict]:

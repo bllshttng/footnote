@@ -5,6 +5,7 @@ A crown is stamped on the spawned worker's registry row by the SPAWN path
 round-trip, and surfaces in `fno whoami` and `fno agents list`.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import subprocess
@@ -1173,10 +1174,7 @@ def test_in_place_crown_rescopes_a_live_row_from_project_to_epic(
     )
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}),
-        encoding="utf-8",
-    )
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}))
 
     result = _invoke_crown("worker", "--scope", "e-1")
 
@@ -1417,10 +1415,7 @@ def test_widening_rescope_keeps_contained_subordinates_out_of_the_report(
     _prepare_crown_cli(monkeypatch, tmp_path, [king, sub])
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}),
-        encoding="utf-8",
-    )
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}))
 
     result = _invoke_crown("king", "--scope", "alpha", "--scope", "beta")
 
@@ -2121,10 +2116,7 @@ def test_agent_caller_with_a_wrongly_typed_scope_sees_the_type_refusal_not_ident
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps({"entries": [{"id": "n-1", "type": "feature", "project": "alpha"}]}),
-        encoding="utf-8",
-    )
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "n-1", "type": "feature", "project": "alpha"}]}))
     before = [asdict(row) for row in load_registry()]
     monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
 
@@ -2392,7 +2384,7 @@ def _seed_crown_graph(monkeypatch, tmp_path: Path, epics: list[dict]) -> None:
 
     graph_path = graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": epics}), encoding="utf-8")
+    seed_graph(graph_path, json.dumps({"entries": epics}))
 
 
 def _graph_entries() -> list[dict]:

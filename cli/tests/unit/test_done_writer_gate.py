@@ -6,6 +6,7 @@ at ship time, 2h before their PR merged. These tests pin the writers shut.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -23,8 +24,7 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
     """Write a graph fixture whose node is the ledger entry's join target."""
     graph = home / ".fno" / "graph.json"
     graph.parent.mkdir(parents=True, exist_ok=True)
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {
@@ -40,9 +40,7 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
                 ]
             },
             indent=2,
-        ),
-        encoding="utf-8",
-    )
+        ))
     return graph
 
 
@@ -139,7 +137,7 @@ def _seed(g: Path, entry: dict) -> None:
         row["completed_at"] = "2026-09-01T00:00:00Z"
     row.setdefault("title", entry.get("id", "node"))
     row.setdefault("slug", entry.get("id", "node"))
-    g.write_text(json.dumps({"entries": [row]}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": [row]}, indent=2) + "\n")
 
 
 def _node(g: Path, node_id: str) -> dict:

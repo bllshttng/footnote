@@ -8,6 +8,7 @@ monkeypatched so the selector's logic is tested without shelling
 `fno backlog ready`; the claims root is isolated to `tmp_path`.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -328,7 +329,7 @@ def _isolated_graph(tmp_path, monkeypatch):
     file via `_seed_graph`.
     """
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
 
@@ -342,7 +343,7 @@ def _seed_graph(graph_path, entries):
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
-    graph_path.write_text(json.dumps({"entries": complete}))
+    seed_graph(graph_path, json.dumps({"entries": complete}))
 
 
 def _plan(tmp_path, name: str, files: list[str]) -> str:

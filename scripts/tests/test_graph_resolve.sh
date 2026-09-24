@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_graph_resolve.sh -- unit tests for scripts/lib/graph-resolve.sh
 #
-# Sandboxes ~/.fno/graph.json via a temp HOME override so the caller's
+# Seeds a graph.db via a temp anchor so the caller's
 # real backlog is never touched.
 
 set -uo pipefail
@@ -23,8 +23,8 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 :: $2"; FAIL=$((FAIL + 1)); }
 
-# Seed a sandbox graph.json. Caller can point GRAPH_JSON at it.
-cat > "$TMP/graph.json" <<'JSON'
+# Seed a sandbox graph.db. Caller can point GRAPH_JSON at its stable anchor.
+cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$TMP/graph.json"
 {
   "entries": [
     {

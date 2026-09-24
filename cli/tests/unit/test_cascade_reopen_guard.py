@@ -25,6 +25,7 @@ once the reopen is removed. Without it a green run cannot tell "the guard
 works" from "this fixture never closed anyway".
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -366,7 +367,7 @@ def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at) -> str:
     }
     if reopened_at is not None:
         node["reopened_at"] = reopened_at
-    g.write_text(json.dumps({"entries": [node]}, indent=2) + "\n", encoding="utf-8")
+    seed_graph(g, json.dumps({"entries": [node]}, indent=2) + "\n")
     return str(plan)
 
 

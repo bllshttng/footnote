@@ -89,7 +89,6 @@ make_repo() {
     # entry before it resolves + probes (x-8e98: the ungrep'd ab- arm is gone).
     # Only presence is seeded; the derived in_review STATUS is still stubbed via fno.
     mkdir -p "$dir/.fno"
-    printf '{"entries":[{"id":"%s"}]}\n' "$NODE" > "$dir/.fno/graph.json"
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature

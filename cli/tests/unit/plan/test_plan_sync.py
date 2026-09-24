@@ -5,6 +5,7 @@ AC2-EDGE (idempotent no-op), AC3-EDGE (--all bypasses the watermark), AC1-FR
 (graph re-read failure degrades cleanly), AC2-FR (mtime short-circuit).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -35,14 +36,14 @@ def env(tmp_path, monkeypatch):
     """A temp graph.json + a plans dir; graph_json() points at the temp graph so
     the sync command and its watermark both resolve under tmp_path."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.paths as paths
     monkeypatch.setattr(paths, "graph_json", lambda: g)
     return tmp_path, g
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
     # Bump graph mtime so the watermark gate sees "changed" between edits.
     os.utime(g, None)
 

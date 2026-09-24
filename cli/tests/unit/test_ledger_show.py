@@ -6,6 +6,7 @@ the MARKER is printed - never a blank, never a fabricated resume command.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -108,7 +109,7 @@ def test_unresolved_row_prints_marker_not_blank(show):
 
 
 def test_harness_unrecorded_when_graph_has_no_node(show, tmp_path):
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": []}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": []}))
     out = show("x-3344")
     assert UUID in out
     assert "harness unrecorded; no resume command inferred" in out

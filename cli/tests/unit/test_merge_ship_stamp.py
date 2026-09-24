@@ -16,6 +16,7 @@ merge, so losing the tests here would let a future refactor regress the
 repo-scoping-is-mandatory guarantee they pin.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -31,7 +32,7 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": complete}, indent=2) + "\n")
     return g
 
 

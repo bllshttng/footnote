@@ -1,32 +1,17 @@
-//! The graph.json readers follow the backend switch.
-//!
-//! A graph flipped to sqlite holds nodes graph.json never saw (the typed
-//! api ops skip the file). Every moved caller must resolve a node the FILE
-//! does not carry; the raw-bytes control proves the fixture really split
-//! the two stores, and the guard tests pin the public json leg shut.
-//!
-//! Split store:
-//! - x-old: written to the file pre-flip, imports into the store at flip.
-//! - x-new: created through the typed api after the flip, so only graph.db
-//!   carries it (the typed ops skip the file seam).
+//! Graph consumers resolve rows from the SQLite store.
 
 use fno_agents::backlog::api::{self, NodeCreateInput, Store};
 use fno_agents::backlog::patch::{self, PatchRequest};
-use fno_agents::{backlog, graph_store};
+use fno_agents::graph_store;
 
 fn split_store_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let graph = root.path().join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::json!({"entries": [serde_json::json!({
+    let rows = vec![serde_json::json!({
             "id": "x-old", "title": "pre-flip", "slug": "pre-flip",
             "type": "feature", "status": "ready", "priority": "p2",
-        })]})
-        .to_string(),
-    )
-    .unwrap();
-    backlog::set_backend(&graph, backlog::Backend::Sqlite).unwrap();
+        })];
+    graph_store::seed_rows(&graph, &rows).unwrap();
     let store = Store::new(&graph);
     api::node_create(
         &store,
@@ -43,28 +28,14 @@ fn split_store_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn moved_callers_resolve_the_post_flip_node_the_file_lacks() {
+fn moved_callers_resolve_the_store_node() {
     let (_root, graph) = split_store_fixture();
 
-    // Control: the store carries x-new, the file does not.
     let rows = graph_store::read_rows(&graph).unwrap();
     assert!(
         rows.iter()
             .any(|e| graph_store::entry_id(e) == Some("x-new")),
         "read_rows must resolve the post-flip node"
-    );
-    let file_text = std::fs::read_to_string(&graph).unwrap();
-    let file_rows = serde_json::from_str::<serde_json::Value>(&file_text)
-        .unwrap()
-        .get("entries")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        !file_rows
-            .iter()
-            .any(|e| graph_store::entry_id(e) == Some("x-new")),
-        "control failed: graph.json unexpectedly holds x-new, the stores did not split"
     );
     let stored_status = rows
         .iter()
@@ -116,39 +87,6 @@ fn x_old_still_resolves_after_the_flip() {
         rows.iter()
             .any(|e| graph_store::entry_id(e) == Some("x-old")),
         "the pre-flip node must survive the flip"
-    );
-}
-
-#[test]
-fn json_leg_refuses_under_sqlite() {
-    let (_root, graph) = split_store_fixture();
-    let err = graph_store::read_defaulted(&graph, false).unwrap_err();
-    match &err {
-        graph_store::StoreError::Invalid(msg) => {
-            assert!(
-                msg.contains("read_rows"),
-                "the refusal must name the switch: {msg}"
-            );
-        }
-        other => panic!("expected StoreError::Invalid under sqlite, got {other:?}"),
-    }
-    let opts_err = graph_store::read_defaulted_opts(&graph, true, true).unwrap_err();
-    assert!(matches!(opts_err, graph_store::StoreError::Invalid(_)));
-
-    // Negative control: a json-backend graph (no db sibling) answers as
-    // before, guard out of the way.
-    let plain = tempfile::tempdir().unwrap();
-    let json_graph = plain.path().join("graph.json");
-    std::fs::write(
-        &json_graph,
-        r#"{"entries":[{"id":"x-json","title":"json only"}]}"#,
-    )
-    .unwrap();
-    let rows = graph_store::read_defaulted(&json_graph, false).unwrap();
-    assert!(
-        rows.iter()
-            .any(|e| graph_store::entry_id(e) == Some("x-json")),
-        "the guard must not touch a json-backend graph"
     );
 }
 

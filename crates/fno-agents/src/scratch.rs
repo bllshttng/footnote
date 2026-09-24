@@ -2046,17 +2046,11 @@ mod tests {
     }
 
     #[test]
-    fn node_statuses_follows_the_backend_switch() {
+    fn node_statuses_follow_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        // A row the import can represent: from_json requires slug, type and
-        // priority, and a row it refuses is skipped, so the flip drops it.
-        std::fs::write(
-            &graph,
-            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"}]}"#,
-        )
-        .unwrap();
-        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        let rows = vec![serde_json::json!({"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"})];
+        crate::graph_store::seed_rows(&graph, &rows).unwrap();
         let store = crate::backlog::api::Store::new(&graph);
         crate::backlog::api::node_create(
             &store,

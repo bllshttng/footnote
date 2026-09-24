@@ -17,11 +17,7 @@ fn fixture(id: &str, status: &str) -> serde_json::Value {
 }
 
 fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(path, entries).unwrap();
 }
 
 fn read_graph(path: &PathBuf) -> serde_json::Value {
@@ -143,11 +139,11 @@ fn ac9_stale_and_oversized_and_missing_manifest_entries_refuse() {
     let (code, out) = run_notes(&["migrate", "--manifest", &mp, "--graph", &g, "--json"]);
     assert_ne!(code, 0, "preview with an unresolved row exits nonzero");
     assert!(out.contains("unresolved") || out.contains("\"unresolved\""));
-    let before = std::fs::read_to_string(&graph).unwrap();
+    let before = fno_agents::backlog::version(&graph).unwrap();
     // Apply with the same over-budget digest: refused, row intact.
     let (code, _) = run_notes(&["migrate", "--apply", "--manifest", &mp, "--graph", &g]);
     assert_ne!(code, 0);
-    let after = std::fs::read_to_string(&graph).unwrap();
+    let after = fno_agents::backlog::version(&graph).unwrap();
     assert_eq!(before, after, "a refused row is unchanged");
     // A good digest migrates o-1.
     let good = format!(
@@ -230,13 +226,13 @@ fn inventory_reports_counts_and_hashes_without_writes() {
             "status": "ready", "priority": "p1", "progress_notes": notes,
         })],
     );
-    let before = std::fs::read_to_string(&graph).unwrap();
+    let before = fno_agents::backlog::version(&graph).unwrap();
     let g = graph.display().to_string();
     let (code, out) = run_notes(&["inventory", "--json", "--graph", &g]);
     assert_eq!(code, 0);
-    assert!(out.contains("backend\\\":\\\"json") || out.contains("backend"));
+    assert!(out.contains("backend=sqlite"), "{out}");
     assert!(out.contains(&hash[..20.min(hash.len())]) || out.contains("notes_hash"));
-    assert_eq!(std::fs::read_to_string(&graph).unwrap(), before);
+    assert_eq!(fno_agents::backlog::version(&graph).unwrap(), before);
 }
 
 #[test]

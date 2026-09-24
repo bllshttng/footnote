@@ -5,6 +5,7 @@ backlog CLI.  The graph bytes are the mutation oracle: a discovery run may
 build a disposable FTS cache, but it must never rewrite graph state.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -45,7 +46,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from fno.graph import store
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}) + "\n", encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(constants, "GRAPH_JSON", graph)
     monkeypatch.setattr(constants, "GRAPH_ARCHIVE_JSON", tmp_path / "archive.json")
     monkeypatch.setattr(store, "GRAPH_JSON", graph)
@@ -55,7 +56,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _seed(graph: Path, entries: list[dict]) -> None:
-    graph.write_text(json.dumps({"entries": entries}) + "\n", encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": entries}) + "\n")
 
 
 def test_candidates_union_recall_lanes(tmp_graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:

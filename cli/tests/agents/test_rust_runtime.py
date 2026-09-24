@@ -6,6 +6,7 @@ to the binary only when opted in. The actual ``os.execv`` is always stubbed so
 the test process is never replaced.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -40,9 +41,7 @@ def _open_node_row(monkeypatch, tmp_path):
     # The verb reads the store itself for the nodeless derive: point its
     # FNO_HOME at a fixture graph naming the same row.
     monkeypatch.setenv("FNO_HOME", str(tmp_path))
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-f370"}]}), encoding="utf-8"
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-f370"}]}))
     monkeypatch.setattr(
         "fno.agents.cli._spawn_guard_decision",
         lambda *a, **k: (

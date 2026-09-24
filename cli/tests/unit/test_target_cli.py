@@ -6,6 +6,7 @@ refuses to write a stub, plus a redirect on the substitution-prone
 `fno do state init` bare bootstrap.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -556,7 +557,7 @@ def test_work_start_dispatch_reads_claimed_node(tmp_path, monkeypatch):
 
     node = {"id": "x-122a", "title": "lifecycle"}
     g = tmp_path / "graph.json"
-    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+    seed_graph(g, _json.dumps({"entries": [node]}))
 
     monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
     monkeypatch.setattr(_paths, "graph_json", lambda: g)
@@ -584,7 +585,7 @@ def test_work_start_dispatch_overlays_dispatch_pins(tmp_path, monkeypatch):
 
     node = {"id": "x-122a", "title": "lifecycle"}
     g = tmp_path / "graph.json"
-    g.write_text(_json.dumps({"entries": [node]}), encoding="utf-8")
+    seed_graph(g, _json.dumps({"entries": [node]}))
 
     monkeypatch.setattr(_paths, "resolve_repo_root", lambda: tmp_path)
     monkeypatch.setattr(_paths, "graph_json", lambda: g)

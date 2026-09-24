@@ -26,7 +26,7 @@ def _state_dir() -> Path:
 
 
 def _graph_json() -> Path:
-    """Route through paths.graph_json() to honour config.paths.graph_json override."""
+    """Route through paths.graph_json(), the stable graph.db anchor."""
     try:
         from fno import paths as _paths
         return _paths.graph_json()
@@ -43,8 +43,7 @@ def _graph_html() -> Path:
 
 
 def _graph_archive_json() -> Path:
-    """A sibling of the working graph, so the archive tracks any
-    config.paths.graph_json override the same way the graph does."""
+    """A sibling of the working graph store anchor."""
     return _graph_json().parent / "graph-archive.json"
 
 

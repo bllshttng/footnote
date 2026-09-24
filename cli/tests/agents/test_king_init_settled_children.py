@@ -7,6 +7,7 @@ names the settled children as titles. Nothing prints when none exist: an
 absent section is the positive control, never an empty one.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -27,7 +28,7 @@ def court(tmp_path, monkeypatch):
 
 
 def _seed(rows: list[dict]) -> None:
-    graph_json().write_text(json.dumps({"entries": rows}), encoding="utf-8")
+    seed_graph(graph_json(), json.dumps({"entries": rows}))
 
 
 def _init(court, scope: str):

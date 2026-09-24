@@ -963,9 +963,9 @@ mod resolve_tests {
     ) -> (PathBuf, PathBuf) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.toml"), config).unwrap();
-        std::fs::write(
-            dir.join("graph.json"),
-            serde_json::to_string(&graph).unwrap(),
+        crate::graph_store::seed_rows(
+            &dir.join("graph.json"),
+            graph["entries"].as_array().unwrap(),
         )
         .unwrap();
         let registry_path = dir.join("registry.json");

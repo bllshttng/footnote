@@ -570,11 +570,7 @@ mod tests {
     fn fixture(nodes: &[Value]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::to_string(&json!({ "entries": nodes })).unwrap(),
-        )
-        .unwrap();
+        crate::graph_store::seed_rows(&graph, nodes).unwrap();
         let plans = dir.path().join("plans");
         std::fs::create_dir(&plans).unwrap();
         let claims = tempfile::tempdir().unwrap();

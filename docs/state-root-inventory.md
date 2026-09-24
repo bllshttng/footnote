@@ -20,8 +20,7 @@ One file per install. These belong at the root.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog status --snapshot`, `fno backlog find` | written only when exported |
-| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
+| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate); reached from the `paths.graph_json()` anchor via its `.db` sibling | durable row store; WAL sidecars are SQLite-managed |
 | `graph.json.lock` | `crates/fno-agents/src/graph_store.rs::BoundedLock` | the publish cycle's bounded lock beside the store; the keeper holds it for the duration of one mutation |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
 | `graph.html` | `graph/render_html.py` | regenerated |
@@ -67,7 +66,7 @@ One file per install. These belong at the root.
 | `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
 | `fleet-sweep-state.json`, `.lock` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
 
-Under `graph_meta.backend=sqlite` the `graph.json` file is frozen and must stay on disk. The keeper binds its socket to the path, and nine existence gates read the file's absence as an empty graph. The store of record is the `.db` sibling. The mirror answers nothing.
+`graph.json` is retired. A former file moves to `backups/graph.json.retired.*`; an unimported nonempty file makes the store refuse to open so its rows remain recoverable.
 
 `paths.locks_dir()` hardcodes `Path.home() / ".fno" / "locks"` on purpose, and a `config.state_dir` override deliberately does not move it. The config-free plan-stamp path and the config-loading append path have to agree on one directory, and moving it desyncs them. Its docstring says so. Do not "fix" it to match the rest of this page.
 

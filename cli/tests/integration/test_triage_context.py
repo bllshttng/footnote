@@ -12,6 +12,7 @@ decouples ``_candidate_record`` from ``cmd_context`` can't silently drop
 fields the LLM reasoning prompt depends on.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -219,7 +220,7 @@ def test_deep_mode_still_includes_plan_excerpt(tmp_path):
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Empty graph routed to tmp_path via monkeypatch (matches sibling tests)."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -235,7 +236,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def _seed_entries(graph_path: Path, entries: list[dict]) -> None:
     """Write a hand-crafted graph.json so we can exercise legacy/edge fields."""
-    graph_path.write_text(json.dumps({"entries": entries}))
+    seed_graph(graph_path, json.dumps({"entries": entries}))
 
 
 def _invoke(*args):

@@ -1026,12 +1026,10 @@ def _read_json(path: Path) -> list[dict]:
     """Raw read of a JSON entries file through the keeper's byte read.
 
     Raises GraphCorruptError on JSON parse failure OR when the root value is
-    not a JSON object. A missing file or a valid file with no/empty entries
-    key returns [] -- those are NOT corruption.
+    not a JSON object. Empty stores return an empty entries list; unavailable
+    keepers raise StoreUnavailable.
     """
     path = Path(path)
-    if not path.exists():
-        return []
     raw = read_file_bytes(path)
     try:
         data = json.loads(raw.decode("utf-8"))

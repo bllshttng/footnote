@@ -29,6 +29,10 @@ impl Drop for Keeper {
     }
 }
 
+fn seed_empty_store(graph: &Path) {
+    fno_agents::graph_store::seed_rows(graph, &[]).unwrap();
+}
+
 fn short_home(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -115,7 +119,7 @@ fn ok_result(reply: Value) -> Value {
 fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
     let home = short_home("serve");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("serve-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -171,7 +175,7 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
 fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
     let home = short_home("lost-write");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("lost-write-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -224,7 +228,7 @@ fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
 fn keeper_keeps_serving_after_its_client_hangs_up() {
     let home = short_home("survive");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("survive-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -286,7 +290,7 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
     // instead of blocking the caller past the deadline.
     let home = short_home("wedge");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("wedge-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -327,7 +331,7 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
 fn read_file_returns_the_bytes_load_graph_validates() {
     let home = short_home("bytes");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("bytes-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -355,7 +359,7 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
     // running on one socket, each holding a parsed 15MB graph.
     let home = short_home("seat");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     // Each racer's stderr lands in its own file: an unexpected exit names its
     // path (seat refusal, self-retire, bind failure) instead of a bare code.
@@ -430,7 +434,7 @@ fn keeper_holds_its_seat_lock() {
     // end of the if condition, before the guarded body ran).
     let home = short_home("seatlock");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("seatlock-test", &graph, &sock);
     wait_for_socket(&sock); // positive control: the keeper bound and serves
@@ -466,7 +470,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
     // new listener's) stays in place.
     let home = short_home("rebound");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let a_stderr = home.join("rebound-a.stderr");
     let mut a = Keeper {
@@ -533,7 +537,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
 fn a_keeper_on_a_rewritten_binary_self_retires_when_idle() {
     let home = short_home("drift");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let copy = home.join("worker-copy");
     std::fs::copy(WORKER_BIN, &copy).unwrap();
@@ -576,7 +580,7 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     // keeper answers kind busy inside lock_timeout and keeps serving.
     let home = short_home("busy");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("busy-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -676,11 +680,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
             })
         })
         .collect();
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({ "entries": seed })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &seed).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper("race-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -840,7 +840,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
 fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     let home = short_home("shutrace");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("shutrace-test", &graph, &sock);
     wait_for_socket(&sock);

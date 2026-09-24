@@ -7,6 +7,7 @@ targets) is paired with the same mutation writing graph.json, proving the
 mutator ran and chose to skip.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -670,7 +671,7 @@ def test_the_canonical_board_is_current_when_the_view_pass_returns(tmp_path, mon
     )
 
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
+    seed_graph(graph, '{"entries": []}')
     monkeypatch.setattr(gc, "GRAPH_JSON", graph)
 
     def _add(entries):

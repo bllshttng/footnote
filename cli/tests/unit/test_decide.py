@@ -10,6 +10,7 @@ not find it. So every recall assertion names a POSITIVE marker - the returned
 ``decision_id`` - never the absence of an error.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -488,9 +489,7 @@ def _seed_projection(tmp_graph: Path, rows: list[dict]) -> None:
 @pytest.fixture
 def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n"
-    )
+    seed_graph(g, json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -1208,7 +1207,7 @@ def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, ind
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     entries = json.loads(tmp_graph.read_text())["entries"]
     entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1926,7 +1925,7 @@ def test_reindex_folds_every_project_root_the_graph_names(
     (sibling / ".fno").mkdir(parents=True)
     entries = json.loads(tmp_graph.read_text())["entries"]
     entries.append(_node("x-9999", cwd=str(sibling)))
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     from fno.decide import record_decision
 
