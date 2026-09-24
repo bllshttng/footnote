@@ -3967,15 +3967,14 @@ class _ExternalSelectionError(RuntimeError):
 
 
 def _joined_open_candidates() -> list[dict]:
-    """The transient joined selection model: the Rust snapshot exactly once,
-    one entry per open item with every selection sidecar field already
-    joined. Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    """The transient joined selection model: the Rust snapshot exactly once.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.tracker import get_tracker
 
     tracker = get_tracker()
     try:
-        entries = tracker.snapshot()["entries"]
+        entries = tracker._call("snapshot")["entries"]  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
         raise _ExternalSelectionError(f"tracker {tracker.name!r} snapshot failed: {exc}") from exc
     return [e for e in entries if e.get("state") == "open"]

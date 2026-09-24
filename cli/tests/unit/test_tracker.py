@@ -112,7 +112,7 @@ def test_client_list_open_and_snapshot_and_close(monkeypatch):
     cands = t.list_open()
     assert cands[0].id == "E-1"
     assert cands[0].priority == "p1"
-    assert t.snapshot()["backend"] == "graph"
+    assert t._call("snapshot")["backend"] == "graph"
     t.close("E-1")
 
 

@@ -82,9 +82,10 @@ class FakeTracker:
     def close(self, id):
         raise AssertionError("close is not part of selection")
 
-    def snapshot(self):
+    def _call(self, op, id=None):
         """The door-shaped document: open entries joined with sidecar fields,
-        tombstones omitted (this fake carries no closed rows)."""
+        closed rows as tombstones."""
+        assert op == "snapshot"
         import fno.tracker.sidecar as sidecar_store
 
         entries = []
@@ -114,6 +115,11 @@ class FakeTracker:
                 "claimed_at": sc.claimed_at,
                 "cost_usd": sc.cost_usd,
             })
+        for r in self._rows:
+            if r.get("state", "open") != "open":
+                entries.append(
+                    {"id": r["id"], "state": "closed", "status": "done", "completed_at": "closed"}
+                )
         return {"backend": self.name, "entries": entries}
 
 
@@ -157,6 +163,23 @@ def _rows_basic():
         {"id": "EXT-lo", "title": "Low prio leaf", "priority": "p3",
          "created_at": _days_ago(1)},
     ]
+
+
+def test_next_never_selects_a_closed_tombstone(tmp_path, monkeypatch):
+    """AC10-HP: a closed row rides the snapshot as a tombstone; selection
+    filters it out even when it ranks first."""
+    rows = [
+        {"id": "EXT-done", "title": "Already closed", "priority": "p0",
+         "state": "closed", "created_at": _days_ago(1)},
+        {"id": "EXT-hi", "title": "High prio leaf", "priority": "p1",
+         "created_at": _days_ago(2)},
+    ]
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+    })
+    r = runner.invoke(app, ["backlog", "next", "--json"], catch_exceptions=False)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
 
 
 def test_next_joins_once_and_ranks_over_the_open_set(tmp_path, monkeypatch):
