@@ -15,6 +15,7 @@ pub mod done_evidence;
 pub mod encounters;
 pub mod entities;
 pub mod epic_cap;
+pub mod findings;
 pub mod idea_cap;
 pub mod model;
 pub mod node_state;
@@ -62,6 +63,7 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("decisions", "backlog/decisions.rs"),
     ("node_decisions", "backlog/decisions.rs"),
     ("node_costs", "backlog/costs.rs"),
+    ("findings", "backlog/findings.rs"),
     ("harnesses", "backlog/entities.rs"),
     ("models", "backlog/entities.rs"),
     ("agent_sessions", "backlog/entities.rs"),
@@ -100,6 +102,7 @@ pub(crate) fn ensure_triggers(connection: &Connection) -> Result<(), String> {
         relations::triggers(),
         decisions::triggers(),
         costs::triggers(),
+        findings::triggers(),
     ]
     .concat();
     connection
@@ -240,6 +243,7 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     sessions::ensure_table(&connection)?;
     comments::ensure_table(&connection)?;
     encounters::ensure_table(&connection)?;
+    findings::ensure_table(&connection)?;
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
     costs::ensure_table(&connection)?;
@@ -1046,6 +1050,11 @@ fn save_aggregate(connection: &Connection, node: &Node) -> Result<(), String> {
         &node.id,
         node.comments.as_deref().unwrap_or(&[]),
     )?;
+    findings::save(
+        connection,
+        &node.id,
+        node.findings.as_deref().unwrap_or(&[]),
+    )?;
     encounters::save(
         connection,
         &node.id,
@@ -1068,6 +1077,7 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
     sessions::delete(connection, id)?;
     comments::delete(connection, id)?;
     encounters::delete(connection, id)?;
+    findings::delete(connection, id)?;
     pull_requests::delete(connection, id)?;
     relations::delete(connection, id)?;
     costs::delete(connection, id)?;

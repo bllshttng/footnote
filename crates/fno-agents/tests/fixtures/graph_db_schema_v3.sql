@@ -95,6 +95,14 @@ CREATE TABLE node_decisions (
   seq INTEGER NOT NULL, PRIMARY KEY (node_id, event_id)
 );
 CREATE INDEX node_decisions_order ON node_decisions(node_id, seq);
+CREATE TABLE findings (
+  finding_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  created_at TEXT, body TEXT NOT NULL, block_cmd TEXT, block_excerpt TEXT,
+  source_session_id TEXT, source_harness TEXT, resolved_at TEXT,
+  resolved_by_session_id TEXT
+);
+CREATE INDEX findings_node_open_idx ON findings(node_id, resolved_at);
 
 INSERT INTO graph_meta VALUES ('schema_version', '3'), ('version', 'sqlite:seed'),
   ('backend', 'sqlite'), ('decisions_imported', '1'), ('archive_imported_v2', '1');
@@ -122,3 +130,7 @@ INSERT INTO decisions (event_id, event_type, ts, source, data)
 VALUES ('d-one', 'operator_decision', '2026-09-16T00:00:01Z', 'target',
   '{"decision_id":"d-one","decision":"keep","subject":"x-a"}');
 INSERT INTO node_decisions VALUES ('x-a', 'd-one', 0);
+INSERT INTO findings (finding_id, node_id, created_at, body, source_session_id, source_harness,
+  resolved_at, resolved_by_session_id)
+VALUES ('f-1', 'x-a', '2026-09-20T00:00:00+00:00', 'blocks', 's-9', 'annotate-import',
+  'T1', 's-8');

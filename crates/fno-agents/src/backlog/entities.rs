@@ -110,6 +110,15 @@ const REFERRERS: &[Referrer] = &[
         &[("session_id", Some("harness"))],
     ),
     ("node_costs", &[], &[], &[("session_id", None)]),
+    (
+        "findings",
+        &["source_harness"],
+        &[],
+        &[
+            ("source_session_id", Some("source_harness")),
+            ("resolved_by_session_id", None),
+        ],
+    ),
 ];
 
 /// The entity triggers (a BEFORE INSERT and a BEFORE UPDATE OF pair per
@@ -155,6 +164,17 @@ pub fn ensure_triggers(connection: &Connection) -> Result<(), String> {
 /// ids seen with more than one harness).
 pub fn backfill_from_v3(connection: &Connection) -> Result<(i64, i64, i64), String> {
     let at = |column: &str| format!("strftime('%Y-%m-%dT%H:%M:%fZ', {column})");
+    // A schema-3 store made before findings existed has no findings_v3.
+    let findings = if super::schema_v4::table_exists(connection, "findings_v3")? {
+        format!(
+            "UNION ALL SELECT source_session_id, source_harness, NULL, {created} FROM findings_v3
+             UNION ALL SELECT resolved_by_session_id, NULL, NULL, {resolved} FROM findings_v3",
+            created = at("created_at"),
+            resolved = at("resolved_at"),
+        )
+    } else {
+        String::new()
+    };
     let refs = format!(
         "CREATE TEMP TABLE v4_entity_refs AS
          SELECT session_id AS sid, harness, NULL AS model,
@@ -167,6 +187,7 @@ pub fn backfill_from_v3(connection: &Connection) -> Result<(i64, i64, i64), Stri
                    FROM node_provenance_v3
          UNION ALL SELECT think_session_id, NULL, NULL, NULL FROM node_provenance_v3
          UNION ALL SELECT NULL, NULL, model, NULL FROM node_dispatch_v3
+         {findings}
          UNION ALL SELECT session_id, NULL, NULL, {node} FROM nodes_v3
          UNION ALL SELECT json_extract(j.value, '$.session_id'), NULL, NULL,
                           {cost} FROM nodes_v3, json_each(nodes_v3.extras, '$.cost_sessions') j

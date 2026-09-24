@@ -92,6 +92,7 @@ const V3_TABLES: &[&str] = &[
     "relations",
     "decisions",
     "node_decisions",
+    "findings",
 ];
 
 pub(crate) fn table_exists(connection: &Connection, name: &str) -> Result<bool, String> {
@@ -330,6 +331,7 @@ fn rebuild(connection: &Connection, report: &mut Report) -> Result<(), String> {
         super::relations::ddl(),
         super::decisions::ddl(),
         super::costs::ddl(),
+        super::findings::ddl(),
     ] {
         connection
             .execute_batch(&ddl)
@@ -352,6 +354,9 @@ fn rebuild(connection: &Connection, report: &mut Report) -> Result<(), String> {
     report.relations_dropped = dropped;
     if present.contains(&"decisions") {
         super::decisions::copy_from_v3(connection, present.contains(&"node_decisions"))?;
+    }
+    if present.contains(&"findings") {
+        super::findings::copy_from_v3(connection)?;
     }
     let (promoted, kept) = super::costs::promote_from_extras(connection)?;
     super::nodes::strip_extras_key(connection, "cost_sessions", &promoted)?;
@@ -434,6 +439,16 @@ mod tests {
             })
             .collect();
         assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            rows(
+                &connection,
+                "SELECT finding_id || ' ' || (resolved_at IS NOT NULL) || ' '
+                        || (SELECT harness_id FROM agent_sessions WHERE id = 's-9')
+                 FROM findings"
+            ),
+            vec!["f-1 1 annotate-import"],
+            "a finding migrates with its entities, and a bad resolved stamp stays resolved"
+        );
         let entries = crate::backlog::export_rows(&connection).unwrap();
         let a = entries.iter().find(|row| row["id"] == "x-a").unwrap();
         // The renamed and folded keys: the quoted `at` became started_at,

@@ -24,13 +24,14 @@
 | `decisions` | `backlog/decisions.rs` | `seq`, `event_id` unique | none |
 | `node_decisions` | `backlog/decisions.rs` | `(node_id, event_id)` | `nodes`, `decisions` (both cascade) |
 | `node_costs` | `backlog/costs.rs` | `(node_id, seq)` | `nodes` (cascade), `session_id` |
+| `findings` | `backlog/findings.rs` | `finding_id` | `nodes` (cascade), `source_harness`, two session ids |
 | `nodes_fts` | `backlog/search.rs` | FTS5 over `nodes` rowids | none |
 
 A harness column points at `harnesses`, a session column at `agent_sessions`, a model column at `models`. Node self-references have no foreign key: `parent_id`, `contained_in`, `superseded_by`, `caused_by` and `supersessions.successor_id`. The live store holds dangling values there. A key forces them out of the node JSON, so the schema declares none. `sessions.observed_model` is a JSON object, not a model id, so it has no key either.
 
 ## Timestamps
 
-Every table has `created_at` (row written) and `updated_at` (row last changed). If a write leaves `updated_at` unchanged, an `AFTER UPDATE` trigger per table sets it. `nodes`, `comments` and `node_claims` keep a wire `created_at` that the node JSON carries, so their `created_at` can be null. A claim's `created_at` is its lock time.
+Every table has `created_at` (row written) and `updated_at` (row last changed). If a write leaves `updated_at` unchanged, an `AFTER UPDATE` trigger per table sets it. `nodes`, `comments`, `findings` and `node_claims` keep a wire `created_at` that the node JSON carries, so their `created_at` can be null. A claim's `created_at` is its lock time.
 
 Every timestamp column carries a named CHECK, `<table>_<column>_iso`. A value must parse with `datetime()` and end in `Z` or `+00:00`. A refused write names the constraint, for example `nodes_completed_at_iso`. The store writes its own stamps as `%Y-%m-%dT%H:%M:%fZ`. It never rewrites a stored value to that spelling, because the node JSON must keep its bytes.
 

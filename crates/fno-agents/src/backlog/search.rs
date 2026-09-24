@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::backlog::api::Node;
     use crate::backlog::{
-        comments, costs, encounters, entities, nodes, pull_requests, relations, sessions,
+        comments, costs, encounters, entities, findings, nodes, pull_requests, relations, sessions,
     };
     use serde_json::json;
 
@@ -146,6 +146,7 @@ mod tests {
             encounters::ensure_table,
             pull_requests::ensure_table,
             relations::ensure_table,
+            findings::ensure_table,
         ] {
             ensure(&connection).unwrap();
         }
