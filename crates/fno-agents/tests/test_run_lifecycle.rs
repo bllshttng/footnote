@@ -64,13 +64,57 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// One raw line to fd 2. The libtest per-test capture swallows `eprintln!`
+/// from this process on the runner, so the diagnostic trace rides the raw
+/// descriptor that capture cannot intercept.
+fn raw_note(line: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stderr().lock();
+    let _ = out.write_all(format!("{line}\n").as_bytes());
+    let _ = out.flush();
+}
+
+/// The dump rides three channels because the first run's stderr dump never
+/// reached the CI log: the ordinary stderr write, a raw fd 2 write that no
+/// output capture can intercept, and `GITHUB_STEP_SUMMARY`, whose file the
+/// runner renders even for a failed job. The temp file is the audit copy.
+fn emit_dump(buf: &str) {
+    eprint!("{buf}");
+    use std::io::Write as _;
+    let bytes = buf.as_bytes();
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = unsafe { libc::write(2, bytes[off..].as_ptr().cast(), bytes.len() - off) };
+        if n <= 0 {
+            break;
+        }
+        off += n as usize;
+    }
+    if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
+            let _ = f.write_all(bytes);
+        }
+    }
+    let _ = std::fs::write(
+        std::env::temp_dir().join(format!("hang-watchdog-dump-{}.txt", std::process::id())),
+        bytes,
+    );
+}
+
 fn dump_stuck_state() {
-    eprintln!("hang-watchdog: no test progress for 120s; dumping state");
+    let mut buf = String::from("hang-watchdog: no test progress for 120s; dumping state\n");
     if let Ok(out) = Command::new("ps")
         .args(["-e", "-o", "pid,ppid,pgid,sess,stat,wchan:28,etime,args"])
         .output()
     {
-        eprintln!("--- ps ---\n{}", String::from_utf8_lossy(&out.stdout));
+        buf.push_str(&format!(
+            "--- ps ---\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
     }
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
@@ -91,14 +135,14 @@ fn dump_stuck_state() {
             {
                 continue;
             }
-            eprintln!("--- pid {} ---", pid_path.display());
-            eprintln!("cmdline: {cmdline}");
-            for f in ["stat", "wchan", "status"] {
+            buf.push_str(&format!("--- pid {} ---\n", pid_path.display()));
+            buf.push_str(&format!("cmdline: {cmdline}\n"));
+            for f in ["stat", "wchan", "status", "syscall"] {
                 if let Ok(body) = std::fs::read_to_string(pid_path.join(f)) {
-                    eprintln!(
-                        "{f}: {}",
+                    buf.push_str(&format!(
+                        "{f}: {}\n",
                         body.lines().take(4).collect::<Vec<_>>().join(" | ")
-                    );
+                    ));
                 }
             }
             if let Ok(fds) = std::fs::read_dir(pid_path.join("fd")) {
@@ -107,7 +151,7 @@ fn dump_stuck_state() {
                     .filter_map(|fd| std::fs::read_link(fd.path()).ok())
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
-                eprintln!("fds: {}", links.join(", "));
+                buf.push_str(&format!("fds: {}\n", links.join(", ")));
             }
         }
     }
@@ -118,13 +162,14 @@ fn dump_stuck_state() {
             if !name.starts_with("fno-test-run-lifecycle-") {
                 continue;
             }
-            eprintln!("--- root {} ---", entry.path().display());
-            dump_tree(&entry.path(), 0);
+            buf.push_str(&format!("--- root {} ---\n", entry.path().display()));
+            dump_tree(&entry.path(), 0, &mut buf);
         }
     }
+    emit_dump(&buf);
 }
 
-fn dump_tree(dir: &std::path::Path, depth: usize) {
+fn dump_tree(dir: &std::path::Path, depth: usize, buf: &mut String) {
     if depth > 4 {
         return;
     }
@@ -134,12 +179,12 @@ fn dump_tree(dir: &std::path::Path, depth: usize) {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            eprintln!("{} {}/", " ".repeat(depth * 2), p.display());
-            dump_tree(&p, depth + 1);
+            buf.push_str(&format!("{} {}/\n", " ".repeat(depth * 2), p.display()));
+            dump_tree(&p, depth + 1, buf);
         } else {
-            eprintln!("{} {}", " ".repeat(depth * 2), p.display());
+            buf.push_str(&format!("{} {}\n", " ".repeat(depth * 2), p.display()));
             if let Ok(body) = std::fs::read_to_string(&p) {
-                eprintln!("{}: {body}", p.display());
+                buf.push_str(&format!("{}: {body}\n", p.display()));
             }
         }
     }
@@ -567,6 +612,7 @@ fn the_run_timeout_names_the_wait_and_the_run() {
 #[test]
 fn a_queued_run_keeps_its_whole_budget() {
     let root = tmp_claims_root("whole-budget");
+    raw_note("t5: spawning holder");
     let mut holder = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -576,6 +622,7 @@ fn a_queued_run_keeps_its_whole_budget() {
         .spawn()
         .expect("spawn holder");
     std::thread::sleep(Duration::from_millis(300));
+    raw_note("t5: spawning waiter");
     let out = test_run(&root)
         .args(["--timeout", "5"])
         .arg("--")
@@ -584,6 +631,7 @@ fn a_queued_run_keeps_its_whole_budget() {
         .stderr(std::process::Stdio::piped())
         .output()
         .expect("run the queued waiter");
+    raw_note("t5: waiter returned");
     assert!(holder.try_wait().unwrap().is_some());
     let _ = holder.wait();
     assert!(
