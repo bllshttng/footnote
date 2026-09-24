@@ -103,7 +103,6 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Is this PR ready to merge?" | `fno do pr status <n>` |
 | "Merge an approved PR" | `fno do pr merge` |
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
-| "Send my questions to my notes file" | set `[[attention]]` |
 
 Prefer the smaller surface: skills run inline by default (think, review); dispatched flows spawn.
 
