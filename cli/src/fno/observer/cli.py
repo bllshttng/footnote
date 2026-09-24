@@ -931,7 +931,6 @@ def _write_workdir_settings(workdir: Path) -> None:
             "no_ship": True,
             "state_dir": str(fno_dir) + "/",
             "paths": {
-                "graph_json": str(fno_dir / "graph.json"),
                 "ledger_json": str(fno_dir / "ledger.json"),
                 "briefs_dir": str(fno_dir / "briefs/"),
             },

@@ -493,8 +493,18 @@ pub(crate) fn read_archive_raw(path: &Path) -> Result<RawRead, StoreError> {
     if !path.exists() {
         return Ok(RawRead::Empty);
     }
-    let raw = std::fs::read(path)
-        .map_err(|e| StoreError::Unreadable(path.display().to_string(), format!("{e}")))?;
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RawRead::Empty);
+        }
+        Err(error) => {
+            return Err(StoreError::Unreadable(
+                path.display().to_string(),
+                format!("{error}"),
+            ));
+        }
+    };
     let text = String::from_utf8(raw).map_err(|e| {
         StoreError::Unreadable(path.display().to_string(), format!("not UTF-8: {e}"))
     })?;

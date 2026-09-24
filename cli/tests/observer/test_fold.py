@@ -10,6 +10,7 @@ corrupt-line tolerance, and the isolation-violation detective scan.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fno.observer import fold, isolation
 
@@ -343,3 +344,13 @@ def test_isolation_violation_detected(tmp_path):
     assert result.violations[0].session_id == leaked
     # a clean scan (id absent) -> clean
     assert isolation.check_isolation({"not-present"}, {"ledger_json": real_ledger}).verdict == "clean"
+
+
+def test_default_real_state_paths_tracks_sqlite_graph_store(tmp_path):
+    paths = isolation.default_real_state_paths(Path("/repo"))
+    assert paths["graph_db"] == Path.home() / ".fno" / "graph.db"
+    assert "graph_json" not in paths
+    db = tmp_path / "graph.db"
+    db.write_bytes(b"SQLite\x00eval-leak\x00")
+    result = isolation.check_isolation({"eval-leak"}, {"graph_db": db})
+    assert result.verdict == "violated"

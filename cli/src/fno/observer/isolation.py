@@ -114,8 +114,8 @@ _ESCAPE_EXPLANATIONS: dict[str, str] = {
         "writer bypasses project-local path overrides - known escapee: "
         "register-task.py ledger registration (scripts/metrics/register-task.py:23)"
     ),
-    "graph_json": (
-        "writer bypasses project-local path overrides - known escapee: "
+    "graph_db": (
+        "writer bypasses project-local state path overrides - known escapee: "
         "paths.sh STATE_DIR (scripts/lib/paths.sh:11-13)"
     ),
     "repo_events_jsonl": (
@@ -146,12 +146,12 @@ _DEFAULT_ESCAPE_EXPLANATION = (
 # ---------------------------------------------------------------------------
 
 
-def _scan_jsonl_file(
+def _scan_state_file(
     path: Path,
     eval_session_ids: set[str],
     surface_key: str,
 ) -> list[Violation]:
-    """Scan a JSONL file line by line for eval session ids.
+    """Scan a state file line by line for eval session ids.
 
     Reports the 1-based line number of the first match per (id, file).
     Missing files are silently skipped (clean result).
@@ -274,7 +274,7 @@ def check_isolation(
                             objects.  All known keys:
 
                             - ``ledger_json``       real ~/.fno/ledger.json
-                            - ``graph_json``        real ~/.fno/graph.json
+                            - ``graph_db``          real ~/.fno/graph.db
                             - ``repo_events_jsonl`` fno repo .fno/events.jsonl
                             - ``global_events_jsonl`` ~/.fno/events.jsonl
                             - ``memory_dir``        ~/.fno/memory/ directory
@@ -292,11 +292,11 @@ def check_isolation(
 
     all_violations: list[Violation] = []
 
-    # --- JSONL surfaces ---
-    for key in ("ledger_json", "graph_json", "repo_events_jsonl", "global_events_jsonl"):
+    # --- State-file surfaces ---
+    for key in ("ledger_json", "graph_db", "repo_events_jsonl", "global_events_jsonl"):
         path = real_state_paths.get(key)
         if path is not None:
-            all_violations.extend(_scan_jsonl_file(path, eval_session_ids, key))
+            all_violations.extend(_scan_state_file(path, eval_session_ids, key))
 
     # --- memory directory (whole-file scan per file) ---
     memory_dir = real_state_paths.get("memory_dir")
@@ -447,7 +447,7 @@ def default_real_state_paths(repo_root: Path) -> dict[str, Path]:
     fno_home = home / ".fno"
     return {
         "ledger_json": fno_home / "ledger.json",
-        "graph_json": fno_home / "graph.json",
+        "graph_db": fno_home / "graph.db",
         "repo_events_jsonl": repo_root / ".fno" / "events.jsonl",
         "global_events_jsonl": fno_home / "events.jsonl",
         "memory_dir": fno_home / "memory",
