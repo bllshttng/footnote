@@ -69,7 +69,7 @@ Both ends of a `relations` row are real nodes. An edge whose far end names no no
 
 A timestamp name says what it records (user ruling 2026-09-23). A session's `at` and `claimed_at` held its stamp time, so they fold into `started_at`. An encounter's `ts` is now `created_at`. The column `node_claims.locked_at` is now `created_at`, and the node JSON key stays `locked_at`, because the node already has a `created_at`. The column `decisions.ts` is now `created_at`. The flattened decision rows keep `ts`, the event envelope key.
 
-Writers emit only the new names. Readers accept the old ones for one release through `LEGACY_ITEM_KEYS` in `backlog/model.rs`. A legacy `at` that is not UTC ISO-8601 stays in the item's extras, so nothing is lost. Delete the map, and the folds that read it, one release on.
+Writers emit only the new names. Readers accept the old ones for one release through `LEGACY_ITEM_KEYS` in `backlog/model.rs`. A legacy `at` that is not UTC ISO-8601 stays in the item's extras, so nothing is lost. A progress note's `ts` does the same, in the model and in the migration. Delete the map, and the folds that read it, one release on.
 
 ## The schema-4 migration
 

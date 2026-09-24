@@ -459,6 +459,11 @@ mod tests {
         assert_eq!(a["session_id"], "20260911T051456Z-cl67883-05ec5f");
         let b = entries.iter().find(|row| row["id"] == "x-b").unwrap();
         assert_eq!(
+            b["progress_notes"][1],
+            serde_json::json!({"ts": "T1", "text": "odd stamp"}),
+            "a note stamp that is not UTC migrates into extras"
+        );
+        assert_eq!(
             b["cost_sessions"][0]["timestamp"], "2026-08-21T13:10:35.335800",
             "a naive cost timestamp stays in extras"
         );
@@ -516,9 +521,10 @@ mod tests {
             .unwrap();
         let connection = crate::backlog::open(&graph).unwrap();
         let comments = crate::backlog::comments::load(&connection, "x-b").unwrap();
-        assert_eq!(comments.len(), 1);
+        assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].body.as_deref(), Some("kept"));
         assert!(comments[0].extras.is_empty());
+        assert_eq!(comments[1].extras["ts"], "T1");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! `comments` outside this file).
 
 use super::model::Comment;
-use super::schema_v4::{iso, norm_sql, touch, updated, NOW};
+use super::schema_v4::{iso, iso_sql, norm_sql, touch, updated, NOW};
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
 
@@ -34,14 +34,19 @@ pub fn ensure_table(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Schema-4 migration copy from `comments_v3`.
+/// Schema-4 migration copy from `comments_v3`. A note `ts` that is not UTC
+/// ISO-8601 moves to extras, as the model reads it.
 pub(crate) fn copy_from_v3(connection: &Connection) -> Result<(), String> {
+    let ok = iso_sql("c.created_at");
     connection
         .execute_batch(&format!(
             "INSERT INTO comments (rowid, node_id, seq, created_at, body, kind, title, details,
                  difficulty, source, source_session_id, source_harness, extras, updated_at)
-             SELECT c.rowid, c.node_id, c.seq, c.created_at, c.body, c.kind, c.title, c.details,
-                    c.difficulty, c.source, c.source_session_id, c.source_harness, c.extras,
+             SELECT c.rowid, c.node_id, c.seq, CASE WHEN {ok} THEN c.created_at END,
+                    c.body, c.kind, c.title, c.details,
+                    c.difficulty, c.source, c.source_session_id, c.source_harness,
+                    CASE WHEN c.created_at IS NOT NULL AND NOT COALESCE({ok}, 0)
+                         THEN json_set(c.extras, '$.ts', c.created_at) ELSE c.extras END,
                     COALESCE({}, {}, {NOW})
              FROM comments_v3 c LEFT JOIN nodes_v3 n ON n.id = c.node_id;",
             norm_sql("c.created_at"),

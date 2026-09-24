@@ -114,7 +114,8 @@ VALUES ('x-a', 0, 'think', 'claude', 's-1', NULL, '"2026-07-19T16:43:13Z"'),
 INSERT INTO encounters (node_id, seq, ts, evidence, session_id, harness, model)
 VALUES ('x-a', 0, '2026-09-11T03:00:00+00:00', 'cost me time', 's-2', 'codex', 'gpt-6-luna');
 INSERT INTO comments (node_id, seq, created_at, body)
-VALUES ('x-b', 0, '2026-09-11T00:00:00Z', 'kept');
+VALUES ('x-b', 0, '2026-09-11T00:00:00Z', 'kept'),
+       ('x-b', 1, 'T1', 'odd stamp');
 INSERT INTO relations VALUES ('x-9999', 'x-a', 'blocks', 'x-a', 0);
 INSERT INTO relations VALUES ('x-gone', 'x-b', 'related', 'x-gone', 0);
 INSERT INTO decisions (event_id, event_type, ts, source, data)

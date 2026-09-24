@@ -1449,6 +1449,25 @@ mod tests {
     }
 
     #[test]
+    fn a_note_stamp_that_is_not_utc_saves_and_keeps_its_bytes() {
+        let (_dir, connection) = store();
+        let notes = serde_json::json!([
+            {"ts": "T1", "text": "a"},
+            {"ts": "2026-09-11T00:00:00Z", "text": "b"},
+        ]);
+        let mut row = node(two_sessions()).to_json();
+        row["progress_notes"] = notes.clone();
+        crate::backlog::save_aggregate(&connection, &Node::from_json(&row).unwrap()).unwrap();
+        let exported = crate::backlog::export_rows(&connection).unwrap();
+        assert_eq!(exported[0]["progress_notes"].to_string(), notes.to_string());
+        let stamped = column(
+            &connection,
+            "SELECT COUNT(created_at) FROM comments WHERE node_id = 'x-a'",
+        );
+        assert_eq!(stamped, vec![1], "only the UTC stamp fills the column");
+    }
+
+    #[test]
     fn a_status_the_pass_moves_counts_as_a_write() {
         let (_dir, connection) = store();
         let row = |id: &str, extra: Value| {

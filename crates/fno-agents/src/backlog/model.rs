@@ -1414,8 +1414,13 @@ obj_list!(
     "progress_notes",
     Comment,
     |o: &Map<String, Value>| -> Result<Comment, ModelError> {
+        // A ts that is not UTC ISO-8601 stays in extras, like a session's
+        // legacy `at`, so the column CHECK never refuses a stored note.
+        let created_at =
+            sub_opt_str(o, "ts").filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts));
+        let ts_key = if created_at.is_some() { "ts" } else { "" };
         Ok(Comment {
-            created_at: sub_opt_str(o, "ts"),
+            created_at,
             body: sub_opt_str(o, "text"),
             kind: sub_opt_str(o, "kind"),
             title: sub_opt_str(o, "title"),
@@ -1427,7 +1432,7 @@ obj_list!(
             extras: leftovers(
                 o,
                 &[
-                    "ts",
+                    ts_key,
                     "text",
                     "kind",
                     "title",
@@ -1598,8 +1603,9 @@ fn session_to_json(s: &SessionRecord) -> Value {
 
 pub(crate) fn comment_to_json(c: &Comment) -> Value {
     let mut obj = Map::new();
-    if let Some(v) = &c.created_at {
-        obj.insert("ts".into(), json!(v));
+    let ts = c.created_at.as_ref().map(|v| json!(v));
+    if let Some(v) = ts.or_else(|| c.extras.get("ts").cloned()) {
+        obj.insert("ts".into(), v);
     }
     if let Some(v) = &c.body {
         obj.insert("text".into(), json!(v));
