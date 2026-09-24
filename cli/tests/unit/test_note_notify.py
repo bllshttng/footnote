@@ -999,7 +999,7 @@ def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
     def must_not_run(*a, **k):
         raise AssertionError("the note machinery must not run for a blocking finding")
 
-    monkeypatch.setattr(note_bridge, "readers_before_append", must_not_run)
+    monkeypatch.setattr("fno.backlog.note_notify.readers_before_append", must_not_run)
     monkeypatch.setattr(note_bridge, "_write_state", must_not_run)
     result = CliRunner().invoke(
         graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
