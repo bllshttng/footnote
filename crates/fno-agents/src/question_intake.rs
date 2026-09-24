@@ -332,7 +332,7 @@ One line plus a node pointer (law d-59af3235)."
     let is_pin = !has_options && req.ask.as_deref().is_some_and(|a| !a.trim().is_empty());
     if !is_pin {
         let mut missing: Vec<&str> = Vec::new();
-        if parsed.title.trim().is_empty() {
+        if title_of(&req.question, &parsed.title).trim().is_empty() {
             missing.push("what");
         }
         if parsed.blocked_because.trim().is_empty() {

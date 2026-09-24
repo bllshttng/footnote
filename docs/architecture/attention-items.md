@@ -78,7 +78,7 @@ fno inbox outstanding ask --question-file q.md --node <node-id> --subject <subje
 When options are present, `--node` is required: an ask is one line plus a node pointer. The port refuses a question with no what, why, two options, or recommendation with its reason:
 
 ```
-outstanding: refused: a question needs what, why, two options, a recommendation. Write a question file (docs/architecture/attention-items.md, "Asking with context") and pass --question-file. One action with no choice is a pin: pass --ask "<the action>".
+outstanding: refused: a question needs why, two options, a recommendation. Write a question file (docs/architecture/attention-items.md, "Asking with context") and pass --question-file. One action with no choice is a pin: pass --ask "<the action>".
 ```
 
 A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its king with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
