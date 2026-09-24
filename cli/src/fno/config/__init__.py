@@ -68,7 +68,6 @@ from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
-from fno.config.status_sinks import ReachMeRow as ReachMeRow
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
@@ -3927,28 +3926,13 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
-    attention: list[ReachMeRow] = Field(default_factory=list)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
     @model_validator(mode="before")
     @classmethod
     def _lift_legacy_keys(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("reach_me"), list):
-            legacy = data.pop("reach_me")
-            _LOG.warning("[[reach_me]] is now [[attention]]; the old name reads one release")
-            data["attention"] = list(data.get("attention") or []) + legacy
         return _watchdog.lift_retire_grace(data)
-
-    @field_validator("attention", mode="before")
-    @classmethod
-    def _coerce_attention(cls, v: object) -> object:
-        """Fail-safe like ``status_sinks``: wrong shape degrades to [] with a warning."""
-        if isinstance(v, list):
-            return v
-        if v is not None:
-            _LOG.warning("config.attention is %s, not an array of tables", type(v).__name__)
-        return []
 
     @field_validator("status_sinks", mode="before")
     @classmethod
