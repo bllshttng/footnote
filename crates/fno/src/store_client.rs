@@ -15,6 +15,7 @@
 //! notice line.
 
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -337,7 +338,7 @@ fn format_rank(v: f64) -> String {
 fn backlog_column(e: &Value) -> Option<&'static str> {
     // `kanban_column` needs claim/underway facts the verb deliberately does
     // not fetch; false for both is the unclaimed view the float targets.
-    crate::backlog_view::kanban_column(e, false, false)
+    crate::backlog_view::kanban_column(e, false, false, None)
 }
 
 /// `backlog defer <node> --reason <why>`, natively: the keeper's defer op
@@ -453,6 +454,72 @@ pub fn version(graph: &Path) -> Result<i64, String> {
         .get("version")
         .and_then(Value::as_i64)
         .ok_or_else(|| "the store returned no version".to_string())
+}
+
+/// A crate-local parse of the keeper's board facts reply.
+#[derive(Debug, Clone, Default)]
+pub struct BoardFacts {
+    pub ids: Vec<String>,
+    pub underway: HashSet<String>,
+    pub effective_priority: HashMap<String, String>,
+}
+
+/// The keeper's whole-graph order and column facts: the `ready` op in
+/// board mode. A reply with no `ids` array names the deploy skew, so a
+/// keeper that predates the board mode is an error line, never a silently
+/// wrong order.
+pub fn board_facts(
+    graph: &Path,
+    entries: Option<&[Value]>,
+    claimed: &[String],
+) -> Result<BoardFacts, String> {
+    let mut params = json!({"board": true, "claimed": claimed});
+    if let Some(e) = entries {
+        params["entries"] = json!(e);
+    }
+    let reply = call(graph, "ready", params)?;
+    let ids = reply
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the store keeper predates the board mode; run fno doctor update")?;
+    Ok(BoardFacts {
+        ids: ids
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        underway: reply
+            .get("underway")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        effective_priority: reply
+            .get("effective_priority")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// The one delivery classifier's `flow` aggregate over the graph rows and
+/// the ledger.
+pub fn flow(graph: &Path, entries: &[Value], ledger: &[Value]) -> Result<Value, String> {
+    let reply = call(
+        graph,
+        "scoreboard_classify",
+        json!({"entries": entries, "rows": ledger}),
+    )?;
+    reply
+        .get("flow")
+        .cloned()
+        .ok_or_else(|| "the store classifier returned no flow".to_string())
 }
 
 #[cfg(test)]
