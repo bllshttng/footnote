@@ -7667,7 +7667,7 @@ fn settings_theme_tab_lists_the_shipped_palettes() {
 
 #[test]
 fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
-    let (rows, actions) = build_prefix_settings_rows("C-b");
+    let (rows, actions) = settings_modal::build_prefix_settings_rows("C-b");
     assert!(matches!(
         rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-b"
@@ -7679,13 +7679,13 @@ fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(specs, PREFIX_PICKS.map(String::from));
+    assert_eq!(specs, settings_modal::PREFIX_PICKS.map(String::from));
     assert!(rows.iter().any(|row| matches!(
         row,
         PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
     )));
 
-    let (custom_rows, _) = build_prefix_settings_rows("C-q");
+    let (custom_rows, _) = settings_modal::build_prefix_settings_rows("C-q");
     assert!(matches!(
         custom_rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-q"
@@ -7913,7 +7913,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // Centered (Full): keys modal, sideline MENU, settings.
     assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
     assert_chrome(
-        &build_sideline_menu(Anchor::Center, None).popup,
+        &build_sideline_menu(Anchor::Center, None, false).popup,
         chrome::Level::Full,
     );
     let v = two_pane_view();
@@ -7928,7 +7928,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
 
 #[test]
 fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None);
+    let menu = build_sideline_menu(Anchor::Center, None, false);
     let i = menu
         .popup
         .rows
