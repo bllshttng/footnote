@@ -2577,6 +2577,9 @@ def _sandbox_decision_graph(tmp_path, monkeypatch):
     """
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
     monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+    monkeypatch.setattr(
         "fno.paths.ledger_json", lambda: tmp_path / ".decision-index" / "ledger.json"
     )
     monkeypatch.setattr(

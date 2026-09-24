@@ -278,6 +278,9 @@ class FakeRun:
 
 @pytest.fixture
 def enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
     # The posture floor (merge step 1b) reads live settings; hermetic tests
