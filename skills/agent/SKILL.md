@@ -694,7 +694,7 @@ A final body word such as `question`, `heads-up`, or `fyi` remains body text.
 6. On a CLI refusal, relay its stderr unchanged so the user sees the live-agent and project-note alternatives instead of a skill-layer paraphrase.
 7. On success, relay the real message id and routing receipt exactly as printed.
 
-`delivered (hosted)` confirms the inject was accepted. It does not prove the recipient read the message. `queued (durable)` is durable fallback, not delivery. It awaits the recipient's next active boundary or recovery. Use `fno agents mail sent` to check whether the message `landed` in the recipient's transcript.
+`delivered (hosted)` confirms the inject was accepted. It does not prove the recipient read the message. `queued (durable)` is not delivered. It is durable fallback awaiting the recipient's next active boundary or recovery. Use `fno agents mail sent` to check whether the message `landed` in the recipient's transcript.
 Never upgrade queued mail to delivered, and never invent a receipt when the CLI printed none.
 An unknown agent heads-up exits 16 and writes nothing, so report that exact failure without guessing another recipient.
 `send` is free and never confirms because it is not a billed launch.
