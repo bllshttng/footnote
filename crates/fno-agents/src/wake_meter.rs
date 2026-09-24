@@ -38,7 +38,7 @@ pub(crate) fn wake_meter(transcript: &Path, since_epoch: Option<f64>) -> Result<
             Provenance::Harness(_) => {}
         }
         if turn.text.contains("<task-notification>") {
-            if let Some((id, n)) = parse_task_tokens(&turn.text) {
+            for (id, n) in parse_task_tokens(&turn.text) {
                 let before = match (turn.ts_epoch, since_epoch) {
                     (_, None) => true,
                     // a stampless notification cannot be placed in the window
@@ -79,12 +79,17 @@ pub(crate) fn wake_meter(transcript: &Path, since_epoch: Option<f64>) -> Result<
     }))
 }
 
-/// The first `<task-id>` / `<subagent_tokens>` pair in a notification body.
-fn parse_task_tokens(text: &str) -> Option<(String, u64)> {
-    let id = between(text, "<task-id>", "</task-id>")?;
-    let n = between(text, "<subagent_tokens>", "</subagent_tokens>")?;
-    let n = n.trim().parse::<u64>().ok()?;
-    Some((id.to_string(), n))
+/// Every `<task-id>` / `<subagent_tokens>` pair in the body: a claude wake
+/// can batch several `<task-notification>` blocks into one user row.
+fn parse_task_tokens(text: &str) -> Vec<(String, u64)> {
+    text.split("<task-notification>")
+        .skip(1)
+        .filter_map(|block| {
+            let id = between(block, "<task-id>", "</task-id>")?;
+            let n = between(block, "<subagent_tokens>", "</subagent_tokens>")?;
+            Some((id.to_string(), n.trim().parse::<u64>().ok()?))
+        })
+        .collect()
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -177,5 +182,15 @@ mod tests {
     fn unreadable_transcript_is_an_error_not_a_zero() {
         let err = wake_meter(Path::new("/nonexistent/wake-fixture.jsonl"), None).unwrap_err();
         assert!(err.contains("unreadable"));
+    }
+
+    #[test]
+    fn batched_notifications_all_count() {
+        let text = "<task-notification><task-id>m1</task-id><subagent_tokens>7000</subagent_tokens></task-notification> \
+                    <task-notification><task-id>m2</task-id><subagent_tokens>9000</subagent_tokens></task-notification>";
+        let lines = vec![row(text, "2026-09-24T12:00:00Z", false)];
+        let file = write_transcript(&lines);
+        let result = wake_meter(file.path(), None).unwrap();
+        assert_eq!(result["tokens_session"], 16_000);
     }
 }

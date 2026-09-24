@@ -1516,11 +1516,11 @@ fn derive_change(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        let ratio = data
-            .get("wake_ratio")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        attention.push(format!("wake ratio {ratio:.1} to 1 over 3 to 1"));
+        let item = match data.get("wake_ratio").and_then(Value::as_f64) {
+            Some(ratio) => format!("wake ratio {ratio:.1} to 1 over 3 to 1"),
+            None => "wake ratio n/a (no typed turns) over 3 to 1".to_string(),
+        };
+        attention.push(item);
     }
     // Attention outranks silence: a control plane failing for 30 minutes,
     // or a refusal rate climbing two beats running, is never journaled as
@@ -1963,7 +1963,12 @@ fn render_lines(
                 text.push_str(" - OVER 3 to 1");
             }
             lines.push(text);
-            let since_phrase = if previous.is_some() {
+            let since_phrase = if previous
+                .as_ref()
+                .and_then(|p| p.get("ts"))
+                .and_then(Value::as_str)
+                .is_some()
+            {
                 "since last beat"
             } else {
                 "since session start"
@@ -3214,7 +3219,7 @@ mod tests {
     /// `running 0`, which would name starts past the ceiling.
     #[test]
     fn r_blueprint_fails_without_a_session_id() {
-        let dir = std::env::temp_dir().join(format!("fno-fno-bp-nosess-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fno-bp-nosess-{}", std::process::id()));
         let reading = blueprint_reading(
             &dir,
             "",
@@ -3597,6 +3602,30 @@ mod tests {
         );
         assert!(!lines.iter().any(|l| l.starts_with("wake_ratio:")));
         assert!(!lines.iter().any(|l| l.starts_with("subagent_tokens:")));
+    }
+
+    // A zero-user over beat journals n/a, never a 0.0 ratio that contradicts
+    // the printed n/a line.
+    #[test]
+    fn wake_attention_without_typed_turns_names_n_a() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "wake_meter",
+                json!({"machine": 5, "user": 0, "ratio": null, "over": true,
+                       "tokens_since": 0, "tokens_session": 0}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(change.contains("wake ratio n/a"), "change: {change}");
+        assert!(!change.contains("0.0 to 1"), "change: {change}");
     }
 
     // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
