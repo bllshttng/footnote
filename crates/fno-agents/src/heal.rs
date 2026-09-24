@@ -1041,12 +1041,6 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
     healed
 }
 
-/// True when the line IS a closure line (anchored at the line start,
-/// case-insensitive, either spelling - the same match the gate's grep makes).
-fn is_trailer_line(line: &str) -> bool {
-    crate::king_board::pr_closure::is_closure_line(line)
-}
-
 /// The ids one closure line claims: the keyword and its optional colon
 /// stripped, tokens split on whitespace and comma, malformed tokens making
 /// the line prose. The grammar `pr_closure::parse` reads.
@@ -1072,11 +1066,7 @@ fn edit_body_nodes(findings: &[Finding]) -> Vec<String> {
 /// where append-per-node lost every id but the last to the last-line rule.
 fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     let mut union = edit_body_nodes(findings);
-    for id in body
-        .lines()
-        .filter(|line| is_trailer_line(line))
-        .flat_map(closure_line_ids)
-    {
+    for id in body.lines().flat_map(closure_line_ids) {
         if !union.contains(&id) {
             union.push(id);
         }
@@ -1084,11 +1074,12 @@ fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     union
 }
 
-/// The body with every trailer line removed - the base the one new line is
-/// appended to, so no stale line can outrank it.
+/// The body with every CLAIMING closure line removed - the base the one new
+/// line is appended to, so no stale line can outrank it. A keyword-led line
+/// whose tokens void it ("Fixes the thing.") is prose: the sweep leaves it.
 fn body_without_trailer_lines(body: &str) -> String {
     body.lines()
-        .filter(|line| !is_trailer_line(line))
+        .filter(|line| closure_line_ids(line).is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }

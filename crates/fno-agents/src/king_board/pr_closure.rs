@@ -20,12 +20,6 @@ use serde_json::{json, Value};
 /// writers render; `Backlog-Closure` is read for PRs opened before the rename.
 const KEYWORDS: [&str; 2] = ["fixes", "backlog-closure"];
 
-/// True when `line` opens with a closure keyword (either spelling, colon or
-/// colonless). The gate's grep and the heal read both match this shape.
-pub(crate) fn is_closure_line(line: &str) -> bool {
-    closure_line_rest(line).is_some()
-}
-
 /// The well-formed, deduplicated ids ONE line claims; empty when the line is
 /// prose (no keyword, or any malformed token).
 pub(crate) fn line_ids(line: &str) -> Vec<String> {
