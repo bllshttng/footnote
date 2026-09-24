@@ -85,6 +85,13 @@ cat >/dev/null
 printf '{"worktree":"%s"}\n' "$FNO_PR_WORKTREE"
 RESOLVER
 chmod +x "$TMP/bin/fno-agents"
+cat > "$TMP/bin/fno" <<'HOLDCHECK'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == "do pr hold-check" ]] && exit 0
+exit 1
+HOLDCHECK
+chmod +x "$TMP/bin/fno"
+export PATH="$TMP/bin:$PATH"
 export FNO_AGENTS_BIN="$TMP/bin/fno-agents"
 export FNO_PR_WORKTREE="$PR_WORKTREE"
 
