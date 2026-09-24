@@ -796,11 +796,9 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         "did not race: zero commit_rows conflicts across both appenders"
     );
 
-    // Every append that answered ok must be in the final file.
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // Every append that answered ok must be in the store: the json file is
+    // a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))

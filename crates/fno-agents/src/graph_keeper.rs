@@ -2044,7 +2044,14 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         };
         let base_rungs = plan_rung_map_field(params, "base_plan_rungs");
         let normalized_base = canonical_row_digests_with_rungs(&base_entries, base_rungs.as_ref());
-        let current_digests = canonical_row_digests_with_rungs(&current, base_rungs.as_ref());
+        // The begin snapshot is the defaulted read view (the cache runs
+        // apply_defaults), so the current rows must pass through the same
+        // pass before the compare: against the raw export every touched row
+        // reads as changed, and disjoint writers blanket-conflict.
+        let mut current_normalized = current.clone();
+        graph_store::apply_defaults(&mut current_normalized, false);
+        let current_digests =
+            canonical_row_digests_with_rungs(&current_normalized, base_rungs.as_ref());
         let ids: std::collections::BTreeSet<String> = normalized_base
             .keys()
             .chain(current_digests.keys())
