@@ -223,10 +223,10 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
 /// `spawn_gate.py::CPU_HOLD_POLL_S`.
 const CPU_HOLD_POLL: Duration = Duration::from_secs(15);
 const CPU_ADMIT_SAMPLES: u32 = 2;
-/// A blind CPU read (an undecidable band or an unreadable probe) is re-read
-/// this many times before the gate refuses. A blind read is not evidence the
-/// fleet is over, so it never holds for the whole queue budget, and it never
-/// admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
+/// A blind CPU read (an undecidable band or an unreadable probe) gets at most
+/// this many total samples before the gate refuses. A blind read is not
+/// evidence the fleet is over. It never holds for the whole queue budget and
+/// never admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
 const CPU_BLIND_SAMPLES: u32 = 3;
 #[cfg(not(test))]
 const CPU_BLIND_POLL: Duration = Duration::from_secs(5);

@@ -34,6 +34,7 @@ fn a_blind_read_refuses_after_bounded_rereads() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-blind-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -73,7 +74,10 @@ fn a_blind_read_refuses_after_bounded_rereads() {
     );
     let elapsed = started.elapsed();
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -116,6 +120,7 @@ fn no_wait_refuses_a_blind_read_on_the_first_sample() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-blind-nowait-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -153,7 +158,10 @@ fn no_wait_refuses_a_blind_read_on_the_first_sample() {
         },
     );
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -195,6 +203,7 @@ fn a_blind_read_then_an_admit_admits() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-admit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -246,7 +255,10 @@ fn a_blind_read_then_an_admit_admits() {
         },
     );
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -286,6 +298,7 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-dead-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -323,7 +336,10 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
         },
     );
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -359,6 +375,7 @@ fn an_admit_resets_blind_samples_before_slot_wait() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-admit-reset-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -410,7 +427,10 @@ fn an_admit_resets_blind_samples_before_slot_wait() {
         },
     );
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -452,6 +472,10 @@ fn a_blind_sample_breaks_the_held_under_threshold_streak() {
         .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-gate-streak-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let original_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+    let expected_claims_root = dir.join("previous-claims-root");
+    std::env::set_var("FNO_CLAIMS_ROOT", &expected_claims_root);
+    let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
     let root = dir.join("claims-root");
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
@@ -495,7 +519,15 @@ fn a_blind_sample_breaks_the_held_under_threshold_streak() {
         },
     );
 
-    std::env::remove_var("FNO_CLAIMS_ROOT");
+    match prior_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
+    let observed_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+    match original_claims_root {
+        Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+        None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+    }
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     match prior_payload_seq {
         Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
@@ -521,5 +553,10 @@ fn a_blind_sample_breaks_the_held_under_threshold_streak() {
     let receipt = refusal.receipt.expect("refusal carries a receipt");
     assert_eq!(receipt["reason"], "cpu_share_undecidable");
     assert_eq!(receipt["samples"], 3);
+    assert_eq!(
+        observed_claims_root,
+        Some(expected_claims_root.into_os_string()),
+        "the test restores its incoming claims root"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
