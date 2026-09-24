@@ -700,14 +700,11 @@ pub(crate) mod tests {
     fn install_fake_uv(root: &Path) {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let uv = bin.join("uv");
-        std::fs::write(
-            &uv,
+        crate::write_exec_stub(
+            &bin,
+            "uv",
             "#!/bin/sh\nif [ \"$1\" = cache ] && [ \"$2\" = dir ]; then printf '/dev/null\\n'; fi\nexit 0\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let old = std::env::var_os("PATH");
         let paths = std::iter::once(bin)
             .chain(std::env::split_paths(old.as_deref().unwrap_or_default()))
