@@ -2741,7 +2741,7 @@ event_types:
           type: string
 
   - name: reign_armed
-    description: "A crowned reign finished arming its beat: the self-injected /loop and the settled-PR watch. Journaled by the reigning session through fno doctor event emit."
+    description: "A crowned reign finished arming its beat: the self-injected /loop. Journaled by the reigning session through fno doctor event emit."
     sources: [loop, daemon]
     data:
       required: []
