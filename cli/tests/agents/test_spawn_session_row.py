@@ -1,8 +1,8 @@
-"""x-4342: a node-bearing spawn opens a sessions row on the node.
+"""A node-bearing spawn opens a contributor session row.
 
-A spawned contributor that never holds the claim crossed no stamping
-chokepoint (claim acquire/release, plan-bind, PR-link), so its review work
-landed in no sessions array. Coverage:
+A worker that never holds the claim crosses no stamping chokepoint (claim
+acquire/release, plan-bind, PR-link). Reviews stay inline in the builder's
+session and do not create review-worker rows. Coverage:
 
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
     row carrying the WORKER's harness session id (never the spawner's, never
@@ -10,11 +10,8 @@ landed in no sessions array. Coverage:
     spawn_phase.toml table - do, review, blueprint, think, ship all stamp
     their spellings; an unlabeled --node spawn is refused (x-007c), so no
     row is ever born mislabeled or driverless.
-  - AC1-fallback: a review-verb prompt naming exactly ONE node id (no --node)
-    opens the same row; prose or a two-id prompt arms nothing.
-  - AC1-ERR: a review prompt naming an unresolvable id exits 0 with a named
-    skip on stderr and writes no row; a bad --session-phase refuses before
-    anything spawns (exit 2).
+  - Review labels and review seeds refuse before launch; invalid phases also
+    refuse before launch.
   - AC2: `session add --phase review` stamps (exit 2 before the enum gained
     review), and the roster renders the review slot between do and ship.
   - Closing: `session reap-open --phase review` fills ended_at and KEEPS the
@@ -24,6 +21,7 @@ landed in no sessions array. Coverage:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -132,7 +130,8 @@ def workdir_claude(tmp_path: Path, monkeypatch) -> Path:
     _seed_graph()
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
-    monkeypatch.setenv("PATH", str(bin_dir))
+    # Keep the native event-store writer reachable alongside the fake provider.
+    monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), os.environ.get("PATH", ""))))
     return tmp_path
 
 
@@ -149,9 +148,16 @@ def resolvable_uuid(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uuid) -> None:
+@pytest.mark.dev_build
+def test_spawn_with_node_and_review_verb_is_refused(
+    workdir_claude, native_backlog_door, monkeypatch
+) -> None:
     from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
 
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     result = CliRunner().invoke(
         agents_app,
         [
@@ -161,23 +167,42 @@ def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uu
         ],
         catch_exceptions=False,
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 89, result.output
+    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert load_registry() == []
+    assert _node_rows() == []
+    for key in (f"node:{NODE}", f"dispatch:{NODE}"):
+        assert claim_status(key, root=claims_root_for(key)).get("holder") is None
 
-    rows = _node_rows()
-    assert len(rows) == 1, f"expected exactly one sessions row, got {rows!r}"
-    row = rows[0]
-    assert row["phase"] == "review"
-    assert row["harness"] == "claude"
-    # The WORKER's full uuid, not the fake's 8-hex short id and not the
-    # spawning session's id - the observed_model join needs the full form.
-    assert row["session_id"] == FULL_UUID
-    assert row["started_at"]
-    # The strict store read returns the full envelope: an open session's
-    # absence reads as None, not as a missing key (the file leg omitted it).
-    assert row.get("ended_at") is None
-    assert row["observed_model"].get("kind") != "unreadable"
-    assert "effort" in row
-    assert row["effort"] == "xhigh"
+
+@pytest.mark.dev_build
+@pytest.mark.parametrize(
+    ("phase", "seed"),
+    [("review", "/fno:triage deep"), ("do", "/code-review this diff")],
+)
+def test_spawn_review_label_or_seed_is_refused(
+    workdir_claude, native_backlog_door, monkeypatch, phase, seed
+) -> None:
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "review-probe", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "--session-phase", phase, seed,
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 89, result.output
+    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert load_registry() == []
+    assert _node_rows() == []
+    for key in (f"node:{NODE}", f"dispatch:{NODE}"):
+        assert claim_status(key, root=claims_root_for(key)).get("holder") is None
 
 
 def test_spawn_with_prose_and_node_composes_a_labeled_seed(
@@ -200,6 +225,9 @@ def test_spawn_with_prose_and_node_composes_a_labeled_seed(
     rows = _node_rows()
     assert len(rows) == 1, f"one row for the composed seed: {_node_rows()!r}"
     assert rows[0]["phase"] == "do"
+    assert rows[0]["session_id"] == FULL_UUID
+    assert rows[0]["started_at"]
+    assert rows[0].get("ended_at") is None
 
 
 def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> None:
@@ -212,14 +240,15 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "bg",
-         f"/code-review {NODE} please"],
+         "--node", NODE,
+         f"/fno:think {NODE} please"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert len(_node_rows()) == 1
 
     _stamp_spawned_session_row(
-        node=NODE, message="", phase="review",
+        node=NODE, message="", phase="think",
         worker_name="row-retry", worker_harness="claude",
         worker_session_uuid=FULL_UUID,
     )
@@ -240,7 +269,7 @@ def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
         agents_app,
         [
             "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "bg",
-            "--node", NODE, "/fno:review this diff",
+            "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,
     )
@@ -248,7 +277,7 @@ def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
     assert _node_rows() == []
     assert "session row open skipped" not in result.stderr
     row = next(r for r in load_registry() if r.name == "nouuid-worker")
-    assert row.pending_session_row["phase"] == "review"
+    assert row.pending_session_row["phase"] == "think"
     assert row.pending_session_row["merge_grant"] is None
     assert row.pending_session_row["started_at"]
 
@@ -267,56 +296,10 @@ def test_stamp_no_worker_name_skips_named(workdir_claude, capsys) -> None:
     assert _node_rows() == []
 
 
-# ---------------------------------------------------------------------------
-# AC1-fallback / AC1-ERR: prompt-parse path
-# ---------------------------------------------------------------------------
-
-
-def test_spawn_prompt_node_opens_row(workdir_claude, resolvable_uuid) -> None:
-    """A review-verb prompt naming one node id (no --node) opens the same row;
-    no guard path."""
-    from fno.agents.cli import agents_app
-
-    result = CliRunner().invoke(
-        agents_app,
-        [
-            "spawn", "--name", "prompt-worker", "-H", "claude", "--substrate", "bg",
-            f"/code-review the diff for {NODE} and drain the threads",
-        ],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0, result.output
-    rows = _node_rows()
-    assert len(rows) == 1
-    assert rows[0]["phase"] == "review"
-    assert rows[0]["session_id"] == FULL_UUID
-
-
-def test_spawn_prompt_unresolvable_id_skips_named(workdir_claude, resolvable_uuid) -> None:
-    """A review-verb prompt naming an id no graph node carries: exit 0, named
-    skip, no row."""
-    from fno.agents.cli import agents_app
-
-    result = CliRunner().invoke(
-        agents_app,
-        [
-            "spawn", "--name", "ghost-worker", "-H", "claude", "--substrate", "bg",
-            "/code-review x-deadbeef please",
-        ],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0, result.output
-    assert _node_rows() == []
-    assert "session row open skipped" in result.stderr
-    assert "x-deadbeef" in result.stderr
-
-
 def test_spawn_prose_prompt_names_nothing_stays_silent(
     workdir_claude, resolvable_uuid
 ) -> None:
-    """Prose naming a node (no review verb, no --node) arms nothing: the prompt
-    lane is conservative because a bare id in prose names a sibling more often
-    than a target."""
+    """Prose naming a node without a mapped seed or --node writes no row."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -328,21 +311,6 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
     assert result.exit_code == 0, result.output
     assert _node_rows() == []
     assert "session row open skipped" not in result.stderr
-
-
-def test_spawn_prompt_two_ids_arms_nothing(workdir_claude, resolvable_uuid) -> None:
-    """A review prompt naming TWO node ids is ambiguous; first-by-position would
-    assert a reviewer worked on a node the operator never targeted."""
-    from fno.agents.cli import agents_app
-
-    result = CliRunner().invoke(
-        agents_app,
-        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "bg",
-         f"/review {NODE} then x-4ab2"],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0, result.output
-    assert _node_rows() == []
 
 
 def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
@@ -442,14 +410,14 @@ def test_spawn_explicit_phase_rescues_unmapped_verb(
         agents_app,
         [
             "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "bg",
-            "--node", NODE, "--session-phase", "review", "/fno:triage deep",
+            "--node", NODE, "--session-phase", "think", "/fno:triage deep",
         ],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     rows = _node_rows()
     assert len(rows) == 1
-    assert rows[0]["phase"] == "review"
+    assert rows[0]["phase"] == "think"
 
 
 def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
@@ -782,15 +750,15 @@ def test_spawn_no_merge_flag_outranks_config_grant(workdir_claude, resolvable_uu
     assert grant["source"] == "no-merge-flag"
 
 
-def test_spawn_review_row_carries_no_grant(workdir_claude, resolvable_uuid) -> None:
-    """A review-phase worker never merges; its row records no grant at all."""
+def test_spawn_think_row_carries_no_grant(workdir_claude, resolvable_uuid) -> None:
+    """A think worker never merges; its row records no grant at all."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
         agents_app,
         [
             "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
-            "--node", NODE, "/code-review this diff",
+            "--node", NODE, "/fno:think this diff",
         ],
         catch_exceptions=False,
     )
