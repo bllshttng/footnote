@@ -14,7 +14,7 @@ fno mux serve --web --port 9000          # a different port
 
 The command prints the URL and a token once at bind. The token is in the query string. It is the only guard on the port. Anyone who has the URL can watch the session, so keep the URL secret.
 
-The page's **backlog** link opens the current private `fno backlog view` file through the same token. Render or refresh that file first with `FNO_NO_OPEN=1 fno backlog view`. The `/backlog` response is never cached. A missing file names that command, and a missing or wrong token returns no backlog bytes.
+The page's **backlog** link renders the backlog live from the store through the same token. You get lanes by project or epic, six columns, stats, filters, and a node panel with sessions. It needs no render step and never caches. It is read-only: it shows each session's attach or resume command to copy. A missing or wrong token returns no backlog bytes.
 
 The bridge also serves the backlog as JSON through the same token. `/backlog/model.json` takes `lanes`, `project`, `epic`, `status`, `priority`, `size`, `king`, `q` and `all`. `/backlog/node.json?id=<id>` returns one node. When the store holds no such node, the answer is 404. When the store read failed, it is 503. Each body carries `"schema": 1`. The bridge re-reads at most every 30 seconds unless the store changed.
 

@@ -3497,10 +3497,7 @@ def cmd_send(
     ),
     from_name: str | None = typer.Option(
         None, "--from-name",
-        help=(
-            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
-            "agent send, the working dir's project for an inbox-kind send."
-        ),
+        help="XML-safe sender. Unset: session handle or 'fno' for agents; project for inbox notes.",
     ),
     origin: str | None = typer.Option(
         None,
@@ -4185,12 +4182,14 @@ def cmd_send(
             _unavailable_token_exit(name, unavailable)
         return
 
+    timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
     try:
         result = dispatch_send(
             name=name,
             message=message,
             provider=harness,
             cwd=workdir,
+            **({"lock_timeout": float(timeout_override)} if timeout_override else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
         )

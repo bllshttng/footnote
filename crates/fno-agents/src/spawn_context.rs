@@ -691,7 +691,7 @@ fn harness_static(stamp: &str) -> Option<&'static str> {
 /// same property); `None` covers both "not carried" and "unreadable" because
 /// neither changes a caller decision.
 #[cfg(target_os = "macos")]
-fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
+pub(crate) fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
     if unsafe {
@@ -757,7 +757,7 @@ fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
+pub(crate) fn ancestor_env_marker(pid: u32, marker: &str) -> Option<String> {
     let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let prefix = format!("{marker}=");
     for entry in raw.split(|b| *b == 0) {

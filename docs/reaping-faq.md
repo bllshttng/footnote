@@ -73,7 +73,7 @@ These five move or remove state around sessions. None stops or removes a session
 - The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only. The manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
 - The state-file sweep: removes expired claims, stale plan locks, agent locks, the pr-status cache, and claim tmp files (`gc.rs` `state_file_sweep`). No row is touched.
 - The liveness sweep: bands the machine and writes status. It removes nothing (`daemon.rs` `liveness_sweep`).
-- The daily reclaim janitor, with its `cargo_build_dirs` lane: removes disk artifacts, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
+- The daily janitor runs `cargo_build_dirs` and `codex_cache_quarantines`. It removes cargo artifacts and stale Codex backups under `<codex home>/footnote`, never sessions (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
 
 ## In what order
 
@@ -174,8 +174,8 @@ A kept open-PR row is a session that is not driving. The daemon's retire arm run
 3. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
 4. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
 5. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
-6. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: ..."`. The text renders the status JSON of `fno do pr status <N>`: verdict, head, and each failing check with its step and first error. A `queued (durable)` receipt on a session the claude roster reads `working` stays queued. The durable leg delivers it at the next turn: 39 of 40 did, 2026-09-19 to 2026-09-22. A resume must not type into a turn. On any other session, a durable receipt or a failed send falls back to resume in the same pass.
-7. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`. It relaunches the conversation and then delivers the text, confirmed by content, or exits 16 naming why.
+6. **Mail.** A live session gets mail only for an open PR with readable, settled status. Only red and green verdicts are actionable. The command sets `--from-name pr-nudge --origin scheduler`. Its text names the daemon arm. It renders `fno do pr status <N>`: verdict, head, and each failing check with its step and first error. An unreadable or unsettled status sends nothing and spends no attempt. The next daemon pass retries. Red gives the worker a fix action. Green gives it a merge action. When the claude roster reads the session as `working`, a durable receipt stays queued. The next turn delivers it. 39 of 40 did from 2026-09-19 to 2026-09-22. A resume must not type into a turn. Other durable receipts and failed sends fall back to resume in the same pass.
+7. **Resume.** A session without a live process resumes only for an open PR with readable, settled red or green status. The command is `fno agents resume <full-session-id> --message "<text>"`. Its message names the daemon arm and has no envelope wrapper. Delivery is confirmed after relaunch by content, or exits 16 with a reason. An unreadable or unsettled status sends nothing and spends no attempt. The next daemon pass retries.
 
 Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. When a resume failed, `pr_nudge_sent` carries `reason`. When a mail pass fell back, it carries `resume_exit` and `resume_reason`. State is one file per session under `~/.fno/agents/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge {id} ({action})` and takes no effect.
 
