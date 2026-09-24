@@ -548,7 +548,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = dir.join("graph.json");
-        fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
         std::env::set_var(
             "FNO_AGENTS_WORKER",
             stub_worker(
@@ -574,7 +573,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = dir.join("graph.json");
-        fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
         std::env::set_var(
             "FNO_AGENTS_WORKER",
             stub_worker(

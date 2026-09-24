@@ -1786,6 +1786,9 @@ mod tests {
         drop(dir);
     }
 
+    // -- single-row mutations --------------------------------------------
+    /// Pins both state roots the emit path resolves, so a test's gate event
+    /// lands in the redirected space journal and never the operator's home.
     fn declare_test_roots(spaces: &std::path::Path) {
         std::env::set_var("FNO_SPACES_DIR", spaces);
         std::env::set_var(crate::paths::HOME_ENV, spaces.join("agents-home"));
