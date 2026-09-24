@@ -2309,16 +2309,10 @@ def _mint_branch_row(
 
 
 def _arm_crown_after_identification(entry: AgentEntry, session_id: str) -> None:
-    """Arm the king loop manifest the moment a crowned row first names the
-    session id it can be woken through.
-
-    Spawn-time succession carries the crown in the registry while the
-    successor child still has no harness session id, so the spawn lane's arm
-    attempt refuses and the manifest keeps naming the abdicating session
-    until a human clears it. The SessionStart restamp is the first moment
-    the successor is addressable; arming here rewrites manifest_session to
-    the successor instead of leaving the split. Fail-soft like its callers:
-    a failed arm is an event, never a blocked session start."""
+    """Arm the king manifest the moment a crowned row first names the session
+    id it can be woken through: spawn-time succession has no id to arm with,
+    so the SessionStart restamp is the arm point, and manifest_session stops
+    naming the abdicating session. Fail-soft like its callers."""
     if entry.crown_level is None or not entry.crown_scope:
         return
     try:
@@ -2328,13 +2322,8 @@ def _arm_crown_after_identification(entry: AgentEntry, session_id: str) -> None:
     except (OSError, ValueError) as exc:
         from fno.agents import events
 
-        events.emit(
-            "crown_manifest_arm_failed",
-            name=entry.name,
-            scope=entry.crown_scope,
-            session_id=session_id,
-            error=str(exc),
-        )
+        events.emit("crown_manifest_arm_failed", name=entry.name,
+                    scope=entry.crown_scope, session_id=session_id, error=str(exc))
 
 
 def restamp_harness_session_id(

@@ -4628,8 +4628,7 @@ def dispatch_spawn_pane(
                 )
             if _declined_scope and king_loop_armed is False:
                 why = (
-                    f": {king_unarmed_reason}; the manifest arms when this "
-                    "worker self-identifies"
+                    f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                     if king_unarmed_reason
                     else "; king loop disabled, no scope manifest armed"
                 )

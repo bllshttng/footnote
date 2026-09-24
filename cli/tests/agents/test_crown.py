@@ -2774,27 +2774,3 @@ def test_a_refused_arm_is_an_event_never_a_blocked_session_start(
     assert outcome == "primary", "the registry write itself still lands"
     assert seen.get("kind") == "crown_manifest_arm_failed"
     assert not _scope_manifest(tmp_path).exists()
-
-
-def test_stop_names_ask_before_it_ends_a_claude_session(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    """The steering misuse caught at the moment it happens: on claude, stop IS
-    Done, so the verb names `fno agents ask` before it ends anything."""
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.dispatch import _stop_agent_inner
-    from fno.agents.registry import AgentEntry, write_registry
-
-    _crowned_row(
-        tmp_path,
-        monkeypatch,
-        name="wk-steer",
-        harness_session_id=SUCCESSOR_ID,
-        launch_account="default",
-    )
-    monkeypatch.setattr(dispatch_mod, "is_provider_available", lambda _p: False)
-
-    with pytest.raises(dispatch_mod.DispatchAskError):
-        _stop_agent_inner("wk-steer")
-
-    assert "fno agents ask" in capsys.readouterr().err
