@@ -161,29 +161,36 @@ function sessionCommand(s) {
   const gridEl = document.getElementById("board");
   const controls = document.getElementById("controls");
   const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king"];
-  function modelQs() {
-    const p = new URLSearchParams();
-    if (t) p.set("t", t);
-    if (state.lanes) p.set("lanes", state.lanes);
+  // The one filter-to-query mapping, shared by the fetch URL and the page
+  // URL, so a shared link always reopens the board it was cut from. The
+  // default lanes=project rides the model's own default and is omitted.
+  function filterParams(p) {
+    if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
     for (const k of FILTER_KEYS) if (state[k]) p.set(k, state[k]);
     if (state.q) p.set("q", state.q);
     if (state.all) p.set("all", "1");
+    return p;
+  }
+  function modelQs() {
+    const p = filterParams(new URLSearchParams());
+    if (t) p.set("t", t);
     return p.toString();
   }
   // The filter state lives in the page URL, so a view survives a reload and
   // can be shared. Unknown keys the model ignores are simply kept.
   function syncUrl() {
-    const p = new URLSearchParams();
+    const p = filterParams(new URLSearchParams());
     if (t) p.set("t", t);
-    if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
-    for (const k of FILTER_KEYS) if (state[k]) p.set(k, state[k]);
-    if (state.q) p.set("q", state.q);
-    if (state.all) p.set("all", "1");
     if (openId) p.set("node", openId);
     history.replaceState(null, "", location.pathname + "?" + p.toString());
   }
   function fillSelect(id, pairs, current) {
     const sel = document.getElementById(id);
+    // Rebuild only on a real change: repopulating an open dropdown resets it
+    // mid-choice, and the 10 s poll would do that constantly.
+    const sig = JSON.stringify(pairs) + "|" + (current || "");
+    if (sel.dataset.sig === sig) return;
+    sel.dataset.sig = sig;
     sel.textContent = "";
     const any = document.createElement("option");
     any.value = "";
