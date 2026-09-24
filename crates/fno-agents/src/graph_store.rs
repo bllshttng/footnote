@@ -2428,16 +2428,29 @@ pub fn locked_mutate_with_hook(
     ensure_slugs(&mut entries);
     recompute_statuses_with_plan_rungs(&mut entries, input.plan_rungs.as_ref());
 
-    // touched_at stamp: a curation-field change vs the pre-image.
+    // touched_at stamp: a curation-field change vs the pre-image. The
+    // pre-image is defaulted, so the compare reads the defaulted view too:
+    // a caller that ships raw untouched rows (commit_rows merges the raw
+    // export) would otherwise re-stamp every row missing a defaulted field.
+    // Status stays the row's own: the pre-image carries the recomputed
+    // status, not the readiness overlay the defaults pass applies.
     let now_iso = now_isoformat();
-    for e in entries.iter_mut() {
+    let mut defaulted = entries.clone();
+    apply_defaults(&mut defaulted, true);
+    for (e, view) in entries.iter_mut().zip(defaulted.iter_mut()) {
         let (Some(id), true) = (entry_id(e).map(str::to_string), is_dict(e)) else {
             continue;
         };
         let Some(before) = pre_curation.get(&id) else {
             continue; // absent from the pre-image: new node, created_at carries it
         };
-        if curation_key(e) != *before {
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert(
+                "status".to_string(),
+                e.get("status").cloned().unwrap_or(Value::Null),
+            );
+        }
+        if curation_key(view) != *before {
             e.as_object_mut()
                 .unwrap()
                 .insert("touched_at".to_string(), Value::String(now_iso.clone()));
