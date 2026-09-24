@@ -281,31 +281,32 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         // A readable quiet-undelivered fire is a park edge. Codex owns the
         // preserved objective, so verify it is paused before finishing NoWork;
         // any provider refusal keeps the existing bounded block.
-        let provider_goal_error = if manifest.harness.as_deref() == Some("codex") {
-            match crate::reign_goal::pause_codex_reign_goal(&manifest, &parsed.cwd) {
-                Ok(provider_receipt) => {
-                    emit(
-                        "quiet-undelivered",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "scope": manifest.scope,
-                            "undelivered": undelivered,
-                            "provider_receipt": provider_receipt,
-                        }),
-                    );
-                    return terminate(
-                        TerminationReason::NoWork,
-                        "board quiet; provider goal paused with undelivered scope delivery",
-                        0,
-                        dry,
-                        &[],
-                    );
+        let provider_goal_error =
+            if should_pause_codex_goal(manifest.harness.as_deref(), drain_error.is_none()) {
+                match crate::reign_goal::pause_codex_reign_goal(&manifest, &parsed.cwd) {
+                    Ok(provider_receipt) => {
+                        emit(
+                            "quiet-undelivered",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "scope": manifest.scope,
+                                "undelivered": undelivered,
+                                "provider_receipt": provider_receipt,
+                            }),
+                        );
+                        return terminate(
+                            TerminationReason::NoWork,
+                            "board quiet; provider goal paused with undelivered scope delivery",
+                            0,
+                            dry,
+                            &[],
+                        );
+                    }
+                    Err(error) => Some(error),
                 }
-                Err(error) => Some(error),
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let mut message =
             crate::king_termination::king_quiet_message(undelivered, drain_error.as_ref());
         if let Some(error) = provider_goal_error.as_deref() {
@@ -460,6 +461,10 @@ fn provider_goal_pause_refusal_body(session_id: &str, error: &str) -> serde_json
         "cleared": false,
         "provider_goal_pause_error": error,
     })
+}
+
+fn should_pause_codex_goal(harness: Option<&str>, drain_readable: bool) -> bool {
+    harness == Some("codex") && drain_readable
 }
 
 fn king_board_block_message(board: &crate::king_termination::KingBoard) -> String {
@@ -728,8 +733,15 @@ mod stale_crown_doc_tests {
 
 #[cfg(test)]
 mod provider_goal_pause_tests {
-    use super::provider_goal_pause_refusal_body;
+    use super::{provider_goal_pause_refusal_body, should_pause_codex_goal};
     use crate::loop_king::king_fire_history;
+
+    #[test]
+    fn unreadable_drain_never_enters_the_codex_quiet_park() {
+        assert!(should_pause_codex_goal(Some("codex"), true));
+        assert!(!should_pause_codex_goal(Some("codex"), false));
+        assert!(!should_pause_codex_goal(Some("claude"), true));
+    }
 
     #[test]
     fn pause_refusal_is_counted_without_recording_a_quiet_baseline() {
