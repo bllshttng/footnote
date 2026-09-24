@@ -71,7 +71,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let Some(graph) = graph else {
-        eprintln!("session-backfill: --graph <graph.json> is required");
+        eprintln!("session-backfill: --graph is required");
         return 2;
     };
     let store = Store::new(&graph);
