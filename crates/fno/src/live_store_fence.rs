@@ -68,18 +68,29 @@ fn nearest_git_ancestor(exe: &Path) -> Option<(PathBuf, bool)> {
 }
 
 /// Canonical form with a fallback for paths that do not fully exist yet:
-/// canonicalize the parent and re-append the file name, so a store the guarded
-/// open is ABOUT to create still compares equal to its canonical neighbors.
+/// canonicalize the deepest existing ancestor and re-append the missing tail,
+/// so a store the guarded open is ABOUT to create still compares equal to its
+/// canonical neighbors even when several leading directories are new.
 fn canonical_or_self(path: &Path) -> PathBuf {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return canonical;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
-            Ok(canonical) => canonical.join(name),
-            Err(_) => path.to_path_buf(),
-        },
-        _ => path.to_path_buf(),
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&probe) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |acc, part| acc.join(part));
+        }
+        match probe.parent() {
+            Some(parent) if parent != probe => {
+                missing.push(probe.file_name().unwrap_or_default().to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
