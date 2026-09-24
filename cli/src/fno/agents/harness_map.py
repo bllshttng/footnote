@@ -1581,14 +1581,8 @@ def resolve_dispatch(
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
-    # The loop gate, at the same choke point every spawn surface resolves
-    # through. It reads a CAPABILITY, never a harness name, and it fires after
-    # normalization so it judges the per-harness /target spelling the worker
-    # will actually receive. Deliberately not at registry load: an alien or
-    # one-shot dispatch must still resolve fine, matching the existing split
-    # where the load gate is a shape check and the dispatch gate is where a
-    # capability is required.
-    check_loop_participation(chosen_harness, template)
+    # Resolution is read-only. The spawn door checks loop readiness after it
+    # has the actual caller session context and before it launches a worker.
     # `{id}` must appear at least once; a template may reference it more than
     # once. A registry verb declaring takes_node_id=false is exempt: ignoring
     # the id is declared, not a dropped substitution.
