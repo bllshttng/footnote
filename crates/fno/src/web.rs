@@ -39,6 +39,10 @@ use crate::proto::{self, ClientMsg, ServerMsg, BUILD_VERSION, PROTO_VERSION};
 
 /// The served page, vendored inline (no CDN) so the strict CSP holds offline.
 const PAGE: &str = include_str!("web_page.html");
+/// The backlog board page, vendored like PAGE. It draws the read model
+/// ([`crate::backlog_model`]) through `/backlog/model.json` and
+/// `/backlog/node.json` and computes nothing the model already answered.
+const BACKLOG_PAGE: &str = include_str!("web_backlog.html");
 /// The browser drives nothing, so anything it sends is dropped - but cap it so
 /// a hostile client cannot OOM the bridge with one giant frame.
 const INBOUND_WS_CAP: usize = 64 * 1024;
@@ -112,7 +116,6 @@ struct AppState {
     tx: broadcast::Sender<String>,
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
-    graph_html: PathBuf,
     reign_html: PathBuf,
     fleet_html: PathBuf,
     /// The cached backlog read model (`None` until the first gather).
@@ -129,22 +132,6 @@ struct CachedModel {
     version: Option<i64>,
     at: Instant,
     inputs: Arc<backlog_model::Inputs>,
-}
-
-fn graph_html_path_from_state_root(state_root: &Path) -> PathBuf {
-    state_root.join("graph.html")
-}
-
-fn graph_html_path() -> PathBuf {
-    #[cfg(not(test))]
-    {
-        graph_html_path_from_state_root(&crate::proto::mux_sidecar_root())
-    }
-    #[cfg(test)]
-    {
-        let graph = crate::backlog_view::graph_path();
-        graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
-    }
 }
 
 fn reign_html_path_from_state_root(state_root: &Path) -> PathBuf {
@@ -721,7 +708,6 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         tx,
         snap,
         token,
-        graph_html: graph_html_path(),
         reign_html: reign_html_path(),
         fleet_html: fleet_html_path(),
         model: Default::default(),
@@ -960,14 +946,17 @@ struct WsQuery {
 }
 
 async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
-    backlog_response(
-        &st.graph_html,
-        q.t.as_deref(),
-        &st.token,
-        "FNO_NO_OPEN=1 fno backlog view",
-        NavPage::Backlog,
+    if !token_ok(q.t.as_deref(), &st.token) {
+        return unauthorized();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        with_nav(BACKLOG_PAGE, NavPage::Backlog),
     )
-    .await
+        .into_response()
 }
 
 async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
@@ -978,7 +967,7 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     if crown_needs_republish(authorized, modified, SystemTime::now()) {
         start_crown_republish(&st.reign_html);
     }
-    backlog_response(
+    private_page_response(
         &st.reign_html,
         q.t.as_deref(),
         &st.token,
@@ -989,7 +978,7 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
 }
 
 async fn fleet(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
-    backlog_response(
+    private_page_response(
         &st.fleet_html,
         q.t.as_deref(),
         &st.token,
@@ -1294,7 +1283,7 @@ fn nav_fragment(current: NavPage) -> String {
 }
 
 /// Insert the nav fragment right after the first `<body ...>` tag (ASCII
-/// case-insensitive; graph.html opens with `<body data-local="true">`).
+/// case-insensitive; a served page opens with `<body data-local="true">`).
 /// With no body tag at all, prepend.
 fn with_nav(html: &str, current: NavPage) -> String {
     let fragment = nav_fragment(current);
@@ -1325,7 +1314,7 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-async fn backlog_response(
+async fn private_page_response(
     path: &Path,
     supplied: Option<&str>,
     expected: &str,
@@ -1354,7 +1343,7 @@ async fn backlog_response(
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("backlog unreadable: {err}"),
+            format!("page unreadable: {err}"),
         )
             .into_response(),
     }
@@ -1535,7 +1524,6 @@ mod tests {
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            graph_html: dir.join("graph.html"),
             reign_html: dir.join("reign.html"),
             fleet_html: dir.join("fleet.html"),
             model: Default::default(),
@@ -1715,12 +1703,12 @@ mod tests {
     /// inside a string or comment in the lifted functions) and is the ceiling:
     /// a future `"{"` inside one of them would cut the slice short, and the
     /// node run then fails loudly on a syntax error rather than passing.
-    fn lift_js_fn(name: &str) -> String {
+    fn lift_js_fn(src: &str, name: &str) -> String {
         let head = format!("function {name}(");
-        let start = PAGE
+        let start = src
             .find(&head)
             .unwrap_or_else(|| panic!("the served page defines {name}()"));
-        let rest = &PAGE[start..];
+        let rest = &src[start..];
         let open = rest.find('{').expect("a function body opens");
         let mut depth = 0usize;
         for (i, c) in rest[open..].char_indices() {
@@ -1816,8 +1804,8 @@ console.log("evictedRowCount: 18 cases ok");
             PAGE.lines()
                 .find(|l| l.contains("const MAX_FIXED_TAIL"))
                 .expect("the page bounds the fixed tail it looks past"),
-            lift_js_fn("scrollWithin"),
-            lift_js_fn("evictedRowCount"),
+            lift_js_fn(PAGE, "scrollWithin"),
+            lift_js_fn(PAGE, "evictedRowCount"),
             asserts
         );
         let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
@@ -1915,68 +1903,83 @@ console.log("evictedRowCount: 18 cases ok");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
     }
 
+    /// The route serves the vendored page behind the token, from a state
+    /// root with no graph.html in it: the page is built in, so no render
+    /// step exists to run first, and no 404 can name one.
     #[tokio::test]
-    async fn backlog_requires_token_and_serves_private_file_without_cache() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-backlog-{}-serve", std::process::id()));
+    async fn router_serves_backlog_page_with_token_and_shared_nav() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-backlog-{}-page", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("graph.html");
-        std::fs::write(&path, "PRIVATE-BACKLOG-MARKER").unwrap();
-        let response = backlog_response(
-            &path,
-            Some("right"),
-            "right",
-            "fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
-
-        let denied = backlog_response(
-            &path,
-            Some("wrong"),
-            "right",
-            "fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
-        let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("cache-control: no-store"), "{reply}");
+        assert!(reply.contains("data-current=\"backlog\""), "{reply}");
+        assert!(reply.contains("default-src 'none'"), "{reply}");
+        assert!(reply.contains("backlog/model.json"), "{reply}");
+        assert!(!reply.contains("fno backlog view"), "{reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        assert!(reply.contains("invalid or missing token"), "{reply}");
+        server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn missing_backlog_names_the_render_action() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-backlog-{}-missing", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(
-            &dir.join("graph.html"),
-            Some("right"),
-            "right",
-            "FNO_NO_OPEN=1 fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("FNO_NO_OPEN=1 fno backlog view"));
-        let _ = std::fs::remove_dir_all(&dir);
+    /// One HTML sink fed from the model is script injection on a page that
+    /// holds the operator's token: node titles, details, notes and decisions
+    /// are free text any session writes. The page must therefore never build
+    /// HTML from data at all.
+    #[test]
+    fn backlog_page_writes_no_html_from_data() {
+        for sink in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ] {
+            assert!(
+                !BACKLOG_PAGE.contains(sink),
+                "the backlog page must not build HTML from data via {sink}"
+            );
+        }
+        assert!(
+            BACKLOG_PAGE.contains("connect-src 'self'"),
+            "the page fetches only same-origin JSON"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"class="controls""#),
+            "the filter bar keeps the controls class the nav offset targets"
+        );
     }
 
     #[test]
@@ -2031,15 +2034,6 @@ console.log("evictedRowCount: 18 cases ok");
         assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
 
-    #[test]
-    fn backlog_html_follows_state_root_not_graph_json_override() {
-        let state = Path::new("/configured/state");
-        assert_eq!(
-            graph_html_path_from_state_root(state),
-            PathBuf::from("/configured/state/graph.html")
-        );
-    }
-
     #[tokio::test]
     async fn crown_requires_token_and_serves_private_file_without_cache() {
         let dir = std::env::temp_dir().join(format!("fno-web-crown-{}-serve", std::process::id()));
@@ -2047,7 +2041,7 @@ console.log("evictedRowCount: 18 cases ok");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("reign.html");
         std::fs::write(&path, "<body><p>PRIVATE-CROWN-MARKER</p></body>").unwrap();
-        let response = backlog_response(
+        let response = private_page_response(
             &path,
             Some("right"),
             "right",
@@ -2067,7 +2061,7 @@ console.log("evictedRowCount: 18 cases ok");
         // The served crown page carries the shared nav (inserted after <body>).
         let text = String::from_utf8_lossy(&body).to_string();
         assert!(text.contains("nav class=\"fno-nav\" data-current=\"crown\""));
-        let denied = backlog_response(
+        let denied = private_page_response(
             &path,
             Some("wrong"),
             "right",
@@ -2089,7 +2083,7 @@ console.log("evictedRowCount: 18 cases ok");
             std::env::temp_dir().join(format!("fno-web-crown-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(
+        let response = private_page_response(
             &dir.join("reign.html"),
             Some("right"),
             "right",
@@ -2162,7 +2156,7 @@ console.log("evictedRowCount: 18 cases ok");
             std::env::temp_dir().join(format!("fno-web-fleet-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(
+        let response = private_page_response(
             &dir.join("fleet.html"),
             Some("right"),
             "right",
@@ -2193,7 +2187,6 @@ console.log("evictedRowCount: 18 cases ok");
             tx,
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
-            graph_html: dir.join("graph.html"),
             reign_html: dir.join("reign.html"),
             fleet_html: fleet_path,
             model: Default::default(),
