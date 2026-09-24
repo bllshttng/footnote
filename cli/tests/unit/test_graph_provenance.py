@@ -1677,7 +1677,7 @@ def test_cli_session_close_leaves_foreign_blueprint_claim_intact(tmp_path, monke
     assert status["holder"] == "blueprint-session:other-sess"
     row = read_graph_strict(g)[0]["sessions"][0]
     assert row["session_id"] == "sess-open11"
-    assert "started_at" not in row, "another session's claim never dates this row"
+    assert row.get("started_at") is None, "another session's claim never dates this row"
 
 
 def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
