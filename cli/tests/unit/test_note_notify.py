@@ -1014,6 +1014,6 @@ def test_blocking_note_with_no_live_reader_still_writes(monkeypatch) -> None:
         graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
     )
     assert result.exit_code == 0, result.output
-    assert "recorded abcd1234; no live reader, it gates the next worker" in result.output
+    assert "recorded abcd1234 on x-5a62" in result.output, "the native receipt line passes through"
     assert written[0][0] == "x-5a62"
     assert "--blocking" in written[0][1]

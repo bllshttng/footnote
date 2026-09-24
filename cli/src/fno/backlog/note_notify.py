@@ -253,26 +253,17 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
 
 def send_note(readers: NoteReaders, text: str) -> list[tuple[str, bool]]:
     """Receipt lines for one delivery, each flagged when it is not a delivery."""
-    body = pointer(readers.node_id, text)
+    return _send(readers, pointer(readers.node_id, text))
+
+
+def _send(readers: NoteReaders, body: str) -> list[tuple[str, bool]]:
+    """The delivery half over one prebuilt body."""
     lines = [_one_receipt(address, why, body) for address, why in readers.recipients]
     return [(line, line.startswith(_UNDELIVERED)) for line in lines]
 
 
-def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
+def deliver(readers: NoteReaders, text: str, *, json_output: bool, body: Optional[str] = None) -> int:
     """Send to every bound reader; the exit code reports confirmed delivery."""
-    return _deliver(readers, pointer(readers.node_id, text), json_output=json_output)
-
-
-def deliver_finding(readers: NoteReaders, finding_id: str, *, json_output: bool) -> int:
-    """Send the finding pointer to every bound reader; the exit code reports
-    confirmed delivery."""
-    return _deliver(
-        readers, finding_pointer(readers.node_id, finding_id), json_output=json_output
-    )
-
-
-def _deliver(readers: NoteReaders, body: str, *, json_output: bool) -> int:
-    """Send one prebuilt body to every bound reader."""
     if not readers.recipients:
         typer.echo(
             f"notify: you are the only reader bound to {readers.node_id} "
@@ -280,8 +271,7 @@ def _deliver(readers: NoteReaders, body: str, *, json_output: bool) -> int:
             err=json_output,
         )
         return 0
-    lines = [_one_receipt(address, why, body) for address, why in readers.recipients]
-    receipts = [(line, line.startswith(_UNDELIVERED)) for line in lines]
+    receipts = _send(readers, body) if body else send_note(readers, text)
     for line, undelivered in receipts:
         typer.echo(line, err=undelivered or json_output)
     if any(line.startswith("notified ") for line, _ in receipts):
@@ -295,6 +285,13 @@ def _deliver(readers: NoteReaders, body: str, *, json_output: bool) -> int:
         err=True,
     )
     return 4
+
+
+def deliver_finding(readers: NoteReaders, finding_id: str, *, json_output: bool) -> int:
+    """The finding pointer is the whole delivered body."""
+    return deliver(
+        readers, "", json_output=json_output, body=finding_pointer(readers.node_id, finding_id)
+    )
 
 
 def _one_receipt(address: str, why: str, body: str) -> str:

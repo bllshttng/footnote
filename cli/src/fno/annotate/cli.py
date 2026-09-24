@@ -1,38 +1,39 @@
-"""`fno backlog annotate`: one-release forwarding shim.
+"""`fno backlog annotate`: one-release forwarding shim (x-26bd).
 
-`note --blocking` replaced annotate (x-26bd): one verb, one store, and the
-finding is gate state instead of a journal line a relative path could lose.
-Each action forwards and prints one stderr line naming the replacement; the
-shim is removed one release out.
+Each action rewrites its argv to the `note` spelling and execs this same
+entrypoint; one stderr line names the replacement.
 """
 from __future__ import annotations
 
-import subprocess
-from typing import Optional
+import os
+import sys
 
 import typer
 
 from fno.tombstones import tombstone_group_cls
 
-# Three commands kept so the retiring surface still answers its old shape.
+# Three commands from the start (single-command sub-app collapse gotcha: a
+# 1-command Typer flattens the verb away).
 annotate_app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Retiring: `fno backlog note <node> \"<text>\" --blocking` records a "
-        "finding, `fno backlog notes findings [<node>]` reads them, and `fno "
-        "backlog note --resolve <id>` clears one. This shim forwards one release."
+        "Record an operator review finding against a node. The finding is a "
+        "durable review_finding event loop-check gates on (blocks terminal-allow "
+        "until resolved) AND a best-effort live-inject to the claim-holding "
+        "session. add | list | resolve."
     ),
     cls=tombstone_group_cls("annotate"),
 )
 
 
-def _retire_line(replacement: str) -> None:
-    typer.echo(f"annotate is retiring: use {replacement}", err=True)
+def _forward(new: list[str]) -> None:
+    """Exec the rewritten argv through this same entrypoint; the exit code rides."""
+    os.execvp(sys.argv[0], [sys.argv[0], *new])
 
 
 @annotate_app.command("add")
 def add(
-    text: str = typer.Option(..., "--message", "-m", help="The finding text."),
+    text: str = typer.Option(..., "--message", "-m", help="The annotation text."),
     node: str = typer.Option(..., "--node", help="The backlog node the finding is against."),
     block_cmd: str = typer.Option(None, "--block-cmd", help="The annotated block's command line."),
     block_excerpt_file: str = typer.Option(
@@ -41,66 +42,37 @@ def add(
         help="Path to a file holding the block excerpt, or '-' to read it from stdin.",
     ),
 ) -> None:
-    """Forward to `fno backlog note <node> "<text>" --blocking`."""
-    _retire_line('fno backlog note <node> "<text>" --blocking')
-    from fno.graph.note_cli import cmd_note
-
-    cmd_note(
-        task_id=node,
-        text=text,
-        body_file=None,
-        quiet=False,
-        json_output=False,
-        read=[],
-        blocking=True,
-        resolve=None,
-        block_cmd=block_cmd,
-        block_excerpt_file=block_excerpt_file,
-    )
+    """Forward: `fno backlog note <node> "<text>" --blocking`."""
+    typer.echo("annotate is retiring: use fno backlog note <node> \"<text>\" --blocking", err=True)
+    extra = [node, text, "--blocking"]
+    if block_cmd:
+        extra += ["--block-cmd", block_cmd]
+    if block_excerpt_file:
+        extra += ["--block-excerpt-file", block_excerpt_file]
+    _forward(["backlog", "note", *extra])
 
 
 @annotate_app.command("list")
 def list_cmd(
     node: str = typer.Option(None, "--node", help="Scope to one node. Omit for all."),
     as_json: bool = typer.Option(
-        False, "--json", "-J", help="Emit one JSON object per finding."
+        False, "--json", "-J", help="Emit one JSON object per line instead of a summary."
     ),
 ) -> None:
-    """Forward to `fno backlog notes findings`."""
-    _retire_line("fno backlog notes findings [<node>]")
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo("Error: the fno-agents binary is required for `fno backlog annotate list`", err=True)
-        raise typer.Exit(code=2)
-    argv = [str(binary), "backlog-notes", "findings"]
+    """Forward: `fno backlog notes findings [<node>]`."""
+    typer.echo("annotate is retiring: use fno backlog notes findings [<node>]", err=True)
+    extra = ["backlog", "notes", "findings"]
     if node:
-        argv.extend(["--node", node])
+        extra += ["--node", node]
     if as_json:
-        argv.append("--json")
-    proc = subprocess.run(argv, check=False)
-    raise typer.Exit(code=propagate_returncode(proc.returncode))
+        extra.append("--json")
+    _forward(extra)
 
 
 @annotate_app.command("resolve")
 def resolve(
     finding_id: str = typer.Argument(..., help="The finding id to resolve."),
 ) -> None:
-    """Forward to `fno backlog note --resolve <finding-id>`."""
-    _retire_line("fno backlog note --resolve <finding-id>")
-    from fno.graph.note_cli import cmd_note
-
-    cmd_note(
-        task_id=None,
-        text=None,
-        body_file=None,
-        quiet=False,
-        json_output=False,
-        read=[],
-        blocking=False,
-        resolve=finding_id,
-        block_cmd=None,
-        block_excerpt_file=None,
-    )
+    """Forward: `fno backlog note --resolve <finding-id>`."""
+    typer.echo("annotate is retiring: use fno backlog note --resolve <finding-id>", err=True)
+    _forward(["backlog", "note", "--resolve", finding_id])
