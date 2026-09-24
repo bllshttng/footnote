@@ -37,11 +37,13 @@ use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod rename_overlay;
+mod row_menu;
 mod sweep_scope;
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
+use row_menu::build_row_menu;
 
 // The placement pickers (attach `p`, portal `P`) live in their own module;
 // client.rs is shrink-only under the file-budget gate.
@@ -1613,6 +1615,10 @@ enum MenuAction {
     BreakOut,
     /// Detach a pane-hosted worker while keeping its PTY live.
     Detach,
+    /// Close ONLY the portal seat showing this row (`Command::ClosePortal`)
+    /// - the viewer pane, never the row: the thread keeps running and can
+    /// be shown again anywhere. Built only when the row wears a portal.
+    ClosePortal,
     /// Relocate a pane-hosted row's live pane into ANOTHER workspace. Opens the
     /// move picker (the same numbered picker `m` uses for a tab); the chosen
     /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
@@ -1705,6 +1711,7 @@ impl MenuAction {
             MenuAction::Diff => Some("diff-row"),
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
+            MenuAction::ClosePortal => Some("close-portal"),
             _ => None,
         }
     }
@@ -1731,129 +1738,6 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
         label: label.into(),
         hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
-    }
-}
-
-/// Build the per-state row menu for the agent at `display_rows()` index `i`,
-/// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
-/// Entry sets mirror the row's state so no dead item ever renders: a paneless
-/// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
-/// focus plus the move/break-out grid that relocates its live pane; an exited
-/// row gets remove; peek/stop apply where they make sense.
-fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut actions: Vec<MenuAction> = Vec::new();
-    let mut add = |mut row: PopupRow, acts: &[MenuAction]| {
-        if let (PopupRow::Entry { hint, .. }, [action]) = (&mut row, acts) {
-            *hint = action
-                .accelerator_id()
-                .and_then(crate::keys::menu_key_for)
-                .unwrap_or_default();
-        }
-        rows.push(row);
-        actions.extend_from_slice(acts);
-    };
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
-    let cell = |glyph: &str, label: &str| GridCell {
-        glyph: glyph.into(),
-        label: label.into(),
-    };
-    add(PopupRow::Header(agent.name.clone()), &[]);
-    add(PopupRow::Rule, &[]);
-    if agent.exited {
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        // Resume above the rule (AC7): the menu twin of peek `r`, on the row
-        // state `r` accepts - an exited row.
-        add(entry("↻", "Resume"), &[MenuAction::Resume]);
-    } else if agent.pane_id.is_some() {
-        // Live pane row: already placed, so re-placement is a MOVE of the live
-        // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
-        // below, so the two menus read as one system; the verbs differ because
-        // the operations do (move a running pane vs. place a new one).
-        add(entry("→", "Focus"), &[MenuAction::Focus]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(PopupRow::Rule, &[]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::BreakOut],
-        );
-        add(entry("⇱", "Detach pane"), &[MenuAction::Detach]);
-        // Ungated by pane count. A row whose pane is on screen and has no
-        // neighbour `dir`-ward gets the server's "no pane in that direction"
-        // notice, the same fail-closed feedback the paneless branch relies on;
-        // a row whose pane is off screen always has somewhere to land (the
-        // current view), so gating on the source tab would be wrong anyway.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Move Left"), cell("◨", "Move Right")]),
-            &[
-                MenuAction::MoveDir(Dir::Left),
-                MenuAction::MoveDir(Dir::Right),
-            ],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Move Up"), cell("⬓", "Move Down")]),
-            &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else if agent.attach_id.is_some() {
-        // Paneless bg row: the motivating case - open as a tab or a split pane.
-        // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
-        // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
-        add(entry("⊙", "Open Here"), &[MenuAction::OpenHere]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::NewTab],
-        );
-        add(PopupRow::Rule, &[]);
-        // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
-        // IS the direction). Glyphs are half-block squares; a non-nerd-font
-        // terminal still shows the label beside them.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
-            &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
-            &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else {
-        // A live row that is neither pane-hosted nor attachable here.
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
-            add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
-        }
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    }
-    // Diff is common to every row state: it reads the row's worktree,
-    // which an exited or paneless row has just as much as a live pane-hosted
-    // one - and a finished worker's diff is the one you most want to read.
-    // Bound in menu scope now, so its hint is the live key.
-    add(PopupRow::Rule, &[]);
-    add(entry("±", "Diff"), &[MenuAction::Diff]);
-    // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
-    if !agent.external {
-        add(entry("✎", "Rename"), &[MenuAction::RenameAgent]);
-    }
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Agent(AgentIdent::of(agent)),
-        actions,
     }
 }
 
@@ -12226,6 +12110,18 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("detach send failed: {e}"))?,
             _ => view.set_notice("only a live pane-hosted worker can detach".into()),
+        },
+        MenuAction::ClosePortal => match a.pane_id {
+            // One command, the seat named: FocusPane plus ClosePane would
+            // close whatever holds focus if the seat vanished between the
+            // two sends.
+            Some(pid) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::ClosePortal { seat: pid }),
+            )
+            .await
+            .map_err(|e| format!("close portal send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
         },
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
