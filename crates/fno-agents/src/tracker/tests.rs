@@ -8,13 +8,38 @@ use std::collections::HashMap;
 /// A hermetic env for tests that touch HOME-derived paths: FNO_CONFIG names an
 /// empty file, so no real config resolves; HOME lands in the temp dir. Hold
 /// the crate's env lock first so sibling tests do not read the overrides.
-fn hermetic_env(tmp: &std::path::Path) {
+/// The returned guard restores the previous values on drop, so the overrides
+/// never leak into sibling tests under parallel execution.
+fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
     let empty = tmp.join("empty.toml");
     std::fs::write(&empty, "").unwrap();
+    let saved = [
+        ("FNO_CONFIG", std::env::var("FNO_CONFIG").ok()),
+        ("HOME", std::env::var("HOME").ok()),
+        ("FNO_HOME", std::env::var("FNO_HOME").ok()),
+        (
+            "FNO_NO_CANONICAL_CONFIG",
+            std::env::var("FNO_NO_CANONICAL_CONFIG").ok(),
+        ),
+    ];
     std::env::set_var("FNO_CONFIG", &empty);
     std::env::set_var("HOME", tmp);
     std::env::set_var("FNO_HOME", tmp);
     std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
+    EnvGuard(saved)
+}
+
+struct EnvGuard([(&'static str, Option<String>); 4]);
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.iter() {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
 }
 
 struct FakeGh {
@@ -107,7 +132,7 @@ fn cand(id: &str, title: &str, blocked_by: &[&str]) -> Candidate {
 #[test]
 fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
     let dir = tempfile::tempdir().unwrap();
-    hermetic_env(dir.path());
+    let _env = hermetic_env(dir.path());
     // Sidecar file for o/r#1 with plan_path, cwd and two sessions.
     let sidecar_dir = dir.path().join(".fno/sidecar");
     std::fs::create_dir_all(&sidecar_dir).unwrap();
@@ -243,7 +268,7 @@ fn a_gh_io_fault_surfaces_as_backend_naming_the_id() {
 fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
     let dir = tempfile::tempdir().unwrap();
     let _lock = crate::claims::test_env_lock();
-    hermetic_env(dir.path());
+    let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
         cands: vec![cand("E-1", "One", &[])],
@@ -285,7 +310,7 @@ fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
 fn a_scope_switch_never_serves_another_scope_cache() {
     let dir = tempfile::tempdir().unwrap();
     let _lock = crate::claims::test_env_lock();
-    hermetic_env(dir.path());
+    let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
         cands: vec![cand("E-1", "One", &[])],

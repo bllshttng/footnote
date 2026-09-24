@@ -50,7 +50,6 @@ pub(crate) fn root(cwd: &Path) -> std::path::PathBuf {
 /// read failure is `Backend` naming the id. Every key passes through except
 /// `id` - no second field list here.
 pub fn load(root: &Path, id: &str) -> Result<serde_json::Map<String, Value>, TrackerError> {
-    use super::TrackerError;
     let path = root.join(format!("{}.json", encode_key(id)));
     if !path.exists() {
         return Ok(serde_json::Map::new());

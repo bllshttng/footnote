@@ -74,11 +74,7 @@ fn cache_dir(cwd: &std::path::Path) -> std::path::PathBuf {
 
 fn cache_path(backend: &str, scope: &str) -> Option<std::path::PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    let dir = cache_dir(&cwd);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-    Some(dir.join(format!(
+    Some(cache_dir(&cwd).join(format!(
         "{backend}-{}.json",
         crate::claims::encode_key(scope)
     )))
@@ -88,6 +84,13 @@ fn cache_write(backend: &str, scope: &str, doc: &Value) {
     let Some(path) = cache_path(backend, scope) else {
         return;
     };
+    // Only the write creates the directory; a cache read never mutates.
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
     let payload = json!({ "taken_at": now_rfc3339(), "snapshot": doc });
     let tmp = path.with_file_name(format!(".tmp-snapshot-{}", std::process::id()));
     if std::fs::write(&tmp, payload.to_string()).is_ok() {
