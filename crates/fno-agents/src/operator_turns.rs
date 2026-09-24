@@ -589,7 +589,7 @@ pub fn ack_turn(
                 "answered_at": chrono::Utc::now().to_rfc3339(),
             }
         });
-        crate::provider_cap::append_questions_row(
+        let _ = crate::provider_cap::append_questions_row(
             &crate::provider_cap::questions_path(home),
             &answered,
         );
@@ -1193,8 +1193,10 @@ mod tests {
         assert_eq!(row["outcome"], "answer:use the narrow reading");
         assert_eq!(row["ref"], "use the narrow reading");
         // The durable answered row: the fold the attention arm reads.
-        let index =
-            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        let index = crate::event_store::journal_text(
+            &crate::provider_cap::questions_path(&home),
+            &["user_ask_answered"],
+        );
         assert!(
             index.contains("\"user_ask_answered\""),
             "index carries the answered row: {index}"
@@ -1214,8 +1216,10 @@ mod tests {
             !capture.join("s.jsonl").exists(),
             "the refusal writes no ledger"
         );
-        let index =
-            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        let index = crate::event_store::journal_text(
+            &crate::provider_cap::questions_path(&home),
+            &["user_ask_answered"],
+        );
         assert!(
             !index.contains("user_ask_answered"),
             "the refusal writes no answered row: {index}"
