@@ -12,11 +12,11 @@ Claude Code 2.1.269 or later ships the command. Run it from the repo root:
 claude plugin eval . --eval-dir evals/claude-plugin --model claude-opus-5-5 --max-cost-usd 10
 ```
 
-Every run is a real model call on your account. Six cases at three runs in two arms cost about $4 to $8 on an Opus model. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
+Every run is a real model call on your account. Six cases at three runs in two arms cost about $5 at list price on `claude-opus-5-5`. Add `--ablation none` to skip the no-plugin arm and halve the cost. Add `--case <name> --runs 1` to try one case once. Each invocation writes `results/<timestamp>/`, which git ignores. No CI job runs this suite.
 
 ## Read the table
 
-A positive case has one grader, `tool_used: Skill`, pinned to the fno skill name. A skill that the plugin supplies can never fire without the plugin, so `W/OUT` is 0 by design and `Δ` equals the trigger rate. The negative case scores in both arms (`arm: both`). Its `Δ` shows whether the plugin makes Claude call a skill on a request that needs none.
+A positive case has one grader, `tool_used: Skill`, pinned to the fno skill name. A skill that the plugin supplies can never fire without the plugin, so `W/OUT` is 0 by design and `Δ` equals the trigger rate. A `Reached maximum number of turns` note is expected on `target` and `fix`: the skill starts work that the read-only sandbox cannot finish. The grader reads the trace, so the run still passes. The negative case scores in both arms (`arm: both`). Its `Δ` shows whether the plugin makes Claude call a skill on a request that needs none.
 
 ## Isolation
 
