@@ -16,6 +16,9 @@ pub struct ResumeArgs {
     pub name: String,
     pub print_command: bool,
     pub message: Option<String>,
+    /// Internal fallback marker: the caller already accepted this message in
+    /// the durable mail queue, so a Working route must not enqueue it again.
+    pub message_already_queued: bool,
     pub cross_project: bool,
     pub cwd: Option<String>,
     pub account: Option<String>,
@@ -67,6 +70,7 @@ pub fn parse_resume_args(rest: &[String]) -> Result<ResumeArgs, i32> {
             "--cross-project" => parsed.cross_project = true,
             "--dry-run" => parsed.dry_run = true,
             "--allow-new-id" => parsed.allow_new_id = true,
+            "--message-already-queued" => parsed.message_already_queued = true,
             "--message" | "-m" => {
                 parsed.message = Some(match iter.next() {
                     Some(v) => v.clone(),
@@ -149,6 +153,10 @@ pub fn parse_resume_args(rest: &[String]) -> Result<ResumeArgs, i32> {
                 name = Some(other.to_string());
             }
         }
+    }
+    if parsed.message_already_queued && parsed.message.is_none() {
+        eprintln!("fno-agents: --message-already-queued needs --message");
+        return Err(2);
     }
     // The conversion-only flags refuse on a plain resume rather than being
     // dropped: a silently ignored `--allow-new-id` is how a caller learns its
@@ -423,5 +431,22 @@ mod tests {
         );
         // The control: both are legal beside --substrate thread.
         assert!(parse_resume_args(&args(&["alpha", "--substrate", "thread", "--dry-run"])).is_ok());
+    }
+
+    #[test]
+    fn resume_accepts_the_internal_already_queued_message_marker() {
+        let parsed = parse_resume_args(&args(&[
+            "alpha",
+            "--message-already-queued",
+            "--message",
+            "go",
+        ]))
+        .expect("the internal fallback marker must parse");
+        assert_eq!(parsed.message.as_deref(), Some("go"));
+        assert!(format!("{parsed:?}").contains("message_already_queued: true"));
+        assert_eq!(
+            parse_resume_args(&args(&["alpha", "--message-already-queued"])),
+            Err(2)
+        );
     }
 }
