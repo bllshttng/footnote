@@ -1203,8 +1203,12 @@ mod tests {
         let page = std::fs::read_to_string(dir.join("plain.html")).unwrap();
         assert!(!page.contains("<svg"), "no chart without a fold");
         assert!(out.notes.iter().any(|n| n.starts_with("no fold:")));
-        // A frontmatter fold that does not exist on disk.
-        let (dir, out) = render_fixture("ac5b", "gone.json", "{\"days\": 30}");
+        // A frontmatter fold that does not exist on disk: the md names it,
+        // the file is never written.
+        let dir = temp_dir("ac5b");
+        let md = FIXTURE_MD.replace("fold: intel_report.json", "fold: gone.json");
+        std::fs::write(dir.join("2026-09-21-0a1b2c3d.md"), md).unwrap();
+        let out = render_report(&dir.join("2026-09-21-0a1b2c3d.md")).unwrap();
         let page = rendered_page(&dir);
         assert!(!page.contains("<svg"));
         assert!(out.notes.iter().any(|n| n.contains("gone.json")));
@@ -1229,9 +1233,15 @@ mod tests {
         let usage = page.split("<section id=\"usage\">").nth(1).unwrap();
         let usage = &usage[..usage.find("</section>").unwrap()];
         assert_eq!(usage.matches("<figure>").count(), 5, "five usage charts");
-        // Per-day charts: one slot per distinct date (30, incl. the zero day).
+        // Per-day charts: one slot per distinct date (30, incl. the zero
+        // day); hours hold 24; the response histogram draws 4 bucket
+        // columns and the tool-error bars 3 tracks.
         let track = usage.matches("class=\"track\"").count();
-        assert_eq!(track, 30 + 30 + 24, "30 + 30 slots + 24 hour columns");
+        assert_eq!(
+            track,
+            30 + 30 + 24 + 4 + 3,
+            "30 + 30 slots + 24 hours + 4 buckets + 3 bars"
+        );
         assert!(usage.contains("hours in +02:00"), "tz caption");
         // Tool-error bars run in descending count order: Bash, Edit, WebFetch.
         let bash = usage.find("Bash (9)").unwrap();

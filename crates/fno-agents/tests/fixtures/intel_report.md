@@ -73,6 +73,7 @@ operator: tell me the token
 - <a id="s-0a1b2c3d"></a>s-0a1b2c3d: claude, node x-4a63, PR 2456, Relay handoffs
 - <a id="s-11aa22bb"></a>s-11aa22bb: codex, node x-76fc, PR 2454, Coordination
 - <a id="s-33cc44dd"></a>s-33cc44dd: claude, node -, PR -, Review gate
+- <a id="s-zz"></a>s-zz: malformed anchor plant, never becomes an id
 
 ## Skipped
 No harness unreadable.
