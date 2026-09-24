@@ -941,6 +941,20 @@ event_types:
           description: "Optional provenance_nonce; tie-back to a session if provided."
     consumers: [hooks/target-stop-hook.sh]
 
+  - name: mail_notify_self_missed
+    description: "inject-mail-notify.sh (UserPromptSubmit) called `fno agents mail notify-self` and it did not deliver within its 2-second bound: rc 124 is the bound firing; any other nonzero is a refusal or a crash the hook previously discarded (2>/dev/null || true). Forensic event: the next reading of mail_notify_self_missed rows against agent_mail_drained gaps names the cause (timeout, identity refusal, crash); recording it does not fix it."
+    sources: [hook]
+    data:
+      required: [rc]
+      properties:
+        rc:
+          type: integer
+          description: "Exit status of `fno agents mail notify-self`; 124 means the portable 2-second bound fired."
+        stderr_tail:
+          type: string
+          description: "Last stderr line, at most 200 chars, when the verb wrote one."
+    consumers: [operator]
+
   - name: reconcile_backfill_wrote
     description: "fno megatron reconcile --backfill wrote a missing completion JSON for a confirmed-merged PR. Forensic event: the file is the source of truth, this event is best-effort telemetry."
     sources: [megatron]
