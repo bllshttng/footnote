@@ -13,10 +13,9 @@ identically to a close claim to a prose scanner. The exact line is the only
 runtime-recognized closure grammar, so a claim is either the literal line or
 it does not exist.
 
-The LINE FORMAT lives in one leg: the Rust parser (`crates/fno-agents/src/
-king_board/pr_closure.rs`, verbs `pr-closure-parse` / `pr-closure-render`);
-`parse_closure_trailer` and `render_closure_trailer` are thin forwarders to
-it, so the Python and Rust readers can never disagree. Writers emit only
+The LINE FORMAT lives in one leg: the Rust parser (`crates/fno-agents/src/king_board/
+pr_closure.rs`, verbs `pr-closure-parse` / `pr-closure-render`); the two forwarders
+below speak for Python, so both readers answer from one grammar. Writers emit only
 `Fixes`; readers also accept the retired `Backlog-Closure:` spelling.
 """
 from __future__ import annotations
@@ -28,28 +27,21 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
+from fno.rust_binary import VerbUnavailable, verb_call
 
-
-class ClosureBinaryError(RuntimeError):
-    """The Rust closure leg failed or is missing; never a silent empty."""
+ClosureBinaryError = VerbUnavailable
 
 
 def parse_closure_trailer(body: str) -> list[str]:
     """Forward to the Rust leg: ids on the LAST closure line of ``body``."""
     if not isinstance(body, str) or not body:
         return []
-    from fno.rust_binary import verb_call
-
     return verb_call("pr-closure-parse", {"body": body}, ClosureBinaryError)["ids"]
 
 
 def render_closure_trailer(node_ids: list[str]) -> str:
     """Forward to the Rust leg: the one ``Fixes`` line ("" when nothing well-formed)."""
-    from fno.rust_binary import verb_call
-
-    return verb_call(
-        "pr-closure-render", {"ids": list(node_ids)}, ClosureBinaryError
-    )["line"]
+    return verb_call("pr-closure-render", {"ids": list(node_ids)}, ClosureBinaryError)["line"]
 
 
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:
