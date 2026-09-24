@@ -38,7 +38,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     echo "ERROR: not inside a git repository" >&2
     exit 2
 }
-cd "$REPO_ROOT" || exit 2
+cd "$REPO_ROOT" || {
+    echo "ERROR: cannot cd into $REPO_ROOT" >&2
+    exit 2
+}
 
 SCHEMA_FILE="crates/fno-agents/src/registry_schema.toml"
 
@@ -66,12 +69,21 @@ read_version() {
 # line. Empty output when the key is absent (the introducing PR). Tolerates
 # trailing commas and quoting.
 read_fields() {
-    local rev="$1" label="$2" blob
+    local rev="$1" label="$2" blob line
     blob="$(git show "$rev:$SCHEMA_FILE")" || {
         echo "ERROR: cannot read schema toml at $label ($rev)" >&2
         return 1
     }
-    grep -E '^fields[[:space:]]*=' <<<"$blob" \
+    # The no-match path IS a value: a pre-fields toml reads as the empty
+    # field set (the introducing PR). With pipefail set, an unguarded grep
+    # no-match would fail the whole pipeline and exit 2 with no message -
+    # the silent red this guard shipped with. Guarded here, so absence
+    # returns 0 with empty output.
+    line="$(grep -E '^fields[[:space:]]*=' <<<"$blob" || true)"
+    if [[ -z "$line" ]]; then
+        return 0
+    fi
+    printf '%s\n' "$line" \
         | sed -e 's/^[^=]*=[[:space:]]*//' -e 's/^\[//; s/\][[:space:]]*$//' \
         | tr ',' '\n' | tr -d '"'"'"' \t' \
         | sed '/^$/d' | sort

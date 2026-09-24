@@ -129,8 +129,20 @@ else
     fail "parallel-bump case: rc=$rc out=$out"
 fi
 
+# --- case 5: base tip has no fields key yet (the introducing PR) -------------
+# This PR's own shape: the base toml predates the fields key. The no-match
+# grep used to fail the pipelined read under pipefail and exit 2 silently;
+# absence is the empty field set and exits 0 with the reason.
+read -r dir sha <<< "$(make_repo 36 NONE 36 "$FIELDS_BASE")"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"no baseline fields at base tip"* ]]; then
+    pass "no baseline fields at base tip exits 0"
+else
+    fail "introducing-PR case: rc=$rc out=$out"
+fi
+
 if [[ $failures -eq 0 ]]; then
-    echo "check-registry-schema-bump-selftest: all 4 cases pass"
+    echo "check-registry-schema-bump-selftest: all 5 cases pass"
     exit 0
 fi
 echo "check-registry-schema-bump-selftest: $failures failure(s)" >&2
