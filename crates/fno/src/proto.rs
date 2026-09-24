@@ -328,7 +328,9 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 87;
+/// v88: `AgentLaunchRequest.node` (serde default), the board's target key
+/// binds the launch to its node; floor stays 58.
+pub const PROTO_VERSION: u32 = 88;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing

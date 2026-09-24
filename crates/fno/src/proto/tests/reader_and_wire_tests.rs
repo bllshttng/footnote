@@ -97,6 +97,7 @@ fn proto_v83_agent_launch_roundtrips() {
         placement: Some("name:work".into()),
         portal: None,
         split: None,
+        node: None,
         message: "line one\nline \"two\" $ ` \u{1f600}".into(),
     };
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -141,4 +142,16 @@ fn proto_v83_agent_launch_roundtrips() {
     })
     .unwrap();
     assert!(json.contains(r#""kind":"launched""#), "{json}");
+}
+
+#[test]
+fn proto_v88_node_field_defaults_to_none() {
+    // AC4-EDGE: a v87 payload carries no `node` key; the serde default
+    // decodes it as None, so an older client still attaches and launches.
+    let json = r#"{
+        "request_id": 7, "revision": 3, "cwd": "/tmp/proj",
+        "harness": "codex", "substrate": "pane", "message": ""
+    }"#;
+    let req: AgentLaunchRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.node, None);
 }
