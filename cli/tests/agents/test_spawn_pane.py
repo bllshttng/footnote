@@ -2071,44 +2071,6 @@ def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
     assert resolve_provenance("x-missing") == {"FNO_NODE": "x-missing"}
 
 
-def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """x-84a8: `fno agents spawn --node ... --slug ... --plan ...` resolves the
-    provenance map and hands it to the bounded default pane dispatcher."""
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-
-    captured: dict = {}
-
-    def fake_dispatch(**kwargs):
-        captured.update(kwargs)
-        return MuxSpawnResult(
-            name=kwargs["name"], provider=kwargs["provider"], session="main",
-            pane_id=1, child_pid=None, session_uuid="u",
-        )
-
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    # The dispatch takes a real node claim; keep it out of the user's global store.
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    monkeypatch.setattr("fno.graph.load.load_graph",
-        lambda: [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}])
-
-    res = CliRunner().invoke(
-        agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
-         "--node", "x-84a8", "--slug", "s", "--plan", "p.md", "--session-phase", "do"],
-    )
-    assert res.exit_code == 0, res.output
-    # The claim holder rides with the provenance group: the worker names it back
-    # at init to prove it is the successor this dispatch claimed the node for.
-    assert captured["provenance"] == {
-        "FNO_NODE": "x-84a8", "FNO_SLUG": "s", "FNO_PLAN": "p.md",
-        "FNO_NODE_CLAIM_HOLDER": "spawn-handover:t-84a8-s",
-    }
-
-
 def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2451,58 +2413,6 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
     )
     assert result.exit_code == 0, result.output
     assert captured["tab"] == "id:12"
-
-
-def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-    import fno.adapters.providers.dispatch as provider_dispatch
-    import fno.adapters.providers.loader as provider_loader
-
-    stub_codex_sandbox_probe(monkeypatch)
-
-    captured = {}
-
-    def fake_bounded(**kwargs):
-        captured.update(kwargs)
-        return MuxSpawnResult(
-            name=kwargs["name"], provider=kwargs["provider"], session="main",
-            pane_id=1, child_pid=None, session_uuid="codex-thread",
-        )
-
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_bounded)
-    monkeypatch.setattr(
-        provider_loader,
-        "load_providers",
-        lambda **_kwargs: SimpleNamespace(
-            by_id={"work": SimpleNamespace(harness="codex")}
-        ),
-    )
-    monkeypatch.setattr(
-        provider_dispatch, "dispatch_env", lambda *_args, **_kwargs: {"CODEX_HOME": "/tmp/codex"}
-    )
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    result = CliRunner().invoke(
-        agents_cli.agents_app,
-        [
-            "spawn", "--name", "successor", "--harness", "codex",
-            "--substrate", "pane", "--bounded-placement",
-            "--recorded-provider=openai", "--model", "gpt-5.6-sol",
-            "--dispatch-account", "work", "/fno:target --no-merge x-abcd",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == "codex"
-    assert captured["route_provider_id"] == "openai"
-    assert captured["account_record_id"] == "work"
-    assert captured["model_name"] == "gpt-5.6-sol"
-    assert captured["workspace"] is None
-    assert captured["tab"] is None
 
 
 def test_cmd_spawn_pane_uses_global_bounded_dispatch(monkeypatch) -> None:

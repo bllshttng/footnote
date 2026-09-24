@@ -1,9 +1,9 @@
 //! Goal truth, continuation ownership and correlated Stop event emission.
 
-use super::{events_path, first_raw_field, Fire};
+use super::{events_path, first_raw_field, global_events_path, Fire};
 use serde::Serialize;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GoalTruth {
@@ -306,10 +306,7 @@ pub(super) fn emit_stop_decision(
         harness_output_contract: harness_output_contract(fire, decision).into(),
     };
     let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
+    let global_events = global_events_path(&project_events);
     crate::loopcheck::emit_to_both(
         &project_events,
         &global_events,

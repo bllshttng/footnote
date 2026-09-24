@@ -338,7 +338,9 @@ def test_codex_code_payload_after_provider_fence_is_checked() -> None:
     )
 
 
-def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
+def test_codex_code_spawn_in_a_repo_keeps_launch_path(
+    monkeypatch, tmp_path, loop_admission_ready
+) -> None:
     """A resolved grant is the positive control and must not refuse."""
     from fno.agents import sandbox_probe
     from fno.cli import app
@@ -447,7 +449,7 @@ def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> No
     ],
 )
 def test_bounded_codex_code_spawn_is_probed_before_it_routes(
-    monkeypatch, tmp_path, verdict, blocked, routed, marker
+    monkeypatch, tmp_path, verdict, blocked, routed, marker, loop_admission_ready
 ) -> None:
     """x-8d88: the derived node takes the Python dispatch lane, so the
     routed branch is observed at the codex thread terminus."""

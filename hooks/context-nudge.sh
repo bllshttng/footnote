@@ -164,10 +164,14 @@ USED_TOKENS=""
 WINDOW_TOKENS=""
 COMPACTION_BAND=""
 COMPACTION_PREPARATION=0
-if command -v jq >/dev/null 2>&1 && command -v fno-agents >/dev/null 2>&1; then
-    PROBE_OUT=$(with_timeout 5 fno-agents context-run --probe --transcript "$TRANSCRIPT" --session "$SESSION_ID" --json 2>/dev/null || true)
+PROBE_OUT=""
+CONTEXT_RUNNER="${FNO_AGENTS_FRONT:-fno-agents}"
+if command -v jq >/dev/null 2>&1 && command -v "$CONTEXT_RUNNER" >/dev/null 2>&1; then
+    PROBE_OUT=$(with_timeout 5 "$CONTEXT_RUNNER" context-run --probe --transcript "$TRANSCRIPT" --session "$SESSION_ID" --json 2>/dev/null || true)
 elif command -v jq >/dev/null 2>&1 && command -v fno >/dev/null 2>&1; then
     PROBE_OUT=$(with_timeout 5 fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
+fi
+if command -v jq >/dev/null 2>&1; then
     # jq, not sed: BSD sed (macOS) does not support `[0-9]\+` in basic regex, and
     # the hook already requires jq for the registry read below.
     _p=$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // empty' 2>/dev/null)

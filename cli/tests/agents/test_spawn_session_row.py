@@ -181,7 +181,7 @@ def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uu
 
 
 def test_spawn_with_prose_and_node_composes_a_labeled_seed(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, loop_admission_ready
 ) -> None:
     """Arbitrary prose with a `--node` is no longer unlabelable: the verb
     seam composes the node's command in front, so the seed names the verb
@@ -345,7 +345,9 @@ def test_spawn_prompt_two_ids_arms_nothing(workdir_claude, resolvable_uuid) -> N
     assert _node_rows() == []
 
 
-def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_target_family_stamps_do(
+    workdir_claude, resolvable_uuid, loop_admission_ready
+) -> None:
     """A /target-family payload names a do worker: the row stamps do (the
     worker's own claim-acquire stamp duplicate-fills it), never review."""
     from fno.agents.cli import agents_app
@@ -532,7 +534,9 @@ def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
     assert "session row open skipped" not in result.stderr
 
 
-def test_spawn_bad_session_phase_refuses_before_spawn(workdir_claude) -> None:
+def test_spawn_bad_session_phase_refuses_before_spawn(
+    workdir_claude, loop_admission_ready
+) -> None:
     """--session-phase is validated against the enum fail-closed (exit 2)."""
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -756,7 +760,9 @@ def test_spawn_do_row_records_config_grant(
     assert grant["source"] == "config"
 
 
-def test_spawn_no_merge_flag_outranks_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+def test_spawn_no_merge_flag_outranks_config_grant(
+    workdir_claude, resolvable_uuid, monkeypatch, loop_admission_ready
+) -> None:
     """A /target message carrying --no-merge records approved=false with the
     flag named as the source, even while the standing config would grant
     (AC9-EDGE's newer refusal)."""

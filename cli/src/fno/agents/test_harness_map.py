@@ -1219,7 +1219,7 @@ def test_native_and_review_verbs_come_from_the_capability_table():
 
     caps = capabilities("codex")
     assert set(caps["native_verbs"]) == {
-        "/review", "/code-review", "/model", "/status", "/compact",
+        "/review", "/code-review", "/model", "/status", "/compact", "/goal",
     }
     assert _CODEX_REVIEW_VERBS == {"/review", "/code-review"}
     assert _CODEX_REVIEW_VERBS <= set(caps["native_verbs"])

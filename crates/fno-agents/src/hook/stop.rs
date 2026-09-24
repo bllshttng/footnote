@@ -680,10 +680,7 @@ fn emit_block_for_harness(reason: &str) -> i32 {
 /// One control-plane arm row for this fire.
 fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
     let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
+    let global_events = global_events_path(&project_events);
     let detail = format!(
         "driver={driver} decision={decision} reason={}",
         if reason.is_empty() { "live" } else { reason }
@@ -697,6 +694,16 @@ fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
         "interval_s": 0,
     });
     crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
+}
+
+fn global_events_path(fallback: &Path) -> PathBuf {
+    std::env::var_os("GLOBAL_EVENTS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::paths::AgentsHome::from_env_opt()
+                .map(|home| crate::daemon::global_events_path(&home))
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
 }
 
 ///: the CARGO_BUILD_BUILD_DIR value, ported from
