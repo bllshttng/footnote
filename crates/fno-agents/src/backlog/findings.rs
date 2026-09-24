@@ -160,9 +160,11 @@ pub fn import_finding(
         None,
         None,
         |rows| {
-            let taken = rows
-                .iter()
-                .any(|row| finding_ids_in(row).iter().any(|id| *id == finding.finding_id));
+            let taken = rows.iter().any(|row| {
+                finding_ids_in(row)
+                    .iter()
+                    .any(|id| *id == finding.finding_id)
+            });
             if taken {
                 return Ok(false);
             }
@@ -210,10 +212,7 @@ pub fn import_resolve(
                 let Some(list) = &mut parsed.findings else {
                     continue;
                 };
-                let Some(finding) = list
-                    .iter_mut()
-                    .find(|f| f.finding_id == finding_id)
-                else {
+                let Some(finding) = list.iter_mut().find(|f| f.finding_id == finding_id) else {
                     continue;
                 };
                 if finding.resolved_at.is_some() {

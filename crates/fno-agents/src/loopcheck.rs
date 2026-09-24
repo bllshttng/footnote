@@ -1663,12 +1663,11 @@ pub(crate) fn decide_with_payload(
                 // session whose lease renewal succeeds and whose harness can
                 // idle; a fall-through there must not reach a terminal built
                 // from absence.
-                let observed_async_wait =
-                    async_wait_class(
-                        &pr_info,
-                        open_findings.is_empty() && findings_read_error.is_none(),
-                        head_shipped,
-                    );
+                let observed_async_wait = async_wait_class(
+                    &pr_info,
+                    open_findings.is_empty() && findings_read_error.is_none(),
+                    head_shipped,
+                );
 
                 //: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
