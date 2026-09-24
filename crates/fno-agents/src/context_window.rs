@@ -235,6 +235,25 @@ pub fn parse_usage_record(record: &Value) -> Option<ContextUsage> {
     })
 }
 
+/// Read the session id from the bounded first record of a Codex rollout.
+/// The transcript path already resolved by the caller is the identity source
+/// when the hook environment does not carry `CODEX_THREAD_ID`.
+pub fn rollout_session_id(path: &Path) -> Option<String> {
+    let mut prefix = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    let first_line = prefix.split(|byte| *byte == b'\n').next()?;
+    let record: Value = serde_json::from_slice(first_line).ok()?;
+    record
+        .pointer("/payload/id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+}
+
 pub fn read_last_usage(path: &Path) -> Result<Option<ContextUsage>, ContextWindowError> {
     let mut file =
         File::open(path).map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
@@ -415,6 +434,24 @@ mod tests {
         for model in ["claude-haiku-4-5", "claude-opus-4-5", "future-model"] {
             assert_eq!(window_for_model(model), 200_000, "{model}");
         }
+    }
+
+    #[test]
+    fn rollout_session_id_uses_bounded_metadata_not_the_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-file-id-is-not-authoritative.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-exact\"}}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::rollout_session_id(&path).as_deref(),
+            Some("thread-exact")
+        );
     }
 
     #[test]

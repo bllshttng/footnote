@@ -194,6 +194,7 @@ fn run_context_probe(args: &[String]) -> i32 {
         eprintln!("context-run --probe: --transcript is required");
         return 2;
     };
+    session = crate::context_window::rollout_session_id(Path::new(transcript)).unwrap_or(session);
     let usage = match crate::context_window::read_last_usage(Path::new(transcript)) {
         Ok(Some(usage)) => usage,
         Ok(None) | Err(_) => return 3,
