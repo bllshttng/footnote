@@ -147,7 +147,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next beat or mail wakes the reign, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires still escalates automatically and parks the session; the answer wakes it through the wake arm. Do not fight the hook.
+Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook.
 
 ## The three halts
 
