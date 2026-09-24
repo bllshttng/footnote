@@ -54,8 +54,7 @@ def cmd_note(
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
-    # Finding flags ride ctx.args straight to the native action (d-b6cc1a2a):
-    # reader resolution, delivery, and the receipt live in Rust.
+    # Finding flags ride ctx.args straight to the native action (d-b6cc1a2a).
     extra = list(ctx.args)
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:

@@ -12,9 +12,10 @@ from fno.tombstones import tombstone_group_cls
 annotate_app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Retired: `fno backlog note <node> \"<text>\" --blocking` records a "
-        "finding, `fno backlog notes findings [<node>]` reads them, `fno "
-        "backlog note --resolve <id>` clears one."
+        "Record an operator review finding against a node. The finding is a "
+        "durable review_finding event loop-check gates on (blocks terminal-allow "
+        "until resolved) AND a best-effort live-inject to the claim-holding "
+        "session. add | list | resolve."
     ),
     cls=tombstone_group_cls("annotate"),
 )
@@ -31,7 +32,6 @@ def add(
         help="Path to a file holding the block excerpt, or '-' to read it from stdin.",
     ),
 ) -> None:
-    """Refuse: `fno backlog note <node> "<text>" --blocking` replaced this."""
     typer.echo("annotate is retired: use fno backlog note <node> \"<text>\" --blocking", err=True)
     raise typer.Exit(code=2)
 
@@ -43,7 +43,6 @@ def list_cmd(
         False, "--json", "-J", help="Emit one JSON object per line instead of a summary."
     ),
 ) -> None:
-    """Refuse: `fno backlog notes findings [<node>]` replaced this."""
     typer.echo("annotate is retired: use fno backlog notes findings [<node>]", err=True)
     raise typer.Exit(code=2)
 
@@ -52,6 +51,5 @@ def list_cmd(
 def resolve(
     finding_id: str = typer.Argument(..., help="The finding id to resolve."),
 ) -> None:
-    """Refuse: `fno backlog note --resolve <finding-id>` replaced this."""
     typer.echo("annotate is retired: use fno backlog note --resolve <finding-id>", err=True)
     raise typer.Exit(code=2)
