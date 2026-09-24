@@ -555,7 +555,7 @@ fn deliver_working_mail(
         return code;
     }
     let receipt = crate::mail_inject::mail_send_receipt(&stdout);
-    if crate::mail_inject::mail_send_landed(code, &stdout) {
+    if crate::mail_inject::mail_send_accepted(code, &stdout) {
         println!(
             "fno agents resume: '{name}' ({short}) is 'Working'; delivered live: {receipt}",
             short = short_id
