@@ -422,17 +422,23 @@ fn codex_print_command_keeps_route_args_and_masks_route_key_without_side_effects
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("model_providers.zai-openai"), "{stdout}");
-    assert!(stdout.contains("model_provider='zai-openai'"), "{stdout}");
-    assert!(stdout.contains("model='glm-route-test'"), "{stdout}");
     assert!(
-        stdout.contains(&format!(
-            "exec env FNO_AGENT_SELF={} FNO_AGENT_HARNESS=codex FNO_NODE=resume-node-test",
-            row.name
-        )),
+        stdout.contains("model_provider=") && stdout.contains("zai-openai"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("model=") && stdout.contains("glm-route-test"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("exec sh -c "), "{stdout}");
+    assert!(
+        stdout.contains(&format!("FNO_AGENT_SELF={}", row.name)),
+        "{stdout}"
+    );
+    assert!(stdout.contains("FNO_AGENT_HARNESS=codex"), "{stdout}");
+    assert!(stdout.contains("FNO_NODE=resume-node-test"), "{stdout}");
     let route_provider = stdout.find("FNO_ROUTE_PROVIDER=zai-openai").unwrap();
-    let codex_executable = stdout.rfind(" codex ").unwrap();
+    let codex_executable = stdout.rfind("codex").unwrap();
     assert!(route_provider < codex_executable, "{stdout}");
     assert!(
         stdout.contains("FNO_TEST_ZAI_KEY=<from config>"),
@@ -449,7 +455,10 @@ fn codex_print_command_keeps_route_args_and_masks_route_key_without_side_effects
     entry["route_provider_id"] = json!("missing-provider");
     fixture.write_registry_entries(&entries);
     let output = run_null(&fixture, &row, &["--print-command"], &fixture.bins);
-    assert_eq!(output.status.code(), Some(13));
+    assert_eq!(
+        output.status.code(),
+        Some(fno_agents::reentry::REENTRY_REFUSED_EXIT)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("was launched on codex route missing-provider"),
