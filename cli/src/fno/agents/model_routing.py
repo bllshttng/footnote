@@ -332,9 +332,8 @@ def resolve_spawn_route(
 # these need no resolution-path change; they exist so `fno config route ls` can render
 # a lane that has no config line yet (an unconfigured `build` row) instead of
 # hiding it. `build` is the sanctioned delivery lane for /target bg + the
-# ordered advance drain. Unconfigured it fails safe to the primary Anthropic
-# model - no hardcoded tier. PR creation runs inline in the invoking session
-# and dispatches no lane.
+# ordered advance drain; PR creation runs inline in the invoking session and
+# dispatches no lane. Unconfigured fails safe to the primary Anthropic model.
 KNOWN_LANE_ROLES = ("build",)
 
 # Every tier Claude Code may request internally. Setting all of them to the
