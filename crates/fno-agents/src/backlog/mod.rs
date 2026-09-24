@@ -1192,8 +1192,11 @@ pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, Stri
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    // Read the lockfile directory once for the whole carrier batch.
+    let node_claims = nodes::node_claims_by_id()?;
     for id in ids {
-        if let Some(node) = nodes::load(&transaction, &id)? {
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        if let Some(node) = nodes::load_with_claim(&transaction, &id, Some(claim))? {
             entries.push(node.to_json());
         }
     }
@@ -1207,6 +1210,9 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
+    // Project the external claim store once for the whole export. Loading each
+    // node through `nodes::load` would rescan every lockfile for every row.
+    let node_claims = nodes::node_claims_by_id()?;
     let mut statement = connection
         .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
         .map_err(|error| error.to_string())?;
@@ -1218,13 +1224,19 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     let mut typed: Vec<(i64, String, Value)> = Vec::new();
     for id in ids {
         let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
             return Err(format!("node {id} vanished mid-export"));
         };
         typed.push((ordinal, id, node.to_json()));
     }
     // Raw-carried rows round-trip verbatim, merged into ordinal order.
-    let mut merged: Vec<(i64, String, Value)> = nodes::raw_rows(connection)?
+    let mut raw_rows = nodes::raw_rows(connection)?;
+    for (id, _, body) in &mut raw_rows {
+        let claim = node_claims.get(id).cloned().unwrap_or_default();
+        nodes::project_claim_value(body, claim);
+    }
+    let mut merged: Vec<(i64, String, Value)> = raw_rows
         .into_iter()
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();

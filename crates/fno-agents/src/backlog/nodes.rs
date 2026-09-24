@@ -161,7 +161,7 @@ fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
     Ok(NodeClaim::default())
 }
 
-fn node_claims_by_id() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
+pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
     let records = list_node_claims(Some("node:"))?;
     let mut claims = std::collections::HashMap::new();
     for record in records {
@@ -180,28 +180,41 @@ fn set_node_claim(node: &mut Node, claim: NodeClaim) {
 }
 
 pub(crate) fn project_claims(rows: &mut [Value]) -> Result<(), String> {
-    let mut claims = node_claims_by_id()?;
+    let claims = node_claims_by_id()?;
     for row in rows {
         let Some(id) = crate::graph_store::entry_id(row).map(str::to_string) else {
             continue;
         };
-        let claim = claims.remove(&id).unwrap_or_default();
-        let Some(object) = row.as_object_mut() else {
-            continue;
-        };
-        for (field, value) in [
-            ("locked_by", claim.locked_by),
-            ("locked_by_harness", claim.harness),
-            ("locked_by_harness_session", claim.harness_session),
-            ("locked_at", claim.locked_at),
-        ] {
-            object.insert(
-                field.to_string(),
-                value.map(Value::String).unwrap_or(Value::Null),
-            );
-        }
+        let claim = claims.get(&id).cloned().unwrap_or_default();
+        project_claim_value(row, claim);
     }
-    Ok(())
+}
+
+pub(crate) fn project_claim_value(row: &mut Value, claim: NodeClaim) {
+    let completed = row
+        .get("completed_at")
+        .is_some_and(|value| !value.is_null());
+    let session_id = claim.locked_by.clone();
+    let Some(object) = row.as_object_mut() else {
+        return;
+    };
+    for (field, value) in [
+        ("locked_by", claim.locked_by),
+        ("locked_by_harness", claim.harness),
+        ("locked_by_harness_session", claim.harness_session),
+        ("locked_at", claim.locked_at),
+    ] {
+        object.insert(
+            field.to_string(),
+            value.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
+    if session_id.is_some() || !completed {
+        object.insert(
+            "session_id".to_string(),
+            session_id.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
 }
 
 /// Upsert one node's row and its mirrors. The caller owns the transaction;
@@ -671,6 +684,14 @@ fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec
 /// One node with its mirrors and child aggregates, or None when the id is
 /// unknown.
 pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
+    load_with_claim(connection, id, None)
+}
+
+pub(crate) fn load_with_claim(
+    connection: &Connection,
+    id: &str,
+    claim: Option<NodeClaim>,
+) -> Result<Option<Node>, String> {
     let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
     let mut statement = connection
         .prepare_cached(&sql)
@@ -683,7 +704,10 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         None => return Ok(None),
     };
     let (mut node, supersession_extras, child_lists_present) = base_from_parts(parts)?;
-    let claim = claim_for_node(id)?;
+    let claim = match claim {
+        Some(claim) => claim,
+        None => claim_for_node(id)?,
+    };
     set_node_claim(&mut node, claim);
     let mut dispatch_statement = connection
         .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
