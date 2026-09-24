@@ -785,6 +785,23 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // deliberately not returned into `failed`.
     if !delivery_ship {
         stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+        // ── held-findings backstop ────────────────────────────────────
+        // A create flow that died between `gh pr create` and its
+        // publish-review step still owes the PR its pre-PR review comment.
+        // Idempotent by marker inside publish_held; log-only, never fatal.
+        let held_payload = serde_json::json!({"cwd": cwd.to_string_lossy()});
+        let held_journals = [crate::paths::events_path(&cwd)];
+        let held = crate::publish_review::publish_held(
+            &held_payload,
+            &crate::publish_review::GhReal,
+            &held_journals,
+        );
+        if held.status != "skipped" {
+            eprintln!(
+                "finalize: held review findings: {} ({})",
+                held.status, held.reason
+            );
+        }
     }
 
     // ── guarded do-provenance backstop ────────────────────────────
@@ -1850,7 +1867,7 @@ fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
 }
 
 /// Deterministic node<->PR `pr_number` backstop: the create-time skill
-/// stamp (pr-creator §5.5) is best-effort and was skipped for /#358,
+/// stamp (the create flow's bind step) is best-effort and was skipped for /#358,
 /// leaving `pr_number` null so the derived `in_review` status never engaged.
 /// Gated on node-presence + PR-exists (NOT `ship`) so `DoneAwaitingMerge` - the
 /// exact terminal `in_review` covers - is included. Best-effort + non-fatal +
