@@ -2,23 +2,13 @@
 
 Questions and pins reach a user away from a terminal, and the answer returns. One model, no new store: an attention item is a read-time projection over the question journals, the escalation notes and the user lane. `fno-agents needs --items --json` prints it. The daemon's `attention` arm delivers it. The answer returns through `fno inbox outstanding clear`, the same door the mux overlay uses.
 
-Setup is one sentence to your agent: "send my questions to my notes file". The agent writes:
-
-```toml
-[[attention]]
-type = "md"
-path = "~/c3po/me/inbox/jc-todos.md"
-```
-
-The key was named `[[reach_me]]`. That name still reads for one release, and loading it warns and names this key.
-
-`path` is the only required key. `type` defaults to `md`.
+Question pages need no setup. The attention arm writes one page per open question or pin into the vault's questions folder whenever it beats. Resolve it with `fno-agents state path questions`: with obsidian enabled it is the project's questions folder under the vault's internal tree, without it `<space>/questions`. One page per question, a `done/` folder for closed pages, a `questions.md` index, and a `questions.base` Obsidian Base over the folder. `[[attention]]` and `[[reach_me]]` md rows are retired: a row still in config.toml is ignored and named once per beat in the tick detail.
 
 ## Is this page for you?
 
-You are setting up where questions reach the user away from a terminal. You can also be changing how they are delivered, answered, or closed. The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
+The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
 
-Not for: one-way event pushes to phones and webhooks (counts and notices, no answer path). That is the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
+Not for: one-way event pushes to phones and webhooks. Those are the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
 
 ## The model
 
@@ -32,27 +22,15 @@ A fleet pin is an `operator_question` with no options and an `ask` line. Agents 
 
 ## What is not a question
 
-A machine chore whose row names the command that clears it is a `fleet_task`, not a question. It lands in `~/.fno/questions.jsonl` beside the questions. A king reads open tasks report-only on the board's `fleet_task` queue. It never reaches a sink or the user's question list. See `crates/fno-agents/src/fleet_task.rs`.
+A machine chore whose row names the command that clears it is a `fleet_task`, not a question. It lands in `~/.fno/questions.jsonl` beside the questions and never reaches the question pages. See `crates/fno-agents/src/fleet_task.rs`.
 
 ## The ten context fields and the readiness gate
 
-The eight context fields are:
-
-- `asker`: who asked, and how to reach them.
-- `node`: the node asked about, or the literal `none`.
-- `blocked_because`: why the asker is blocked.
-- `options_rationale`: why these options.
-- `recommendation`: the pick, with its downside.
-- `options`: each with next, pros and cons.
-- `unknowns`: what the asker has not thought through.
-
-Two routing fields complete the set. `reversible` is `yes`, `costly` or `no`, and `cost_if_wrong` names the cost in one line. `meanwhile` says what the asker does while it waits: stops, or proceeds.
-
-A question missing a required field is `ready: false`. A sink with `ready_only = true` never delivers it. `fno-agents needs --items --json` prints the `missing` list so the asker can re-ask with the fields. `ready_only` defaults to false for one release. Machine writers cannot supply the fields until the Rust intake ships.
+The context fields: `asker`, `node`, `blocked_because`, `options_rationale`, `recommendation` (the pick, its reason, its downside), `options` (each with next, pros and cons), `unknowns`, `reversible`, `cost_if_wrong`, `meanwhile`. `reversible` is `yes`, `costly`, or `no`. A question missing a required field is `ready: false`, and `fno-agents needs --items --json` prints the `missing` list so the asker can re-ask with the fields.
 
 ## Asking with context
 
-The ten fields ride the question file you hand `--question-file`:
+The fields ride a question file handed to `--question-file`:
 
 ```markdown
 ---
@@ -75,6 +53,9 @@ the three readings kings have acted on
 ## Downside
 a repair can hide a feature
 
+## Recommendation
+Option 1, the narrowest door: every later fix needs it.
+
 ## Not thought through
 whether a net-zero move between files counts
 
@@ -94,64 +75,53 @@ The first line after the frontmatter is the question. Each numbered option carri
 fno inbox outstanding ask --question-file q.md --node <node-id> --subject <subject> --blocks <blocked-node-id>
 ```
 
-When options are present, `--node` is required: an ask is one line plus a node pointer. A question missing a context field is not delivered, and its asker is mailed once, naming the missing fields.
+When options are present, `--node` is required: an ask is one line plus a node pointer. The port refuses a question with no what, why, two options, or recommendation with its reason:
 
-## The `md` sink
-
-One item is one task line plus an indented block:
-
-```markdown
-- [ ] Which reading of the law? Blocks x-aaaa. Recommended: 1 #jc ⏫ 📅 2026-09-18 ^q-e5e5520b
-    - [ ] 1. Narrow. Pro: unblocks today. Con: strict.
-    - The user ticks one, or writes words on an indented line under the item.
+```
+outstanding: refused: a question needs why, two options, a recommendation. Write a question file (docs/architecture/attention-items.md, "Asking with context") and pass --question-file. One action with no choice is a pin: pass --ask "<the action>".
 ```
 
-The top line ends with the `^<id>` block anchor. Only the top line carries the tag, so a `#jc` grep counts one item. The tag also tells the close flip what is ours. The arm flips only blocks whose top line carries the tag, never the user's own anchored task lines.
+A reversible question that carries a recommendation is one the asker must decide itself. The port refuses it too, naming the door: record the ruling as the asking session or its king with `fno backlog decide <node> "<ruling>"`, then continue. It reaches the user only with a user-only reason in a `why_user:` frontmatter key. The four reasons are: irreversible, spends money or a credential, reaches outside the machine, or a product or taste call. The user sees a decide-it-yourself ruling only as a one-line FYI in the check-in, never as a question.
 
-The writer's rules:
+## Question pages
 
-- Append at EOF only, for new items. The settle hash lives in `~/.fno/attention/<name>.json`.
-- Whole-file atomic writes that keep the mode. Re-read inside every beat, because a vault plugin rewrites frontmatter.
-- Refuse a file with conflict markers.
-- On any close, flip the top line to `- [x] ... ✅ <date>` and append one `Recorded:` sub-bullet. Report a refused answer verbatim under the item.
+One page per question. The page name is `<ask date>-<question id>-<slug>-<node>.md`, for example `20260922-q-aaaaaaaa-wont-do-deferral-kind-x-bbbb.md`. When the frontmatter `question_id` is the id inside the file name, the file is a page. A sync client's `q-1 (conflicted copy)` is ignored. Closed pages move to `done/<id>.md` (`<id>-2.md`, `-3.md`, ... when the name is taken).
 
-The reader's rules: hash each open block, and let a changed hash restart the settle window. After `settle_secs` (default 120), one ticked option records `option: N`, words record `words`, a ticked top line records `done` for a pin. Two ticked options record nothing and earn one notice.
+Frontmatter carries `question_id`, `kind`, `status`, `title`, `ask`, `recommend`, `aliases`, `asked_at`, `created`, `updated`, and `project`. It also carries the routing facts `harness_session_id`, `session_name`, `harness`, `model`, `node`, `blocks`, `epic`, `crown`, and `king`. Each option also renders a letter column (`a`, `b`, `c`, ...), and `answer` holds the typed cell. A close adds `answered_at` and `recorded_by`. An unmeasured asker fact reads `unknown` and an absent routing fact reads `none`, never a blank key. The renderer escapes `<` and `>` in every text field it writes, and the answer reader unescapes them. An unescaped `<stage>` reads as an open HTML tag and eats every checkbox on the page.
+
+## Answering
+
+The Base's Needs you view shows the ask, the option letters `a` `b` `c`, `recommend`, `answer`, created, updated, and an Age (d) column. It also shows the routing facts: session, node, crown as the king name, harness, and model. Answer from the Base: type a letter (a, b, c) into the answer cell, or a number, or words. The arm records only a typed value: an empty cell is never an answer. Answer from the page: tick one option, write words under `## Answer`, or tick a pin's `- [x] Done`. Two ticked options record nothing and earn one notice. After the settle window (120 s), a changed page restarts the window. A frontmatter stamp that only adds keys does not: the settle key mixes the body hash with the answer cell. First answer wins. When another writer changed a page since the arm's read, the close skips it (`skip_reason: file_changed`) and moves it into `done/` on a later beat.
+
+The body holds the title and the question body. `## Options` carries one `- [ ] N. <text>. Next: <next>. Pro: <pros>. Con: <cons>` line per option, with empty parts omitted. `## Context` carries the blocked-because, the options rationale, `Recommended: N, because <why>. Downside: <downside>`, the not-thought-through list, reversible with its cost, and meanwhile. The body ends with `## Answer`.
+
+`questions.md` is the index: one `[[<file stem>|<title>]]` wikilink per open page under `## Open (N)`, newest ask first, and the 20 most recent closed pages under `## Done`. `questions.base` filters `file.hasProperty("question_id")` and carries four views: Needs you, Open by king, Open by node, and Board (cards grouped by status). Every view sorts newest ask first. Both files are generated. They carry a generated marker and are never written over a hand-authored file. The tick detail names it instead.
 
 ## The arm
 
-The `attention` arm beats every 30 s, reads the projection, delivers, settles, records and flips. It writes two files beside the sink: `~/.fno/attention/items.json` (the projection cache, read each beat) and `~/.fno/attention/<name>.json` (the settle state). Zero sinks configured means the arm ticks with `skip_reason: no_sinks` and never opens a file.
+The `attention` arm beats every 30 s, reads the projection, routes each item to its crown, writes pages, settles, records and closes. The settle state lives at `~/.fno/attention/questions.json`. The projection cache at `~/.fno/attention/items.json` gains `questions_dir`, which the king check-in reads. `attention.enabled = false` is the kill switch: it stops every page write and answer read, checked on every beat. The arm computes routing once at page-write time and never refreshes it: a crown crowned later never sees older pages in its check-in. When the graph is unreadable the beat delivers nothing (`skip_reason: routing_unreadable`) and the next beat retries.
 
-## Config keys and defaults
+## Config keys
 
-| Key | Default | Meaning |
-|---|---|---|
-| `type` | `"md"` | The only sink type that ships today. |
-| `path` | (required) | The questions file. |
-| `tag` | `"#fno"` | Top-line tag; the default `#jc`-style convention still works when set per user. |
-| `line` | see module | The top-line template, `{title} {blocks} {recommend} {tag} {priority_mark} {due} {id}` slots. |
-| `option_line` | see module | The option sub-line template. |
-| `settle_secs` | `120` | How long an edit must hold still before it records. |
-| `ready_only` | `false` | Never deliver not-ready items. |
-| `kinds` | `["question", "pin"]` | Which item kinds route to this sink. |
-| `match_project` | none | Deliver only items from this project. |
+The md config row is retired. There is one key: `attention.enabled` (default true), the kill switch. A `[[attention]]` or `[[reach_me]]` row still in config.toml is ignored. The tick detail names the retired row once per beat.
 
 ## Answer lanes
 
-No sink answer records as `operator`. `_resolve_decider` in `cli/src/fno/decide/__init__.py` refuses a session identity and refuses an unattributed daemon. So a file tick records `authority: file_edit` in the `attention_answer` row, and the `clear` that follows runs with no `--authority` flag. The durable row lands first, then the arm runs `clear`. If that clear times out, the row is already durable. The arm retries the clear on the next beat and never writes a second row. First answer wins.
+No file answer records as `operator`. A file tick records `authority: file_edit` in the `attention_answer` row, and the `clear` that follows runs with no `--authority` flag. The durable row lands first, then the arm runs `clear`. If that clear times out, the row is already durable. The arm retries the clear and never writes a second row. First answer wins.
 
 What a file answer can do: close the question, reach the asker, unblock the nodes in `blocks`. What it cannot do: become law, waive review coverage, supersede or retract a law row. A law-grade answer from a phone stays a coordination ruling until the user confirms it in chat through `/fno:law` or at a terminal.
 
 ## Failure modes
 
-- The Mac sync client is closed: a phone tick never arrives, the item stays visible, the delay is unbounded. Nothing is lost.
+- The Mac sync client is closed: a phone tick never arrives, the page stays open, the delay is unbounded. Nothing is lost.
 - Any local process can tick a box. The answer carries no identity the machine can check. The `attention_answer` row names the lane, and section-style limits hold.
-- An option label can trip the evidence gate inside `record_decision`. The row lands and the decision is refused, and the arm reports the refusal verbatim under the item. Askers keep citations in `blocked_because`, not in option text.
-- Another writer changes the file between the arm's read and its write. The beat is skipped (`skip_reason: file_changed`) and the next beat retries. New items ride append-mode writes, which cannot drop another writer's text.
+- A page with conflict markers is skipped every beat and named in the tick detail. An answer typed inside it never records until someone resolves the markers.
+- Another writer changes a page between the arm's read and its close write. That page is skipped (`skip_reason: file_changed`) and the next beat closes it. Other pages still process.
 
 ## The other two sink types, named and not built
 
-`ntfy` brings action buttons and needs an answer endpoint the phone can reach. `webhook` is the escape-hatch contract. Both stay specified in the plan and unbuilt until the file sink has been observed. When they ship, this page grows their sections.
+`ntfy` brings action buttons and needs an answer endpoint the phone can reach. `webhook` is the escape-hatch contract. Both stay specified in the plan and unbuilt until the pages have been observed. When they ship, this page grows their sections. ntfy will link a page path instead of a block anchor.
 
 ## Checks the user's agent runs
 
-`fno-agents needs --items --json` prints what a sink will deliver: the items, their readiness and the named sources. The user runs no command.
+`fno-agents needs --items --json` prints what the pages will carry: the items, their readiness and the named sources. The user runs no command.

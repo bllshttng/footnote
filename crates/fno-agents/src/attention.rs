@@ -6,6 +6,58 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
+
+/// One `operator_question_closed` fold row: the last close per question id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closed {
+    pub answer: String,
+    pub ts: String,
+    pub closed_by: String,
+    pub reason: String,
+}
+
+/// The last `operator_question_closed` row per question id, folded from the
+/// raw journal text the projection read. Pure, so the arm and a test share
+/// it.
+pub fn closes(journals_raw: &str) -> HashMap<String, Closed> {
+    let mut out: HashMap<String, Closed> = HashMap::new();
+    for line in journals_raw.lines() {
+        if line.trim().is_empty() || !line.contains("operator_question_closed") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // torn/malformed tail line: skip, never abort
+        };
+        if v.get("type").and_then(Value::as_str) != Some("operator_question_closed") {
+            continue;
+        }
+        let data = v.get("data").cloned().unwrap_or(Value::Null);
+        let field = |name: &str| -> String {
+            data.get(name)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let Some(qid) = data.get("question_id").and_then(Value::as_str) else {
+            continue;
+        };
+        out.insert(
+            qid.to_string(),
+            Closed {
+                answer: field("answer"),
+                ts: v
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                closed_by: field("closed_by"),
+                reason: field("reason"),
+            },
+        );
+    }
+    out
+}
 
 /// Who asked, and how to reach them. `live` is `None` when unmeasured, never
 /// `false` by inference. `reach` is the exact command that opens the asking
@@ -619,6 +671,24 @@ mod tests {
         assert!(missing.contains("recommendation"), "missing: {missing}");
         assert!(missing.contains("reversible"), "missing: {missing}");
         assert!(missing.contains("meanwhile"), "missing: {missing}");
+    }
+
+    #[test]
+    fn closes_folds_the_last_close_per_id() {
+        let raw = concat!(
+            r#"{"ts":"2026-09-22T10:00:00Z","type":"operator_question_closed","source":"t","data":{"question_id":"q-1","answer":"narrow","closed_by":"s9"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-22T11:00:00Z","type":"operator_question_closed","source":"t","data":{"question_id":"q-1","answer":"","reason":"moved-on","closed_by":"k1"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-22T11:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-2","question":"still open"}}"#,
+            "\n",
+        );
+        let map = closes(raw);
+        let q1 = map.get("q-1").unwrap();
+        assert_eq!(q1.answer, "", "the last close wins");
+        assert_eq!(q1.reason, "moved-on");
+        assert_eq!(q1.closed_by, "k1");
+        assert!(!map.contains_key("q-2"), "an open question has no fold row");
     }
 
     #[test]
