@@ -60,7 +60,7 @@ fn read_crown_names_from(
             Some(d) => d,
             None => continue,
         };
-        names.insert(scope.clone(), display.clone());
+        names.insert(canonical_scope(scope), display.clone());
         for node in rec
             .get("nodes")
             .and_then(|n| n.as_array())
