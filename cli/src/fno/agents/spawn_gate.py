@@ -958,6 +958,7 @@ def run_gate(
     no_wait: bool = False,
     route_provider: Optional[str] = None,
     account: Optional[str] = None,
+    succession_scope: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate - by asking the ONE gate in the binary. Returns a
     :class:`GateGuard` to hold across dispatch on pass; raises
@@ -991,6 +992,7 @@ def run_gate(
         "no_wait": no_wait,
         "route_provider": route_provider,
         "account": account,
+        "succession_scope": succession_scope,
         "caller_session": caller_session,
         "holder_pid": os.getpid(),
     }
