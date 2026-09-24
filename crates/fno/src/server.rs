@@ -2342,20 +2342,6 @@ fn sanitize_mail_text(text: &str) -> Result<String, String> {
     Ok(clean.to_string())
 }
 
-/// Whether `s` is a lowercase 8-4-4-4-12 hex uuid (the respawn shape
-/// gate, the AttachAgent jobId precedent): a malformed value never reaches
-/// `spawn --resume`'s argv.
-fn valid_session_uuid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-}
-
 /// First non-empty line of `s` with control chars stripped, else
 /// `fallback`. Subprocess stdout/stderr becomes an operator-visible notice, so
 /// raw ANSI/C0 must never reach the status line (Domain Pitfall: route stderr
@@ -2393,65 +2379,6 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
         Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),
         Err(_) => format!("{label} {node}: unavailable"),
-    }
-}
-
-/// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-/// off-loop for the peek `r` respawn: a longer 60s bound (a bg spawn creates a
-/// thread; 20s is too tight). Success -> `respawned <name>`; failure -> the
-/// first stderr line. The 1s registry poll owns the row flipping live; this
-/// notice is advisory. Uses the `fno` porcelain, NOT `fno-agents`: the Rust
-/// runtime intercepts `agents spawn` and routes it (unlike stop/rm, which use
-/// the `fno-agents` binary deliberately).
-///
-/// `cwd` + `account` come from the registry row, NOT the `--resume` uuid:
-/// `fno agents spawn` defaults `--cwd` to the CANONICAL checkout, so a
-/// worker revived from a feature worktree would land in main without `--cwd`;
-/// an isolated-account session's uuid lives in that account's config dir, so it
-/// needs `--account` to be found. Both are omitted when empty/absent (the
-/// pre-existing default, correct for a canonical/default-account worker).
-async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
-    const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
-    // Pin `--harness claude`: respawn is definitionally a claude revival (the
-    // uuid is carried only for claude rows), but `fno agents spawn` otherwise
-    // infers the harness from the invoking one, so a mux server running under a
-    // non-claude context would infer the wrong harness and fail the claude-only
-    // `--resume` guard. The name rides `--name`: the single positional is the
-    // prompt now, and a revival seeds none.
-    let mut args: Vec<&str> = vec![
-        "agents",
-        "spawn",
-        "--name",
-        name,
-        "--harness",
-        "claude",
-        "--resume",
-        uuid,
-        "--substrate",
-        "bg",
-    ];
-    if !cwd.is_empty() {
-        args.push("--cwd");
-        args.push(cwd);
-    }
-    if let Some(acct) = account.filter(|a| !a.is_empty()) {
-        args.push("--account");
-        args.push(acct);
-    }
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
-        Err(_) => format!("respawn {name}: timed out"),
-        Ok(Err(_)) => format!("respawn {name}: unavailable"),
-        Ok(Ok(o)) if o.status.success() => format!("respawned {name}"),
-        Ok(Ok(o)) => first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("respawn {name}: failed"),
-        ),
     }
 }
 
@@ -8472,21 +8399,12 @@ impl Core {
         });
     }
 
-    /// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-    /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
-    /// notice; the 1s registry poll owns the row flipping live. `uuid` was
-    /// shape-validated by the caller.
-    fn respawn_agent(
-        &self,
-        id: u64,
-        name: String,
-        uuid: String,
-        cwd: String,
-        account: Option<String>,
-    ) {
+    /// Shell `fno agents resume <name>` off-loop; the door owns harness routing
+    /// and race-time refusals, and its verdict returns as the visible notice.
+    fn resume_agent(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_respawn(&name, &uuid, &cwd, account.as_deref()).await;
+            let notice = agent_actions::run_resume(&name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -11786,43 +11704,11 @@ impl Core {
                 Flow::Continue
             }
             Command::RespawnAgent { name } => {
-                // Respawn an exited claude bg row from peek (`r`). Copy
-                // the two fields out via `.map` so the row borrow is dropped
-                // before the arm bodies touch `&mut self`. Refuse a still-live
-                // row, a uuid-less row (also covers non-claude - derive_rows only
-                // carries the uuid for claude), and a malformed uuid (shape gate
-                // before argv); else shell `fno agents spawn --resume` off-loop.
-                // Carry the row's cwd + account too: `fno agents spawn` defaults
-                // to the CANONICAL checkout, NOT the row's worktree, so a
-                // cross-worktree revival must pass `--cwd <recorded>` or it comes
-                // back in main; an isolated-account session needs `--account`
-                // (its uuid lives in that account's config dir). The row is the
-                // only source of these - they are not on the `--resume` uuid.
-                let resolved = self.resolve_lifecycle_target(&name, None).map(|a| {
-                    (
-                        a.exited,
-                        a.claude_session_uuid.clone(),
-                        a.cwd.clone(),
-                        a.account.clone(),
-                    )
-                });
-                match resolved {
+                // Keep the target check fail-closed, then let the shared resume
+                // door own its route and any row-state race.
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok((false, ..)) => self.notice(client_id, format!("{name} is still live")),
-                    Ok((true, None, ..)) => self.notice(
-                        client_id,
-                        format!("{name}: no claude session recorded - cannot respawn"),
-                    ),
-                    Ok((true, Some(uuid), cwd, account)) => {
-                        if valid_session_uuid(&uuid) {
-                            self.respawn_agent(client_id, name, uuid, cwd, account);
-                        } else {
-                            self.notice(
-                                client_id,
-                                format!("{name}: malformed session id - cannot respawn"),
-                            );
-                        }
-                    }
+                    Ok(_) => self.resume_agent(client_id, name),
                 }
                 Flow::Continue
             }

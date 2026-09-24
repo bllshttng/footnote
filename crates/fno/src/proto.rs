@@ -1864,14 +1864,9 @@ pub enum Command {
         name: String,
         text: String,
     },
-    /// (v34) Respawn an EXITED claude bg row from the peek overlay (`r`).
-    /// The server resolves `name` fail-closed, refuses a still-live row, refuses
-    /// a row with no recorded `claude_session_uuid` (which also covers non-claude
-    /// providers, since `derive_rows` carries the uuid only for claude rows),
-    /// shape-validates the uuid before it reaches argv, then shells `fno agents
-    /// spawn <name> --resume <uuid> --substrate bg` OFF-loop. The 1s registry
-    /// poll owns the row flipping live; the notice is advisory (fact beats
-    /// report). Rides revive-in-place: the porcelain is shelled as-is.
+    /// (v34) Run `fno agents resume <name>` for a row selected by the mux
+    /// Resume gesture. The door owns harness routing and race-time refusals;
+    /// its result returns as the gesture's notice.
     RespawnAgent {
         name: String,
     },
