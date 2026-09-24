@@ -170,6 +170,8 @@ def _scan_state_file(
         else:
             text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
+        if surface_key == "graph_json":
+            return [Violation(path, sid, 1, explanation) for sid in eval_session_ids]
         return []
 
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -278,7 +280,7 @@ def check_isolation(
                             objects.  All known keys:
 
                             - ``ledger_json``       real ~/.fno/ledger.json
-                            - ``graph_json``        real ~/.fno/graph.json anchor; store is graph.db
+                            - ``graph_json``        real ~/.fno/graph.json
                             - ``repo_events_jsonl`` fno repo .fno/events.jsonl
                             - ``global_events_jsonl`` ~/.fno/events.jsonl
                             - ``memory_dir``        ~/.fno/memory/ directory
@@ -296,7 +298,6 @@ def check_isolation(
 
     all_violations: list[Violation] = []
 
-    # --- State-file surfaces ---
     for key in ("ledger_json", "graph_json", "repo_events_jsonl", "global_events_jsonl"):
         path = real_state_paths.get(key)
         if path is not None:

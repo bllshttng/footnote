@@ -354,3 +354,10 @@ def test_default_real_state_paths_tracks_sqlite_graph_store(tmp_path):
     seed_graph(db, [{"id": "x-isolate1", "title": "sandbox", "session_id": "eval-leak"}])
     result = isolation.check_isolation({"eval-leak"}, {"graph_json": db})
     assert result.verdict == "violated"
+
+
+def test_unreadable_graph_store_fails_isolation_closed(monkeypatch, tmp_path):
+    from fno.graph import store
+    monkeypatch.setattr(store, "read_graph_strict", lambda _path: (_ for _ in ()).throw(RuntimeError()))
+    result = isolation.check_isolation({"eval-leak"}, {"graph_json": tmp_path / "graph.json"})
+    assert result.verdict == "violated"
