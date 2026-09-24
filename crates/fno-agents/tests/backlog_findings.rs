@@ -1,7 +1,6 @@
 //! x-26bd wave 1: the findings aggregate and its API, store-level.
 
 use fno_agents::backlog::api::{self, FindingInput, Store};
-use fno_agents::backlog::findings;
 use serde_json::json;
 use std::path::PathBuf;
 
