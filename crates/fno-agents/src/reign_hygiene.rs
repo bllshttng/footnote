@@ -172,10 +172,17 @@ fn first(entries: &[Entry], predicate: impl Fn(&Entry) -> bool) -> Option<usize>
 }
 
 fn is_spawn(entry: &Entry) -> bool {
-    entry.kind == "tool_use"
-        && (entry.tool.as_deref() == Some("Agent")
-            || entry.target.contains("agents spawn")
-            || entry.target.contains("backlog advance"))
+    if entry.kind != "tool_use" {
+        return false;
+    }
+    if entry.tool.as_deref() == Some("Agent") {
+        return true;
+    }
+    shell_command_segments(&entry.target).iter().any(|args| {
+        (args_start_with(args, &["fno", "agents", "spawn"])
+            || args_start_with(args, &["fno", "backlog", "advance"]))
+            && !args.iter().any(|arg| arg == "--help")
+    })
 }
 
 fn flush_shell_word(args: &mut Vec<String>, word: &mut String, started: &mut bool) {
@@ -1002,6 +1009,18 @@ mod tests {
 
     #[test]
     fn command_scanners_only_accept_real_flags_and_probes() {
+        let mail_mentions_spawn = entry(
+            0,
+            "tool_use",
+            Some("Bash"),
+            "fno agents mail send king 'Please use fno agents spawn worker'",
+            "",
+        );
+        assert!(
+            !is_spawn(&mail_mentions_spawn),
+            "message text is not a dispatch"
+        );
+
         let mail = entry(
             0,
             "tool_use",
