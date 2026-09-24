@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fno.observer import fold, isolation
+from tests.fixtures.graph_seed import seed_graph
 
 NOW = datetime(2026, 7, 4, 12, 0, 0)
 
@@ -348,9 +349,8 @@ def test_isolation_violation_detected(tmp_path):
 
 def test_default_real_state_paths_tracks_sqlite_graph_store(tmp_path):
     paths = isolation.default_real_state_paths(Path("/repo"))
-    assert paths["graph_db"] == Path.home() / ".fno" / "graph.db"
-    assert "graph_json" not in paths
-    db = tmp_path / "graph.db"
-    db.write_bytes(b"SQLite\x00eval-leak\x00")
-    result = isolation.check_isolation({"eval-leak"}, {"graph_db": db})
+    assert paths["graph_json"] == Path.home() / ".fno" / "graph.json"
+    db = tmp_path / "graph.json"
+    seed_graph(db, [{"id": "x-isolate1", "title": "sandbox", "session_id": "eval-leak"}])
+    result = isolation.check_isolation({"eval-leak"}, {"graph_json": db})
     assert result.verdict == "violated"
