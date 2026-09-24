@@ -1055,7 +1055,10 @@ mod tests {
             (RowGesture::Resume, "agents|mux|resume agent"),
             (RowGesture::Stop, "agents|mux|stop agent"),
             (RowGesture::Remove, "agents|mux|rm agent"),
-            (RowGesture::Mail, "fno|mux|agents mail send -- agent hello"),
+            (
+                RowGesture::Mail,
+                "fno|mux|agents mail send --from-name mux-peek -- agent hello",
+            ),
             (RowGesture::Reap, "agents|mux|reap --json --no-mux"),
         ];
         for (gesture, _) in gesture_table {
