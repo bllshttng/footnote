@@ -1072,7 +1072,9 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         return []
 
 
-def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
+def _on_confirmed_merge(
+    pr_number: int, cwd: str = "", *, defer_close: bool = False
+) -> List[str]:
     """Every graph side-effect of a CONFIRMED (immediate) merge, in one place.
 
     Sync merge_status + stamp ship provenance (``_sync_graph_merge_status``), then
@@ -1080,8 +1082,13 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
     call this ONE function so the node-close can never be forgotten on one of
     them; the failure paths keep calling ``_sync_graph_merge_status`` alone.
     Returns the node ids the merge closed (the cleanup request's ``node_ids``).
+
+    ``defer_close`` (the watcher's durable-grant merge) skips the node-close:
+    the sweep ritual leg and merge_close arm close the node instead.
     """
     _sync_graph_merge_status("merged", pr_number, cwd)
+    if defer_close:
+        return []
     return _reconcile_merged_pr_node(pr_number, cwd)
 
 
@@ -1509,6 +1516,7 @@ def _finish_confirmed_merge(
     *,
     prior_cleanup_failure: str = "",
     release_lock: Optional[Callable[[], None]] = None,
+    defer_close: bool = False,
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
     # The race the lock closes ended at the merged receipt; release first so
@@ -1541,7 +1549,7 @@ def _finish_confirmed_merge(
         )
         rc = 0
 
-    bound_node_ids = _on_confirmed_merge(pr_number, repo)
+    bound_node_ids = _on_confirmed_merge(pr_number, repo, defer_close=defer_close)
     _run_post_merge_followups(pr_number, strategy, repo, bound_node_ids=bound_node_ids)
     return rc
 
@@ -2098,5 +2106,6 @@ def _do_merge(
             note or "merged immediately",
             prior_cleanup_failure=(f"failed: {cleanup_failure}" if cleanup_failure else ""),
             release_lock=release_lock,
+            defer_close=(authority == "durable_grant"),
         )
     return _emit_authorized_outcome(pr_number, receipt, strategy)
