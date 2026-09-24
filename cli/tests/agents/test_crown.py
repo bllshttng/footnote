@@ -2601,3 +2601,168 @@ def test_a_childless_epic_is_not_armed(tmp_path: Path, monkeypatch) -> None:
 
     assert "mission_active" not in _graph_entries()[0]
     assert _mission_events() == []
+
+
+# --- the manifest arms when the successor identifies --------------------------
+#
+# Spawn-time succession carries the crown in the registry while the successor
+# child still has no harness session id, so the spawn lane's arm attempt
+# refuses and the manifest keeps naming the abdicating session. The
+# SessionStart observation is the first moment the successor is addressable;
+# that is where the manifest must rewrite.
+
+SUCCESSOR_ID = "22222222-2222-4222-8222-222222222222"
+PREDECESSOR_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _crowned_row(tmp_path, monkeypatch, name="heir", **kw):
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name=name,
+                cwd=str(tmp_path),
+                log_path=str(tmp_path / f"{name}.log"),
+                harness="claude",
+                short_id=kw.pop("short_id", "deadbeef"),
+                crown_level=2,
+                crown_scope="x-epic",
+                **kw,
+            )
+        ]
+    )
+
+
+def _arm_enabled(monkeypatch):
+    import fno.king.state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+
+
+def _scope_manifest(tmp_path):
+    from fno.paths import space_dir
+
+    return space_dir(tmp_path) / "kings" / "x-epic.md"
+
+
+def test_spawn_succession_arms_the_manifest_when_the_successor_identifies(
+    tmp_path, monkeypatch
+) -> None:
+    from fno.agents.registry import record_session_observation
+    from fno.king.state import parse_manifest
+
+    _crowned_row(tmp_path, monkeypatch, harness_session_id="")
+    _arm_enabled(monkeypatch)
+
+    entry, outcome = record_session_observation(
+        name="heir", harness="claude", session_id=SUCCESSOR_ID
+    )
+
+    assert outcome == "primary"
+    manifest = _scope_manifest(tmp_path)
+    assert manifest.exists(), "the successor's first id must arm the wake gate"
+    assert parse_manifest(manifest)["harness_session_id"] == SUCCESSOR_ID
+
+
+def test_succession_in_place_repoints_the_manifest_at_the_new_session(
+    tmp_path, monkeypatch
+) -> None:
+    from fno.agents.registry import record_session_observation
+    from fno.king.state import parse_manifest, write_manifest
+
+    _crowned_row(
+        tmp_path, monkeypatch, harness_session_id=PREDECESSOR_ID
+    )
+    _arm_enabled(monkeypatch)
+    write_manifest(
+        _scope_manifest(tmp_path),
+        scope="x-epic",
+        harness_session_id=PREDECESSOR_ID,
+    )
+
+    entry, outcome = record_session_observation(
+        name="heir",
+        harness="claude",
+        session_id=SUCCESSOR_ID,
+        predecessor_reachable=False,
+        expected_predecessor_session_id=PREDECESSOR_ID,
+    )
+
+    assert outcome == "succession"
+    assert parse_manifest(_scope_manifest(tmp_path))["harness_session_id"] == (
+        SUCCESSOR_ID
+    )
+
+
+def test_a_branch_never_arms_the_crown_manifest(tmp_path, monkeypatch) -> None:
+    """A branch inherits no crown and no claim; the predecessor's manifest
+    authority stays exactly where it was."""
+    from fno.agents.registry import record_session_observation
+
+    _crowned_row(
+        tmp_path, monkeypatch, harness_session_id=PREDECESSOR_ID
+    )
+    _arm_enabled(monkeypatch)
+
+    entry, outcome = record_session_observation(
+        name="heir",
+        harness="claude",
+        session_id=SUCCESSOR_ID,
+        predecessor_reachable=True,
+        expected_predecessor_session_id=PREDECESSOR_ID,
+    )
+
+    assert outcome == "branch"
+    assert not _scope_manifest(tmp_path).exists()
+
+
+def test_an_uncrowned_row_arms_nothing(tmp_path, monkeypatch) -> None:
+    from fno.agents.registry import AgentEntry, record_session_observation, write_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="plain",
+                cwd=str(tmp_path),
+                log_path=str(tmp_path / "plain.log"),
+                harness="claude",
+            )
+        ]
+    )
+    _arm_enabled(monkeypatch)
+
+    entry, outcome = record_session_observation(
+        name="plain", harness="claude", session_id=SUCCESSOR_ID
+    )
+
+    assert outcome == "primary"
+    assert not _scope_manifest(tmp_path).exists()
+
+
+def test_a_refused_arm_is_an_event_never_a_blocked_session_start(
+    tmp_path, monkeypatch
+) -> None:
+    """The restamp hook is fail-soft: a manifest arming that cannot produce a
+    transcript-matchable id surfaces as an event, never an exception."""
+    import fno.agents.events as events
+    from fno.agents.registry import record_session_observation
+
+    _crowned_row(tmp_path, monkeypatch, harness_session_id="")
+    _arm_enabled(monkeypatch)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        events, "emit", lambda kind, **data: seen.setdefault("kind", kind)
+    )
+
+    entry, outcome = record_session_observation(
+        name="heir", harness="claude", session_id="shortid"
+    )
+
+    assert outcome == "primary", "the registry write itself still lands"
+    assert seen.get("kind") == "crown_manifest_arm_failed"
+    assert not _scope_manifest(tmp_path).exists()
