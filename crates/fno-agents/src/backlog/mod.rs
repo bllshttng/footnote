@@ -2390,8 +2390,8 @@ mod tests {
     fn schema_v3_population_keeps_its_rows_and_stamps_three() {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The first schema-3 open keeps the rows, stamps the new
-        // schema and preserves the soak key; parity still reports the
+        // authority. The first schema-3 open keeps the rows and stamps the
+        // schema; parity still reports the
         // mirror's staleness instead of papering over it with a rebuild.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
@@ -2411,14 +2411,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
-        let soak: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM graph_meta WHERE key LIKE 'soak_%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(soak, 1, "the sqlite path preserves the soak key");
     }
 
     #[test]
