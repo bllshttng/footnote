@@ -1974,7 +1974,12 @@ fn canonical_row_digests_with_rungs(
 ) -> std::collections::BTreeMap<String, String> {
     use sha2::Digest as _;
 
+    // Both sides pass the defaults pass here: a ring snapshot is either the
+    // defaulted begin view or a raw publish outcome, and the current rows
+    // are the raw export. Without it an untouched-but-defaulted row reads as
+    // changed and disjoint writers conflict.
     let mut canonical = entries.to_vec();
+    graph_store::apply_defaults(&mut canonical, false);
     graph_store::ensure_slugs(&mut canonical);
     graph_store::recompute_statuses_with_plan_rungs(&mut canonical, plan_rungs);
     graph_store::canonicalize_entries(&mut canonical);
@@ -2044,14 +2049,7 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         };
         let base_rungs = plan_rung_map_field(params, "base_plan_rungs");
         let normalized_base = canonical_row_digests_with_rungs(&base_entries, base_rungs.as_ref());
-        // The begin snapshot is the defaulted read view (the cache runs
-        // apply_defaults), so the current rows must pass through the same
-        // pass before the compare: against the raw export every touched row
-        // reads as changed, and disjoint writers blanket-conflict.
-        let mut current_normalized = current.clone();
-        graph_store::apply_defaults(&mut current_normalized, false);
-        let current_digests =
-            canonical_row_digests_with_rungs(&current_normalized, base_rungs.as_ref());
+        let current_digests = canonical_row_digests_with_rungs(&current, base_rungs.as_ref());
         let ids: std::collections::BTreeSet<String> = normalized_base
             .keys()
             .chain(current_digests.keys())
@@ -3578,7 +3576,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
@@ -3597,9 +3594,44 @@ mod tests {
         handle_commit_rows(&state, &row_commit_params(&begin, left)).unwrap();
         handle_commit_rows(&state, &row_commit_params(&begin, right)).unwrap();
 
-        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        let rows = graph_store::read_rows(&graph).unwrap();
         assert_eq!(rows[0]["title"], json!("left changed"));
         assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn commit_rows_disjoint_from_a_publish_seeded_snapshot_no_conflict() {
+        // The ring also holds publish outcomes, so a begin at a just-published
+        // version reads its base from the publish, not from the cache.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-a","title":"a"},{"id":"x-b","title":"b"},{"id":"x-c","title":"c"}]}"#,
+        )
+        .unwrap();
+        let state = row_commit_state(graph.clone());
+        let first = handle_begin(&state).unwrap();
+        let mut a = first["entries"][0].clone();
+        a["title"] = json!("a changed");
+        handle_commit_rows(&state, &row_commit_params(&first, a)).unwrap();
+
+        let begin = handle_begin(&state).unwrap();
+        let mut b = begin["entries"][1].clone();
+        b["title"] = json!("b changed");
+        let mut c = begin["entries"][2].clone();
+        c["title"] = json!("c changed");
+        handle_commit_rows(&state, &row_commit_params(&begin, b)).unwrap();
+        handle_commit_rows(&state, &row_commit_params(&begin, c)).unwrap();
+
+        let rows = graph_store::read_rows(&graph).unwrap();
+        let title = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == json!(id))
+                .map(|row| row["title"].clone())
+        };
+        assert_eq!(title("x-b"), Some(json!("b changed")));
+        assert_eq!(title("x-c"), Some(json!("c changed")));
     }
 
     #[test]
