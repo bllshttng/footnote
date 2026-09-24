@@ -165,19 +165,11 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let bin = dir.path().join("fno-py");
-        std::fs::write(
-            &bin,
-            format!("#!/bin/sh\ncat >/dev/null\necho '{ensure_stdout}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {}\n", repo_exit),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perm = std::fs::metadata(&bin).unwrap().permissions();
-            perm.set_mode(0o755);
-            std::fs::set_permissions(&bin, perm).unwrap();
-        }
+        let bin = crate::write_exec_stub(
+            dir.path(),
+            "fno-py",
+            &format!("#!/bin/sh\ncat >/dev/null\necho '{ensure_stdout}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {}\n", repo_exit),
+        );
         std::env::set_var("FNO_PY", &bin);
         let plain = tempfile::tempdir().unwrap();
         let cwd = if non_git {

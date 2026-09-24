@@ -1515,16 +1515,11 @@ mod tests {
         // Hermetic git_common_dir: the FNO_VERIFY_GIT_BIN seam answers the
         // one rev-parse the receipt verb makes, pointing at the temp dir.
         let bin = tempfile::tempdir().unwrap();
-        let script = bin.path().join("git");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho {}\n", common.path().display()),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script = crate::write_exec_stub(
+            bin.path(),
+            "git",
+            &format!("#!/bin/sh\necho {}\n", common.path().display()),
+        );
 
         let mut journal = tempfile::NamedTempFile::new().unwrap();
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

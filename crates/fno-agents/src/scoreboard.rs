@@ -3,8 +3,9 @@
 //! One decision about what a node's evidence means, so the main, provider,
 //! skill, efficiency, lane, calibration and fidelity views cannot drift into
 //! seven answers. The terminal vocabulary arrives from the caller (Python owns
-//! `fno.terminals`); the decision lives here. The `flow` section rides the
-//! same answer: the weekly delivery/cycle/waiting aggregates every board and
+//! `fno.terminals`) or, when the caller sends no lists, from the default built
+//! beside [`classify`] out of [`TerminationReason`]; the decision lives here.
+//! The `flow` section rides the same answer: the weekly delivery/cycle/waiting aggregates every board and
 //! view reads, so presentation layers never re-classify.
 //!
 //! - a confirmed merge delivers the node, ledger row or not;
@@ -14,9 +15,63 @@
 //! - a session terminal on a node the graph lost stays a fallback, labeled
 //!   `inferred`, never equal to a confirmed merge.
 
+use crate::loopcheck::TerminationReason;
 use chrono::{Datelike, TimeZone};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+
+/// Every [`TerminationReason`] variant, spelled through serde so a rename on
+/// the enum cannot drift from the wire names the ledger and Python carry.
+const ALL_TERMINALS: [TerminationReason; 14] = [
+    TerminationReason::DonePRGreen,
+    TerminationReason::DoneAdvisory,
+    TerminationReason::DoneDelivery,
+    TerminationReason::DoneBatched,
+    TerminationReason::DoneAwaitingMerge,
+    TerminationReason::NoWork,
+    TerminationReason::DoneUnreviewed,
+    TerminationReason::DoneAwaitingReview,
+    TerminationReason::DonePlanned,
+    TerminationReason::Budget,
+    TerminationReason::NoProgress,
+    TerminationReason::HeldOnQuestion,
+    TerminationReason::Interrupted,
+    TerminationReason::Aborted,
+];
+
+/// The delivered-terminal vocabulary when a caller sends no lists: one
+/// exhaustive match over every [`TerminationReason`] variant, so a new
+/// variant is a compile error until someone places it. `DoneAdvisory` is
+/// doc, `DoneDelivery` is delivery, `DonePRGreen` and `DoneBatched` are
+/// ship, every other variant is none - the same answer Python's
+/// `fno.terminals` passes today.
+fn default_terminal_lists() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut doc = Vec::new();
+    let mut delivery = Vec::new();
+    let mut ship = Vec::new();
+    for terminal in ALL_TERMINALS {
+        let name = serde_json::to_value(&terminal)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string));
+        let Some(name) = name else { continue };
+        match terminal {
+            TerminationReason::DoneAdvisory => doc.push(name),
+            TerminationReason::DoneDelivery => delivery.push(name),
+            TerminationReason::DonePRGreen | TerminationReason::DoneBatched => ship.push(name),
+            TerminationReason::DoneAwaitingMerge
+            | TerminationReason::DoneUnreviewed
+            | TerminationReason::DoneAwaitingReview
+            | TerminationReason::DonePlanned
+            | TerminationReason::NoWork
+            | TerminationReason::Budget
+            | TerminationReason::NoProgress
+            | TerminationReason::HeldOnQuestion
+            | TerminationReason::Interrupted
+            | TerminationReason::Aborted => {}
+        }
+    }
+    (doc, delivery, ship)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalVocabulary<'a> {
@@ -607,9 +662,20 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             })
             .unwrap_or_default()
     };
-    let doc = list("doc_terminals");
-    let delivery = list("delivery_terminals");
-    let ship = list("ship_terminals");
+    // Explicit lists win, so the Python callers see no change. When none is
+    // an array, the default vocabulary answers - a Rust caller sends none.
+    let any_list_present = ["doc_terminals", "delivery_terminals", "ship_terminals"]
+        .iter()
+        .any(|k| params.get(*k).and_then(Value::as_array).is_some());
+    let (doc, delivery, ship) = if any_list_present {
+        (
+            list("doc_terminals"),
+            list("delivery_terminals"),
+            list("ship_terminals"),
+        )
+    } else {
+        default_terminal_lists()
+    };
     let vocab = TerminalVocabulary {
         doc: &doc,
         delivery: &delivery,
@@ -948,6 +1014,77 @@ mod tests {
         assert_eq!(weeks[4]["code"], 1);
         assert_eq!(flow["deliveries"]["code"], 3);
         assert_eq!(flow["deliveries"]["doc"], 1);
+    }
+
+    #[test]
+    fn classify_without_lists_answers_the_default_vocabulary() {
+        // AC3-HP: no terminal lists in, the default vocabulary counts a
+        // DonePRGreen merge exactly as the explicit lists do.
+        let entries = vec![
+            json!({"id": "x-1", "merge_status": "merged", "merged_at": "2026-09-02T12:00:00"}),
+            json!({"id": "d-1", "status": "done", "completed_at": "2026-09-02T12:00:00"}),
+        ];
+        let rows = vec![json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})];
+        let bare = json!({
+            "entries": entries,
+            "rows": rows,
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let without = classify(&bare).unwrap();
+        let explicit = json!({
+            "entries": entries,
+            "rows": rows,
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DoneBatched", "DonePRGreen"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let with = classify(&explicit).unwrap();
+        assert_eq!(
+            without["flow"]["deliveries"]["code"],
+            with["flow"]["deliveries"]["code"]
+        );
+        assert_eq!(
+            without["flow"]["deliveries"]["doc"],
+            with["flow"]["deliveries"]["doc"]
+        );
+        assert_eq!(
+            without["flow"]["deliveries"]["code"], 1,
+            "a merged DonePRGreen row is one confirmed code delivery"
+        );
+    }
+
+    #[test]
+    fn classify_explicit_lists_win_over_the_default() {
+        // AC4-EDGE: lists that leave DonePRGreen out keep it out - the
+        // default is not mixed in behind them. The observable is an inferred
+        // delivery: a node the graph lost, whose only evidence is the
+        // terminal's vocabulary membership.
+        let params = json!({
+            "entries": [],
+            "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        assert_eq!(
+            out["by_node"]["x-1"]["delivered"], false,
+            "explicit lists won: DonePRGreen is no vocabulary member"
+        );
+        // The same row under the default vocabulary (no lists) delivers.
+        let bare = json!({
+            "entries": [],
+            "rows": [json!({"graph_node_id": "x-1", "termination_reason": "DonePRGreen"})],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&bare).unwrap();
+        assert_eq!(out["by_node"]["x-1"]["delivered"], true);
     }
 
     #[test]

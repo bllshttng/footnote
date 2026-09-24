@@ -759,19 +759,16 @@ mod tests {
     }
 
     fn gate_status_stub(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fno = dir.join("fno");
         let payload = json!({
             "verdict": "refused",
             "reason": "max_live",
             "message": "15 live worker slots >= max_live 15",
         });
-        std::fs::write(&fno, format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n")).unwrap();
-        let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fno, permissions).unwrap();
-        fno
+        crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
+        )
     }
 
     fn accepted_probe() -> GateProbe {

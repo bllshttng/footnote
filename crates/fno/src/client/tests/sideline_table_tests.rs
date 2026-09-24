@@ -7,6 +7,37 @@ use super::*;
 #[path = "sideline_name_fit_tests.rs"]
 mod sideline_name_fit_tests;
 
+#[path = "sideline_card_tests.rs"]
+mod sideline_card_tests;
+
+#[test]
+fn list_layout_paints_the_same_cells_as_an_untouched_view() {
+    // AC4/AC10: list mode is byte-identical to a view that never set the
+    // field (both read the same startup default).
+    let agents = vec![
+        {
+            let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
+            king.harness_session_id = Some("sess-king".into());
+            king
+        },
+        {
+            let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
+            w1.lineage_kind = Some("child".into());
+            w1.spawned_by_session = Some("sess-king".into());
+            w1.harness_session_id = Some("sess-w1".into());
+            w1
+        },
+    ];
+    let mut a = wide_view(agents.clone());
+    set_density(&mut a, Density::Extended);
+    let mut b = wide_view(agents);
+    set_density(&mut b, Density::Extended);
+    b.sideline_layout = sideline_color::SidelineLayout::List;
+    let fa = a.compose();
+    let fb = b.compose();
+    assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
+}
+
 // ---------------------------------------------------------------------------
 // the table rewrite: the sideline is a Table (status word, name, message, PR, age)
 // ---------------------------------------------------------------------------

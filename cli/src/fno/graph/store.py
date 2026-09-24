@@ -662,6 +662,11 @@ def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
     return _ExecClient(path)
 
 
+def _refusal(exc: Exception, message: str) -> Exception:
+    exc.fno_refusal = message  # type: ignore[attr-defined]
+    return exc
+
+
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)
@@ -672,12 +677,13 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "lock_timeout":
         raise GraphLockTimeout(message)
     if kind == "empty_field_update":
-        raise ValueError(message)
+        raise _refusal(ValueError(message), message)
     if kind == "conflict":
         raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
-    raise RuntimeError(f"store error ({kind}): {message}")
+    err = RuntimeError(f"store error ({kind}): {message}")
+    raise _refusal(err, message) if kind == "invalid" else err
 
 
 class _Conflict(Exception):
@@ -926,6 +932,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    filter_args: "list[str] | None" = None,
     occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
@@ -953,6 +960,8 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
+    if filter_args:
+        params["filter_args"] = filter_args
     if occupancy is not None:
         params["claimed"] = sorted(occupancy)
     else:
@@ -981,6 +990,8 @@ def ready(
         result = _client_for(_paths.graph_json()).request("ready", params)
     except RuntimeError as exc:
         text = str(exc)
+        if "ready filter: " in text:
+            raise ValueError(text[text.index("ready filter: ") :]) from None
         if "no such node" in text:
             # The verb's own refusal wording, without the store-error prefix
             # the transport wraps it in.
