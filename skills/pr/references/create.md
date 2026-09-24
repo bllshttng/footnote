@@ -3,7 +3,7 @@
 
 Create a PR using `gh` CLI.
 
-**Model routing:** This worker runs on the declared `pr-create` role, resolved through `config.model_routing` (`config.model_routing.roles.pr-create`). An explicit configured route wins; with no route configured it runs on the invoking harness's primary model - no tier or model literal is hardcoded. Declare the role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override so the resolved route selects the model). Do NOT use `context: fork` - forking passes the parent's full context into the worker; instead spawn a fresh agent with only the gathered context from Step 1 below.
+This create flow runs inline in the invoking session. It does not dispatch a `pr-create` worker or use a routed model lane.
 
 ## Process
 
@@ -335,7 +335,7 @@ This is the *fast path* only: it engages `in_review` mid-session, before the nex
 
 ### 6. Report the result (RESULT contract)
 
-After creating the PR, state the human-readable line AND emit the machine-readable `RESULT:` contract as your FINAL line. A dispatcher (e.g. `/pr create`) parses the `RESULT:` line to decide success vs failure; without it, a successfully-opened PR can be misread as a failed worker.
+After creating the PR, state the human-readable line AND emit the machine-readable `RESULT:` contract as your final line. The invoking workflow uses it to distinguish success from failure.
 
 On success:
 
@@ -395,7 +395,7 @@ gh pr view --json number,url
 ```
 
 **Flow:**
-1. `/pr create` runs as a fresh, role-routed `pr-create` worker with targeted context (branch, commits, plan summary)
+1. `/pr create` runs this flow inline in the invoking session
 2. `/pr check` polls for external review and processes feedback
 3. Human reviewer merges
 
