@@ -179,7 +179,7 @@ impl View {
         // accent, the row-scoped outcome stamp, and the selector / hover
         // bar. The list bar XORs INVERSE so a focused row's standing band
         // de-inverts under the cursor. Card mode clears the Table's selection
-        // style and applies one paired, full-width overlay here after the blit.
+        // style; its Agent and CardDetail rows use one paired overlay here.
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off;
             if r >= table_rows_n {
@@ -277,9 +277,11 @@ impl View {
             if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
+            let paired_card_row =
+                card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(_));
             if highlit {
                 for cell in &mut cells[r * cols..r * cols + text_w] {
-                    if card {
+                    if paired_card_row {
                         cell.flags |= cell_flags::INVERSE;
                     } else {
                         cell.flags ^= cell_flags::INVERSE;
