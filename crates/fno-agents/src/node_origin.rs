@@ -4,7 +4,7 @@
 //! birth provenance a node already carries plus the minimal evidence field
 //! this contract adds. The categories are the board's four buckets:
 //!
-//! - `operator_request`      — a human asked for this (explicit `source_kind`)
+//! - `operator_request`      — a human asked for this and the filing session has an unacked turn
 //! - `agent_discovery`       — an agent found it, with explicit evidence
 //! - `automated_followup`    — a machine follow-up (retro land, decompose)
 //! - `unknown`               — everything else, and unknown stays unknown
@@ -83,6 +83,8 @@ pub struct BirthRecord {
 pub struct Resolution {
     pub origin: RequestOrigin,
     pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// Channels whose births are machine follow-ups by construction. A decomposed
@@ -100,7 +102,7 @@ fn is_agent_declared_kind(kind: Option<&str>) -> bool {
 
 /// Resolve one birth record. Total function: every input maps to a category,
 /// and the maps that matter are the refusals.
-pub fn resolve(record: &BirthRecord) -> Resolution {
+pub fn resolve(record: &BirthRecord, pending_operator_turns: &Result<usize, String>) -> Resolution {
     let evidence = record
         .origin_evidence
         .as_deref()
@@ -112,25 +114,39 @@ pub fn resolve(record: &BirthRecord) -> Resolution {
     // one re-derives below rather than pinning the corruption forever.
     if let Some(prior) = record.request_origin.as_deref() {
         if let Some(origin) = RequestOrigin::parse(prior) {
-            return Resolution { origin, evidence };
+            return Resolution {
+                origin,
+                evidence,
+                refused: None,
+            };
         }
     }
 
-    // Explicit operator origin wins, evidence or not: the flag IS the
-    // operator's declaration; evidence only travels beside it.
+    // An operator ask has standing only while its filing session has an
+    // unacked operator turn. Unknown readings refuse rather than guess.
     if record.source_kind.as_deref() == Some("operator_request") {
+        let (origin, refused) = match pending_operator_turns {
+            Ok(depth) if *depth > 0 => (RequestOrigin::OperatorRequest, None),
+            Ok(_) => (
+                RequestOrigin::Unknown,
+                Some("refused: --source-kind operator_request needs a pending operator turn in this session, and its queue is empty (fno inbox operator status reads 0). The stamp is the only evidence behind operator standing. File your own finding as organic, or as from_observation with --origin-evidence. File an operator ask from the session the operator typed it into, and ack the turn after its last node.".to_string()),
+            ),
+            Err(why) => (
+                RequestOrigin::Unknown,
+                Some(format!("refused: --source-kind operator_request could not be verified: {why}. File it as organic, or file the ask from the session the operator typed it into.")),
+            ),
+        };
         return Resolution {
-            origin: RequestOrigin::OperatorRequest,
+            origin,
             evidence,
+            refused,
         };
     }
 
     // Agent and automated origins need explicit producing-event evidence.
     // A recorder harness, an organic default, or bare prose never qualifies.
     let evidenced = evidence.is_some();
-    let category = if record.source_kind.as_deref() == Some("operator_request") {
-        RequestOrigin::OperatorRequest
-    } else if evidenced && is_automated_channel(record.birth_channel.as_deref()) {
+    let category = if evidenced && is_automated_channel(record.birth_channel.as_deref()) {
         RequestOrigin::AutomatedFollowup
     } else if evidenced && is_agent_declared_kind(record.source_kind.as_deref()) {
         RequestOrigin::AgentDiscovery
@@ -141,6 +157,7 @@ pub fn resolve(record: &BirthRecord) -> Resolution {
     Resolution {
         origin: category,
         evidence,
+        refused: None,
     }
 }
 
@@ -166,7 +183,24 @@ pub fn run_node_origin(args: &[String]) -> i32 {
         }
     };
 
-    let results: Vec<Resolution> = records.iter().map(resolve).collect();
+    let pending_operator_turns = if records
+        .iter()
+        .any(|record| record.source_kind.as_deref() == Some("operator_request"))
+    {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        crate::operator_turns::session_queue_depth(
+            &|key| std::env::var(key).ok(),
+            &crate::paths::AgentsHome::from_env(),
+            &cwd,
+            chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+        )
+    } else {
+        Ok(0)
+    };
+    let results: Vec<Resolution> = records
+        .iter()
+        .map(|record| resolve(record, &pending_operator_turns))
+        .collect();
     match serde_json::to_string(&serde_json::json!({ "results": results })) {
         Ok(out) => {
             println!("{out}");
@@ -236,12 +270,53 @@ mod tests {
             Some("idea"),
             Some("mail-inject:fu-k3j2d1"),
         );
-        assert_eq!(resolve(&requested).origin, RequestOrigin::OperatorRequest);
-        assert_eq!(resolve(&discovered).origin, RequestOrigin::AgentDiscovery);
         assert_eq!(
-            resolve(&discovered).evidence.as_deref(),
+            resolve(&requested, &Ok(1)).origin,
+            RequestOrigin::OperatorRequest
+        );
+        assert_eq!(
+            resolve(&discovered, &Ok(0)).origin,
+            RequestOrigin::AgentDiscovery
+        );
+        assert_eq!(
+            resolve(&discovered, &Ok(0)).evidence.as_deref(),
             Some("mail-inject:fu-k3j2d1")
         );
+    }
+
+    #[test]
+    fn operator_request_grants_with_a_pending_turn() {
+        let requested = record(Some("operator_request"), Some("idea"), None);
+        let granted = resolve(&requested, &Ok(1));
+        assert_eq!(granted.origin, RequestOrigin::OperatorRequest);
+        assert_eq!(granted.refused, None);
+    }
+
+    #[test]
+    fn operator_request_refuses_an_empty_queue() {
+        let requested = record(Some("operator_request"), Some("idea"), None);
+        let refused = resolve(&requested, &Ok(0));
+        assert_eq!(refused.origin, RequestOrigin::Unknown);
+        let refusal = refused.refused.unwrap();
+        assert!(refusal.contains("queue is empty"));
+        assert!(refusal.contains("as organic"));
+        assert!(refusal.contains("ack the turn after its last node"));
+    }
+
+    #[test]
+    fn operator_request_refuses_an_unreadable_queue() {
+        let requested = record(Some("operator_request"), Some("idea"), None);
+        let unreadable = resolve(
+            &requested,
+            &Err("transcript /fixture/missing unreadable".into()),
+        );
+        assert!(unreadable.refused.unwrap().contains("/fixture/missing"));
+        let json = serde_json::to_value(resolve(
+            &record(Some("organic"), Some("idea"), None),
+            &Ok(0),
+        ))
+        .unwrap();
+        assert!(json.get("refused").is_none());
     }
 
     /// AC1-EDGE: a legacy organic row and a recorder harness alone stay
@@ -251,8 +326,11 @@ mod tests {
     fn organic_harness_alone_and_prose_never_become_human_origin() {
         let organic = record(Some("organic"), Some("idea"), None);
         let harness_only = record(None, Some("new"), None);
-        assert_eq!(resolve(&organic).origin, RequestOrigin::Unknown);
-        assert_eq!(resolve(&harness_only).origin, RequestOrigin::Unknown);
+        assert_eq!(resolve(&organic, &Ok(0)).origin, RequestOrigin::Unknown);
+        assert_eq!(
+            resolve(&harness_only, &Ok(0)).origin,
+            RequestOrigin::Unknown
+        );
         // The struct carries no title/details field, so substring backfill is
         // impossible by construction; the JSON round-trip drops unknown keys.
         let raw = serde_json::json!({
@@ -260,15 +338,15 @@ mod tests {
             "title": "OPERATOR RAISED: fix the thing"
         });
         let parsed: BirthRecord = serde_json::from_value(raw).expect("deserialize");
-        assert_eq!(resolve(&parsed).origin, RequestOrigin::Unknown);
+        assert_eq!(resolve(&parsed, &Ok(0)).origin, RequestOrigin::Unknown);
     }
 
     #[test]
     fn agent_discovery_requires_evidence_even_when_declared() {
         let bare = record(Some("from_observation"), Some("idea"), None);
-        assert_eq!(resolve(&bare).origin, RequestOrigin::Unknown);
+        assert_eq!(resolve(&bare, &Ok(0)).origin, RequestOrigin::Unknown);
         let blank = record(Some("from_supervisor"), Some("idea"), Some("   "));
-        assert_eq!(resolve(&blank).origin, RequestOrigin::Unknown);
+        assert_eq!(resolve(&blank, &Ok(0)).origin, RequestOrigin::Unknown);
     }
 
     #[test]
@@ -279,11 +357,17 @@ mod tests {
             Some("retro:2026-09-08"),
         );
         let child = record(None, Some("decompose"), Some("parent:x-aaaa"));
-        assert_eq!(resolve(&landed).origin, RequestOrigin::AutomatedFollowup);
-        assert_eq!(resolve(&child).origin, RequestOrigin::AutomatedFollowup);
+        assert_eq!(
+            resolve(&landed, &Ok(0)).origin,
+            RequestOrigin::AutomatedFollowup
+        );
+        assert_eq!(
+            resolve(&child, &Ok(0)).origin,
+            RequestOrigin::AutomatedFollowup
+        );
         // The same channels without evidence stay unknown.
         assert_eq!(
-            resolve(&record(Some("organic"), Some("retro_land"), None)).origin,
+            resolve(&record(Some("organic"), Some("retro_land"), None), &Ok(0)).origin,
             RequestOrigin::Unknown
         );
     }
@@ -294,7 +378,7 @@ mod tests {
     fn prior_origin_is_immutable_birth() {
         let mut reborn = record(Some("operator_request"), Some("idea"), Some("brief:p1"));
         reborn.request_origin = Some("agent_discovery".into());
-        let resolved = resolve(&reborn);
+        let resolved = resolve(&reborn, &Ok(0));
         assert_eq!(resolved.origin, RequestOrigin::AgentDiscovery);
         assert_eq!(resolved.evidence.as_deref(), Some("brief:p1"));
     }
@@ -306,7 +390,7 @@ mod tests {
             Some("intake"),
             Some("plan:20260907-request-origin.md"),
         );
-        let resolved = resolve(&intaken);
+        let resolved = resolve(&intaken, &Ok(0));
         assert_eq!(resolved.origin, RequestOrigin::Unknown);
         assert_eq!(
             resolved.evidence.as_deref(),
@@ -318,7 +402,10 @@ mod tests {
     fn corrupt_prior_rederives_instead_of_echoing() {
         let mut corrupt = record(Some("operator_request"), Some("idea"), None);
         corrupt.request_origin = Some("human".into());
-        assert_eq!(resolve(&corrupt).origin, RequestOrigin::OperatorRequest);
+        assert_eq!(
+            resolve(&corrupt, &Ok(1)).origin,
+            RequestOrigin::OperatorRequest
+        );
     }
 
     #[test]
@@ -329,7 +416,10 @@ mod tests {
         ];
         let payload = serde_json::to_string(&records).expect("serialize");
         let parsed: Vec<BirthRecord> = serde_json::from_str(&payload).expect("round-trip");
-        let results: Vec<Resolution> = parsed.iter().map(resolve).collect();
+        let results: Vec<Resolution> = parsed
+            .iter()
+            .map(|record| resolve(record, &Ok(1)))
+            .collect();
         assert_eq!(results[0].origin, RequestOrigin::OperatorRequest);
         assert_eq!(results[1].origin, RequestOrigin::AgentDiscovery);
     }
