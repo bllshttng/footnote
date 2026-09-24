@@ -84,7 +84,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
    fno-agents intel --render <report.md>
    ```
 
-   Its stdout line is the HTML path. The renderer reads the report and the fold JSON named in the frontmatter `fold:` field, scrubs secrets, home paths, quoted blocks, and quotes outside Operator corrections, and draws the fold counters as inline SVG. End the run by telling the operator both paths, one line each: `Report: <md path>` and `Shareable copy: <html path> (open in a browser; print to PDF; latest.html beside it is always the newest)`. A nonzero exit is relayed with its stderr line, and the markdown report stands: it stays the file every later step reads.
+   Its stdout line is the HTML path. The renderer reads the report and the fold JSON named in the frontmatter `fold:` field. It scrubs secrets, home paths, quoted blocks, and quotes outside Operator corrections, and draws the fold counters as inline SVG. End the run by telling the operator both paths, one line each: `Report: <md path>` and `Shareable copy: <html path> (open in a browser; print to PDF; latest.html beside it is always the newest)`. A nonzero exit is relayed with its stderr line. The markdown report stands either way: it stays the file every later step reads.
 
 Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
 
