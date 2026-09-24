@@ -1436,7 +1436,45 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
             }
         };
-        ci_base_verdict(compare, &base_tip, &runs)
+        let verdict = ci_base_verdict(compare, &base_tip, &runs);
+        let ProbeOutcome::Refused(stale) = verdict else {
+            return verdict;
+        };
+        let pull_head = format!("pull/{}/head", facts.number);
+        let fetch = Command::new("git")
+            .args([
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                &facts.base_ref,
+                &pull_head,
+            ])
+            .current_dir(cwd)
+            .output();
+        let overlap = match fetch {
+            Ok(output) if output.status.success() => {
+                let Some((_, since)) = oldest_current_run(&runs) else {
+                    return stale_overlap_verdict(
+                        stale,
+                        facts.number,
+                        Err("no current workflow run".to_string()),
+                    );
+                };
+                crate::merge_gates::stale_overlap(
+                    cwd,
+                    &format!("origin/{}", facts.base_ref),
+                    &facts.head_sha,
+                    &since,
+                )
+            }
+            Ok(output) => Err(format!(
+                "fetch failed: {}",
+                first_line(&String::from_utf8_lossy(&output.stderr))
+            )),
+            Err(error) => Err(format!("fetch failed: {error}")),
+        };
+        stale_overlap_verdict(stale, facts.number, overlap)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -1863,6 +1901,62 @@ fn valid_github_timestamp(value: &str) -> bool {
         })
 }
 
+fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
+    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
+    for (name, created_at) in runs {
+        if let Some((_, newest)) = newest_by_workflow
+            .iter_mut()
+            .find(|(known, _)| known == name)
+        {
+            if created_at > newest {
+                *newest = created_at.clone();
+            }
+        } else {
+            newest_by_workflow.push((name.clone(), created_at.clone()));
+        }
+    }
+    newest_by_workflow
+        .into_iter()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+}
+
+pub(crate) fn stale_overlap_verdict(
+    stale: String,
+    pr: u64,
+    overlap: Result<crate::merge_gates::StaleOverlap, String>,
+) -> ProbeOutcome {
+    match overlap {
+        Ok(result) if result.shared.is_empty() => {
+            eprintln!(
+                "pr-merge: ci_base_stale waived: {} files landed since CI base {}, none shared with PR {pr}",
+                result.landed,
+                &result.ci_base_sha[..result.ci_base_sha.len().min(8)]
+            );
+            ProbeOutcome::Clear
+        }
+        Ok(result) => {
+            let shown = result
+                .shared
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let extra = if result.shared.len() > 3 {
+                format!(" and {} more", result.shared.len() - 3)
+            } else {
+                String::new()
+            };
+            ProbeOutcome::Refused(format!(
+                "{stale}; shares {} files with main since CI base {}: {shown}{extra}",
+                result.shared.len(),
+                &result.ci_base_sha[..result.ci_base_sha.len().min(8)]
+            ))
+        }
+        Err(error) => ProbeOutcome::Refused(format!("{stale}; file overlap unreadable ({error})")),
+    }
+}
+
 /// Did the green runs test a merge ref that already held the base tip?
 pub fn ci_base_verdict(
     behind_by: u64,
@@ -1882,23 +1976,7 @@ pub fn ci_base_verdict(
         );
     }
 
-    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
-    for (name, created_at) in runs {
-        if let Some((_, newest)) = newest_by_workflow
-            .iter_mut()
-            .find(|(known, _)| known == name)
-        {
-            if created_at > newest {
-                *newest = created_at.clone();
-            }
-        } else {
-            newest_by_workflow.push((name.clone(), created_at.clone()));
-        }
-    }
-    let Some((name, created_at)) = newest_by_workflow
-        .iter()
-        .min_by(|(_, left), (_, right)| left.cmp(right))
-    else {
+    let Some((name, created_at)) = oldest_current_run(runs) else {
         return ProbeOutcome::Clear;
     };
     if created_at.as_str() >= base_tip_at {
@@ -2740,6 +2818,75 @@ mod tests {
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Inconclusive(_)
         ));
+    }
+
+    #[test]
+    fn oldest_current_run_uses_each_workflows_newest_run_then_takes_the_oldest() {
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            oldest_current_run(&runs),
+            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn oldest_current_run_returns_none_without_workflow_runs() {
+        assert_eq!(oldest_current_run(&[]), None);
+    }
+
+    #[test]
+    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 4,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_stale_ci_base_refuses_with_shared_paths_and_a_bounded_list() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 5,
+                shared: vec![
+                    "docs/guide.md".to_string(),
+                    "hooks/a.json".to_string(),
+                    "hooks/b.json".to_string(),
+                    "hooks/c.json".to_string(),
+                ],
+            }),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("docs/guide.md")
+                && reason.contains("hooks/a.json")
+                && reason.contains("hooks/b.json")
+                && reason.contains("and 1 more")
+                && !reason.contains("hooks/c.json")));
+    }
+
+    #[test]
+    fn an_unreadable_stale_overlap_fails_closed() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Err("fetch failed".to_string()),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("file overlap unreadable (fetch failed)")));
     }
 
     #[test]
