@@ -215,6 +215,7 @@ pub mod merge_reap;
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
 pub mod model_env_scrub;
+pub mod model_family;
 pub mod naming;
 pub mod needs;
 pub mod node_origin;
@@ -280,6 +281,7 @@ pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
+pub mod route_inventory;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
