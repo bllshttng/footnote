@@ -10,7 +10,7 @@ Detection of multi-deliverable scope from node prose is impossible with high rec
 
 A regex tight enough to skip that node's measurement digits misses its ask. A regex loose enough to catch the ask fires on every measurement bullet. Keying any behavior on full detection is keying it on a coin flip.
 
-The gate era is over. `fno do target init` on a plan-less code node now states its own scope: it derives `deliverables: N` from the node's own details and proceeds, never refusing. The derivation reads only the unambiguous structures (highest ordinal marker, a two-member construction, else 1), so the count is falsifiable - a reader can recount the node's enumeration. An explicit `--deliverables N` still wins. `shipped M of N` stays expressible without a blueprint, which is what the refusal existed to force.
+The gate era is over. `fno do target init` on a plan-less code node now states its own scope: it derives `deliverables: N` from the node's own details and proceeds, never refusing. The derivation reads only the unambiguous structures: the highest ordinal marker, a two-member construction, or else 1. The count is falsifiable, so a reader can recount the node's enumeration. An explicit `--deliverables N` still wins. `shipped M of N` stays expressible without a blueprint, which is what the refusal existed to force.
 
 ### The enumerated_scope predicate
 

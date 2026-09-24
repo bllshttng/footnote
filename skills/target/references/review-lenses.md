@@ -1,8 +1,8 @@
 # Review lenses for the target run
 
-The code lenses that moved out of blueprint drafting (lean dispatch: the plan is no longer the upstream quality gate) land in the review phase, bundled from their canonical source under `skills/blueprint/references/lenses/code/` via `skill-bundles.yaml`. Nothing here is read up front. When a row's condition holds for the diff under review, read that one lens file and apply its question to the built code. Each lens names its source, and `NOTICE` at the repo root carries the license terms.
+The code lenses of blueprint drafting moved to the review phase under lean dispatch: the plan is no longer the upstream quality gate. The canonical files live under `skills/blueprint/references/lenses/code/`. `skill-bundles.yaml` copies them into this skill. Read nothing up front. When a row's condition holds for the diff under review, read that one lens file and apply its question to the built code. Each lens names its source. `NOTICE` at the repo root carries the license terms.
 
-The `Feeds:` line inside each lens file names the plan section the lens fed when it lived in blueprint drafting. It is metadata from that era, not an instruction to read a plan; the review phase reads the code.
+Each lens file carries a `Feeds:` line. It names the plan section the lens fed during its drafting era. Treat it as metadata from that era. The review phase reads the code, not a plan.
 
 | Read when | Lens |
 |---|---|

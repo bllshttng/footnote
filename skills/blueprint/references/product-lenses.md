@@ -2,7 +2,7 @@
 
 Each drafting lens is one file under `lenses/draft/`, a move you make while you write the plan. Nothing here is read up front. When a row's condition holds for the node in hand, read that one lens file. Each lens names its source, and `NOTICE` at the repo root carries the license terms.
 
-These are the premise lenses, and under lean dispatch they are the only ones drafting keeps: a cheap check that the node is still true before a plan is written. The code lenses moved to the target run's review phase: the canonical table is skills/target/references/review-lenses.md, shared through `skill-bundles.yaml`.
+These are the premise lenses. Under lean dispatch they are the only ones drafting keeps. They are a cheap check that the node is still true before a plan is written. The code lenses moved to the target run's review phase: the canonical table is skills/target/references/review-lenses.md, shared through `skill-bundles.yaml`.
 
 | Read when | Lens |
 |---|---|
