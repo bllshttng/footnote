@@ -115,7 +115,7 @@ lint
 loops
 loops resume-all
 mail
-mail send !--lock-timeout !--origin !--provider
+mail send !--origin !--provider
 mcp send
 mux
 notify

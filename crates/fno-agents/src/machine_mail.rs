@@ -11,6 +11,8 @@ enum MailArm {
     NotePointer,
 }
 
+const NOTE_POINTER_LOCK_TIMEOUT_ENV: &str = "_FNO_MACHINE_MAIL_LOCK_TIMEOUT";
+
 impl MailArm {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -102,15 +104,16 @@ fn mail_argv(arm: MailArm, session_id: Option<&str>, recipient: &str, body: &str
     if let Some(from_name) = sender_name(arm, session_id) {
         argv.extend(["--from-name".into(), from_name]);
     }
-    if arm == MailArm::NotePointer {
-        argv.extend(["--lock-timeout".into(), "5".into()]);
-    }
     if let Some(origin) = arm.origin() {
         argv.extend(["--origin".into(), origin.into()]);
     }
     argv.push("--".into());
     argv.extend([recipient.into(), body.into()]);
     argv
+}
+
+fn lock_timeout_override(arm: MailArm) -> Option<(&'static str, &'static str)> {
+    (arm == MailArm::NotePointer).then_some((NOTE_POINTER_LOCK_TIMEOUT_ENV, "5"))
 }
 
 fn current_session_id() -> Option<String> {
@@ -153,6 +156,9 @@ pub async fn run(args: &[String]) -> i32 {
         &request.body,
     );
     let mut command = Command::new(crate::scrape::fno_bin());
+    if let Some((name, value)) = lock_timeout_override(request.arm) {
+        command.env(name, value);
+    }
     command
         .args(argv)
         .stdin(std::process::Stdio::null())
@@ -186,7 +192,7 @@ pub async fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{mail_argv, note_pointer_receipt, parse_args, MailArm};
+    use super::{lock_timeout_override, mail_argv, note_pointer_receipt, parse_args, MailArm};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -205,6 +211,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.body, "--help");
+    }
+
+    #[test]
+    fn note_pointer_lock_timeout_is_an_internal_dispatch_override() {
+        assert_eq!(
+            lock_timeout_override(MailArm::NotePointer),
+            Some(("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", "5"))
+        );
+        assert_eq!(lock_timeout_override(MailArm::EventsPush), None);
     }
 
     #[test]
@@ -263,8 +278,6 @@ mod tests {
                 "send",
                 "--from-name",
                 "a1535d0b",
-                "--lock-timeout",
-                "5",
                 "--",
                 "reader",
                 "body",
@@ -278,8 +291,6 @@ mod tests {
                 "send",
                 "--from-name",
                 "note-pointer",
-                "--lock-timeout",
-                "5",
                 "--",
                 "reader",
                 "body",

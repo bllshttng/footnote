@@ -15,7 +15,6 @@ agents heal-token !--cross-project
 agents list !--provider
 agents mail hold-release !--poll-s
 agents mail pane-prepare !--session
-agents mail send !--lock-timeout
 agents mail send !--origin
 agents mail send !--provider
 agents spawn !--output-format
@@ -55,7 +54,6 @@ doctor event find !--session
 event find !--session
 mail hold-release !--poll-s
 mail pane-prepare !--session
-mail send !--lock-timeout
 mail send !--origin
 mail send !--provider
 resume receipt validate !--session
