@@ -2308,6 +2308,35 @@ def _mint_branch_row(
     return branch
 
 
+def _arm_crown_after_identification(entry: AgentEntry, session_id: str) -> None:
+    """Arm the king loop manifest the moment a crowned row first names the
+    session id it can be woken through.
+
+    Spawn-time succession carries the crown in the registry while the
+    successor child still has no harness session id, so the spawn lane's arm
+    attempt refuses and the manifest keeps naming the abdicating session
+    until a human clears it. The SessionStart restamp is the first moment
+    the successor is addressable; arming here rewrites manifest_session to
+    the successor instead of leaving the split. Fail-soft like its callers:
+    a failed arm is an event, never a blocked session start."""
+    if entry.crown_level is None or not entry.crown_scope:
+        return
+    try:
+        from fno.king.state import arm_king_manifest
+
+        arm_king_manifest(entry.crown_scope, session_id, row=entry)
+    except (OSError, ValueError) as exc:
+        from fno.agents import events
+
+        events.emit(
+            "crown_manifest_arm_failed",
+            name=entry.name,
+            scope=entry.crown_scope,
+            session_id=session_id,
+            error=str(exc),
+        )
+
+
 def restamp_harness_session_id(
     *,
     name: str,
@@ -2449,6 +2478,8 @@ def restamp_harness_session_id(
         return entries
 
     update_registry(_updater, path=registry_path)
+    for entry in restamped:
+        _arm_crown_after_identification(entry, session_id)
     for filled in first_filled:
         _flush_pending_session_row(filled, session_id)
     return restamped[0] if restamped else None
@@ -2789,6 +2820,8 @@ def record_session_observation(
         return row, "refused-cap"
     if classified:
         outcome, written = classified[0]
+        if outcome == "succession":
+            _arm_crown_after_identification(written, session_id)
         return written, outcome
     if not observed:
         # A concurrent observation won the slot between the pre-read and the
@@ -2798,6 +2831,7 @@ def record_session_observation(
         "primary" if observed[0].harness_session_id == session_id else "related"
     )
     if outcome == "primary":
+        _arm_crown_after_identification(observed[0], session_id)
         _flush_pending_session_row(observed[0], session_id)
     return observed[0], outcome
 

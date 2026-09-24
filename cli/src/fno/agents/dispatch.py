@@ -1888,7 +1888,8 @@ def _claude_create_path(
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}"
+                f": {king_unarmed_reason}; the manifest arms when this "
+                "worker self-identifies"
                 if king_unarmed_reason
                 else "; king loop disabled, no scope manifest armed"
             )
@@ -3714,6 +3715,15 @@ def _stop_agent_inner(
     # because we do NOT call ``hold_agent_lock`` directly in this function
     # body — the helper encapsulates the lock acquisition.
     pre_provider = pre_existing.harness
+    if pre_provider == "claude":
+        # The steering misuse this catches at the moment it happens: kings
+        # reached for stop to pause a worker, and on claude stop IS Done.
+        print(
+            "stop ends this claude session. To pause or redirect the worker "
+            "without ending it, use `fno agents ask` (or mail).",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
