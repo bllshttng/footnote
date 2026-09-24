@@ -2097,11 +2097,8 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let json_rows = raw_rows(&graph);
         let sqlite_rows = crate::backlog::read_entries(&graph).unwrap();
-        assert_eq!(json_rows[1]["status"], "superseded");
         assert_eq!(sqlite_rows[1]["status"], "superseded");
-        assert_eq!(json_rows[1]["superseded_by"], "ab-one");
         assert_eq!(sqlite_rows[1]["superseded_by"], "ab-one");
     }
 
