@@ -59,8 +59,12 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
             "--to" => {
                 recipient = Some(it.next().ok_or("--to needs a recipient")?.clone());
             }
-            "--body" => {
-                body = Some(it.next().ok_or("--body needs text")?.clone());
+            "--" => {
+                body = Some(it.next().ok_or("-- needs a message body")?.clone());
+                if it.next().is_some() {
+                    return Err("unexpected arguments after the fenced message body".into());
+                }
+                break;
             }
             "--timeout-secs" => {
                 let value = it.next().ok_or("--timeout-secs needs a number")?;
@@ -77,7 +81,7 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
     Ok(Request {
         arm: arm.ok_or("--arm is required")?,
         recipient: recipient.ok_or("--to is required")?,
-        body: body.ok_or("--body is required")?,
+        body: body.ok_or("a fenced message body is required")?,
         timeout_secs,
     })
 }
@@ -182,10 +186,25 @@ pub async fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{mail_argv, note_pointer_receipt, MailArm};
+    use super::{mail_argv, note_pointer_receipt, parse_args, MailArm};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_keeps_a_fenced_flag_like_body_as_text() {
+        let request = parse_args(&strings(&[
+            "--arm",
+            "events-push",
+            "--to",
+            "parent",
+            "--",
+            "--help",
+        ]))
+        .unwrap();
+
+        assert_eq!(request.body, "--help");
     }
 
     #[test]

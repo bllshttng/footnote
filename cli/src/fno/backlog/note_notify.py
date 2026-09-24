@@ -72,7 +72,7 @@ def send_pointer(address: str, body: str) -> str:
     if binary is None:
         raise RuntimeError("fno-agents binary unavailable")
     argv = [str(binary), "machine-mail-send", "--arm", "note-pointer"]
-    argv.extend(["--timeout-secs", "30", "--to", address, "--body", body])
+    argv.extend(["--timeout-secs", "30", "--to", address, "--", body])
     result = subprocess.run(
         argv, capture_output=True, text=True, timeout=_SEND_TIMEOUT_SECONDS
     )

@@ -83,7 +83,8 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
     assert sent["argv"][sent["argv"].index("--arm") + 1] == "events-push"
     assert sent["argv"][sent["argv"].index("--to") + 1] == "claude-parent99"
     # The event body references the run so the parent can correlate.
-    body = sent["argv"][sent["argv"].index("--body") + 1]
+    assert sent["argv"][-2] == "--"
+    body = sent["argv"][-1]
     assert "R1" in body
     assert "[fno:blocked]" in body
 
@@ -202,3 +203,5 @@ def test_push_parent_subcommand_pushes(runner, monkeypatch) -> None:
     assert sent["argv"][:2] == ["/fake/fno-agents", "machine-mail-send"]
     assert sent["argv"][sent["argv"].index("--arm") + 1] == "events-push"
     assert sent["argv"][sent["argv"].index("--to") + 1] == "claude-parent99"
+    assert sent["argv"][-2] == "--"
+    assert sent["argv"][-1].startswith("[fno:run_summary]")

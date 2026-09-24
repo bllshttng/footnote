@@ -429,7 +429,7 @@ def test_send_pointer_forwards_to_rust_machine_mail_with_session(monkeypatch) ->
     assert note_notify.send_pointer("sess-worker", "body") == "hosted msg-abc12345"
     assert calls == [[
         "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
-        "--timeout-secs", "30", "--to", "sess-worker", "--body", "body",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
     ]]
 
 
@@ -440,7 +440,7 @@ def test_send_pointer_forwards_to_rust_machine_mail_without_session(monkeypatch)
     assert note_notify.send_pointer("sess-worker", "body") == "durable msg-abc12345"
     assert calls == [[
         "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
-        "--timeout-secs", "30", "--to", "sess-worker", "--body", "body",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
     ]]
 
 

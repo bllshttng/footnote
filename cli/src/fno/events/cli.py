@@ -231,7 +231,7 @@ def _push_to_parent(
         typer.echo("push: note: fno-agents unavailable, skipped parent push", err=True)
         return False
     argv = [str(binary), "machine-mail-send", "--arm", "events-push"]
-    argv.extend(["--timeout-secs", "20", "--to", parent, "--body", msg])
+    argv.extend(["--timeout-secs", "20", "--to", parent, "--", msg])
     try:
         result = subprocess.run(
             argv, check=False, capture_output=True, timeout=20

@@ -9,7 +9,7 @@ fn machine_mail_send_rejects_unknown_arm_before_delivery() {
             "unknown",
             "--to",
             "worker",
-            "--body",
+            "--",
             "body",
         ])
         .output()
