@@ -2712,8 +2712,18 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 
 fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
     let mut cmd = Command::new("fno");
-    cmd.current_dir(cwd)
-        .args(["inbox", "outstanding", "ask", question]);
+    cmd.current_dir(cwd).args([
+        "inbox",
+        "outstanding",
+        "ask",
+        question,
+        // A rescued question records as a pin: the asker is gone, so the
+        // page carries the action, not a question (the ask port refuses a
+        // question with no context). Wording never says the session ended:
+        // a session has no terminal state.
+        "--ask",
+        "the asker went quiet on this question; resume its session or re-dispatch its node, then clear this with done",
+    ]);
     if let Some(n) = node {
         cmd.args(["--node", n]);
     }

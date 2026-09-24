@@ -77,8 +77,8 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `approvals.db` | `cli/src/fno/approvals/store.py` via `paths.state_dir()` | permanent SQLite store for approvals and effect attempts |
-| `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache, rewritten every beat; the prompt hook reads it, safe to delete, next beat rebuilds it |
-| `attention/<sink>.json` | `crates/fno-agents/src/attention_arm.rs` | per-sink settle state (block hashes and since-stamps); deleting it restarts every settle window and can double-deliver nothing (delivery is proven by the file's own `^id` anchors) |
+| `attention/items.json` | `crates/fno-agents/src/attention_arm.rs` (the `attention` arm) | the attention projection cache plus `questions_dir`, rewritten every beat; the king check-in reads it and refuses when it is missing or over 600 s old, safe to delete, next beat rebuilds it |
+| `attention/questions.json` | `crates/fno-agents/src/attention_arm.rs` | page settle state (body hashes and since-stamps); deleting it restarts every settle window and cannot double-deliver, because a page's existence proves delivery |
 | `attest/` | `hooks/attest-model.sh`, `hooks/review-hold.sh` | one attestation sidecar per reviewed session |
 | `backups/` | `crates/fno-agents/src/graph_store.rs` backup rotation (pruned to `GRAPH_BACKUP_KEEP`), and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. A backup at most a tenth the size of its predecessor moves that predecessor to `backups/pre-shrink.<name>`, and pins are never pruned. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |

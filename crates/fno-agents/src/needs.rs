@@ -806,7 +806,7 @@ pub(crate) fn held_nodes(journals: &[PathBuf]) -> std::collections::BTreeMap<Str
 }
 
 /// The held rows: one per blocked node, oldest question first.
-pub(crate) fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
+fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
     let mut raw = String::new();
     for path in journals {
         let content = crate::event_store::journal_text(path, crate::needs::QUESTION_TYPES);
@@ -817,7 +817,7 @@ pub(crate) fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
 }
 
 /// The pure half of [`held_rows`], over newline-joined journal contents.
-pub(crate) fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
+fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
     // Latest ask of a qid wins (journal order, mirroring
     // `scan_unrecorded_decisions`); the oldest OPEN ask per node then wins.
     let mut asked: HashMap<String, (u64, String, Value)> = HashMap::new();

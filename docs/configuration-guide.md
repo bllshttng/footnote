@@ -281,7 +281,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.interval_secs` | int | `5` | advanced | Seconds between status-fanout ticks per project (daemon host). |
 | `status_fanout.http_timeout_secs` | int | `5` | advanced | Bounded per-webhook HTTP timeout for a status sink. |
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
-| `attention` | list[ReachMeRow] | `[]` | advanced | Questions-file sinks: list of {name, type (md), path, tag, settle_secs, ready_only}. The daemon's attention arm writes open questions there; see docs/architecture/attention-items.md. The retired [[reach_me]] name reads for one release. |
 | `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
 | `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
 | `king.wake_enabled` | bool | `false` | advanced | Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false. |

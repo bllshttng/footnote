@@ -112,10 +112,17 @@ fn golden_of(answer: &fno_agents::question_intake::IntakeAnswer) -> Golden {
 fn plain_ask_matches_the_python_leg() {
     let (root, fno_home) = fixture();
     let home = fno_agents::paths::AgentsHome::at(&fno_home.join("agents"));
-    let answer = run_intake(&request("parity fixture question one", &root), &home);
+    // A pin: the context rule (wave 2) refuses a bare question, so the
+    // parity case sends an ask line to keep its captured golden.
+    let mut r = request("parity fixture question one", &root);
+    r.ask = Some("parity: keep the lane moving".to_string());
+    let answer = run_intake(&r, &home);
     assert_golden("question_intake", "plain_ask", &golden_of(&answer), None);
 }
 
+/// The context rule changed `ask_with_options` on purpose: a flag-only
+/// question carries no why and no recommendation, so the port refuses it
+/// (exit 2, empty stdout) instead of recording.
 #[test]
 fn ask_with_options_matches_the_python_leg() {
     let (root, fno_home) = fixture();
@@ -157,7 +164,10 @@ fn over_cap_question_matches_the_python_leg() {
     let (root, fno_home) = fixture();
     let home = fno_agents::paths::AgentsHome::at(&fno_home.join("agents"));
     let long = "x".repeat(2050);
-    let answer = run_intake(&request(&long, &root), &home);
+    // A pin, like plain_ask: the context rule refuses a bare question.
+    let mut r = request(&long, &root);
+    r.ask = Some("parity: keep the lane moving".to_string());
+    let answer = run_intake(&r, &home);
     assert_golden(
         "question_intake",
         "over_cap_question",
