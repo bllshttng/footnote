@@ -1150,7 +1150,7 @@ pub fn run_update(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{read_defaulted, CANONICAL_FIELD_ORDER};
+    use crate::graph_store::CANONICAL_FIELD_ORDER;
     use std::io::Write;
 
     #[test]
@@ -1246,7 +1246,8 @@ mod tests {
     }
 
     fn status_of(graph: &Path, id: &str) -> String {
-        let rows = read_defaulted(graph, false).expect("read back");
+        // graph.db is the only store: read the store, not the frozen mirror.
+        let rows = crate::graph_store::read_rows(graph).expect("read back");
         rows.iter()
             .find(|e| field_eq(e, "id", id))
             .and_then(|e| e.get("status"))
@@ -1286,7 +1287,7 @@ mod tests {
             .expect("backref change");
         assert_eq!(backref.id, "x-aaaa");
         assert_eq!(status_of(&graph, "x-bbbb"), "idea");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let repl = rows.iter().find(|e| field_eq(e, "id", "x-aaaa")).unwrap();
         assert_eq!(repl.get("supersedes"), Some(&json!([])));
     }
@@ -1336,9 +1337,10 @@ mod tests {
         let receipt = apply(&graph, &req("x-2", Some("ready"), &[])).expect("applied");
         assert_eq!(receipt.status.to, "ready");
         assert_eq!(status_of(&graph, "x-2"), "ready");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-2")).unwrap();
-        assert_eq!(row.get("deferred_at"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("deferred_at").map_or(true, Value::is_null));
     }
 
     // AC3-HP
@@ -1378,9 +1380,10 @@ mod tests {
             apply(&graph, &req("x-1", None, &[("merge_status", "null")])).expect("clear applied");
         assert_eq!(receipt.status.from, "in_review");
         assert_eq!(receipt.status.to, "in_review");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-1")).unwrap();
-        assert_eq!(row.get("merge_status"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("merge_status").map_or(true, Value::is_null));
         assert_eq!(row.get("pr_number"), Some(&json!(1060)));
         assert_eq!(
             row.get("pr_url"),
@@ -1488,10 +1491,11 @@ mod tests {
         )
         .expect("applied");
         assert_eq!(receipt.status.to, "deferred");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-3")).unwrap();
-        assert_eq!(row.get("locked_by"), Some(&Value::Null));
-        assert_eq!(row.get("locked_at"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("locked_by").map_or(true, Value::is_null));
+        assert!(row.get("locked_at").map_or(true, Value::is_null));
         assert!(row.get("deferred_at").and_then(Value::as_str).is_some());
     }
 

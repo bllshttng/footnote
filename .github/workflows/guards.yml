@@ -61,8 +61,8 @@ on:
     branches: [main]
 
 concurrency:
-  group: guards-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: guards-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
