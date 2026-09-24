@@ -211,6 +211,17 @@ impl super::Core {
         account: Option<String>,
         plan: bool,
     ) -> super::Flow {
+        // The plan branch refuses ONLY an in-flight node: the blueprint
+        // spawn door accepts an idea node (nothing to route to yet), and a
+        // card being worked already must not fork a second plan.
+        if plan {
+            if let Some(refusal) = self.plan_refusal(&node) {
+                self.notice(client_id, refusal);
+            } else {
+                self.dispatch_next(client_id, Some(node), account, true);
+            }
+            return super::Flow::Continue;
+        }
         if super::card_ready_to_dispatch(&self.backlog, &node) {
             self.dispatch_next(client_id, Some(node), account, plan);
         } else if plan {
@@ -231,8 +242,18 @@ impl super::Core {
         super::Flow::Continue
     }
 
-    /// "Grab work" (prefix+g): dispatch the next ready backlog node into
-    /// a new pane. Board selection is `fno backlog next`; the launch is the door
+    /// The plan-spawn door's refusal: a node the server feed shows in
+    /// flight names its session instead of getting a second blueprint.
+    /// Everything else passes - an idea node (no feed card at all), an
+    /// unranked or blocked card: the model decides readiness, the spawn
+    /// door answers, and a blueprint for worked work is not asked twice.
+    pub(super) fn plan_refusal(&self, node: &str) -> Option<String> {
+        self.inflight_hint(node).map(|hint| {
+            format!("{node} is already being worked ({hint}); open its session instead")
+        })
+    }
+
+    /// "Grab work" (prefix+g): dispatch the next ready backlog node into    /// a new pane. Board selection is `fno backlog next`; the launch is the door
     /// (`fno agents spawn`), shelled OFF the core loop in a detached
     /// task so a slow backlog read never stalls a pane. The launched pane
     /// appears through the existing registry reader; the outcome (dispatched /

@@ -156,7 +156,7 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "done", node_id)
+    r = _invoke("backlog", "done", node_id, "--note", "marks the node completed")
     assert r.exit_code == 0, r.output
 
     # Fetch and assert completed_at is set
@@ -172,7 +172,7 @@ def test_ac3_edge_done_is_idempotent(tmp_graph):
     """Running `done` on an already-done node is a safe no-op (exit 0)."""
     add = _invoke("--json", "backlog", "add", "IdemTest")
     node_id = json.loads(add.stdout)["id"]
-    _invoke("backlog", "done", node_id)
+    _invoke("backlog", "done", node_id, "--note", "idempotency fixture")
     r2 = _invoke("backlog", "done", node_id)
     assert r2.exit_code == 0, r2.output
     assert "already" in r2.output.lower() or "done" in r2.output.lower()

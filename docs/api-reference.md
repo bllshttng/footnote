@@ -56,7 +56,7 @@ Input ("feature" or path/to/plan)
   -> do (execute waves, spawn subagents)
   -> review (the owned lane: one inline reviewer, head-pinned attestation)
   -> goal-verification (3-level check)
-  -> create-pr (routed pr-create worker)
+  -> create-pr (inline create flow)
   -> <promise> tag signals completion
 ```
 
@@ -119,7 +119,7 @@ Code quality, testing, and PR management.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `review` | `/fno:review` | The owned lane: one inline reviewer works every angle, verifies findings, and emits a head-pinned attestation; `peer` adds a cross-model second opinion |
-| `pr` | `/fno:pr create` | Opens a PR from your commits; a routed pr-create worker writes the description |
+| `pr` | `/fno:pr create` | Opens a PR from your commits inline in the invoking session |
 | `pr` | `/fno:pr check` | Polls for external reviewer feedback and implements changes |
 | `pr` | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, file follow-ups |
 

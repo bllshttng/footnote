@@ -41,7 +41,7 @@ That asymmetry is deliberate - a wrongly-live `attended` costs you one unnecessa
 | Bug in plan | fix inline, note it | unchanged |
 | Minor enhancement (<15 min) | implement, note it | unchanged |
 | Architecture decision, missing dependency, ambiguous requirement | STOP, emit `<help>` | **decide, record one ledger entry, continue** |
-| Interactive prompt (`AskUserQuestion`) in a composed skill | ask the operator | **take the recommended option, record it** |
+| Interactive prompt (`AskUserQuestion`) in a composed skill | ask the user | **take the recommended option, record it** |
 | Missing credentials, destructive ambiguity, a genuine blocker | STOP, emit `<help>` | unchanged - still stops |
 
 The split is what the session can *undo*. A wrong architecture call costs a review comment; a wrong destructive call costs data.

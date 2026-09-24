@@ -950,32 +950,102 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
-/// The held reading: nodes an open operator question blocks, oldest
-/// question first. One fold over the question journals in process; the rows
-/// carry everything the render needs to name the decide verb.
-fn r_held() -> Result<Value, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
-    let home = crate::paths::AgentsHome::from_env();
-    let fno_dir = home
-        .root()
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "agents home has no parent".to_string())?;
-    let journals = crate::needs::question_journals(&fno_dir, &cwd);
-    let rows = crate::needs::held_rows(&journals);
-    let rows: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "node": r.node,
-                "question_id": r.question_id,
-                "question": r.question,
-                "ts": r.ts,
-                "epoch": r.epoch,
-            })
-        })
+/// The held reading: this crown's open questions, read from the page
+/// frontmatter the attention arm froze at write time. The folder comes from
+/// items.json's `questions_dir`, so a king in any project reads the one
+/// folder the daemon writes. A missing or stale items.json is a failed
+/// reading, never `held: none`: the arm being down must not read as "no
+/// questions".
+fn r_held(ctx: &Ctx) -> Result<Value, String> {
+    let index_path = crate::attention_arm::attention_dir()
+        .map_err(|e| e.to_string())?
+        .join("items.json");
+    let raw = std::fs::read_to_string(&index_path)
+        .map_err(|_| "the attention arm has not written items.json".to_string())?;
+    let index: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("items.json unreadable: {e}"))?;
+    let as_of = index.get("as_of").and_then(Value::as_u64).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(as_of);
+    if age > 600 {
+        return Err(format!(
+            "items.json is {age}s old; the attention arm is not beating"
+        ));
+    }
+    let dir = index
+        .get("questions_dir")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty())
+        .ok_or("items.json names no questions_dir")?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("questions folder {dir} unreadable: {e}"))?;
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
         .collect();
+    paths.sort();
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if crate::attention_file::has_conflict_markers(&text) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        pages.push((stem.to_string(), text));
+    }
+    let rows = held_from_pages(&pages, &ctx.scope);
     Ok(json!({"open": rows.len(), "rows": rows}))
+}
+
+/// The pure fold: open pages whose question_id the stem names and whose
+/// crown equals this check-in's canonical scope, oldest first. Rows carry
+/// what the render needs to name the decide verb.
+fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Value> {
+    let canon = crate::territory::canonical_scope(scope);
+    let mut rows: Vec<(u64, Value)> = Vec::new();
+    for (stem, text) in pages {
+        let Some((front, _)) = crate::attention_file::parse_page(text) else {
+            continue;
+        };
+        if front.status != "open" {
+            continue;
+        }
+        if !crate::attention_arm::stem_names_id(stem, &front.question_id) {
+            continue;
+        }
+        if crate::territory::canonical_scope(&front.crown) != canon {
+            continue;
+        }
+        let epoch = chrono::DateTime::parse_from_rfc3339(&front.asked_at)
+            .map(|d| d.timestamp().max(0) as u64)
+            .unwrap_or(0);
+        let node = front
+            .blocks
+            .first()
+            .cloned()
+            .filter(|b| !b.is_empty() && b != "none")
+            .or_else(|| Some(front.node.clone()).filter(|n| !n.is_empty() && n != "none"));
+        rows.push((
+            epoch,
+            json!({
+                "node": node,
+                "question_id": front.question_id,
+                "question": front.title,
+                "ts": front.asked_at,
+                "epoch": epoch,
+            }),
+        ));
+    }
+    rows.sort_by_key(|(epoch, _)| *epoch);
+    rows.into_iter().map(|(_, v)| v).collect()
 }
 
 /// One verdict token for the check-in line, from the shared reader's rows:
@@ -1158,7 +1228,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
     take("drain", r_drain(ctx));
-    take("held", r_held());
+    take("held", r_held(ctx));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("parked", r_parked());
@@ -1547,8 +1617,9 @@ fn render_lines(
     match failed("held") {
         Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
         None => {
-            // Held nodes: the rows already carry node, question id
-            // and ask time; the line names the decide verb that clears them.
+            // This crown's questions: the rows carry node, question id and
+            // ask time; a row with a node names the decide verb, a row with
+            // none names the clear verb.
             let rows = by_name("held")
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null)
@@ -1559,28 +1630,21 @@ fn render_lines(
             if rows.is_empty() {
                 lines.push("held: none".into());
             } else {
-                let now = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                lines.push(format!(
-                    "held: {} node(s) waiting on the operator",
-                    rows.len()
-                ));
+                lines.push(format!("held: {} question(s) for this crown", rows.len()));
                 for row in rows.iter().take(MAX_COURT_ROWS) {
-                    let age = row
-                        .get("epoch")
-                        .and_then(Value::as_u64)
-                        .map(|e| now.saturating_sub(e) / 60)
-                        .unwrap_or(0);
-                    lines.push(format!(
-                        "  {} on question {}, age {}m; answer with: fno backlog decide {} \"<ruling>\" --question-id {}",
-                        dash(row.get("node")),
-                        dash(row.get("question_id")),
-                        age,
-                        dash(row.get("node")),
-                        dash(row.get("question_id")),
-                    ));
+                    let qid = dash(row.get("question_id"));
+                    let node = row
+                        .get("node")
+                        .and_then(Value::as_str)
+                        .filter(|n| !n.is_empty() && *n != "none");
+                    match node {
+                        Some(n) => lines.push(format!(
+                            "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
+                        )),
+                        None => lines.push(format!(
+                            "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
+                        )),
+                    }
                 }
             }
         }
@@ -3451,7 +3515,10 @@ mod tests {
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
         assert_eq!(summary.len(), 1, "lines: {lines:?}");
-        assert!(summary[0].contains("2 node(s)"), "lines: {lines:?}");
+        assert!(
+            summary[0].contains("2 question(s) for this crown"),
+            "lines: {lines:?}"
+        );
         let verbs: Vec<&String> = lines
             .iter()
             .filter(|l| l.contains("fno backlog decide"))
@@ -4219,5 +4286,60 @@ mod tests {
         assert_eq!(level, None);
         assert_eq!(board_state, None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn held_page(
+        id: &str,
+        crown: &str,
+        status: &str,
+        asked_at: &str,
+        node: Option<&str>,
+    ) -> (String, String) {
+        let node_line = match node {
+            Some(n) => format!("node: {n}\n"),
+            None => String::new(),
+        };
+        let stem = format!("20260923-{id}-test-x-none");
+        let text = format!(
+            "---\nquestion_id: {id}\nkind: question\nstatus: {status}\ntitle: t-{id}\nasked_at: {asked_at}\n{node_line}crown: {crown}\n---\n\n# t-{id}\n"
+        );
+        (stem, text)
+    }
+
+    // AC11-HP: only this crown's open questions, oldest first, each with the
+    // verb that clears it.
+    #[test]
+    fn held_from_pages_lists_this_crowns_open_questions_oldest_first() {
+        let pages = vec![
+            held_page("q-new", "x-b", "open", "2026-09-23T12:00:00Z", Some("x-1")),
+            held_page("q-old", "x-b", "open", "2026-09-22T08:00:00Z", None),
+            held_page(
+                "q-other",
+                "fno",
+                "open",
+                "2026-09-21T08:00:00Z",
+                Some("x-2"),
+            ),
+            held_page(
+                "q-closed",
+                "x-b",
+                "answered",
+                "2026-09-20T08:00:00Z",
+                Some("x-3"),
+            ),
+        ];
+        let rows = held_from_pages(&pages, "x-b");
+        assert_eq!(rows.len(), 2, "AC11-HP: only x-b's open pages: {rows:?}");
+        assert_eq!(
+            rows[0].get("question_id").and_then(|v| v.as_str()),
+            Some("q-old"),
+            "oldest first"
+        );
+        assert_eq!(
+            rows[1].get("question_id").and_then(|v| v.as_str()),
+            Some("q-new")
+        );
+        // The node-less row reads as null so the render names the clear verb.
+        assert_eq!(rows[0].get("node"), Some(&Value::Null));
     }
 }

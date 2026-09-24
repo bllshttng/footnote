@@ -351,7 +351,13 @@ fn translate(
     let _ = std::fs::remove_file(&counter);
 
     // One control-plane arm row for this fire.
-    emit_tick(hook_cwd, decision, &termination_reason, driver);
+    super::emit_tick(
+        hook_cwd,
+        decision,
+        &termination_reason,
+        driver,
+        &fire.hook_harness_id,
+    );
 
     // ── Block ─────────────────────────────────────────────────────────────────
     if decision == "block" {
@@ -518,7 +524,7 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
         .unwrap_or(0)
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
-    emit_tick(cwd, "blocked", "unavailable", driver);
+    super::emit_tick(cwd, "blocked", "unavailable", driver, session_id);
     if count <= MAX_UNAVAIL_RETRIES {
         return emit_block_for_harness(&format!(
             "checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running"
@@ -569,28 +575,6 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     }
     eprintln!("target stop-hook: {reason}");
     2
-}
-
-/// One control-plane arm row for this fire.
-fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
-    let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
-    let detail = format!(
-        "driver={driver} decision={decision} reason={}",
-        if reason.is_empty() { "live" } else { reason }
-    );
-    let data = serde_json::json!({
-        "arm": "stop_hook",
-        "scheduler": "hook:target-stop-hook",
-        "acted": 1,
-        "skip_reason": Value::Null,
-        "detail": detail,
-        "interval_s": 0,
-    });
-    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
 }
 
 ///: the CARGO_BUILD_BUILD_DIR value, ported from
@@ -1288,6 +1272,59 @@ mod tests {
             None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The tick row names the fire's session so a reader of `fno agents
+    /// status` can tell a king's own fire from its newest neighbor.
+    #[test]
+    fn the_tick_row_names_its_session_and_an_empty_one_omits_the_field() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
+
+        super::super::emit_tick(
+            dir.path(),
+            "block",
+            "live",
+            "king",
+            "41725e5f-1c20-4b81-824e",
+        );
+        let tick_row = || {
+            crate::event_store::query_events(
+                &crate::paths::events_path(dir.path()),
+                &crate::event_store::EventQuery::of_types(&["control_plane_tick"]),
+            )
+            .unwrap()
+            .pop()
+            .map(|r| r.line)
+            .unwrap_or_default()
+        };
+        let row = tick_row();
+        assert!(
+            row.contains("driver=king decision=block reason=live session=41725e5f"),
+            "{row}"
+        );
+
+        super::super::emit_tick(dir.path(), "allow", "", "target", "");
+        let last = tick_row();
+        assert!(
+            last.contains("driver=target decision=allow reason=live"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("session="),
+            "an empty session omits the field: {last}"
+        );
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("GLOBAL_EVENTS_PATH");
     }
 
     /// The manifest resolves through the crown ROW's cwd, not the Stop

@@ -3,6 +3,7 @@
 //! shrink-only ratchet, plus the quiet-window flush that releases a lone
 //! ESC carry to the overlay on top.
 
+use super::backlog_board;
 use super::{
     answer_keys, attach_place_keys, confirm_keys, connections_keys, create_keys, is_sideline_verb,
     keys_modal_keys, move_pick_keys, move_to_keys, nav_keys, peek_keys, portal_pick_keys,
@@ -49,6 +50,11 @@ pub(super) async fn route(
     if view.aux.is_some() {
         // US4/US5: the MENU popup / settings modal consumes keys.
         return Some(aux_keys(view, bytes, sock_w).await);
+    }
+    if view.backlog_board.is_some() {
+        // the experimental backlog board consumes keys while open; its
+        // inputs, pickers, and facets ride inside it.
+        return Some(backlog_board::board_keys(view, bytes, sock_w).await);
     }
     if view.connections.is_some() {
         // the Connections modal consumes all keys while open (Tab

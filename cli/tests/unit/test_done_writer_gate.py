@@ -594,3 +594,45 @@ def test_orient_renders_merged_for_an_evidenced_close(monkeypatch):
     assert orient._node_line("ab-ev003", Path("/"), manifest_raw={}) == (
         "shipped (PR #42 merged)"
     )
+
+
+# ---------------------------------------------------------------------------
+# The store refuses a close that records nothing
+# ---------------------------------------------------------------------------
+
+
+def test_store_refuses_a_bare_evidence_less_close(done_graph, monkeypatch):
+    """A bare close of a node with no PR ref, note or link exits non-zero,
+    names the repair flags, and leaves completed_at null.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-bare001", "title": "Bare node", "domain": "code"})
+
+    r = CliRunner().invoke(app, ["done", "ab-bare001"])
+
+    assert r.exit_code != 0
+    combined = r.output + str(r.exception)
+    assert "--note" in combined
+    entry = _node(done_graph, "ab-bare001")
+    assert entry.get("completed_at") is None
+    assert entry.get("status") != "done"
+
+
+def test_store_accepts_a_close_that_records_why(done_graph, monkeypatch):
+    """The same close with a note lands: completion_note carries the text."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-noted001", "title": "Noted node", "domain": "code"})
+
+    r = CliRunner().invoke(
+        app, ["done", "ab-noted001", "--note", "shipped in a docs change"]
+    )
+
+    assert r.exit_code == 0, r.output
+    entry = _node(done_graph, "ab-noted001")
+    assert entry.get("status") == "done"
+    assert entry.get("completed_at") is not None
+    assert entry.get("completion_note") == "shipped in a docs change"
