@@ -13,7 +13,7 @@ One dock in the mux sideline launches a new harness session through the canonica
 
 ## Launching a backlog node
 
-`t` on a board card or in the drill-down opens the dock prefilled: message `/fno:target <id>`, the node's project preselected, and the launch bound to the node with `--node <id>` so the door's dispatch guard judges it and the worker joins its roster row and card. The operator picks harness, model and effort; nothing spawns before the Launch press. A card already being worked refuses before the dock opens. A kept draft is never overwritten.
+`t` on a board card or in the drill-down opens the dock prefilled with `/fno:target <id>` and the node's project. The launch is bound to the node with `--node <id>`. The door's dispatch guard judges the node, and the worker joins its roster row and card. The operator picks harness, model and effort. Nothing spawns before the Launch press. A card already being worked refuses before the dock opens. A kept draft is never overwritten.
 
 ## Dock geometry
 
@@ -38,12 +38,12 @@ One dock in the mux sideline launches a new harness session through the canonica
 
 ## Boundaries not crossed
 
-- The dock launches a thread by default, or a pane through the placement chip; headless workers keep the CLI. They reuse the same state and render components (`client/agent_launcher.rs`), not a second composer.
+- The dock launches a thread by default, or a pane through the placement chip. Headless workers keep the CLI. Both reuse the same state and render components (`client/agent_launcher.rs`), not a second composer.
 - No raw CLI passthrough, crown granting, or permission escalation. No force flags ride the spawn argv. A refusal is the product.
 
 ## Tests
 
-- `src/client/tests/agent_launcher_tests.rs`: editor, focus order, draft retention, the board prefill (binds message, project and node; keeps a held draft; replaces after a launch; drops a stale node binding when the message moves), submit refusals, update correlation, render table, dock geometry.
-- `src/client/tests/backlog_board_tests.rs`: the `t` key (prefills from a card, refuses a card already being worked, works inside the drill-down, keeps a held draft).
+- `src/client/tests/agent_launcher_tests.rs`: editor, focus order, draft retention, submit refusals, update correlation, render table, dock geometry. Board prefill: binds message, project and node. A held draft survives. A launched attempt makes way. A message edit drops a stale node binding.
+- `src/client/tests/backlog_board_tests.rs`: the `t` key. It prefills from a card, refuses a worked card, works in the drill-down, and keeps a held draft.
 - `src/server/tests/agent_launcher_tests.rs`: pre-birth validation and desk dedup/replay at the Core.
 - `tests/agent_launcher_journey.rs`: real subprocess boundary with a recording fake door. Pins exact argv, verbatim stdin, refusal and unknown journeys, and no duplicate attempt.
