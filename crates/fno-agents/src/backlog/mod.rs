@@ -2120,6 +2120,7 @@ mod tests {
             Value::String("pending supersession".into()),
         );
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw.clone();
         after[0]
@@ -2407,9 +2408,9 @@ mod tests {
     fn schema_v3_population_keeps_its_rows_and_stamps_three() {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The schema-3 open keeps the rows and stamps the new
-        // schema; parity still reports the mirror's staleness instead of
-        // papering over it with a rebuild.
+        // authority. The first schema-3 open keeps the rows and stamps the
+        // schema; parity still reports the
+        // mirror's staleness instead of papering over it with a rebuild.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
         let entries = read_entries(&graph).unwrap();
