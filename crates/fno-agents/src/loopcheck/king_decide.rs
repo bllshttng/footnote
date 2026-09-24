@@ -5,6 +5,13 @@
 use super::*;
 
 pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
+    // The drain reserve arms HERE, on the shared king entry, and not at the
+    // fire stamp: both king routes (the `--driver king` hook and the bound
+    // Crown row) converge on this function, so the route into it, not the
+    // driver string the fire was stamped with, decides who pays for the
+    // drain. A missing manifest allows right after the hold - an uncrowned
+    // session pays nothing.
+    super::stopgate_hold_drain_reserve();
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
     // would trap every ordinary session here.
@@ -450,11 +457,15 @@ fn stale_crown_doc_gate(
     // The handoffs-dir resolver lives only in the Python CLI; shell it rather
     // than copy it, then pick newest + mtime with the same resolver
     // king_checkin uses, so the two cannot drift.
-    let out = std::process::Command::new(fno_bin)
-        .args(["config", "paths", "handoff", "--scope", scope])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let out = match run_bounded(
+        std::ffi::OsStr::new(fno_bin),
+        &["config", "paths", "handoff", "--scope", scope],
+        cwd,
+        stopgate_read_timeout(),
+    ) {
+        BoundedRun::Completed(out) => out,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -506,10 +517,57 @@ fn stale_doc_block(
 #[cfg(test)]
 mod stale_crown_doc_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     const CROWN_START: &str = "2026-09-15T00:00:00Z";
+
+    #[test]
+    fn king_decide_holds_the_drain_reserve_on_entry() {
+        // The Crown route enters the king path under a fire stamped reserve 0
+        // (the entry stamp is driver-blind now). The hold on the first line
+        // is what arms the drain slice on BOTH king routes; a missing
+        // manifest lets the call return at its first read with the hold
+        // already landed.
+        let dir = tempfile::tempdir().unwrap();
+        let parsed = LoopCheckArgs {
+            state_path: dir.path().join("no-such-king.md"),
+            transcript_path: dir.path().join("t.jsonl"),
+            cwd: dir.path().to_path_buf(),
+            global_settings_path: None,
+            events_path: Some(dir.path().join("events.jsonl")),
+            global_events_path: Some(dir.path().join("global-events.jsonl")),
+            settings_path: None,
+            ledger_path: None,
+            gh_budget_ledger: None,
+            now_override: None,
+            gh_bin: "/nonexistent-gh".into(),
+            git_bin: "/nonexistent-git".into(),
+            author_harness_override: Some("none".into()),
+            hook_input_stdin: false,
+            driver: "target".into(),
+            fno_bin: "/nonexistent-fno".into(),
+            read_timeout_ms: None,
+            harness: None,
+            harness_session: None,
+        };
+        super::stopgate_stamp_fire(0, std::time::Instant::now() + Duration::from_secs(50), 0);
+        let (code, out) = king_decide(&parsed);
+        assert_eq!(code, 0);
+        assert!(out.contains("no king manifest"), "{out}");
+        // The reserve is armed despite the driver-blind stamp: pre-drain
+        // reads clamp to remaining-minus-reserve (34s) under the 30s read
+        // ceiling, so 30s stands; the drain reads the full remaining.
+        let pre_drain = super::stopgate_read_timeout();
+        assert!(
+            pre_drain <= Duration::from_secs(30) && pre_drain >= Duration::from_secs(29),
+            "{pre_drain:?}"
+        );
+        let drain = super::stopgate_drain_timeout();
+        assert!(
+            drain <= Duration::from_secs(50) && drain >= Duration::from_secs(49),
+            "{drain:?}"
+        );
+    }
 
     fn manifest(harness: &str) -> KingManifest {
         KingManifest {
@@ -536,17 +594,15 @@ mod stale_crown_doc_tests {
     /// The CLI stub answers `config paths handoff --scope` with a path inside
     /// `handoffs_dir`, the way the real verb prints the scope's newest doc.
     fn stub_fno(dir: &Path, handoffs_dir: &Path) -> String {
-        let stub = dir.join("fno-stub.sh");
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            &stub,
-            format!(
+        let stub = crate::write_exec_stub(
+            dir,
+            "fno-stub.sh",
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' '{}'\n",
                 handoffs_dir.join("unused-crown-footnote.md").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         stub.to_string_lossy().into_owned()
     }
 

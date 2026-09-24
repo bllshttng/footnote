@@ -1,0 +1,805 @@
+<!doctype html>
+<!--
+  fno backlog web board (read-only). Vendored inline by `fno mux serve --web`
+  (include_str!), so no external resource exists and the strict CSP holds
+  offline. It draws the Rust read model (backlog_model) through
+  /backlog/model.json and /backlog/node.json, computing nothing the model
+  already answered, polling while the tab is visible and keeping the last
+  good board when a poll fails. Titles, details, notes and decisions are
+  free text any session writes, so every node string lands through
+  textContent: no HTML is ever built from data. Read-only: the page runs
+  nothing and shows each session's attach or resume command to copy.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>fno backlog (read-only)</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0b0e14; color: #c5cdd9; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
+.controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: #10141d; border-bottom: 1px solid #1c2230; }
+.controls .lbl { color: #6f7a8f; font-size: 12px; }
+.controls button, .controls select, .controls input { font: inherit; font-size: 12px; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 8px; max-width: 180px; min-height: 26px; }
+.controls button { cursor: pointer; color: #9aa4b6; }
+.controls button.active { background: #24406b; color: #fff; border-color: #3763ac; }
+.controls label { display: flex; align-items: center; gap: 4px; color: #6f7a8f; font-size: 12px; }
+#note { flex: 0 0 auto; }
+#note:empty { display: none; }
+#note .err { padding: 3px 10px; color: #f08a8a; white-space: pre-wrap; }
+#note .stale { padding: 3px 10px; color: #f0c674; }
+#hdr { flex: 0 0 auto; padding: 0 10px; color: #6f7a8f; font-size: 12px; }
+#hdr:empty { display: none; }
+#hdr .unavail { color: #f0c674; }
+#stats { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 6px 10px; border-bottom: 1px solid #1c2230; font-size: 12px; }
+#stats:empty { display: none; }
+#stats .dim { color: #6f7a8f; }
+.bars { display: flex; align-items: flex-end; gap: 2px; height: 40px; }
+.bars .bar { width: 9px; background: #3763ac; }
+.bars .bar.partial { opacity: .45; }
+#main { flex: 1 1 auto; overflow: auto; padding: 8px 10px 24px; }
+#board { display: grid; gap: 8px; width: max-content; min-width: 100%; }
+.hcell { position: sticky; top: 0; z-index: 5; background: #10141d; color: #9aa4b6; font-weight: 600; padding: 5px 8px; border-radius: 5px; border-bottom: 2px solid #232b3a; }
+.hcell.corner { left: 0; z-index: 6; }
+.lcell { position: sticky; left: 0; z-index: 4; background: #10141d; font-weight: 600; padding: 6px 8px; border-radius: 5px; align-self: start; max-width: 150px; overflow-wrap: anywhere; }
+.cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.card { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; width: 100%; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 6px; padding: 6px 8px; cursor: pointer; font: inherit; }
+.card:hover { border-color: #3763ac; }
+.card .cid { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; }
+.card .ct { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.card .cm { color: #6f7a8f; font-size: 11px; }
+.card .king { color: #c99b45; font-size: 11px; }
+.card .chip { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid #4a3a12; color: #f0c674; }
+.card .live { width: 7px; height: 7px; border-radius: 50%; background: #6cc04a; display: inline-block; }
+.card.blocked { border-color: #5a2b2b; }
+.more { color: #6f7a8f; font-size: 11px; padding: 2px 8px; }
+.empty { color: #6f7a8f; padding: 10px; }
+#panel { position: fixed; top: var(--fno-nav-h, 0px); right: 0; bottom: 0; width: min(460px, 46vw); background: #0d1119; border-left: 1px solid #232b3a; overflow-y: auto; padding: 10px 12px 24px; z-index: 500; }
+#panel[hidden] { display: none; }
+#panelhead { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+#panelclose { font: inherit; font-size: 11px; cursor: pointer; background: #141a26; color: #9aa4b6; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 10px; min-height: 26px; }
+.ptitle { margin: 0 0 6px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.pid { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; }
+.pgroup { margin: 10px 0 0; }
+.pgroup h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #6f7a8f; }
+.fields { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; }
+.fields .k { color: #6f7a8f; }
+.fields .v { overflow-wrap: anywhere; }
+.pre { margin: 4px 0 0; padding: 6px 8px; background: #10141d; border: 1px solid #1c2230; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 260px; overflow-y: auto; }
+.links { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+.linkbtn { font: inherit; font-size: 11px; text-align: left; cursor: pointer; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 8px; overflow-wrap: anywhere; }
+.linkbtn:hover { border-color: #3763ac; }
+.sess { width: 100%; border-collapse: collapse; font-size: 11px; }
+.sess th { text-align: left; color: #6f7a8f; font-weight: 600; padding: 2px 6px 2px 0; border-bottom: 1px solid #1c2230; }
+.sess td { padding: 3px 6px 3px 0; vertical-align: top; border-bottom: 1px solid #141a26; }
+.sess td.dim { color: #6f7a8f; }
+.sess .sid { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; }
+.cmd { display: flex; align-items: center; gap: 4px; }
+.cmd code { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c99b45; overflow-wrap: anywhere; }
+.copybtn { font: inherit; font-size: 10px; cursor: pointer; flex: 0 0 auto; background: #141a26; color: #9aa4b6; border: 1px solid #232b3a; border-radius: 5px; padding: 2px 7px; min-height: 22px; }
+.prlink { color: #7ea3d8; overflow-wrap: anywhere; }
+.noteline { margin: 3px 0; overflow-wrap: anywhere; }
+.noteline .nts { color: #6f7a8f; font-size: 11px; }
+@media (max-width: 720px) { #panel { width: auto; left: 0; }
+}
+</style>
+</head>
+<body>
+<!--fno-nav-->
+<noscript><p>JavaScript is off; this page cannot draw the board.</p></noscript>
+<div class="controls" id="controls">
+  <span class="lbl">lanes</span>
+  <button type="button" data-lanes="project">project</button>
+  <button type="button" data-lanes="epic">epic</button>
+  <button type="button" data-lanes="none">none</button>
+  <label>project <select id="f-project"><option value="">any</option></select></label>
+  <label>epic <select id="f-epic"><option value="">any</option></select></label>
+  <label>status <select id="f-status"><option value="">any</option></select></label>
+  <label>priority <select id="f-priority"><option value="">any</option></select></label>
+  <label>size <select id="f-size"><option value="">any</option></select></label>
+  <label>king <select id="f-king"><option value="">any</option></select></label>
+  <label>find <input id="f-q" type="search" size="14" placeholder="id, slug or title"></label>
+  <label><input id="f-all" type="checkbox"> all projects</label>
+</div>
+<div id="note"></div>
+<div id="hdr"></div>
+<div id="stats"></div>
+<div id="main"><div id="board"></div></div>
+<aside id="panel" hidden>
+  <div id="panelhead"><button id="panelclose" type="button">close</button></div>
+  <div id="panelbody"></div>
+</aside>
+<script>
+"use strict";
+// The pure board helpers. They compute values and touch no DOM, so the Rust
+// tests lift and run them under node (see web.rs lift_js_fn).
+function cellHead(cell) {
+  return cell.column + " " + cell.total;
+}
+// One board answer folded into what the page shows. An errors-only answer
+// never wipes a good board: the previous lanes stay and the answer carries
+// the new error lines plus the time the kept board is from.
+function mergeBoard(last, next, now) {
+  const failed = next.errors && next.errors.length > 0 && (!next.lanes || next.lanes.length === 0);
+  if (failed && last) {
+    return Object.assign({}, last, { errors: next.errors, stale_since: last.fetched_at });
+  }
+  return Object.assign({}, next, { fetched_at: now });
+}
+// What a session row can do from this page: the attach or resume command to
+// copy, or null when the row renders dim with the reason the model sent.
+// The page copies; it never launches.
+function sessionCommand(s) {
+  if (s.action === "attach" && s.agent) return "fno agents attach " + s.agent;
+  if (s.action === "resume" && s.session_id) return "fno agents resume " + s.session_id;
+  return null;
+}
+(() => {
+  const nav = document.querySelector("nav.fno-nav");
+  const base = nav && nav.dataset.base ? nav.dataset.base : "/";
+  const initial = new URLSearchParams(location.search);
+  const t = initial.get("t") || "";
+  const state = {
+    lanes: initial.get("lanes") || "project", project: initial.get("project") || "", epic: initial.get("epic") || "", status: initial.get("status") || "", priority: initial.get("priority") || "", size: initial.get("size") || "", king: initial.get("king") || "", q: initial.get("q") || "", all: initial.get("all") === "1", };
+  let board = null;
+  let seenVersion;
+  let pollTimer = 0;
+  let dead = false;
+  let openId = initial.get("node") || "";
+  let openSeq = 0;
+  const panel = document.getElementById("panel");
+  const panelBody = document.getElementById("panelbody");
+  const noteEl = document.getElementById("note");
+  const hdrEl = document.getElementById("hdr");
+  const statsEl = document.getElementById("stats");
+  const mainEl = document.getElementById("main");
+  const gridEl = document.getElementById("board");
+  const controls = document.getElementById("controls");
+  const FILTER_KEYS = ["project", "epic", "status", "priority", "size", "king"];
+  // The one filter-to-query mapping, shared by the fetch URL and the page
+  // URL, so a shared link always reopens the board it was cut from. The
+  // default lanes=project rides the model's own default and is omitted.
+  function filterParams(p) {
+    if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
+    for (const k of FILTER_KEYS) if (state[k]) p.set(k, state[k]);
+    if (state.q) p.set("q", state.q);
+    if (state.all) p.set("all", "1");
+    return p;
+  }
+  function modelQs() {
+    const p = filterParams(new URLSearchParams());
+    if (t) p.set("t", t);
+    return p.toString();
+  }
+  // The filter state lives in the page URL, so a view survives a reload and
+  // can be shared. Unknown keys the model ignores are simply kept.
+  function syncUrl() {
+    const p = filterParams(new URLSearchParams());
+    if (t) p.set("t", t);
+    if (openId) p.set("node", openId);
+    history.replaceState(null, "", location.pathname + "?" + p.toString());
+  }
+  function fillSelect(id, pairs, current) {
+    const sel = document.getElementById(id);
+    // Rebuild only on a real change: repopulating an open dropdown resets it
+    // mid-choice, and the 10 s poll would do that constantly.
+    const sig = JSON.stringify(pairs) + "|" + (current || "");
+    if (sel.dataset.sig === sig) return;
+    sel.dataset.sig = sig;
+    sel.textContent = "";
+    const any = document.createElement("option");
+    any.value = "";
+    any.textContent = "any";
+    sel.appendChild(any);
+    for (const p of pairs) {
+      const o = document.createElement("option");
+      o.value = p.v;
+      o.textContent = p.l;
+      sel.appendChild(o);
+    }
+    // A bookmarked filter that matches nothing on the board still shows.
+    if (current && !pairs.some((p) => p.v === current)) {
+      const o = document.createElement("option");
+      o.value = current;
+      o.textContent = current;
+      sel.appendChild(o);
+    }
+    sel.value = current || "";
+  }
+  function syncControls() {
+    for (const b of controls.querySelectorAll("button[data-lanes]")) {
+      b.classList.toggle("active", b.dataset.lanes === state.lanes);
+    }
+    const f = (board && board.facets) ||
+      { projects: [], epics: [], kings: [], priorities: [], sizes: [], statuses: [] };
+    fillSelect("f-project", (f.projects || []).map((v) => ({ v: v, l: v })), state.project);
+    fillSelect("f-epic", (f.epics || []).map((e) =>
+      ({ v: e.id, l: e.title ? e.id + " " + e.title : e.id })), state.epic);
+    fillSelect("f-status", (f.statuses || []).map((v) => ({ v: v, l: v })), state.status);
+    fillSelect("f-priority", (f.priorities || []).map((v) => ({ v: v, l: v })), state.priority);
+    fillSelect("f-size", (f.sizes || []).map((v) => ({ v: v, l: v })), state.size);
+    fillSelect("f-king", (f.kings || []).map((v) => ({ v: v, l: v })), state.king);
+    document.getElementById("f-q").value = state.q;
+    document.getElementById("f-all").checked = state.all;
+  }
+  function draw() {
+    drawNote();
+    drawHeader();
+    drawStats();
+    drawGrid();
+    syncControls();
+  }
+  function drawNote() {
+    noteEl.textContent = "";
+    for (const e of (board && board.errors) || []) {
+      const d = document.createElement("div");
+      d.className = "err";
+      d.textContent = e;
+      noteEl.appendChild(d);
+    }
+    if (board && board.stale_since) {
+      const d = document.createElement("div");
+      d.className = "stale";
+      d.textContent =
+        "showing the board from " + new Date(board.stale_since).toLocaleTimeString();
+      noteEl.appendChild(d);
+    }
+  }
+  function drawHeader() {
+    hdrEl.textContent = "";
+    if (!board) return;
+    const line = document.createElement("div");
+    line.textContent = "backend: " + board.backend + " · scope: " + board.scope;
+    hdrEl.appendChild(line);
+    for (const u of board.unavailable || []) {
+      const d = document.createElement("div");
+      d.className = "unavail";
+      d.textContent = u.feature + ": " + u.reason;
+      hdrEl.appendChild(d);
+    }
+  }
+  function drawStats() {
+    statsEl.textContent = "";
+    const s = board && board.stats;
+    if (!s) return;
+    const open = document.createElement("span");
+    open.textContent = (s.open || []).map(cellHead).join(" · ");
+    statsEl.appendChild(open);
+    const flow = s.flow || {};
+    if (!flow.available) {
+      const d = document.createElement("span");
+      d.className = "dim";
+      d.textContent = "flow unavailable: " + (flow.reason || "unknown");
+      statsEl.appendChild(d);
+      return;
+    }
+    const weeks = (flow.deliveries && flow.deliveries.weeks) || [];
+    const max = weeks.reduce((m, w) => Math.max(m, (w.code || 0) + (w.doc || 0)), 0);
+    if (max > 0) {
+      const bars = document.createElement("div");
+      bars.className = "bars";
+      for (const w of weeks) {
+        const b = document.createElement("div");
+        b.className = "bar" + (w.partial ? " partial" : "");
+        b.style.height =
+          Math.max(2, Math.round(((w.code || 0) + (w.doc || 0)) / max * 40)) + "px";
+        b.title = (w.week_start || "") + ": " + (w.code || 0) + " code, " + (w.doc || 0) + " doc" + (w.partial ? " · partial week" : "");
+        bars.appendChild(b);
+      }
+      statsEl.appendChild(bars);
+    }
+    const cycle = flow.cycle || {};
+    const cl = document.createElement("span");
+    cl.className = "dim";
+    cl.textContent = cycle.available === false
+      ? "cycle unavailable: " + (cycle.reason || "unknown")
+      : "cycle median " + cycle.median_days + " d, p85 " + cycle.p85_days + " d (n=" + cycle.n + ")";
+    statsEl.appendChild(cl);
+    const prs = flow.open_prs || {};
+    const pr = document.createElement("span");
+    pr.textContent = "open PRs " + (prs.count || 0);
+    statsEl.appendChild(pr);
+    const waiting = flow.waiting || {};
+    const w = document.createElement("span");
+    w.className = "dim";
+    const nOf = (v) => (v && typeof v === "object" ? v.count : v) || 0;
+    w.textContent = "waiting: in progress " + nOf(waiting.in_progress) + ", in review " + nOf(waiting.in_review) + ", blocked " + nOf(waiting.blocked);
+    statsEl.appendChild(w);
+  }
+  function drawGrid() {
+    // A redraw replaces the grid node's children only, so an open panel and
+    // the reading position survive the 10 s poll.
+    const top = mainEl.scrollTop;
+    const left = mainEl.scrollLeft;
+    gridEl.textContent = "";
+    const lanes = (board && board.lanes) || [];
+    if (!lanes.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "no cards";
+      gridEl.appendChild(p);
+      return;
+    }
+    const n = lanes[0].cells ? lanes[0].cells.length : 0;
+    gridEl.style.gridTemplateColumns =
+      "minmax(96px,150px) repeat(" + n + ", minmax(175px,225px))";
+    const corner = document.createElement("div");
+    corner.className = "hcell corner";
+    corner.textContent = "lane";
+    gridEl.appendChild(corner);
+    for (const c of lanes[0].cells || []) {
+      const h = document.createElement("div");
+      h.className = "hcell";
+      h.textContent = cellHead(c);
+      gridEl.appendChild(h);
+    }
+    for (const lane of lanes) {
+      const title = document.createElement("div");
+      title.className = "lcell";
+      title.textContent = lane.title;
+      gridEl.appendChild(title);
+      for (const cell of lane.cells || []) drawCell(cell);
+    }
+    mainEl.scrollTop = top;
+    mainEl.scrollLeft = left;
+  }
+  function drawCell(cell) {
+    const box = document.createElement("div");
+    box.className = "cell";
+    const cards = cell.cards || [];
+    for (const card of cards) box.appendChild(cardButton(card));
+    if (cell.total > cards.length) {
+      const more = document.createElement("div");
+      more.className = "more";
+      more.textContent = "+" + (cell.total - cards.length) + " more";
+      box.appendChild(more);
+    }
+    gridEl.appendChild(box);
+  }
+  function cardButton(card) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "card" + (card.blocked ? " blocked" : "");
+    const id = document.createElement("span");
+    id.className = "cid";
+    id.textContent = card.id;
+    b.appendChild(id);
+    const title = document.createElement("span");
+    title.className = "ct";
+    title.textContent = card.title;
+    b.appendChild(title);
+    const meta = [];
+    if (card.priority) meta.push(card.priority);
+    if (card.size) meta.push(card.size);
+    if (card.claimed) meta.push("claimed");
+    if (meta.length) {
+      const m = document.createElement("span");
+      m.className = "cm";
+      m.textContent = meta.join(" · ");
+      b.appendChild(m);
+    }
+    if (card.blocked) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = "blocked";
+      b.appendChild(chip);
+    }
+    if (card.king && card.king.name) {
+      const k = document.createElement("span");
+      k.className = "king";
+      k.textContent = card.king.name;
+      b.appendChild(k);
+    }
+    if (card.live) {
+      const dot = document.createElement("span");
+      dot.className = "live";
+      dot.title = "a session joins the roster";
+      b.appendChild(dot);
+    }
+    b.addEventListener("click", () => openNode(card.id));
+    return b;
+  }
+  function stopPoll() {
+    dead = true;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = 0;
+  }
+  function showNoteLine(text) {
+    noteEl.textContent = "";
+    const d = document.createElement("div");
+    d.className = "err";
+    d.textContent = text;
+    noteEl.appendChild(d);
+  }
+  function nodeQs(id) {
+    const p = new URLSearchParams();
+    if (t) p.set("t", t);
+    p.set("id", id);
+    return p.toString();
+  }
+  // Open a node: fetch its answer and draw the panel. A non-200 or a failed
+  // read names the status and the response text; the panel never goes blank.
+  async function openNode(id) {
+    const seq = ++openSeq;
+    openId = id;
+    syncUrl();
+    panel.hidden = false;
+    panelBody.textContent = "loading " + id;
+    let resp;
+    try {
+      resp = await fetch(base + "backlog/node.json?" + nodeQs(id), { cache: "no-store" });
+    } catch (e) {
+      if (seq === openSeq) panelBody.textContent =
+        "bridge unreachable: " + (e && e.message ? e.message : e);
+      return;
+    }
+    const text = await resp.text();
+    if (seq !== openSeq) return; // a newer open superseded this read
+    if (!resp.ok) {
+      panelBody.textContent = resp.status + ": " + text;
+      return;
+    }
+    let view;
+    try {
+      view = JSON.parse(text);
+    } catch (e) {
+      panelBody.textContent = "the node answer was not JSON";
+      return;
+    }
+    renderPanel(view);
+  }
+  // A Link button: <id> <title> (<column>), each part only when present.
+  function renderLink(box, link) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "linkbtn";
+    b.textContent = link.id + (link.title ? " " + link.title : "") + (link.column ? " (" + link.column + ")" : "");
+    b.addEventListener("click", () => openNode(link.id));
+    box.appendChild(b);
+  }
+  function addLinkGroup(panelBody, label, items, render) {
+    if (!items || !items.length) return;
+    const g = document.createElement("div");
+    g.className = "pgroup";
+    const h = document.createElement("h3");
+    h.textContent = label;
+    g.appendChild(h);
+    const box = document.createElement("div");
+    box.className = "links";
+    g.appendChild(box);
+    for (const item of items) render(box, item);
+    panelBody.appendChild(g);
+  }
+  // The node panel, top to bottom: id and title, unavailable notes, the
+  // field list, details, link groups, sessions with their commands, PRs,
+  // notes, decisions. Nothing here builds HTML from data.
+  function renderPanel(view) {
+    panelBody.textContent = "";
+    const card = view.card || {};
+    const h = document.createElement("h2");
+    h.className = "ptitle";
+    const idSpan = document.createElement("span");
+    idSpan.className = "pid";
+    idSpan.textContent = card.id + " ";
+    h.appendChild(idSpan);
+    const t = document.createElement("span");
+    t.textContent = card.title;
+    h.appendChild(t);
+    panelBody.appendChild(h);
+    for (const u of view.unavailable || []) {
+      const d = document.createElement("div");
+      d.className = "unavail";
+      d.textContent = u.feature + ": " + u.reason;
+      panelBody.appendChild(d);
+    }
+    const g = document.createElement("div");
+    g.className = "pgroup";
+    const fh = document.createElement("h3");
+    fh.textContent = "fields";
+    g.appendChild(fh);
+    const grid = document.createElement("div");
+    grid.className = "fields";
+    g.appendChild(grid);
+    const king = card.king && card.king.name;
+    addFieldRow(grid, "column", card.column);
+    addFieldRow(grid, "status", card.status);
+    addFieldRow(grid, "priority", card.priority);
+    addFieldRow(grid, "size", card.size);
+    addFieldRow(grid, "project", card.project);
+    addFieldRow(grid, "kind", view.kind);
+    addFieldRow(grid, "difficulty", view.difficulty);
+    addFieldRow(grid, "created_at", view.created_at);
+    addFieldRow(grid, "completed_at", view.completed_at);
+    addFieldRow(grid, "cwd", view.cwd);
+    addFieldRow(grid, "king", king);
+    addFieldRow(grid, "plan_path", view.plan_path);
+    panelBody.appendChild(g);
+    if (view.details !== null && view.details !== undefined) {
+      const dg = document.createElement("div");
+      dg.className = "pgroup";
+      const dh = document.createElement("h3");
+      dh.textContent = "details";
+      dg.appendChild(dh);
+      panelBody.appendChild(dg);
+      addPre(dg, typeof view.details === "string"
+        ? view.details
+        : JSON.stringify(view.details, null, 2));
+    }
+    if (view.current_state && view.current_state !== null) {
+      const cg = document.createElement("div");
+      cg.className = "pgroup";
+      const ch = document.createElement("h3");
+      ch.textContent = "current state";
+      cg.appendChild(ch);
+      panelBody.appendChild(cg);
+      addPre(cg, typeof view.current_state === "string"
+        ? view.current_state
+        : JSON.stringify(view.current_state, null, 2));
+    }
+    // Parent first, then the id-named link groups.
+    if (card.parent) {
+      addLinkGroup(panelBody, "parent", [card.parent], (box, id) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "linkbtn";
+        b.textContent = id;
+        b.addEventListener("click", () => openNode(id));
+        box.appendChild(b);
+      });
+    }
+    addLinkGroup(panelBody, "children", view.children, renderLink);
+    addLinkGroup(panelBody, "contained", view.contained, renderLink);
+    addLinkGroup(panelBody, "blocked_by", view.blocked_by, renderLink);
+    addLinkGroup(panelBody, "blocks", view.blocks, renderLink);
+    addLinkGroup(panelBody, "related", view.related, renderLink);
+    const sessions = view.sessions || [];
+    if (sessions.length) {
+      const sg = document.createElement("div");
+      sg.className = "pgroup";
+      const sh = document.createElement("h3");
+      sh.textContent = "sessions";
+      sg.appendChild(sh);
+      panelBody.appendChild(sg);
+      const table = document.createElement("table");
+      table.className = "sess";
+      const thead = document.createElement("thead");
+      const hr = document.createElement("tr");
+      for (const name of ["phase", "harness", "model", "session", "started", "ended", "agent", "action"]) {
+        const th = document.createElement("th");
+        th.textContent = name;
+        hr.appendChild(th);
+      }
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      table.appendChild(tbody);
+      for (const s of sessions) {
+        const tr = document.createElement("tr");
+        const tds = [s.phase, s.harness, s.model, s.session_id ? s.session_id.slice(0, 8) : "", s.started_at, s.ended_at, s.agent];
+        for (const val of tds) {
+          const td = document.createElement("td");
+          td.textContent = val || "";
+          tr.appendChild(td);
+        }
+        const actionTd = document.createElement("td");
+        addSessionAction(actionTd, s);
+        tr.appendChild(actionTd);
+        tbody.appendChild(tr);
+      }
+      sg.appendChild(table);
+    }
+    const prs = view.prs || [];
+    if (prs.length) {
+      const pg = document.createElement("div");
+      pg.className = "pgroup";
+      const ph = document.createElement("h3");
+      ph.textContent = "prs";
+      pg.appendChild(ph);
+      panelBody.appendChild(pg);
+      for (const pr of prs) {
+        const row = document.createElement("div");
+        row.className = "noteline";
+        if (pr.url) {
+          const a = document.createElement("a");
+          a.className = "prlink";
+          a.href = pr.url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = "PR " + pr.number + (pr.merge_status ? " " + pr.merge_status : "");
+          row.appendChild(a);
+        } else {
+          row.textContent = "PR " + pr.number + (pr.merge_status ? " " + pr.merge_status : "");
+        }
+        pg.appendChild(row);
+      }
+    }
+    const notes = view.notes || [];
+    if (notes.length) {
+      const ng = document.createElement("div");
+      ng.className = "pgroup";
+      const nh = document.createElement("h3");
+      nh.textContent = "notes";
+      ng.appendChild(nh);
+      panelBody.appendChild(ng);
+      for (const n of notes) {
+        const row = document.createElement("div");
+        row.className = "noteline";
+        if (n.ts) {
+          const ts = document.createElement("span");
+          ts.className = "nts";
+          ts.textContent = n.ts + " ";
+          row.appendChild(ts);
+        }
+        const tx = document.createElement("span");
+        tx.textContent = n.text;
+        row.appendChild(tx);
+        ng.appendChild(row);
+      }
+    }
+    const decisions = view.decisions || [];
+    if (decisions.length) {
+      const dg = document.createElement("div");
+      dg.className = "pgroup";
+      const dh = document.createElement("h3");
+      dh.textContent = "decisions";
+      dg.appendChild(dh);
+      panelBody.appendChild(dg);
+      for (const d of decisions) {
+        addPre(dg, typeof d === "string" ? d : JSON.stringify(d, null, 2));
+      }
+    }
+  }
+  function closePanel() {
+    openId = "";
+    openSeq++;
+    panel.hidden = true;
+    panelBody.textContent = "";
+    syncUrl();
+  }
+  function addFieldRow(grid, key, value) {
+    if (value === null || value === undefined || value === "") return;
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = key;
+    grid.appendChild(k);
+    const v = document.createElement("span");
+    v.className = "v";
+    v.textContent = String(value);
+    grid.appendChild(v);
+  }
+  function addPre(group, text) {
+    const pre = document.createElement("pre");
+    pre.className = "pre";
+    pre.textContent = text;
+    group.appendChild(pre);
+  }
+  // Copy over plain http on a non-loopback host has no clipboard API, so the
+  // fallback selects the text and says so (secure contexts only).
+  function copyCmd(code, btn) {
+    const text = code.textContent;
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then( () => { btn.textContent = "copied"; }, () => selectCmd(code, btn));
+    } else {
+      selectCmd(code, btn);
+    }
+  }
+  function selectCmd(code, btn) {
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    btn.textContent = "selected; copy by hand";
+  }
+  // One session row's action cell: the command to copy, or the dim reason.
+  function addSessionAction(td, s) {
+    const cmd = sessionCommand(s);
+    if (!cmd) {
+      td.className = "dim";
+      td.textContent = s.reason || "";
+      return;
+    }
+    const wrap = document.createElement("span");
+    wrap.className = "cmd";
+    const code = document.createElement("code");
+    code.textContent = cmd;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copybtn";
+    btn.textContent = "copy";
+    btn.addEventListener("click", () => copyCmd(code, btn));
+    wrap.appendChild(code);
+    wrap.appendChild(btn);
+    td.appendChild(wrap);
+  }
+  // A failed poll never wipes a good board: fold the failure through
+  // mergeBoard as an errors-only answer and keep drawing.
+  function failBoard(msg) {
+    board = mergeBoard(board, { errors: [msg], lanes: [] }, Date.now());
+    draw();
+  }
+  async function fetchBoard() {
+    if (dead) return;
+    let resp;
+    try {
+      resp = await fetch(base + "backlog/model.json?" + modelQs(), { cache: "no-store" });
+    } catch (e) {
+      failBoard("bridge unreachable: " + (e && e.message ? e.message : e));
+      return;
+    }
+    if (resp.status === 401) {
+      stopPoll();
+      showNoteLine("token rejected; open the URL the bridge printed");
+      return;
+    }
+    if (!resp.ok) {
+      failBoard("bridge answered " + resp.status);
+      return;
+    }
+    let next;
+    try {
+      next = await resp.json();
+    } catch (e) {
+      failBoard("the board answer was not JSON");
+      return;
+    }
+    board = mergeBoard(board, next, Date.now());
+    draw();
+    // A new store version while the panel is open re-reads that node, so a
+    // live claim or session change shows up without a manual reload.
+    const prevVersion = seenVersion;
+    seenVersion = next.version;
+    if (openId && prevVersion !== undefined && next.version !== prevVersion) {
+      openNode(openId);
+    }
+  }
+  for (const b of controls.querySelectorAll("button[data-lanes]")) {
+    b.addEventListener("click", () => {
+      state.lanes = b.dataset.lanes;
+      syncUrl();
+      fetchBoard();
+    });
+  }
+  for (const k of FILTER_KEYS) {
+    document.getElementById("f-" + k).addEventListener("change", (ev) => {
+      state[k] = ev.target.value;
+      syncUrl();
+      fetchBoard();
+    });
+  }
+  let debounce = 0;
+  document.getElementById("f-q").addEventListener("input", (ev) => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      state.q = ev.target.value.trim();
+      syncUrl();
+      fetchBoard();
+    }, 300);
+  });
+  document.getElementById("f-all").addEventListener("change", (ev) => {
+    state.all = ev.target.checked;
+    syncUrl();
+    fetchBoard();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) fetchBoard();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closePanel();
+  });
+  document.getElementById("panelclose").addEventListener("click", closePanel);
+  pollTimer = setInterval(() => {
+    if (!document.hidden) fetchBoard();
+  }, 10000);
+  syncControls();
+  fetchBoard();
+  if (openId) openNode(openId);
+})();
+</script>
+</body>
+</html>

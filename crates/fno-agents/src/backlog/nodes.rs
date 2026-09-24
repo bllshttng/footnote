@@ -188,6 +188,7 @@ pub(crate) fn project_claims(rows: &mut [Value]) -> Result<(), String> {
         let claim = claims.get(&id).cloned().unwrap_or_default();
         project_claim_value(row, claim);
     }
+    Ok(())
 }
 
 pub(crate) fn project_claim_value(row: &mut Value, claim: NodeClaim) {

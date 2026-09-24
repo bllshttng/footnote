@@ -550,6 +550,7 @@ def _zero_job_rows(
     rows, listing = out.get("rows"), out.get("listing")
     if out.get("error") or not isinstance(rows, list) or not isinstance(listing, list):
         return [], [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
+    check_runs[:] = out.get("check_runs") or check_runs
     return rows, listing, ""
 
 
@@ -632,6 +633,7 @@ def fetch_pr_rest(
                 # Per-run workflow name from the listing above; "" when the
                 # details_url names no run the listing knows.
                 "workflow": run_names.get(run_id.group(1), "") if run_id else "",
+                **({"timeout": cr["timeout"]} if cr.get("timeout") else {}),
             }
         )
 
@@ -749,6 +751,7 @@ def list_prs_rest(
                         "title": row["title"],
                         "headRefName": head["ref"],
                         "url": row["html_url"],
+                        "mergedAt": row.get("merged_at"),
                         "body": row.get("body") or "",
                     }
                 )
@@ -760,7 +763,7 @@ def list_prs_rest(
         # rows. Loud on purpose: the old gh pr list path logged "possibly
         # truncated" for the same condition, and a silent ceiling is a sweep
         # that reads complete while missing its tail.
-        log.warning(
+        (log.warning if max_pages > 1 else log.debug)(
             "gh api pulls list for %s hit the max_pages=%d ceiling with a full last page:"
             " listing is possibly truncated after %d rows",
             slug,

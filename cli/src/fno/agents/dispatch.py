@@ -1888,7 +1888,7 @@ def _claude_create_path(
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}"
+                f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                 if king_unarmed_reason
                 else "; king loop disabled, no scope manifest armed"
             )
@@ -7935,10 +7935,10 @@ def dispatch_send(
                     recipient_live=family1_live,
                     recipient_resumable=not family1_live,
                 ).value
-                # Unknown is hands-off, not dead. A registered peer still has a
-                # confirmable transport, so try it once and let delivery's ack
-                # decide; failure falls through to the durable bus.
-                family1_attemptable = family1_live or family1_state == "unknown"
+                # Unknown is hands-off, not dead. A claude row off any pane is always
+                # tried: mail-inject reads the daemon roster first, and the roster decides.
+                family1_attemptable = family1_live or family1_state == "unknown" or (
+                    existing.harness == "claude" and not existing.mux)
 
                 # W3 write-ahead: a recipient we will not attempt live is asleep,
                 # so it cannot drain during a live window, and there is no live
@@ -7957,12 +7957,10 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
-                # the row's own policy names the durable queue's cause
-                # even when no live rung was attemptable (an idle registered
-                # leader), so the receipt never reads as a live-miss.
-                _bus_only = (
-                    _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
-                )
+                # A skipped live lane names the reading that vetoed it. Bus-only outranks both.
+                _bus_only = _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
+                if not family1_attemptable:
+                    live_miss_reason = f"transcript-{family1_state}"
                 if family1_attemptable:
                     live_attempted = True
                     _live_delivered = _deliver_live(

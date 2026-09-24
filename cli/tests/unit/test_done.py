@@ -792,6 +792,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
         "title": "ERR target",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
@@ -853,6 +854,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
         "title": "EDGE target",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
@@ -896,6 +898,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
         "title": "Drive completion",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-drv00001"])
@@ -920,6 +923,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
         "title": "No-drive completion",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-ndr00001"])
@@ -939,6 +943,7 @@ def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
         monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: driving)
         _seed(tmp_graph, [{
             "id": node_id, "title": "Same line", "status": "ready", "domain": "code",
+            "artifact_url": "https://example.test/artifact",
         }])
         _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
         r = runner.invoke(app, ["done", node_id])
@@ -1017,6 +1022,7 @@ def test_done_completes_even_when_audit_emit_raises(tmp_graph, monkeypatch):
         "title": "Emit fails",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-fr000001"], catch_exceptions=False)

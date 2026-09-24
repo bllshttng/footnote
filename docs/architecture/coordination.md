@@ -496,9 +496,8 @@ into a registry row someone would have to go read.
 Reach for **`fno agents spawn`** when any of these hold: the work must
 outlive its spawner; someone other than the spawner must observe, message,
 or drive it; it must be handed to a successor king; it holds a `node:`
-claim, since the registry row is what makes the claim attributable; it must
-join king-mediated review, which is mail-shaped and therefore needs a
-handle; or it needs its own worktree or branch.
+claim, since the registry row is what makes the claim attributable; or it
+needs its own worktree or branch. Review does not require a spawned session.
 
 Neither primitive is always correct.
 "Always spawn" discards the limb's real advantages; "always subagent"

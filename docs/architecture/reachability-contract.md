@@ -14,7 +14,7 @@ Positive evidence comes only from transcript activity age; no other signal may r
 
 This registry lists REACHABLE agents; it is not a process table. "Orphaned" means unreachable, not dead, so a row is never condemned for being quiet. A transcript can only ever supply POSITIVE evidence of activity; its absence is absence of evidence, not evidence of absence. A silent row with no falsifier available (89 percent of rows carry no pid at all) resolves `unknown` with its age attached, never `unreachable`; only an affirmative falsifier condemns a row. That is what makes the destructive rule un-rederivable rather than merely remembered: absence of a pane, absence of a pid, and absence of recent output all contribute exactly nothing, so "no pane means safe to reap" cannot be reconstructed by editing a threshold.
 
-Note the asymmetry that keeps this honest: a row with no pane recorded, or a mux that cannot answer, is an ABSENCE and condemns nothing; a mux affirmatively reporting that a pane exited is EVIDENCE and does condemn. Suppressing a falsifier is never the fix for a wrong falsifier: the answer is to consult the right authority, not to stop asking.
+Note the asymmetry that keeps this honest: a row with no pane recorded, or a mux that cannot answer, is an ABSENCE and condemns nothing; a mux affirmatively reporting that a pane exited is EVIDENCE and does condemn. Suppressing a falsifier is never the fix for a wrong falsifier: the answer is to consult the right authority, not to stop asking. A claude row's recorded pid and exit stamp yield to claude's own session records, the same swap the pane makes: only a proven live holder cancels, and every other holder answer keeps the falsifier.
 
 ## Progress is a second axis, never a fourth reachability value
 

@@ -235,6 +235,8 @@ The rich completion surface (--backfill, --force-overwrite, --pr-number, --pr-ur
 
 Exit codes: 0 success (node closed) 1 validation error (bad id, node not found) 2 usage error (--force without --reason) 3 gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence (retryable when the PR merges; walker treats this as Parked) 4 gh outage: subprocess failure / timeout / parse error; retryable 5 awaiting merge: PR OPEN, not merged; node stays in_review (success-shaped; close lands via reconcile/advance at merge) 6 promise unmet: plan promised work that has not all shipped (multi-wave with no assertion, a failed close_probe, or fewer merged ships than expected_url_count). Use --force --reason to record a deliberate half-ship.
 
+A close records why, or the store refuses it. At the store's publication seam, every close meets one rule. The row must carry a PR ref, a completion note, an artifact link or a retired stamp. A close that leaves none writes nothing. A Python caller sees exit 1 with the refusal as the last stderr line. The repair flags are `--pr-number`, `--note` and `--link`, and a forced close writes the note first with `fno backlog update <id> --completion-note "<why>"`.
+
 ## cmd_reopen
 
 Clear a node's completion, returning it to its underlying state.
@@ -517,7 +519,9 @@ Find open nodes whose PR has merged outside the ship gate.
     at all - a session that died before the node<->PR stamp - by matching the
     node id against merged branch names. ``list_merged`` is injected in tests.
 
-    Cost bound: both listing scans group candidates by resolved git common dir, so the worktrees of one repo share one ``gh pr list`` call, and the run's shared ``_ListingCache`` makes it one open and one merged listing per repo per sweep; merge drift resolves a stamped number from those listings and pays the per-node query only for a number in neither.
+    Cost bound: both listing scans group candidates by resolved git common dir, so the worktrees of one repo share one REST PR listing; the run's shared ``_ListingCache`` makes it one open and one closed listing per repo per sweep; merge drift resolves a stamped number from those listings and pays the per-node query only for a number in neither.
+
+    Each reconcile listing uses REST core (``gh api repos/{slug}/pulls``), never GraphQL ``gh pr list``; a normal listing is one page, while a full 100-row open page may fetch a second page to preserve the existing uniqueness refusal. The gh proxy brokers the GraphQL route under a machine-wide lock, and all sessions share that budget.
 
     Worst-case graph staleness is therefore the 900s reconcile throttle (``scripts/lib/reconcile-throttle.sh``), and it is a bound only while neither scan's 60s ``REVERSE_MAP_BUDGET_S`` fires: a firing budget defers the remaining repo groups to a later sweep, and nothing carries them forward until then. The daemon's ``merge_close`` arm (``crates/fno-agents/src/merge_close.rs``) runs the same bare sweep every 900s with no session alive, so the bound holds when no session starts.
 
@@ -563,10 +567,12 @@ Close open nodes with NO PR refs by matching the id in a merged branch.
     stamp leaves an open node with no ``pr_number`` - invisible to the forward
     ``scan_merge_drift`` (which needs a ref to query). The branch convention
     (``branch_name()``) still carries the full node id, so one
-    ``gh pr list --state merged`` per repo reverse-maps it. A unique headRef hit
+    REST closed-PR page per repo, filtered to merged, reverse-maps it. A unique headRef hit
     synthesizes the same MergeDriftRecord the stamped path emits (so the
     existing close path applies unchanged); an ambiguous hit (two merged PRs
     for one id) emits an ``error`` record naming both, never a guess.
+
+    Missing and non-checkout cwds are skipped and named in the warning until their repo can be resolved.
 
     ``list_merged`` is injected in tests to avoid shelling to gh.
 

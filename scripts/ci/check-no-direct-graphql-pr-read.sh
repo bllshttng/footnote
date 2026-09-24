@@ -38,7 +38,7 @@ fi
 # assignment and the callee, or the binary name, and let formatting move.
 if ! grep -q 'protected = worker_environment(' cli/src/fno/cli.py \
     || ! grep -q 'Command::new("fno-gh-coverage")' crates/fno-agents/src/finalize.rs \
-    || ! grep -q '"fno-gh-loopcheck"' crates/fno-agents/src/loopcheck.rs; then
+    || ! grep -q '"fno-gh-loopcheck"' crates/fno-agents/src/loopcheck/args.rs; then
   echo "direct-graphql-pr-read: a named enforcement boundary is missing" >&2
   exit 1
 fi

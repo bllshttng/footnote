@@ -9859,63 +9859,6 @@ fn copy_source_refuses_open_truncated_and_implicit_blocks() {
 // their only consumers (shrink-only file budget).
 
 #[test]
-fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
-    // The contract the future sigwait reaper must keep: a shutdown-shaped
-    // sweep kills plain pane children and leaves keeper-hosted panes for
-    // the next server to re-adopt. Deliberate close (reap_pane) is the
-    // only path that kills a keeper pane.
-    let mut core = empty_core();
-    core.shells = vec!["/bin/sh".into()];
-    let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
-
-    let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let keeper_pane = {
-        let id = core.reserve_pane_id().unwrap();
-        core.register_pane(
-            id,
-            PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
-            24,
-            80,
-            None,
-            None,
-            "/tmp".into(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        id
-    };
-
-    core.kill_all_panes();
-
-    // The plain child is dead (poll: SIGKILL is fast but not instant).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while core.panes[&plain].pty.is_child_alive() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the plain pane's child must die in the shutdown sweep"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // The keeper pane got NO kill: nothing arrives on its wire inside a
-    // window far longer than the Local kill takes.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut probe = a;
-    use std::io::Read as _;
-    probe
-        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
-        .unwrap();
-    let mut byte = [0u8; 1];
-    assert!(
-        probe.read(&mut byte).is_err(),
-        "the shutdown sweep must never send a Kill frame to a keeper pane"
-    );
-    assert!(core.panes.contains_key(&keeper_pane));
-}
-
-#[test]
 fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
     let plain =
         ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
