@@ -2219,6 +2219,70 @@ fn hold_fixture(store_name: &str) -> StoreScratch {
 }
 
 #[test]
+fn restore_held_seat_feeds_the_message_and_never_types_a_command() {
+    // AC1-HP: the held message paints once onto the seat's screen. No
+    // shell input is typed at the placeholder, so the message cannot come
+    // back a second time as an echoed command or a third time as command
+    // output.
+    let _s = hold_fixture("portal-msg-once");
+    let (mut core, mut out_rx) = empty_core_with_output();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("portal 1 held").seat;
+    // Give any typed-command echo time to travel the pty into the shared
+    // output channel before judging it.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut echoed = String::new();
+    while let Ok((pid, chunk)) = out_rx.try_recv() {
+        if pid == seat {
+            if let PaneChunk::Output(bytes) = chunk {
+                echoed.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+    assert!(
+        !echoed.contains("printf"),
+        "the placeholder was typed a command: {echoed:?}"
+    );
+    let text = core.panes[&seat].vt.text();
+    assert_eq!(
+        text.matches("held across restart").count(),
+        1,
+        "the message paints exactly once: {text:?}"
+    );
+}
+
+#[test]
+fn restore_message_with_an_apostrophe_is_literal_text_never_shell_input() {
+    // AC1-EDGE: the message is screen text. An apostrophe feeds to the VT
+    // verbatim; nothing is quoted for a shell and nothing is executed.
+    let (mut core, mut out_rx) = empty_core_with_output();
+    core.shells = vec!["/bin/cat".into()];
+    let p = core.spawn_pane(24, 40, "/tmp").expect("pane");
+    core.write_restore_message(p, "portal 0 (it's held, across restart) - reach the row");
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut echoed = String::new();
+    while let Ok((pid, chunk)) = out_rx.try_recv() {
+        if pid == p {
+            if let PaneChunk::Output(bytes) = chunk {
+                echoed.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+    assert!(
+        !echoed.contains("printf"),
+        "a command was typed: {echoed:?}"
+    );
+    let text = core.panes[&p].vt.text();
+    assert!(
+        text.contains("it's held, across restart"),
+        "the message is literal: {text:?}"
+    );
+}
+
+#[test]
 fn restore_holds_a_portal_slot_idle_in_its_seat() {
     // AC3-HP: the named tab comes back with its split, the portal entry
     // names the first child of the split with the stored row key, that

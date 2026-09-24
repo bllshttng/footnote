@@ -5639,11 +5639,11 @@ impl Core {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
         };
+        // Screen text only: the line is fed to the seat's VT and never
+        // typed as shell input - a typed printf echoed and executed on the
+        // placeholder, so the operator read the same message three times.
         let line = format!("{message}\r\n");
         entry.vt.feed(line.as_bytes());
-        let quoted = message.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s\\n' '{quoted}'\r");
-        let _ = entry.pty.write_input(command.as_bytes());
     }
 
     fn hold_worker_pane(
