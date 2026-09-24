@@ -144,6 +144,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("question-intake") {
         std::process::exit(fno_agents::question_intake::run_question_intake());
     }
+    if args.first().map(String::as_str) == Some("question-clear") {
+        std::process::exit(fno_agents::question_clear::run_question_clear());
+    }
     // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
     if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
         std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
@@ -603,7 +606,6 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
     }
-
     // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct
     // dispatch; no daemon RPC.
     if verb == "finalize" {

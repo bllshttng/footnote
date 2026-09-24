@@ -728,6 +728,7 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b'f') => open_facet(view),
 
             ModalKey::Byte(b'b') => dispatch_plan(view, sock_w).await?,
+            ModalKey::Byte(b't') => launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => ask_the_king(view, sock_w).await?,
             ModalKey::Byte(b'e') => edit_title(view)?,
             ModalKey::Byte(b'p') => edit_priority(view)?,
@@ -1129,6 +1130,64 @@ pub(crate) async fn dispatch_plan(
     )
     .await
     .map_err(|e| format!("plan spawn send failed: {e}"))
+}
+
+/// `t`: open the launcher prefilled to launch the drill-down node (or the
+/// cursor card) as a target. Nothing spawns here: the board closes, the
+/// dock opens with `/fno:target {id}` and the node's project, and the
+/// operator picks harness, model and effort before any Launch. The launch
+/// carries `--node`, so the door's dispatch guard judges the node and the
+/// worker joins its roster row and card. A card already being worked
+/// refuses before the dock opens (the plan-refusal wording), and a kept
+/// draft is never overwritten.
+pub(crate) async fn launch_target(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let (id, cwd, busy) = {
+        let b = view
+            .backlog_board
+            .as_ref()
+            .expect("board open while its keys fold");
+        let Some(id) = edit_target(b) else {
+            return Ok(());
+        };
+        // No gathered inputs yet: the card flags and the node's cwd are
+        // unreadable, so no prefill can be trusted.
+        let Some(inputs) = b.inputs.as_ref() else {
+            view.set_notice("the board is still loading".to_string());
+            return Ok(());
+        };
+        let nv = backlog_model::node(inputs, &id);
+        let busy = nv
+            .as_ref()
+            .map(|n| n.card.claimed || n.card.live)
+            .unwrap_or(false);
+        (id, nv.and_then(|n| n.cwd), busy)
+    };
+    if busy {
+        view.set_notice(format!(
+            "{id} is already being worked; open its session instead"
+        ));
+        return Ok(());
+    }
+    close_board(view);
+    if !super::sideline::show_composer(view, sock_w).await? {
+        return Ok(());
+    }
+    if let Err(e) = agent_launcher::open_with(
+        view,
+        format!("/fno:target {id}"),
+        cwd.as_deref(),
+        id.clone(),
+    ) {
+        view.set_notice(e);
+        return Ok(());
+    }
+    if cwd.as_deref().unwrap_or_default().is_empty() {
+        view.set_notice(format!("{id} records no project path; pick the project"));
+    }
+    Ok(())
 }
 
 /// `A`: ask the king for a blueprint. The king is the model's

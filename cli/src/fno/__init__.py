@@ -20,7 +20,7 @@ import time
 # postponed evaluation. This module is on the startup path of every caller.
 
 # Keep in lockstep with crates/fno and crates/fno-agents (Rust).
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 __all__ = ["__version__"]
 

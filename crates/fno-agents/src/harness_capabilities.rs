@@ -37,6 +37,7 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 /// cannot disagree about which contracts are legal.
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
+const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
 /// How a probe declaration says a field can be settled. `declared`: the
 /// vendor states it about its own interface (help/version), and reading that
 /// is not inference. `behavioral`: only a scratch-PTY run checking a
@@ -192,6 +193,10 @@ pub struct HarnessCapabilities {
     /// [`HarnessContract::validate`].
     #[serde(default)]
     pub features: BTreeMap<String, FeatureClaim>,
+    /// Provider-owned action recipes. An absent action means the caller must
+    /// use the identity-pinned pane transaction.
+    #[serde(default)]
+    pub provider_actions: BTreeMap<String, ProviderAction>,
     /// The pane-to-thread lifecycle move (`fno agents resume <name>
     /// --substrate thread`), one stanza per harness. ABSENT reads
     /// `unsupported` at the accessor with a named refusal - absence is the
@@ -199,6 +204,14 @@ pub struct HarnessCapabilities {
     /// carry one.
     #[serde(default)]
     pub conversion: Option<ConversionRow>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAction {
+    pub transport: String,
+    pub method: String,
+    pub proof: String,
 }
 
 /// One harness's `[harness.<name>.conversion]` stanza: HOW a live pane of
@@ -368,6 +381,10 @@ impl HarnessCapabilities {
     /// to spend a stance. `None` is the refusal case.
     pub fn state_root_stance(&self, substrate: &str) -> Option<&str> {
         self.state_root_grant.get(substrate).map(String::as_str)
+    }
+
+    pub fn provider_action(&self, action: &str) -> Option<&ProviderAction> {
+        self.provider_actions.get(action)
     }
 }
 
@@ -867,6 +884,22 @@ fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractErro
 }
 
 fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
+    for (action, recipe) in &caps.provider_actions {
+        if !PROVIDER_ACTIONS.contains(&action.as_str()) {
+            return Err(field_error(
+                harness,
+                "provider_actions",
+                &format!("unknown action {action:?}"),
+            ));
+        }
+        if recipe.transport != "app-server" || recipe.method.is_empty() || recipe.proof.is_empty() {
+            return Err(field_error(
+                harness,
+                &format!("provider_actions.{action}"),
+                "needs the implemented app-server transport, method, and proof",
+            ));
+        }
+    }
     for (key, claim) in &caps.features {
         if !FEATURE_KEYS.contains(&key.as_str()) {
             return Err(field_error(
@@ -1261,7 +1294,7 @@ mod tests {
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
-        let contract = HarnessContract::packaged().unwrap();
+        let mut contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             [
@@ -1303,6 +1336,18 @@ mod tests {
                 .kind,
             "menu_walk"
         );
+        let compact = contract
+            .capabilities("codex")
+            .unwrap()
+            .provider_action("compact")
+            .expect("Codex compact must have a declared provider action recipe");
+        assert_eq!(compact.transport, "app-server");
+        assert_eq!(compact.method, "thread/compact/start");
+        assert_eq!(compact.proof, "context-compaction");
+
+        let codex = contract.harness.get_mut("codex").unwrap();
+        codex.provider_actions.get_mut("compact").unwrap().transport = "pane".into();
+        assert!(validate_row("codex", codex).is_err());
     }
 
     /// The lane assignment, pinned per harness: lane A where the attach form
