@@ -921,6 +921,12 @@ def main() -> None:
         ):
             exc.msg = f"{exc.msg or ''}{_reinstall_hint(exc.name)}"
         raise
+    except (RuntimeError, ValueError) as exc:
+        refusal = getattr(exc, "fno_refusal", None)
+        if refusal is None:
+            raise
+        print(f"Error: {refusal}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
