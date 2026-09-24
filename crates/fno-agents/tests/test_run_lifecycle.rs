@@ -31,7 +31,122 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::c_int, 0) == 0 }
 }
 
+static LAST_PROGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// CI once sat 56 minutes silent inside this suite with a live `fno-agents`
+/// child and no failing assertion. One watchdog for the whole binary: when
+/// no test has made progress for 120s it dumps the process tree, the
+/// interested pids' kernel state, and the claims roots to stderr, then
+/// aborts so the shard fails in minutes with evidence instead of at the cap.
+fn note_progress() {
+    LAST_PROGRESS.store(now_secs(), std::sync::atomic::Ordering::SeqCst);
+    std::thread::Builder::new()
+        .name("hang-watchdog".into())
+        .spawn(|| {
+            static ARMED: std::sync::Once = std::sync::Once::new();
+            ARMED.call_once(|| loop {
+                std::thread::sleep(Duration::from_secs(5));
+                let now = now_secs();
+                let last = LAST_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
+                if now.saturating_sub(last) > 120 {
+                    dump_stuck_state();
+                    std::process::abort();
+                }
+            });
+        })
+        .ok();
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn dump_stuck_state() {
+    eprintln!("hang-watchdog: no test progress for 120s; dumping state");
+    if let Ok(out) = Command::new("ps")
+        .args(["-e", "-o", "pid,ppid,pgid,sess,stat,wchan:28,etime,args"])
+        .output()
+    {
+        eprintln!("--- ps ---\n{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let ok_pid = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            if !ok_pid {
+                continue;
+            }
+            let pid_path = entry.path();
+            let cmdline = std::fs::read_to_string(pid_path.join("cmdline"))
+                .unwrap_or_default()
+                .replace('\0', " ");
+            if !["fno-agents", "test_run_lifecycle", "sleep", "cargo"]
+                .iter()
+                .any(|needle| cmdline.contains(needle))
+            {
+                continue;
+            }
+            eprintln!("--- pid {} ---", pid_path.display());
+            eprintln!("cmdline: {cmdline}");
+            for f in ["stat", "wchan", "status"] {
+                if let Ok(body) = std::fs::read_to_string(pid_path.join(f)) {
+                    eprintln!(
+                        "{f}: {}",
+                        body.lines().take(4).collect::<Vec<_>>().join(" | ")
+                    );
+                }
+            }
+            if let Ok(fds) = std::fs::read_dir(pid_path.join("fd")) {
+                let links: Vec<String> = fds
+                    .flatten()
+                    .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                eprintln!("fds: {}", links.join(", "));
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("fno-test-run-lifecycle-") {
+                continue;
+            }
+            eprintln!("--- root {} ---", entry.path().display());
+            dump_tree(&entry.path(), 0);
+        }
+    }
+}
+
+fn dump_tree(dir: &std::path::Path, depth: usize) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            eprintln!("{} {}/", " ".repeat(depth * 2), p.display());
+            dump_tree(&p, depth + 1);
+        } else {
+            eprintln!("{} {}", " ".repeat(depth * 2), p.display());
+            if let Ok(body) = std::fs::read_to_string(&p) {
+                eprintln!("{}: {body}", p.display());
+            }
+        }
+    }
+}
+
 fn tmp_claims_root(tag: &str) -> PathBuf {
+    note_progress();
     let dir = std::env::temp_dir().join(format!(
         "fno-test-run-lifecycle-{tag}-{}-{}",
         std::process::id(),
