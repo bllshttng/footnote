@@ -315,6 +315,7 @@ fi
    CLOSE_RECEIPT="$(mktemp)"
    test -n "${NODE_ID:-}" || { echo "Blueprint close refused: intake produced no node." >&2; exit 2; }
    fno backlog session close "$NODE_ID" \
+     ${BLUEPRINT_STARTED_AT:+--started-at "$BLUEPRINT_STARTED_AT"} \
      --summary "<short plan summary>" \
      --launch "/fno:target $NODE_ID" \
      --json >"$CLOSE_RECEIPT"

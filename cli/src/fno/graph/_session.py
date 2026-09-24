@@ -583,7 +583,11 @@ def cmd_session_close(
         claim.get("state") != "free" and claim.get("holder") == blueprint_holder
     )
     acquired_at = claim.get("acquired_at")
-    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+    # A planner that joined its spawn's handover claim started at that claim.
+    own_claim = blueprint_held or (
+        claim.get("state") != "free" and claim.get("holder") == _own_handover_holder(eff_session)
+    )
+    if own_claim and started_at is None and isinstance(acquired_at, int):
         started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )

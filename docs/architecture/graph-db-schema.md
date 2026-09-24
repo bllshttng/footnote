@@ -34,6 +34,19 @@ Every table has `created_at` (row written) and `updated_at` (row last changed). 
 
 Every timestamp column carries a named CHECK, `<table>_<column>_iso`. A value must parse with `datetime()` and end in `Z` or `+00:00`. A refused write names the constraint, for example `nodes_completed_at_iso`. The store writes its own stamps as `%Y-%m-%dT%H:%M:%fZ`. It never rewrites a stored value to that spelling, because the node JSON must keep its bytes.
 
+### Session rows
+
+A phase that opens stamps its row's `started_at`, and a phase that closes stamps its `ended_at` (user rulings 2026-09-24). A missing time is never invented: a legacy row with no recorded source keeps its gap.
+
+| Phase | `started_at` | `ended_at` |
+|---|---|---|
+| think, review | the spawn that opens the row | the gc sweep, when the session retires: its transcript's last event (`ended_by: reap-sweep`) |
+| blueprint | the planner's own claim, the spawn claim it joined, or the skill's `--started-at` | `fno backlog session close` |
+| do | the node claim | the claim release, the finalize stamp, or the gc settle on a merged node |
+| ship | the PR link (`fno do pr bind-created`) | the merge reaper at the merge instant (`ended_by: merge`). The gc sweep backfills a row it missed from the `Merge pull request #N` commit on origin/main (`merge-commit`), or GitHub's `closed_at` for a PR closed unmerged (`pr-closed`). |
+
+The closes that no session writes live in `crates/fno-agents/src/phase_close.rs`.
+
 ## Entities
 
 Triggers on each referencing table create the parent rows (`<table>_entities_bi` and `_bu`). Every writer, including an older binary during a rollout, gets a valid parent with no code of its own. A session id first seen with no harness takes the first harness a later row names. A later, different harness never overwrites it. An empty harness, model or session id fails `<table>_id_nonempty` and aborts the write.
