@@ -217,7 +217,39 @@ candidate_python() {
     fi
 }
 
-GLOBAL_EVENTS_PATH="$(candidate_fno do pr global-receipt-events-path)" || {
+# The receipt path writes the live events store under ~/.fno. The candidate
+# build is fenced out of live stores (live_store_fence in both crates), so the
+# store-touching receipt calls ride the INSTALLED fno, not the candidate build:
+# FNO_BIN outranks the checkout build in the Python store client, and the
+# journal commit calls the one native binary directly. Candidate code still
+# serves every command that touches no live store.
+INSTALLED_FNO_BIN="$(command -v fno 2>/dev/null || true)"
+
+receipt_fno() {
+    if [[ -n "$INSTALLED_FNO_BIN" ]]; then
+        FNO_BIN="$INSTALLED_FNO_BIN" candidate_fno "$@"
+    else
+        candidate_fno "$@"
+    fi
+}
+
+# One native binary for the receipt commit: the installed fno, else the
+# checkout build, else PATH - the same chain the Python store client walks,
+# pinned once. The commit skips the Python detour on purpose: validation
+# already ran in this shell, and a Python re-resolution would ride the
+# candidate interpreter and re-walk the same chain per call.
+RECEIPT_NATIVE_BIN="$INSTALLED_FNO_BIN"
+if [[ -z "$RECEIPT_NATIVE_BIN" ]]; then
+    for _profile in debug release; do
+        if [[ -x "$INVOKING_ROOT/crates/fno/target/$_profile/fno" ]]; then
+            RECEIPT_NATIVE_BIN="$INVOKING_ROOT/crates/fno/target/$_profile/fno"
+            break
+        fi
+    done
+fi
+[[ -n "$RECEIPT_NATIVE_BIN" ]] || RECEIPT_NATIVE_BIN="$(command -v fno 2>/dev/null || true)"
+
+GLOBAL_EVENTS_PATH="$(receipt_fno do pr global-receipt-events-path)" || {
     echo "preflight: canonical receipt journal path unavailable" >&2
     exit 1
 }
@@ -278,15 +310,12 @@ emit_verification_receipt() {
 
 append_receipt_journal() {
     local events_path="$1" event="$2"
-    candidate_python -c '
-import json
-import sys
-from pathlib import Path
-from fno.events import append_event
-
-event = json.load(sys.stdin)
-append_event(event, events_path=Path(sys.argv[1]))
-' "$events_path" <<< "$event"
+    if [[ -z "$RECEIPT_NATIVE_BIN" ]]; then
+        echo "preflight: no native fno binary for the receipt commit" >&2
+        return 1
+    fi
+    printf '%s\n' "$event" \
+        | "$RECEIPT_NATIVE_BIN" doctor event emit-envelope --events "$events_path" >/dev/null
 }
 
 emit_setup_unavailable() {
@@ -296,7 +325,7 @@ emit_setup_unavailable() {
 }
 
 next_receipt_generation() {
-    candidate_fno do pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
+    receipt_fno do pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
 }
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
@@ -335,7 +364,7 @@ reuse_attestation() {
     # The text file is only a fast cache carrier. Authority stays in the typed
     # event journal, so a matching carrier with missing, malformed, subset,
     # void, stale, or otherwise non-passing evidence cannot bless this SHA.
-    if ! candidate_fno do pr evidence-check >/dev/null 2>&1; then
+    if ! receipt_fno do pr evidence-check >/dev/null 2>&1; then
         echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
         return 1
     fi

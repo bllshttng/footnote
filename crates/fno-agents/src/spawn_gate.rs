@@ -1276,6 +1276,7 @@ pub struct GateInput {
     pub node: Option<String>,
     pub account: Option<String>,
     pub caller_session: Option<String>,
+    pub succession_scope: Option<String>,
     pub holder_pid: Option<u32>,
 }
 
@@ -1446,6 +1447,7 @@ fn decide_gate(
     let mut last_progress = Instant::now();
     let mut announced = false;
     let mut last_slots: usize = 0;
+    let mut last_succession_error: Option<&'static str>;
     // LD4: a fleet-over sample holds, and admission after a hold is
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
@@ -1462,6 +1464,7 @@ fn decide_gate(
     loop {
         // Each pass reads afresh: a refusal names only what IT read, never a
         // slot count from an earlier pass.
+        last_succession_error = None;
         let mut axes_read = serde_json::Map::new();
         let mut pause = QUEUE_POLL;
         // The footprint probe runs OUTSIDE the gate mutex (it costs seconds
@@ -1761,14 +1764,29 @@ fn decide_gate(
                         let (live, reservations) = slot_reading(registry_path, &mut warnings);
                         let slots = live.len() + reservations.len();
                         last_slots = slots;
+                        let succession = input.succession_scope.as_deref().map(|scope| {
+                            spawn_gate_lanes::succession_replaces(
+                                &live,
+                                input.caller_session.as_deref(),
+                                scope,
+                            )
+                        });
+                        last_succession_error = succession
+                            .as_ref()
+                            .and_then(|result| result.as_ref().err().copied());
+                        let replaced = usize::from(matches!(succession.as_ref(), Some(Ok(_))));
                         for w in &warnings {
                             eprintln!("{w}");
                         }
-                        if slots < cap {
-                            axes_read.insert(
-                                "slots".into(),
-                                serde_json::json!(format!("{slots}/{cap} ok")),
-                            );
+                        if slots.saturating_sub(replaced) < cap {
+                            let slot_reading = succession
+                                .as_ref()
+                                .and_then(|result| result.as_ref().ok())
+                                .map(|name| {
+                                    format!("{slots}/{cap} ok (succession replaces {name})")
+                                })
+                                .unwrap_or_else(|| format!("{slots}/{cap} ok"));
+                            axes_read.insert("slots".into(), serde_json::json!(slot_reading));
                             // Re-checked on dequeue for the same reason the RAM floor is: a
                             // spawn can sit queued past QUEUE_POLL for minutes, and another
                             // process can raise the shared schema inside that window.
@@ -1784,14 +1802,21 @@ fn decide_gate(
                             for w in &dequeue_warnings {
                                 eprintln!("{w}");
                             }
-                            check_king_share(
-                                registry_path,
-                                cap,
-                                input.caller_session.as_deref(),
-                                &axes_read,
-                            )
-                            .inspect_err(|_| guard.release())?;
-                            axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            if replaced == 1 {
+                                axes_read.insert(
+                                    "king_share".into(),
+                                    serde_json::json!("skipped (crowned succession)"),
+                                );
+                            } else {
+                                check_king_share(
+                                    registry_path,
+                                    cap,
+                                    input.caller_session.as_deref(),
+                                    &axes_read,
+                                )
+                                .inspect_err(|_| guard.release())?;
+                                axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            }
                             // The per-territory team cap: beside the machine cap,
                             // never instead of it. Refuses (never queues) - waiting cannot
                             // help while the node's own territory is full, and other
@@ -1878,28 +1903,29 @@ fn decide_gate(
                                 "refusing (--no-wait).",
                             );
                             eprintln!("spawn-gate: {line}");
-                            return Err(Refusal::with_receipt(
-                                EXIT_NO_WAIT,
-                                serde_json::json!({
-                                    "status": "refused",
-                                    "reason": "no_wait",
-                                    "axis": "max_live",
-                                    "axes_read": axes_read.clone(),
-                                    "held_on": "max_live",
-                                    "max_live": cap,
-                                    "count": slots,
-                                    "current_count": slots,
-                                    "slot_rows": live
-                                        .iter()
-                                        .map(|r| r.name.clone())
-                                        .chain(reservations.iter().map(|r| r.name.clone()))
-                                        .collect::<Vec<_>>(),
-                                    "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
-                                        "name": name,
-                                        "question_id": qid,
-                                    })).collect::<Vec<_>>(),
-                                }),
-                            ));
+                            let mut receipt = serde_json::json!({
+                                "status": "refused",
+                                "reason": "no_wait",
+                                "axis": "max_live",
+                                "axes_read": axes_read.clone(),
+                                "held_on": "max_live",
+                                "max_live": cap,
+                                "count": slots,
+                                "current_count": slots,
+                                "slot_rows": live
+                                    .iter()
+                                    .map(|r| r.name.clone())
+                                    .chain(reservations.iter().map(|r| r.name.clone()))
+                                    .collect::<Vec<_>>(),
+                                "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
+                                    "name": name,
+                                    "question_id": qid,
+                                })).collect::<Vec<_>>(),
+                            });
+                            if let Some(reason) = last_succession_error {
+                                receipt["succession"] = serde_json::json!(reason);
+                            }
+                            return Err(Refusal::with_receipt(EXIT_NO_WAIT, receipt));
                         }
                         if !announced {
                             let row_refs: Vec<&RegistryEntry> = live.iter().collect();
@@ -1982,19 +2008,20 @@ fn decide_gate(
                     QUEUE_TIMEOUT.as_secs()
                 );
             }
-            return Err(Refusal::with_receipt(
-                EXIT_QUEUE_TIMEOUT,
-                serde_json::json!({
-                    "status": "refused",
-                    "reason": reason,
-                    "held_on": held_on,
-                    "axis": held_on,
-                    "axes_read": axes_read.clone(),
-                    "max_live": cap,
-                    "count": last_slots,
-                    "current_count": last_slots,
-                }),
-            ));
+            let mut receipt = serde_json::json!({
+                "status": "refused",
+                "reason": reason,
+                "held_on": held_on,
+                "axis": held_on,
+                "axes_read": axes_read.clone(),
+                "max_live": cap,
+                "count": last_slots,
+                "current_count": last_slots,
+            });
+            if let Some(reason) = last_succession_error {
+                receipt["succession"] = serde_json::json!(reason);
+            }
+            return Err(Refusal::with_receipt(EXIT_QUEUE_TIMEOUT, receipt));
         }
         std::thread::sleep(pause);
     }

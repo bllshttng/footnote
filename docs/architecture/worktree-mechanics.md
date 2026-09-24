@@ -134,6 +134,10 @@ Every row line names `owner=`, `node=` and `session=`. `owner=` names the regist
 
 The wrapper sets the shared sccache size to 30G unless `SCCACHE_CACHE_SIZE` is set. At 10G the cache sat at its limit on a fleet machine. It kept only 6.5 hours of history, so a branch parked overnight rebuilt cold. A running sccache server keeps its old size until it exits. sccache refuses proc-macro, build-script, bin and test crate types by design. About half the calls never reach the cache, and no setting changes that. The build dir stays per worktree. A shared dir adds reuse of registry proc-macros and build scripts, and nothing more. It also breaks the reclaim at worktree removal, and one `cargo clean` then wipes every worktree. The repo sets no `jobs` key, so a solo clone builds at full width. A per-user `jobs` cap slows every build and still does not stop two cargo runs at once, because cargo shares no jobserver across separate runs.
 
+## Worktree builds and live stores
+
+A binary built inside a linked worktree refuses to open an SQLite store under the passwd home's `.fno`. Every writable open in both crates checks the running executable's nearest `.git` ancestor before it connects. In a linked worktree that ancestor is a `.git` file, and the open is refused with a message that names the store and the worktree. The operator's stores keep their schema and their rows. The canonical checkout carries a `.git` directory. A deployed install carries no `.git` ancestor. Both stay allowed. A store outside the home `.fno`, or under the worktree itself, is never refused. Read-only opens stay unfenced, because a read cannot migrate a store. There is no bypass flag. The remedy is the deployed binary (`fno doctor update`), or a store that belongs to the checkout. Python store writers carry no such check.
+
 ## Enforcement
 
 Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-location.sh`. It emits `verdict=ok|canonical-protected` plus a nested-worktree advisory, and always exits 0.

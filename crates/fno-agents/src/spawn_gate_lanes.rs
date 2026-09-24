@@ -753,6 +753,42 @@ pub(crate) fn share_reading(
     }
 }
 
+/// Return the caller's row only when crown settlement confirms it will be vacated.
+pub(crate) fn succession_replaces(
+    live: &[RegistryEntry],
+    caller: Option<&str>,
+    scope: &str,
+) -> Result<String, &'static str> {
+    let caller = caller
+        .filter(|session| !session.is_empty())
+        .ok_or("no_caller")?;
+    let mut rows = live.iter().filter(|row| {
+        row.harness_session_id.as_deref() == Some(caller)
+            || row.cc_session_id.as_deref() == Some(caller)
+    });
+    let row = rows.next().ok_or("caller_not_live")?;
+    if rows.next().is_some() {
+        return Err("caller_ambiguous");
+    }
+    let rows = serde_json::to_value(live).map_err(|_| "settle_unreadable")?;
+    let answer = crate::crown_settle::resolve(&serde_json::json!({
+        "scope": scope,
+        "rows": rows,
+        "succession": true,
+        "caller": {"kind": "agent", "name": row.name.clone()},
+    }))
+    .map_err(|_| "settle_unreadable")?;
+    let vacates_caller = answer
+        .get("vacate")
+        .and_then(Value::as_array)
+        .is_some_and(|vacate| vacate.len() == 1 && vacate[0].as_str() == Some(row.name.as_str()));
+    if answer.get("outcome").and_then(Value::as_str) == Some("succeeded") && vacates_caller {
+        Ok(row.name.clone())
+    } else {
+        Err("caller_not_sole_holder")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry schema guard
 // ---------------------------------------------------------------------------
