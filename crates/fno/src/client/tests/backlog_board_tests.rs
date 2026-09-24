@@ -174,7 +174,7 @@ fn t_key_prefills_the_launcher_from_a_card() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, &[b't'], &mut sock)
+        board_keys(&mut v, b"t", &mut sock)
             .await
             .expect("t folds");
     });
@@ -197,7 +197,7 @@ fn t_key_refuses_a_card_already_being_worked() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, &[b't'], &mut sock)
+        board_keys(&mut v, b"t", &mut sock)
             .await
             .expect("t folds");
     });
@@ -224,7 +224,7 @@ fn t_key_inside_the_drilldown_targets_its_node() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        node_detail::detail_keys(&mut v, &[b't'], &mut sock)
+        node_detail::detail_keys(&mut v, b"t", &mut sock)
             .await
             .expect("t folds");
     });
@@ -249,7 +249,7 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        board_keys(&mut v, &[b't'], &mut sock)
+        board_keys(&mut v, b"t", &mut sock)
             .await
             .expect("t folds");
     });
