@@ -17,9 +17,6 @@ static CLAIM_RE: OnceLock<Regex> = OnceLock::new();
 static LINE_SUFFIX_RE: OnceLock<Regex> = OnceLock::new();
 static ABDICATION_RE: OnceLock<Regex> = OnceLock::new();
 static RULING_TEXT_RE: OnceLock<Regex> = OnceLock::new();
-static CORONATION_RE: OnceLock<Regex> = OnceLock::new();
-static CROWN_READ_RE: OnceLock<Regex> = OnceLock::new();
-static PRWATCH_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_PROBE_RE: OnceLock<Regex> = OnceLock::new();
 static CONTEXT_ASK_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -181,7 +178,7 @@ fn is_spawn(entry: &Entry) -> bool {
     shell_command_segments(&entry.target).iter().any(|args| {
         (args_start_with(args, &["fno", "agents", "spawn"])
             || args_start_with(args, &["fno", "backlog", "advance"]))
-            && !args.iter().any(|arg| arg == "--help")
+            && !has_help_flag(args)
     })
 }
 
@@ -198,6 +195,10 @@ fn args_start_with(args: &[String], expected: &[&str]) -> bool {
             .iter()
             .zip(expected)
             .all(|(arg, expected)| arg == expected)
+}
+
+fn has_help_flag(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--help" || arg == "-h")
 }
 
 fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
@@ -279,6 +280,7 @@ fn crown_spawn_command(target: &str) -> bool {
             && args[0] == "fno"
             && args[1] == "agents"
             && args[2] == "spawn"
+            && !has_help_flag(args)
             && args
                 .iter()
                 .skip(3)
@@ -286,13 +288,32 @@ fn crown_spawn_command(target: &str) -> bool {
     })
 }
 
+fn crown_read_or_bestow_command(target: &str) -> bool {
+    shell_command_segments(target).iter().any(|args| {
+        !has_help_flag(args)
+            && (args_start_with(args, &["fno", "agents", "crown"])
+                || args_start_with(args, &["fno", "agents", "court"])
+                || args_start_with(args, &["fno", "whoami"]))
+    })
+}
+
+fn prwatch_probe_command(target: &str) -> bool {
+    shell_command_segments(target).iter().any(|args| {
+        !has_help_flag(args)
+            && (args_start_with(args, &["fno", "do", "pr", "watch", "status"])
+                || args_start_with(args, &["fno", "pr-watch", "status"]))
+    })
+}
+
 fn ruling_command(target: &str) -> bool {
     shell_command_segments(target).iter().any(|args| {
         if args_start_with(args, &["fno", "agents", "mail", "send"]) {
-            return !args
-                .iter()
-                .skip(4)
-                .any(|arg| arg == "--help" || arg == "--to-self" || arg.starts_with("--to-self="));
+            return !args.iter().skip(4).any(|arg| {
+                arg == "--help"
+                    || arg == "-h"
+                    || arg == "--to-self"
+                    || arg.starts_with("--to-self=")
+            });
         }
         args_start_with(args, &["fno", "backlog", "update"])
             && args.iter().skip(3).any(|arg| {
@@ -433,11 +454,6 @@ fn check3_crown_before_ruling(entries: &[Entry]) -> CheckResult {
             None,
         );
     };
-    let coronation = compiled(&CORONATION_RE, r"(^|[;|&\n])\s*fno agents crown\s");
-    let crown_read = compiled(
-        &CROWN_READ_RE,
-        r"(^|[;|&\n])\s*fno (?:agents court\b|whoami(?:\s|$))",
-    );
     for entry in entries {
         if entry.index >= first_ruling {
             break;
@@ -445,10 +461,7 @@ fn check3_crown_before_ruling(entries: &[Entry]) -> CheckResult {
         if entry.kind != "tool_use" || entry.tool.as_deref() != Some("Bash") {
             continue;
         }
-        if coronation.is_match(&entry.target)
-            || crown_spawn_command(&entry.target)
-            || crown_read.is_match(&entry.target)
-        {
+        if crown_read_or_bestow_command(&entry.target) || crown_spawn_command(&entry.target) {
             return CheckResult::new(
                 "check3_crown_before_ruling",
                 true,
@@ -483,12 +496,8 @@ fn check4_prwatch_before_dispatch(entries: &[Entry]) -> CheckResult {
             None,
         );
     };
-    let probe_re = compiled(
-        &PRWATCH_RE,
-        r"(^|[;|&\n])\s*fno (?:do pr watch status|pr-watch status)",
-    );
     let probe = first(entries, |entry| {
-        entry.kind == "tool_use" && probe_re.is_match(&entry.target)
+        entry.kind == "tool_use" && prwatch_probe_command(&entry.target)
     });
     if let Some(probe) = probe.filter(|probe| *probe < first_dispatch) {
         return CheckResult::new(
@@ -1031,6 +1040,45 @@ mod tests {
         assert!(
             is_ruling(&mail),
             "flag mentions in message text are not options"
+        );
+
+        for target in [
+            "fno agents crown --help",
+            "fno agents crown -h",
+            "fno agents spawn worker --help --crown x-root",
+            "fno agents spawn worker -h --crown x-root",
+        ] {
+            let entries = vec![
+                entry(0, "tool_use", Some("Bash"), target, ""),
+                entry(
+                    1,
+                    "tool_use",
+                    Some("Bash"),
+                    "fno agents mail send ruling",
+                    "",
+                ),
+            ];
+            assert_eq!(
+                check3_crown_before_ruling(&entries).status,
+                "violation",
+                "help-only command is not a crown: {target}"
+            );
+        }
+
+        let entries = vec![
+            entry(
+                0,
+                "tool_use",
+                Some("Bash"),
+                "fno do pr watch status --help",
+                "",
+            ),
+            entry(1, "tool_use", Some("Bash"), "fno agents spawn worker", ""),
+        ];
+        assert_eq!(
+            check4_prwatch_before_dispatch(&entries).status,
+            "violation",
+            "help output is not a PR-watch liveness reading"
         );
 
         let entries = vec![
