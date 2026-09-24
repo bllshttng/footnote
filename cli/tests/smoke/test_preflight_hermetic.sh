@@ -112,9 +112,9 @@ grep -Fq "print('unavailable')" "$PF" \
   || fail "squads probe does not preserve unavailable"
 grep -Fq 'RECEIPT_RESULT=unavailable' "$PF" \
   || fail "unavailable required evidence does not reach the final receipt"
-grep -Fq 'from fno.events import append_event' "$PF" \
+grep -Fq 'doctor event emit-envelope' "$PF" \
   || fail "verification receipts do not use the shared journal append primitive"
-grep -Fq 'append_event(event, events_path=Path(sys.argv[1]))' "$PF" \
+grep -Fq -- '--events "$events_path"' "$PF" \
   || fail "verification receipts do not bind the shared append primitive to each journal"
 if grep -Fq '>> "$GLOBAL_EVENTS_PATH"' "$PF" \
     || grep -Fq '>> "$EVENTS_PATH"' "$PF"; then

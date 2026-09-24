@@ -89,6 +89,32 @@ if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
         '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' >/dev/null
     exit \$?
 fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "doctor event emit-envelope" ]]; then
+    events=''
+    shift 3
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            --events) events="\$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -z "\$events" ]]; then
+        echo "stub: emit-envelope needs --events" >&2
+        exit 2
+    fi
+    line="\$(cat)"
+    # The real commit creates the directory it needs and fails loud on a
+    # path it cannot write (a directory at the journal path, a missing
+    # parent it may not make), so the stub answers the same way.
+    mkdir -p "\$(dirname "\$events")" 2>/dev/null || true
+    if ! printf '%s\n' "\$line" >> "\$events" 2>/dev/null; then
+        echo "stub: emit-envelope: cannot commit to \$events" >&2
+        exit 1
+    fi
+    seq="\$(wc -l < "\$events" | tr -d ' ')"
+    printf '{"store":"%s.db","event_id":"evt:stub-%s","seq":%s,"inserted":1}\n' "\$events" "\$seq" "\$seq"
+    exit 0
+fi
 exit 0
 EOF
 cat > "$BIN/cargo" <<'EOF'

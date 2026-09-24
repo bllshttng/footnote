@@ -726,6 +726,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
         "no_wait": False,
         "route_provider": "zai",
         "account": None,
+        "succession_scope": None,
     }]
 
 

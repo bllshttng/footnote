@@ -1032,14 +1032,7 @@ mod tests {
     // from the child's own record. The argv file path rides an env var the
     // stub reads.
     fn stub_fno(dir: &Path, name: &str, script: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/bash\n{script}\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
+        crate::write_exec_stub(dir, name, &format!("#!/bin/bash\n{script}\n"))
     }
 
     fn argv_file(dir: &Path, name: &str) -> PathBuf {

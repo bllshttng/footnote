@@ -638,22 +638,37 @@ fn r_capacity() -> Result<Value, String> {
     r_capacity_pair(&payload, &gate)
 }
 
-/// The pair from the two fetched payloads. The two instruments speak
-/// different dialects of the same axis: footprint answers in the cpu-axis
-/// vocabulary (admit/refuse), the gate probe in its whole-admission one
-/// (accepted/refused). Disagreement compares meanings, never spellings.
+/// The pair compares footprint's CPU verdict with the gate's own cpu-share
+/// row; the gate's whole verdict and the axis it refused on print beside it.
 fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Value, String> {
     let footprint = footprint_payload
-        .get("capacity_verdict")
+        .pointer("/admission/verdict")
         .cloned()
         .unwrap_or(Value::Null);
     let gate_verdict = s_str(gate_payload, "verdict").unwrap_or("").to_string();
+    let gate_cpu = gate_payload
+        .get("rows")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("name").and_then(Value::as_str) == Some("cpu-share"))
+                .and_then(|row| row.get("verdict").cloned())
+        })
+        .unwrap_or(Value::Null);
+    let gate_axis = if gate_verdict.is_empty() || gate_verdict == "accepted" {
+        Value::Null
+    } else {
+        s_str(gate_payload, "reason")
+            .map(|r| Value::String(r.to_string()))
+            .unwrap_or(Value::Null)
+    };
     let fp_str = footprint.as_str().unwrap_or("").to_string();
-    fn meaning(v: &str) -> &str {
+    fn meaning(v: &str) -> Option<&str> {
         match v {
-            "admit" | "accepted" => "admit",
-            "refuse" | "refused" => "refuse",
-            other => other,
+            "admit" | "pass" => Some("admit"),
+            "refuse" | "undecidable" => Some("refuse"),
+            "hold" => Some("hold"),
+            _ => None,
         }
     }
     let lanes = gate_payload
@@ -682,12 +697,17 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
             }
         })
         .unwrap_or_else(|| "lanes unreadable".into());
+    let cpu_str = gate_cpu.as_str().unwrap_or("").to_string();
+    let disagree = match (meaning(&fp_str), meaning(&cpu_str)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    };
     Ok(json!({
         "footprint": footprint,
         "gate": gate_verdict,
-        "disagree": !gate_verdict.is_empty()
-            && !fp_str.is_empty()
-            && meaning(&fp_str) != meaning(&gate_verdict),
+        "gate_axis": gate_axis,
+        "gate_cpu": gate_cpu,
+        "disagree": disagree,
         "unparsed_lines": footprint_payload
             .get("unparsed_lines")
             .and_then(|u| u.as_i64())
@@ -1255,14 +1275,15 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         );
     }
     if let Some(capacity) = get("capacity").filter(|r| r.ok) {
-        for key in ["footprint", "gate", "disagree", "unparsed_lines", "lanes"] {
-            let wire = match key {
-                "footprint" => "capacity_footprint",
-                "gate" => "capacity_gate",
-                "disagree" => "capacity_disagree",
-                "lanes" => "capacity_lanes",
-                _ => "unparsed_lines",
-            };
+        for (key, wire) in [
+            ("footprint", "capacity_footprint"),
+            ("gate", "capacity_gate"),
+            ("gate_axis", "capacity_gate_axis"),
+            ("gate_cpu", "capacity_gate_cpu"),
+            ("disagree", "capacity_disagree"),
+            ("unparsed_lines", "unparsed_lines"),
+            ("lanes", "capacity_lanes"),
+        ] {
             data.insert(
                 wire.into(),
                 capacity.value.get(key).cloned().unwrap_or(Value::Null),
@@ -1714,6 +1735,10 @@ fn render_lines(
                 dash(data.get("capacity_footprint")),
                 dash(data.get("capacity_gate")),
             );
+            if let Some(axis) = data.get("capacity_gate_axis").and_then(Value::as_str) {
+                text.push_str(&format!(" on {axis}"));
+            }
+            text.push_str(&format!(", cpu {}", dash(data.get("capacity_gate_cpu"))));
             if data
                 .get("capacity_disagree")
                 .and_then(|d| d.as_bool())
@@ -2988,28 +3013,123 @@ mod tests {
 
     #[test]
     fn disagree_compares_meanings_not_spellings() {
-        let pair = |fp: &str, gate: &str| {
+        let pair = |fp: &str, gate_cpu: &str| {
             r_capacity_pair(
-                &json!({"capacity_verdict": fp, "unparsed_lines": 0}),
-                &json!({"verdict": gate}),
+                &json!({"admission": {"verdict": fp}, "unparsed_lines": 0}),
+                &json!({
+                    "verdict": "refused",
+                    "reason": "cpu_share",
+                    "rows": [{"name": "cpu-share", "verdict": gate_cpu}]
+                }),
             )
             .unwrap()
             .get("disagree")
             .and_then(|d| d.as_bool())
             .unwrap()
         };
-        // The live healthy pair: footprint speaks cpu-axis, the gate speaks
-        // whole-admission; same meaning, so no DISAGREE.
-        assert!(!pair("admit", "accepted"));
-        assert!(!pair("refuse", "refused"));
-        assert!(pair("admit", "refused"));
-        assert!(pair("refuse", "accepted"));
+        assert!(!pair("admit", "pass"));
+        assert!(!pair("refuse", "refuse"));
+        assert!(!pair("hold", "hold"));
+        assert!(!pair("undecidable", "refuse"));
+        assert!(pair("admit", "refuse"));
+        assert!(pair("undecidable", "pass"));
+        assert!(!pair("admit_degraded", "pass"));
+    }
+
+    #[test]
+    fn capacity_pair_ignores_a_refusal_on_another_axis() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "king_share",
+                "rows": [{"name": "cpu-share", "verdict": "pass"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(capacity["disagree"], false);
+        assert_eq!(capacity["gate_axis"], "king_share");
+        assert_eq!(capacity["gate_cpu"], "pass");
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(
+            line.contains("gate refused on king_share, cpu pass"),
+            "line: {line}"
+        );
+        assert!(!line.contains("DISAGREE"), "line: {line}");
+    }
+
+    #[test]
+    fn capacity_pair_marks_a_cpu_divergence() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "cpu_share_undecidable",
+                "rows": [{"name": "cpu-share", "verdict": "refuse"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(capacity["disagree"], true);
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(line.contains("DISAGREE"), "line: {line}");
+        assert!(
+            line.contains("gate refused on cpu_share_undecidable, cpu refuse"),
+            "line: {line}"
+        );
+    }
+
+    #[test]
+    fn capacity_pair_without_a_gate_cpu_row_never_disagrees() {
+        let capacity = r_capacity_pair(
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "reason": "ram_floor",
+                "rows": [{"name": "ram", "verdict": "refuse"}]
+            }),
+        )
+        .unwrap();
+        assert!(capacity["gate_cpu"].is_null());
+        assert_eq!(capacity["disagree"], false);
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(line.contains("cpu -"), "line: {line}");
+        assert!(!line.contains("DISAGREE"), "line: {line}");
     }
 
     #[test]
     fn capacity_pair_renders_provider_lanes_in_order_or_as_unreadable() {
         let capacity = r_capacity_pair(
-            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({
                 "verdict": "refused",
                 "lanes": {
@@ -3041,7 +3161,7 @@ mod tests {
         );
 
         let unreadable = r_capacity_pair(
-            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({"admission": {"verdict": "admit"}, "unparsed_lines": 0}),
             &json!({"verdict": "accepted"}),
         )
         .unwrap();
@@ -3071,7 +3191,7 @@ mod tests {
     fn unparsed_capacity_line_names_the_floor_and_zero_stays_silent() {
         let capacity_line = |unparsed: i64| {
             let capacity = r_capacity_pair(
-                &json!({"capacity_verdict": "admit", "unparsed_lines": unparsed}),
+                &json!({"admission": {"verdict": "admit"}, "unparsed_lines": unparsed}),
                 &json!({"verdict": "accepted"}),
             )
             .unwrap();
