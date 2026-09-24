@@ -166,6 +166,7 @@ pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
 pub mod grok_store;
+pub mod tracker;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
