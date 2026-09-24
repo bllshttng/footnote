@@ -207,8 +207,10 @@ fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
             continue;
         }
         if escaped {
-            word.push(character);
-            started = true;
+            if character != '\n' {
+                word.push(character);
+                started = true;
+            }
             escaped = false;
             continue;
         }
@@ -1051,6 +1053,24 @@ mod tests {
             ),
         ];
         assert_eq!(check3_crown_before_ruling(&crowned).status, "clean");
+        let continued = vec![
+            entry(
+                0,
+                "tool_use",
+                Some("Bash"),
+                r"fno agents spawn worker \
+--crown x-root",
+                "",
+            ),
+            entry(
+                1,
+                "tool_use",
+                Some("Bash"),
+                "fno agents mail send ruling",
+                "",
+            ),
+        ];
+        assert_eq!(check3_crown_before_ruling(&continued).status, "clean");
     }
 
     #[test]
