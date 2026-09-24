@@ -273,26 +273,30 @@ jobs:
 
       - name: Stamp the plugin version onto the nightly tag
         # The nightly tag carries ONE commit on top of the released sha whose
-        # only change is .claude-plugin/plugin.json's version, so the nightly
-        # plugin channel resolves to a version distinct from stable's (the
-        # Claude marketplace skips an update when a channel's version is
-        # unchanged). Main never moves; no v* tag is created.
+        # only change is the plugin manifests' version, so the nightly plugin
+        # channel resolves to a version distinct from stable's (both harness
+        # marketplaces skip an update when a channel's version is unchanged).
+        # Main never moves; no v* tag is created.
         id: stamp
         run: |
           set -euo pipefail
           sha="${{ needs.resolve.outputs.sha }}"
           version="${{ needs.resolve.outputs.version }}"
 
-          # PEP 440 -> semver for the plugin manifest (0.4.0.dev20260925 ->
+          # PEP 440 -> semver for the plugin manifests (0.4.0.dev20260925 ->
           # 0.4.0-dev.20260925); the marketplace docs compare these as strings.
           semver="$(printf '%s' "$version" | sed -E 's/\.dev([0-9]+)$/-dev.\1/; s/rc([0-9]+)$/-rc.\1/')"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout "$sha"
-          perl -i -pe "s/\"version\": \"[^\"]*\"/\"version\": \"${semver}\"/" .claude-plugin/plugin.json
-          git diff --quiet -- .claude-plugin/plugin.json \
-            || { git add .claude-plugin/plugin.json && git commit -m "chore(nightly): stamp plugin ${semver} [skip ci]"; }
+          for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
+            perl -i -pe "s/\"version\": \"[^\"]*\"/\"version\": \"${semver}\"/" "$manifest"
+          done
+          git add .claude-plugin/plugin.json .codex-plugin/plugin.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(nightly): stamp plugin ${semver} [skip ci]"
+          fi
           stamped="$(git rev-parse HEAD)"
 
           # Replace the rolling tag (delete-then-create below removed the old
@@ -308,8 +312,9 @@ jobs:
           stamped="${{ steps.stamp.outputs.stamped }}"
 
           # Tolerate "not found": the first nightly (or a previous delete) has
-          # nothing to remove.
-          gh release delete nightly --cleanup-tag -y 2>/dev/null || true
+          # nothing to remove. No --cleanup-tag: the rolling tag itself was
+          # just force-pushed by the stamp step and must survive.
+          gh release delete nightly -y 2>/dev/null || true
 
           notes="nightly build of footnote.
           - Commit: ${stamped}
@@ -384,12 +389,11 @@ jobs:
           uv publish --check-url https://pypi.org/simple/ dist/*.whl
 
       - name: crates.io (stable only)
-        if: ${{ inputs.dry_run != true && env.CHANNEL == 'stable' }}
+        if: env.CHANNEL == 'stable'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN not set; refusing to publish"; exit 1; }
           # crates.io uploads are permanent: a version already there is an
           # idempotent skip, so a re-run after a partial publish never retries.
           for pair in "fno-agents:crates/fno-agents" "fno:crates/fno"; do
@@ -403,6 +407,7 @@ jobs:
             if [ "$DRY_RUN" = "true" ]; then
               cargo publish --dry-run --manifest-path "${dir}/Cargo.toml"
             else
+              test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN not set; refusing to publish"; exit 1; }
               cargo publish --manifest-path "${dir}/Cargo.toml"
             fi
           done
