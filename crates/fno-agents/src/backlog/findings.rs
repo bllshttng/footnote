@@ -172,7 +172,7 @@ pub fn id_exists(connection: &Connection, finding_id: &str) -> Result<bool, Stri
     Ok(taken > 0)
 }
 
-fn finding_ids_in(row: &serde_json::Value) -> Vec<String> {
+pub(crate) fn finding_ids_in(row: &serde_json::Value) -> Vec<String> {
     row.get("findings")
         .and_then(serde_json::Value::as_array)
         .map(|items| {

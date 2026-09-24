@@ -1036,7 +1036,7 @@ pub fn finding_create(
             minted = mint_finding_id();
             let taken = rows
                 .iter()
-                .any(|row| finding_ids_in(row).iter().any(|id| id == &minted));
+                .any(|row| super::findings::finding_ids_in(row).contains(&minted));
             if !taken {
                 break;
             }
@@ -1071,13 +1071,7 @@ pub fn finding_create(
     let stored = rows
         .iter()
         .find(|row| crate::graph_store::entry_id(row) == Some(node_id))
-        .and_then(|row| row.get("findings").and_then(Value::as_array))
-        .map(|items| {
-            items
-                .iter()
-                .any(|item| item.get("finding_id").and_then(Value::as_str) == Some(minted.as_str()))
-        })
-        .unwrap_or(false);
+        .is_some_and(|row| super::findings::finding_ids_in(row).contains(&minted));
     if !stored {
         return Err(ApiError(format!(
             "finding {minted} committed but not read back"
@@ -1094,19 +1088,6 @@ fn mint_finding_id() -> String {
     let mut bytes = [0u8; 4];
     getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn finding_ids_in(row: &Value) -> Vec<String> {
-    row.get("findings")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("finding_id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Stamp `resolved_at` on a finding. An unknown id is an error; an
