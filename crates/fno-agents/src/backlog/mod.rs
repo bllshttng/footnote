@@ -482,6 +482,9 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     Ok(())
 }
 
+const CLEAR_SOAK_KEYS: &str = "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms',
+    'soak_clean_days', 'soak_last_sample_ms', 'soak_last_divergent')";
+
 /// Schema 3: a populated schema-2 store under the json backend rebuilds
 /// its rows once from authoritative graph.json. The raw-baseline shadow
 /// diff and the child-extras columns stop NEW drift; this rebuild visits
@@ -489,7 +492,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
 /// being skipped. It is also the soak restart: the rebuild deletes the
 /// graph_meta soak keys, so the next clean sample starts a fresh 7-day
 /// clock. Under the sqlite backend graph.json is not authoritative, so
-/// the stamp moves and nothing is rewritten.
+/// the stamp moves, the soak keys still clear, and no row is rewritten.
 fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
     let current: i64 = meta(connection, "schema_version")?
@@ -499,6 +502,9 @@ fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(),
         return Ok(());
     }
     if backend(graph) == Backend::Sqlite {
+        connection
+            .execute(CLEAR_SOAK_KEYS, [])
+            .map_err(|error| error.to_string())?;
         return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
     }
     // The rebuild reads graph.json; a file that does not parse, or that
@@ -557,11 +563,7 @@ fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(),
         save_aggregate(&transaction, &node).map_err(|error| format!("rebuild: {error}"))?;
     }
     transaction
-        .execute(
-            "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms', 'soak_clean_days',
-             'soak_last_sample_ms', 'soak_last_divergent')",
-            [],
-        )
+        .execute(CLEAR_SOAK_KEYS, [])
         .map_err(|error| error.to_string())?;
     stamp_version_fields(&transaction, &content_version(&rows))?;
     stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
@@ -2027,6 +2029,9 @@ mod tests {
         // file's row looked like before the defaults pipeline ran.
         raw[0].as_object_mut().unwrap().remove("tags");
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        // The shadow write-through runs on the json leg only, the explicit
+        // rollback door; an unnamed store is sqlite from birth.
+        set_backend(&graph, Backend::Json).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         after[0]
@@ -2096,6 +2101,7 @@ mod tests {
             Value::String("pending supersession".into()),
         );
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw.clone();
         after[0]
