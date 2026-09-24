@@ -371,7 +371,7 @@ pub fn apply(
                 return;
             }
             let text = nudge_text(row, &status);
-            let resume_argv = vec![
+            let mut resume_argv = vec![
                 "fno".to_string(),
                 "agents".to_string(),
                 "resume".to_string(),
@@ -418,6 +418,11 @@ pub fn apply(
                     } else {
                         if durable_receipt {
                             state.mail_durable = true;
+                            if row.harness == "claude" {
+                                // The Working resume leg must not enqueue the
+                                // same durable message a second time.
+                                resume_argv.insert(4, "--message-already-queued".to_string());
+                            }
                         }
                         let (resume_code, _, rstderr) = runner(&resume_argv, "");
                         resumed_exit = Some(resume_code);
@@ -1148,6 +1153,49 @@ mod tests {
         assert_eq!(ev["data"]["delivered"], serde_json::json!(true));
         assert_eq!(ev["data"]["fallback"], "resume");
         assert_eq!(ev["data"]["receipt"], "msg-1 queued (durable) [live-miss]");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn durable_mail_resume_fallback_marks_the_body_as_already_queued() {
+        let saw_marker = std::cell::Cell::new(false);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("pending", false, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"send".to_string()) {
+                (
+                    0,
+                    "msg-1 queued (durable) [live-miss]\n".into(),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
+                saw_marker.set(argv.iter().any(|a| a == "--message-already-queued"));
+                (16, String::new(), String::new())
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-already-queued"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(
+            saw_marker.get(),
+            "durable fallback must carry its receipt state"
+        );
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 
