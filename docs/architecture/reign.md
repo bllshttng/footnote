@@ -14,7 +14,7 @@ Three facts fix the design, all measured against the harness internals:
 
 The `king_settle` arm is the one push arm. The daemon reads the court on its 300s beat. It mails the crown once per covered PR that settles green, and once per covered node that merges and closes. The king arms no watch.
 
-1. **Settle mail, 300s.** The daemon's `king_settle` arm joins the court's owned nodes to their PR status reads. A green settled PR mails the crown the merge lever, and a node that merged and closed mails the next-dispatch lever. A red settle stays with the daemon nudge ladder, which names the failing checks.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm joins the court's owned nodes to their PR status reads. A green settled PR mails the crown the merge lever. A node that merged and closed mails the next-dispatch lever. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
 The deleted arms are demand reads. Each is read on demand. Mail arrives as a conversation turn and cannot be missed. The board and crown liveness are check-in body reads. A red row in `fno agents status` stays the mechanical trigger for the one dispatch exception. Main CI is read as one verdict token (`red`, `green`, `pending`), never a check-run count. Several of the most productive reign wakes began with "main flipped green". Capacity is the spawn gate's job. The gate refused twice in the measured reign, correctly. The band's five readings changed no decision.
 
