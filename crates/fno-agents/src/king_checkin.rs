@@ -2415,19 +2415,21 @@ mod tests {
         let home = crate::paths::AgentsHome::at(tmp.path());
         let reg = home.registry_json();
         let agents = serde_json::json!([
-            {"name": "king-a", "status": "live", "crown_scope": "x-65a7",
+            {"name": "king-a", "status": "live", "crown_scope": "x-aaaa",
              "crown_level": 2, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-a"},
+             "harness_session_id": "sess-a",
+             "created_at": "2026-09-23T20:00:00Z"},
             {"name": "king-b", "status": "live", "crown_scope": "fno",
              "crown_level": 1, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-b"}
+             "harness_session_id": "sess-b",
+             "created_at": "2026-09-23T20:00:00Z"}
         ]);
         let doc = serde_json::json!({
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": agents,
         });
         std::fs::write(&reg, doc.to_string()).unwrap();
-        apply_crown_naming(Some("barnaby"), None, &home, "x-65a7").unwrap();
+        apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
         let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
         assert!(err.contains("king-a"), "{err}");
     }
@@ -2442,7 +2444,8 @@ mod tests {
             "agents": [
                 {"name": "king-b", "status": "live", "crown_scope": "fno",
                  "crown_level": 1, "cwd": "/repo", "harness": "claude",
-                 "harness_session_id": "sess-b"}
+                 "harness_session_id": "sess-b",
+                 "created_at": "2026-09-23T20:00:00Z"}
             ]
         });
         std::fs::write(&reg, doc.to_string()).unwrap();

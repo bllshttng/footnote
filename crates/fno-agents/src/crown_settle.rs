@@ -464,7 +464,7 @@ mod tests {
             crown_store(tmp),
             serde_json::to_string(&json!({
                 "version": 1,
-                "crowns": {"x-65a7": {
+                "crowns": {"x-aaaa": {
                     "name": "barnaby", "regnal": 1,
                     "holder_session": "sess-old",
                     "nodes": [], "updated_at": "2026-09-23T20:00:00Z"}},
@@ -476,12 +476,14 @@ mod tests {
 
     fn agents_with_succession_rows() -> Value {
         json!([
-            {"name": "king-old", "status": "live", "crown_scope": "x-65a7",
+            {"name": "king-old", "status": "live", "crown_scope": "x-aaaa",
              "crown_level": 2, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-old"},
-            {"name": "king-heir", "status": "live", "crown_scope": "x-65a7",
+             "harness_session_id": "sess-old",
+             "created_at": "2026-09-23T20:00:00Z"},
+            {"name": "king-heir", "status": "live", "crown_scope": "x-aaaa",
              "crown_level": 2, "cwd": "/repo", "harness": "claude",
-             "harness_session_id": "sess-new"}
+             "harness_session_id": "sess-new",
+             "created_at": "2026-09-23T20:00:00Z"}
         ])
     }
 
@@ -896,7 +898,7 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-65a7",
+                "kind": "crown-settle", "scope": "x-aaaa",
                 "plan": {
                     "caller": {"kind": "agent", "name": "king-heir"},
                     "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
@@ -910,8 +912,8 @@ mod tests {
         assert_eq!(answer["outcome"], "succeeded");
         let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
-        assert_eq!(doc["crowns"]["x-65a7"]["regnal"], json!(2));
-        assert_eq!(doc["crowns"]["x-65a7"]["holder_session"], json!(null));
+        assert_eq!(doc["crowns"]["x-aaaa"]["regnal"], json!(2));
+        assert_eq!(doc["crowns"]["x-aaaa"]["holder_session"], json!(null));
     }
 
     #[test]
@@ -921,7 +923,7 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-65a7",
+                "kind": "crown-settle", "scope": "x-aaaa",
                 "plan": {
                     "caller": {"kind": "human"},
                     "holder_ids": [],
@@ -935,7 +937,7 @@ mod tests {
         assert_eq!(answer["outcome"], "granted");
         let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
         let doc: Value = serde_json::from_str(&store).unwrap();
-        assert!(doc["crowns"].get("x-65a7").is_none(), "{store}");
+        assert!(doc["crowns"].get("x-aaaa").is_none(), "{store}");
     }
 
     #[test]
@@ -948,7 +950,7 @@ mod tests {
         named_record_fixture(tmp.path());
         let answer = resolve_at(
             &json!({
-                "kind": "crown-settle", "scope": "x-65a7",
+                "kind": "crown-settle", "scope": "x-aaaa",
                 "plan": {
                     "caller": {"kind": "agent", "name": "king-heir"},
                     "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],

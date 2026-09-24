@@ -168,14 +168,14 @@ mod tests {
     #[test]
     fn a_crowned_row_matches_by_scope_and_a_worker_row_by_node() {
         let names = names_map(&[("fno", "Barnaby II")]);
-        let by_node = names_map(&[("x-f42d", "Barnaby II")]);
+        let by_node = names_map(&[("x-bbbb", "Barnaby II")]);
         assert_eq!(
-            crown_name_for(&names, &by_node, Some("fno"), Some("x-f42d")).unwrap(),
+            crown_name_for(&names, &by_node, Some("fno"), Some("x-bbbb")).unwrap(),
             "Barnaby II",
             "the crowned row answers by scope, never by node"
         );
         assert_eq!(
-            crown_name_for(&names, &by_node, None, Some("x-f42d")).unwrap(),
+            crown_name_for(&names, &by_node, None, Some("x-bbbb")).unwrap(),
             "Barnaby II"
         );
         assert_eq!(crown_name_for(&names, &by_node, Some("other"), None), None);

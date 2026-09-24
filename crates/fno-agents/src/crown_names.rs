@@ -76,10 +76,27 @@ fn read(path: &Path) -> Result<Store, String> {
     Ok(store)
 }
 
+#[cfg(test)]
 fn write(path: &Path, store: &Store) -> Result<(), String> {
     let lock = crate::state::acquire_exclusive(&crate::state::lock_path(path))
         .map_err(|e| e.to_string())?;
     let out = crate::state::write_json_atomic(path, store).map_err(|e| e.to_string());
+    let _ = lock.unlock();
+    out
+}
+
+/// Read-modify-write under the exclusive sidecar lock, the registry's own
+/// contract (`state::update_registry`): a check-in naming, a settle effect
+/// and the daemon prune all mutate this file, and two writers that each
+/// read-then-write outside one lock would lose a record.
+fn update<T>(path: &Path, f: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
+    let lock = crate::state::acquire_exclusive(&crate::state::lock_path(path))
+        .map_err(|e| e.to_string())?;
+    let out = read(path).and_then(|mut store| {
+        let value = f(&mut store)?;
+        crate::state::write_json_atomic(path, &store).map_err(|e| e.to_string())?;
+        Ok(value)
+    });
     let _ = lock.unlock();
     out
 }
@@ -180,41 +197,41 @@ pub fn name_crown(
     }
     let canon = crate::territory::canonical_scope(scope);
     let live = live_index(registry_path)?;
-    let mut store = read(store_path)?;
-    let names = live_names_in(&store, &live);
-    if let Some(existing) = names.get(&canon) {
-        return Err(format!(
-            "this crown is already named {existing}; the name belongs to the crown"
-        ));
-    }
-    if let Some((held_scope, _)) = store.crowns.iter().find(|(s, rec)| {
-        *s != &canon && names.contains_key(*s) && rec.name.eq_ignore_ascii_case(name)
-    }) {
-        let holder = live
-            .get(held_scope)
-            .map(|c| c.holder.as_str())
-            .unwrap_or("another crown");
-        return Err(format!(
-            "the name {} is held by {holder} over {held_scope}; pick another name",
-            display(
-                &store.crowns[held_scope].name,
-                store.crowns[held_scope].regnal
-            )
-        ));
-    }
-    let holder_session = live.get(&canon).and_then(|c| c.holder_session.clone());
-    store.crowns.insert(
-        canon,
-        CrownNameRecord {
-            name: name.to_string(),
-            regnal: 1,
-            holder_session,
-            nodes: Vec::new(),
-            updated_at: now_stamp(),
-        },
-    );
-    write(store_path, &store)?;
-    Ok(display(name, 1))
+    update(store_path, |store| {
+        let names = live_names_in(store, &live);
+        if let Some(existing) = names.get(&canon) {
+            return Err(format!(
+                "this crown is already named {existing}; the name belongs to the crown"
+            ));
+        }
+        if let Some((held_scope, _)) = store.crowns.iter().find(|(s, rec)| {
+            *s != &canon && names.contains_key(*s) && rec.name.eq_ignore_ascii_case(name)
+        }) {
+            let holder = live
+                .get(held_scope)
+                .map(|c| c.holder.as_str())
+                .unwrap_or("another crown");
+            return Err(format!(
+                "the name {} is held by {holder} over {held_scope}; pick another name",
+                display(
+                    &store.crowns[held_scope].name,
+                    store.crowns[held_scope].regnal
+                )
+            ));
+        }
+        let holder_session = live.get(&canon).and_then(|c| c.holder_session.clone());
+        store.crowns.insert(
+            canon,
+            CrownNameRecord {
+                name: name.to_string(),
+                regnal: 1,
+                holder_session,
+                nodes: Vec::new(),
+                updated_at: now_stamp(),
+            },
+        );
+        Ok(display(name, 1))
+    })
 }
 
 /// Move the record from `old_scope` to `new_scope`, keeping name and regnal,
@@ -229,60 +246,60 @@ pub fn keep_from(
     let old = crate::territory::canonical_scope(old_scope);
     let new = crate::territory::canonical_scope(new_scope);
     let live = live_index(registry_path)?;
-    let mut store = read(store_path)?;
-    let Some(rec) = store.crowns.get(&old).cloned() else {
-        return Err(format!(
-            "no crown name is recorded over {old}; nothing to keep"
-        ));
-    };
-    let Some(crown) = live.get(&new) else {
-        return Err(format!("no live crown holds {new}"));
-    };
-    if rec.holder_session.is_none() || rec.holder_session != crown.holder_session {
-        return Err(format!(
-            "the name {} over {old} belongs to another holder ({}), not to {} holding {new}",
-            display(&rec.name, rec.regnal),
-            rec.holder_session
-                .as_deref()
-                .unwrap_or("(no session bound)"),
-            crown.holder,
-        ));
-    }
-    store.crowns.remove(&old);
-    store.crowns.insert(
-        new,
-        CrownNameRecord {
-            holder_session: crown.holder_session.clone(),
-            nodes: Vec::new(),
-            updated_at: now_stamp(),
-            ..rec
-        },
-    );
-    write(store_path, &store)
+    update(store_path, |store| {
+        let Some(rec) = store.crowns.get(&old).cloned() else {
+            return Err(format!(
+                "no crown name is recorded over {old}; nothing to keep"
+            ));
+        };
+        let Some(crown) = live.get(&new) else {
+            return Err(format!("no live crown holds {new}"));
+        };
+        if rec.holder_session.is_none() || rec.holder_session != crown.holder_session {
+            return Err(format!(
+                "the name {} over {old} belongs to another holder ({}), not to {} holding {new}",
+                display(&rec.name, rec.regnal),
+                rec.holder_session
+                    .as_deref()
+                    .unwrap_or("(no session bound)"),
+                crown.holder,
+            ));
+        }
+        store.crowns.remove(&old);
+        store.crowns.insert(
+            new,
+            CrownNameRecord {
+                holder_session: crown.holder_session.clone(),
+                nodes: Vec::new(),
+                updated_at: now_stamp(),
+                ..rec
+            },
+        );
+        Ok(())
+    })
 }
 
 /// A succession: regnal + 1, the heir unbound until its first beat binds it.
 /// A crown with no record succeeds to no record.
 pub fn carry_succession(store_path: &Path, scope: &str) -> Result<(), String> {
     let canon = crate::territory::canonical_scope(scope);
-    let mut store = read(store_path)?;
-    let Some(rec) = store.crowns.get_mut(&canon) else {
-        return Ok(());
-    };
-    rec.regnal = rec.regnal.saturating_add(1);
-    rec.holder_session = None;
-    rec.updated_at = now_stamp();
-    write(store_path, &store)
+    update(store_path, |store| {
+        if let Some(rec) = store.crowns.get_mut(&canon) {
+            rec.regnal = rec.regnal.saturating_add(1);
+            rec.holder_session = None;
+            rec.updated_at = now_stamp();
+        }
+        Ok(())
+    })
 }
 
 /// Drop the record (a fresh grant over the scope starts unnamed).
 pub fn forget(store_path: &Path, scope: &str) -> Result<(), String> {
     let canon = crate::territory::canonical_scope(scope);
-    let mut store = read(store_path)?;
-    if store.crowns.remove(&canon).is_none() {
-        return Ok(());
-    }
-    write(store_path, &store)
+    update(store_path, |store| {
+        store.crowns.remove(&canon);
+        Ok(())
+    })
 }
 
 /// An heir's (or any) beat: bind a null `holder_session` to the live
@@ -295,19 +312,20 @@ pub fn bind_and_refresh(
     nodes: Vec<String>,
 ) -> Result<(), String> {
     let canon = crate::territory::canonical_scope(scope);
-    let mut store = read(store_path)?;
-    let Some(rec) = store.crowns.get_mut(&canon) else {
-        return Ok(());
-    };
-    if rec.holder_session.is_none() {
-        let live = live_index(registry_path)?;
-        if let Some(crown) = live.get(&canon) {
-            rec.holder_session = crown.holder_session.clone();
+    let live = live_index(registry_path)?;
+    update(store_path, |store| {
+        let Some(rec) = store.crowns.get_mut(&canon) else {
+            return Ok(());
+        };
+        if rec.holder_session.is_none() {
+            if let Some(crown) = live.get(&canon) {
+                rec.holder_session = crown.holder_session.clone();
+            }
         }
-    }
-    rec.nodes = nodes;
-    rec.updated_at = now_stamp();
-    write(store_path, &store)
+        rec.nodes = nodes;
+        rec.updated_at = now_stamp();
+        Ok(())
+    })
 }
 
 /// Drop every record `live_names` would not count. Answers the dropped
@@ -317,11 +335,12 @@ pub fn prune(store_path: &Path, registry_path: &Path) -> Result<Vec<String>, Str
     if dropped.is_empty() {
         return Ok(dropped);
     }
-    let mut store = read(store_path)?;
-    for scope in &dropped {
-        store.crowns.remove(scope);
-    }
-    write(store_path, &store)?;
+    update(store_path, |store| {
+        for scope in &dropped {
+            store.crowns.remove(scope);
+        }
+        Ok(())
+    })?;
     Ok(dropped)
 }
 
@@ -377,6 +396,7 @@ mod tests {
             "name": name, "status": "live", "crown_scope": scope,
             "crown_level": level, "cwd": "/repo", "harness": "claude",
             "harness_session_id": session,
+            "created_at": "2026-09-23T20:00:00Z",
         })
     }
 
@@ -405,14 +425,14 @@ mod tests {
         write_registry(
             tmp.path(),
             json!([
-                crown_row("king-a", "x-65a7", 2, "sess-a"),
+                crown_row("king-a", "x-aaaa", 2, "sess-a"),
                 crown_row("king-b", "fno", 1, "sess-b"),
             ]),
         );
         name_crown(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
-            "x-65a7",
+            "x-aaaa",
             "barnaby",
         )
         .unwrap();
@@ -424,7 +444,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("king-a"), "{err}");
-        assert!(err.contains("x-65a7"), "{err}");
+        assert!(err.contains("x-aaaa"), "{err}");
     }
 
     #[test]
@@ -474,23 +494,23 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
-            json!([crown_row("king-a", "x-65a7", 2, "sess-a")]),
+            json!([crown_row("king-a", "x-aaaa", 2, "sess-a")]),
         );
         name_crown(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
-            "x-65a7",
+            "x-aaaa",
             "barnaby",
         )
         .unwrap();
-        carry_succession(&store_path(tmp.path()), "x-65a7").unwrap();
+        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
-        assert_eq!(dump["crowns"]["x-65a7"]["regnal"], json!(2));
-        assert_eq!(dump["crowns"]["x-65a7"]["holder_session"], json!(null));
+        assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(2));
+        assert_eq!(dump["crowns"]["x-aaaa"]["holder_session"], json!(null));
         // A second succession before the heir checks in reads regnal 3.
-        carry_succession(&store_path(tmp.path()), "x-65a7").unwrap();
+        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
-        assert_eq!(dump["crowns"]["x-65a7"]["regnal"], json!(3));
+        assert_eq!(dump["crowns"]["x-aaaa"]["regnal"], json!(3));
     }
 
     #[test]
@@ -498,29 +518,29 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         write_registry(
             tmp.path(),
-            json!([crown_row("king-heir", "x-65a7", 2, "sess-heir")]),
+            json!([crown_row("king-heir", "x-aaaa", 2, "sess-heir")]),
         );
         name_crown(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
-            "x-65a7",
+            "x-aaaa",
             "barnaby",
         )
         .unwrap();
-        carry_succession(&store_path(tmp.path()), "x-65a7").unwrap();
+        carry_succession(&store_path(tmp.path()), "x-aaaa").unwrap();
         bind_and_refresh(
             &store_path(tmp.path()),
             &registry_path(tmp.path()),
-            "x-65a7",
-            vec!["x-f42d".into()],
+            "x-aaaa",
+            vec!["x-bbbb".into()],
         )
         .unwrap();
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(
-            dump["crowns"]["x-65a7"]["holder_session"],
+            dump["crowns"]["x-aaaa"]["holder_session"],
             json!("sess-heir")
         );
-        assert_eq!(dump["crowns"]["x-65a7"]["nodes"], json!(["x-f42d"]));
+        assert_eq!(dump["crowns"]["x-aaaa"]["nodes"], json!(["x-bbbb"]));
         // The carried record still counts while unbound (null session).
     }
 

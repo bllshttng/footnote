@@ -1574,7 +1574,7 @@ mod tests {
     #[test]
     fn a_named_fold_renders_the_name_on_the_holder_line() {
         let crown = json!({
-            "scope": "x-65a7", "level": 2, "status": "live",
+            "scope": "x-aaaa", "level": 2, "status": "live",
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok", "name": "Barnaby II"},
         });
@@ -1588,7 +1588,7 @@ mod tests {
     #[test]
     fn an_unnamed_fold_leaves_the_holder_line_unchanged() {
         let crown = json!({
-            "scope": "x-65a7", "level": 2, "status": "live",
+            "scope": "x-aaaa", "level": 2, "status": "live",
             "holder": "king-fno-g7", "grantor": "user",
             "scope_nodes": {"status": "ok"},
         });
