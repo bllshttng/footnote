@@ -39,14 +39,10 @@ from fno.rust_binary import find_dev_binary
 def _resume_argv_tokens(snippet: str) -> tuple[str, list[str]]:
     """Parse a ``--print-command`` snippet into its cwd and its innermost argv.
 
-    Rust composes a declared ``pre_exec`` (the shared-daemon start; codex's
-    resume form owns one, see harness_capabilities.toml) into
-    ``sh -c '<pre_exec>; exec <argv>'``, doubly shell-quoting the innermost
-    tokens. Python's ``FNO_AGENTS_RUNTIME=python`` fallback renders the
-    identity tokens only - that daemon-lifecycle ownership is Rust's alone
-    (docs/architecture/codex-thread-driver.md) - so a pre_exec-owning form is
-    byte-divergent between the two doors by design. This recovers the argv
-    both sides actually agree on.
+    Rust may compose a declared ``pre_exec`` into
+    ``sh -c '<pre_exec>; exec <argv>'`` and prefixes the command with ``env``
+    bindings for launch identity and route context. Those wrappers are launch
+    context, not provider argv; this recovers the argv both doors agree on.
     """
     outer = shlex.split(snippet)
     assert outer[0] == "cd" and outer[2] == "&&" and outer[3] == "exec"
@@ -54,7 +50,11 @@ def _resume_argv_tokens(snippet: str) -> tuple[str, list[str]]:
     rest = outer[4:]
     if rest[:2] == ["sh", "-c"]:
         _, _, tail = rest[2].partition("; exec ")
-        return cwd, shlex.split(tail)
+        rest = shlex.split(tail)
+    if rest[:1] == ["env"]:
+        rest = rest[1:]
+        while rest and "=" in rest[0]:
+            rest = rest[1:]
     return cwd, rest
 
 
