@@ -431,6 +431,30 @@ pub(crate) fn zero_job_failures(
     Ok(out)
 }
 
+/// The GitHub annotation that distinguishes an Actions timeout from a run
+/// cancelled before it reached a verdict.
+pub(crate) fn timeout_annotation(annotations: &Value) -> Option<String> {
+    fn timeout_message(annotation: &Value) -> Option<String> {
+        if annotation.get("annotation_level").and_then(Value::as_str) != Some("failure") {
+            return None;
+        }
+        let message = annotation.get("message").and_then(Value::as_str)?;
+        message
+            .contains("exceeded the maximum execution time")
+            .then(|| message.to_string())
+    }
+
+    let rows = annotations.as_array()?;
+    if rows.first().is_some_and(Value::is_array) {
+        rows.iter()
+            .filter_map(Value::as_array)
+            .flatten()
+            .find_map(timeout_message)
+    } else {
+        rows.iter().find_map(timeout_message)
+    }
+}
+
 /// The `status-zero-job-runs` op: `slug` + the raw runs/check-runs arrays
 /// in, the Python rollup rows out. `jobs_total` rides the gh probe seam.
 fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
@@ -493,6 +517,40 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
         Ok(runs) => runs,
         Err(err) => return json!({ "error": err }),
     };
+    let mut check_runs = check_runs.clone();
+    for run in &mut check_runs {
+        let timed_out = run.get("conclusion").and_then(Value::as_str) == Some("cancelled")
+            && run
+                .pointer("/output/annotations_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0;
+        if !timed_out {
+            continue;
+        }
+        let Some(id) = run.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let path = format!("repos/{slug}/check-runs/{id}/annotations");
+        let timeout = probes
+            .run_gh(
+                &cwd,
+                &[
+                    "api".to_string(),
+                    "--paginate".to_string(),
+                    "--slurp".to_string(),
+                    path,
+                ],
+            )
+            .ok()
+            .and_then(|(ok, stdout, _stderr)| ok.then_some(stdout))
+            .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+            .and_then(|annotations| timeout_annotation(&annotations));
+        if let (Some(timeout), Some(run)) = (timeout, run.as_object_mut()) {
+            run.insert("conclusion".to_string(), json!("timed_out"));
+            run.insert("timeout".to_string(), json!(timeout));
+        }
+    }
     let jobs_total = |id: u64| -> Result<u64, String> {
         let args = vec![
             "api".to_string(),
@@ -508,7 +566,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
     };
-    match zero_job_failures(&runs, check_runs, &jobs_total) {
+    match zero_job_failures(&runs, &check_runs, &jobs_total) {
         Err(err) => json!({"error": err}),
         Ok(rows) => json!({
             "rows": rows
@@ -526,6 +584,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
                 .collect::<Vec<_>>(),
             // The same listing, for the caller's workflow-name mapping.
             "listing": runs,
+            "check_runs": check_runs,
         }),
     }
 }
@@ -543,16 +602,24 @@ fn window_pair(window: Option<&Vec<Value>>) -> Option<(u64, u64)> {
     let window = window?;
     let first = window.first()?;
     if first.is_object() {
-        let failed = window
+        let failed_index = window
             .iter()
-            .find(|step| step.get("conclusion").and_then(Value::as_str) == Some("failure"))?;
+            .position(|step| step.get("conclusion").and_then(Value::as_str) == Some("failure"))?;
+        let failed = &window[failed_index];
         let start = parse_rfc3339_unix(failed.get("started_at").and_then(Value::as_str)?)?;
-        let end = parse_rfc3339_unix(failed.get("completed_at").and_then(Value::as_str)?)?;
+        let completed = parse_rfc3339_unix(failed.get("completed_at").and_then(Value::as_str)?)?;
+        let slack_end = completed.saturating_add(1);
+        let successor_start = window
+            .iter()
+            .skip(failed_index + 1)
+            .filter_map(|step| parse_rfc3339_unix(step.get("started_at").and_then(Value::as_str)?))
+            .find(|started| *started >= start);
+        let end = successor_start.map_or(slack_end, |started| slack_end.min(started));
         return Some((start, end));
     }
     let start = parse_rfc3339_unix(first.as_str()?)?;
     let end = parse_rfc3339_unix(window.get(1).and_then(Value::as_str)?)?;
-    Some((start, end))
+    Some((start, end.saturating_add(1)))
 }
 
 /// The cause of a failed job, from its own log: the harness verdict names
@@ -590,14 +657,14 @@ pub(crate) fn failure_cause(payload: &Value) -> Value {
         .position(|(_, content)| step_failed.is_match(content))
         .unwrap_or(lines.len());
     let block_range = if let Some((w_start, w_end)) = window {
-        // Timestamped-window scope. The steps API has second precision, so
-        // the end gets one second of slack; a line with no parseable
-        // timestamp cannot prove it belongs and is dropped.
+        // The steps API has second precision, so `window_pair` adds one
+        // second of slack unless the next step starts sooner. A line with no
+        // parseable timestamp cannot prove it belongs and is dropped.
         let mut block_start = lines.len();
         let mut block_end = 0;
         for (i, (ts, _)) in lines.iter().enumerate() {
             match ts {
-                Some(ts) if *ts >= w_start && *ts <= w_end + 1 => {
+                Some(ts) if *ts >= w_start && *ts <= w_end => {
                     block_start = block_start.min(i);
                     block_end = block_end.max(i + 1);
                 }
@@ -631,8 +698,19 @@ pub(crate) fn failure_cause(payload: &Value) -> Value {
     let block: Vec<String> = lines[block_range.start..block_range.end]
         .iter()
         .map(|(_, content)| content.clone())
+        .take_while(|content| {
+            !content.starts_with("##[error]Process completed with exit code")
+                && !content.starts_with("##[error]The operation was canceled.")
+        })
         .filter(|content| {
-            !content.is_empty() && !content.starts_with("::") && !content.starts_with("smoke: ")
+            !content.is_empty()
+                && !content.starts_with("::")
+                && !content.starts_with("smoke: ")
+                && !content.starts_with("##[group]")
+                && !content.starts_with("##[endgroup]")
+                && !content.starts_with("##[warning]")
+                && !content.starts_with("##[notice]")
+                && !content.starts_with("##[debug]")
         })
         .collect();
     let block_text = block.join("\n");

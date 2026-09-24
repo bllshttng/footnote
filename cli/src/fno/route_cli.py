@@ -317,7 +317,13 @@ def inventory_cmd(
     Then a ``slots`` section: each verb's lanes, live capacity, would_take.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
-    from fno.route_resolve import resolve_inventory, slot_states, slot_verbs
+    from fno.route_resolve import (
+        _inventory_payload,
+        resolve_inventory,
+        slot_states,
+        slot_verbs,
+    )
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     inv = resolve_inventory()
     slots = [slot_states(verb, inventory=inv) for verb in slot_verbs()]
@@ -334,27 +340,12 @@ def inventory_cmd(
             typer.echo(note)
             _echo_slots(slots)
         return
-    for name in sorted(inv.rows):
-        row = inv.rows[name]
-        if not row.harness or not row.model:
-            verdict = "incomplete"
-        elif row.harness not in READABLE_PROVIDERS:
-            verdict = "not-installed"
-            refusals.append(f"{name}: harness {row.harness!r} is not installed (known: {', '.join(READABLE_PROVIDERS)})")
-        elif not row.band:
-            verdict = "unbanded"
-        else:
-            verdict = "ok"
-        pct = "" if row.percentile is None else f"{row.percentile:g}"
-        rows.append({
-            "name": name,
-            "harness": row.harness,
-            "model": row.model,
-            "band": row.band or "unbanded",
-            "percentile": pct,
-            "effort": row.effort,
-            "verdict": verdict,
-        })
+    try:
+        answer = route_slot_call({"mode": "inventory", "inventory": _inventory_payload(inv),
+                                  "known_harnesses": list(READABLE_PROVIDERS)})
+    except RouteSlotUnavailable as exc:
+        answer = {"refusals": [f"route-slot-unavailable ({exc})"]}
+    rows, refusals, drift = (answer.get(k) or [] for k in ("rows", "refusals", "drift"))
     if json_output:
         typer.echo(json.dumps({
             "objective": inv.objective,
@@ -363,6 +354,7 @@ def inventory_cmd(
             "slots": slots,
             "fingerprint": next((s["fingerprint"] for s in slots if s.get("fingerprint")), ""),
             "policy": _routing_policy_safe(),
+            "drift": drift,
         }, indent=2))
     else:
         typer.echo(f"objective={inv.objective}"
@@ -380,6 +372,8 @@ def inventory_cmd(
         for r in rows:
             typer.echo(_fmt(r))
         _echo_slots(slots)
+        for line in drift:
+            typer.echo(line)
     for line in refusals:
         typer.echo(f"refused: {line}", err=True)
 

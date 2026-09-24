@@ -520,11 +520,15 @@ fn stale_crown_doc_gate(
     // The handoffs-dir resolver lives only in the Python CLI; shell it rather
     // than copy it, then pick newest + mtime with the same resolver
     // king_checkin uses, so the two cannot drift.
-    let out = std::process::Command::new(fno_bin)
-        .args(["config", "paths", "handoff", "--scope", scope])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let out = match run_bounded(
+        std::ffi::OsStr::new(fno_bin),
+        &["config", "paths", "handoff", "--scope", scope],
+        cwd,
+        stopgate_read_timeout(),
+    ) {
+        BoundedRun::Completed(out) => out,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
