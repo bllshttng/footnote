@@ -4905,8 +4905,9 @@ mod tests {
             .collect();
         assert!(ids.contains(&"x-live".to_string()), "{ids:?}");
 
-        // An unreadable store reads None: every consumer keeps its rows.
-        std::fs::write(graph_path(&home), b"{broken").unwrap();
+        // An unreadable STORE reads None: every consumer keeps its rows.
+        // The store is graph.db; the json file is only the frozen mirror.
+        std::fs::write(graph_path(&home).with_extension("db"), b"not a database").unwrap();
         assert!(read_graph_rows(&home).is_none());
         std::fs::remove_dir_all(&base).ok();
     }

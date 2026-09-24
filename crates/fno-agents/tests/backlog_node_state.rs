@@ -137,15 +137,18 @@ fn ac2_budget_boundary() {
     assert!(err.contains("total=5001"), "message: {err}");
     assert!(err.contains("limit=5000"), "message: {err}");
     // Multibyte emoji count per scalar (not bytes): details 3000 + 2001
-    // emoji body = 5001 scalars, refused.
+    // emoji body = 5001 scalars, refused. A fresh graph, because the store
+    // holds the earlier row and the json file is a frozen mirror under it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let graph2 = dir2.path().join("graph.json");
     write_graph(
-        &graph,
+        &graph2,
         &[json!({
             "id": "b-1", "slug": "slug-b-1", "title": "n", "type": "feature",
             "status": "ready", "priority": "p1", "details": "x".repeat(3000),
         })],
     );
-    let err = node_state::replace_state(&graph, &ws(&graph, "b-1", &"🌊".repeat(2001)))
+    let err = node_state::replace_state(&graph2, &ws(&graph2, "b-1", &"🌊".repeat(2001)))
         .unwrap_err()
         .to_string();
     assert!(err.contains("total=5001"), "message: {err}");
