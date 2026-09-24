@@ -1047,6 +1047,21 @@ def _hermetic_reap_receipt(monkeypatch):
     monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _answer)
 
 
+@pytest.fixture
+def loop_admission_ready(monkeypatch):
+    """Stub native readiness for CLI tests focused on other spawn behavior."""
+    import fno.rust_binary as rust_binary
+
+    real_call = rust_binary.call_binary_json
+
+    def ready(verb, args, *call_args, **call_kwargs):
+        if verb == "loop" and args and args[0] == "readiness":
+            return None, {"ready": True}
+        return real_call(verb, args, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(rust_binary, "call_binary_json", ready)
+
+
 def checkout_fno_agents_binary():
     """This checkout's own fno-agents binary: $FNO_AGENTS_BIN, else the cargo
     dev build under crates/fno-agents/target. resolve_binary() would prefer a

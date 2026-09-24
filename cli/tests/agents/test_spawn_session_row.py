@@ -202,7 +202,7 @@ def test_spawn_review_label_or_seed_is_refused(
 
 
 def test_spawn_with_prose_and_node_composes_a_labeled_seed(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, loop_admission_ready
 ) -> None:
     """Arbitrary prose with a `--node` is no longer unlabelable: the verb
     seam composes the node's command in front, so the seed names the verb
@@ -309,7 +309,26 @@ def test_spawn_prose_prompt_names_nothing_stays_silent(
     assert "session row open skipped" not in result.stderr
 
 
-def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_prompt_two_ids_cannot_bypass_review_session(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """Two node ids do not turn an external prompt into a local review session."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "bg",
+         f"/review {NODE} then x-4ab2"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 89, result.output
+    assert '"reason":"review_session"' in result.output.replace(" ", "")
+    assert _node_rows() == []
+
+
+def test_spawn_target_family_stamps_do(
+    workdir_claude, resolvable_uuid, loop_admission_ready
+) -> None:
     """A /target-family payload names a do worker: the row stamps do (the
     worker's own claim-acquire stamp duplicate-fills it), never review."""
     from fno.agents.cli import agents_app
@@ -496,7 +515,9 @@ def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
     assert "session row open skipped" not in result.stderr
 
 
-def test_spawn_bad_session_phase_refuses_before_spawn(workdir_claude) -> None:
+def test_spawn_bad_session_phase_refuses_before_spawn(
+    workdir_claude, loop_admission_ready
+) -> None:
     """--session-phase is validated against the enum fail-closed (exit 2)."""
     from fno.agents.cli import agents_app
     from fno.agents.registry import load_registry
@@ -666,7 +687,9 @@ def test_reap_open_do_fills_and_keeps(graph_cli_home) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_do_row_records_refusal_without_config(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_do_row_records_refusal_without_config(
+    workdir_claude, resolvable_uuid, loop_admission_ready
+) -> None:
     """No standing grant: the row still records an EXPLICIT approved=false, so
     absence-on-a-row never has to be guessed at resolve time."""
     from fno.agents.cli import agents_app
@@ -687,7 +710,9 @@ def test_spawn_do_row_records_refusal_without_config(workdir_claude, resolvable_
     assert grant["recorded_at"]
 
 
-def test_spawn_do_row_records_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+def test_spawn_do_row_records_config_grant(
+    workdir_claude, resolvable_uuid, monkeypatch, loop_admission_ready
+) -> None:
     """enabled=true + grant=dispatch: the row records the positive grant with
     source naming the config."""
     from fno.agents.cli import agents_app
@@ -716,7 +741,9 @@ def test_spawn_do_row_records_config_grant(workdir_claude, resolvable_uuid, monk
     assert grant["source"] == "config"
 
 
-def test_spawn_no_merge_flag_outranks_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+def test_spawn_no_merge_flag_outranks_config_grant(
+    workdir_claude, resolvable_uuid, monkeypatch, loop_admission_ready
+) -> None:
     """A /target message carrying --no-merge records approved=false with the
     flag named as the source, even while the standing config would grant
     (AC9-EDGE's newer refusal)."""

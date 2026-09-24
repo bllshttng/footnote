@@ -3195,6 +3195,38 @@ fn api_mutation(
                 "version": payload.version,
             }))
         }
+        "finding_create" => {
+            let input: api::FindingInput = input_of(params, "input")?;
+            let receipt = api::finding_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "finding_id": receipt.finding_id,
+                "node_id": receipt.node_id,
+                "version": receipt.version,
+            }))
+        }
+        "finding_resolve" => {
+            let session = params.get("session").and_then(Value::as_str);
+            let receipt = api::finding_resolve(store, id.unwrap_or_default(), session)?;
+            Ok(json!({
+                "finding_id": receipt.finding_id,
+                "status": receipt.status,
+                "resolved_at": receipt.resolved_at,
+                "version": receipt.version,
+            }))
+        }
+        "findings_list" => {
+            let open_only = params
+                .get("open_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let list = api::findings(store, id.as_deref(), open_only)?;
+            Ok(json!({
+                "findings": list
+                    .iter()
+                    .map(crate::backlog::model::finding_to_json)
+                    .collect::<Vec<_>>(),
+            }))
+        }
         "pull_request_attach" => {
             let input: api::PullRequestInput = input_of(params, "input")?;
             let payload = api::pull_request_attach(store, id.unwrap_or_default(), input)?;

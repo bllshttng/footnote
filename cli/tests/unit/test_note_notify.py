@@ -982,3 +982,41 @@ def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert written == ["x-0d08"]
+
+
+def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
+    """The finding flags never touch the note machinery in Python: the bridge
+    is a passthrough and Rust owns routing, delivery and the receipt."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    calls: list[list[str]] = []
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(argv, check=False):
+        calls.append(argv)
+        return Proc()
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
+    monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the note machinery must not run for a blocking finding")
+
+    monkeypatch.setattr("fno.backlog.note_notify.readers_before_append", must_not_run)
+    monkeypatch.setattr(note_bridge, "_write_state", must_not_run)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls, "the native action must run"
+    assert calls[0][1:2] == ["backlog-note"]
+    assert calls[0][-1] == "--blocking"
+    assert "x-5a62" in calls[0] and "the gate leak" in calls[0], (
+        "the positionals ride through verbatim"
+    )

@@ -10,8 +10,8 @@
 // The contract's vocabulary: api speaks (and re-exports) the model types,
 // so a caller imports them from here and the names stay single-sourced.
 pub use crate::backlog::model::{
-    Comment, Dispatch, Encounter, Node, Priority, PullRequest, RelationType, SessionRecord,
-    StateType, Status,
+    Comment, Dispatch, Encounter, Finding, Node, Priority, PullRequest, RelationType,
+    SessionRecord, StateType, Status,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -936,6 +936,221 @@ pub fn comment_create(
     } else {
         refusal(store)
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FindingInput {
+    pub body: String,
+    #[serde(default)]
+    pub block_cmd: Option<String>,
+    #[serde(default)]
+    pub block_excerpt: Option<String>,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_harness: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FindingReceipt {
+    pub finding_id: String,
+    pub node_id: String,
+    pub version: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolveReceipt {
+    pub finding_id: String,
+    pub status: String,
+    pub resolved_at: String,
+    pub version: i64,
+}
+
+/// One blocking review finding on a node. The finding id mints inside the
+/// mutation (re-minting while it collides with any stored finding), and the
+/// receipt returns only after the commit and the readback both succeed: a
+/// write that did not persist is an error, never a receipt.
+pub fn finding_create(
+    store: &Store,
+    node_id: &str,
+    input: FindingInput,
+) -> Result<FindingReceipt, ApiError> {
+    const EXCERPT_LIMIT: usize = 2048;
+    let body = crate::backlog::node_state::normalize_prose(&input.body);
+    if body.is_empty() {
+        return Err(ApiError("finding body is empty".into()));
+    }
+    if crate::backlog::node_state::count_prose(&body) > crate::backlog::node_state::PROSE_LIMIT {
+        return Err(ApiError(format!(
+            "finding body exceeds the {} character prose limit",
+            crate::backlog::node_state::PROSE_LIMIT
+        )));
+    }
+    let mut excerpt = input.block_excerpt.clone();
+    if let Some(text) = &mut excerpt {
+        if text.chars().count() > EXCERPT_LIMIT {
+            *text = text.chars().take(EXCERPT_LIMIT).collect();
+        }
+    }
+    let mut minted = String::new();
+    let ok = mutate(store, "finding_create", |rows| {
+        if !rows
+            .iter()
+            .any(|row| crate::graph_store::entry_id(row) == Some(node_id))
+        {
+            return Ok(false);
+        }
+        loop {
+            minted = mint_finding_id();
+            let taken = rows
+                .iter()
+                .any(|row| finding_ids_in(row).iter().any(|id| id == &minted));
+            if !taken {
+                break;
+            }
+        }
+        for row in rows.iter_mut() {
+            if crate::graph_store::entry_id(row) != Some(node_id) {
+                continue;
+            }
+            let Ok(mut parsed) = Node::from_json(row) else {
+                return Ok(false);
+            };
+            parsed.findings.get_or_insert_with(Vec::new).push(Finding {
+                finding_id: minted.clone(),
+                created_at: Some(crate::graph_store::now_isoformat()),
+                body: body.clone(),
+                block_cmd: input.block_cmd.clone(),
+                block_excerpt: excerpt.clone(),
+                source_session_id: input.source_session_id.clone(),
+                source_harness: input.source_harness.clone(),
+                resolved_at: None,
+                resolved_by_session_id: None,
+            });
+            *row = parsed.to_json();
+            break;
+        }
+        Ok(true)
+    })?;
+    if !ok {
+        return Err(ApiError(format!("node {node_id} not found")));
+    }
+    let rows = read_rows(store)?;
+    let stored = rows
+        .iter()
+        .find(|row| crate::graph_store::entry_id(row) == Some(node_id))
+        .and_then(|row| row.get("findings").and_then(Value::as_array))
+        .map(|items| {
+            items
+                .iter()
+                .any(|item| item.get("finding_id").and_then(Value::as_str) == Some(minted.as_str()))
+        })
+        .unwrap_or(false);
+    if !stored {
+        return Err(ApiError(format!(
+            "finding {minted} committed but not read back"
+        )));
+    }
+    Ok(FindingReceipt {
+        finding_id: minted,
+        node_id: node_id.to_string(),
+        version: fresh_version(store),
+    })
+}
+
+fn mint_finding_id() -> String {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn finding_ids_in(row: &Value) -> Vec<String> {
+    row.get("findings")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("finding_id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Stamp `resolved_at` on a finding. An unknown id is an error; an
+/// already-resolved id returns `already_resolved` with the prior
+/// resolved_at and wrote nothing this call.
+pub fn finding_resolve(
+    store: &Store,
+    finding_id: &str,
+    session: Option<&str>,
+) -> Result<ResolveReceipt, ApiError> {
+    let mut seen = false;
+    let mut prior: Option<String> = None;
+    let mut stamped: Option<String> = None;
+    mutate(store, "finding_resolve", |rows| {
+        for row in rows.iter_mut() {
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let Some(list) = &mut parsed.findings else {
+                continue;
+            };
+            let Some(finding) = list.iter_mut().find(|f| f.finding_id == finding_id) else {
+                continue;
+            };
+            seen = true;
+            if let Some(when) = &finding.resolved_at {
+                prior = Some(when.clone());
+                return Ok(false);
+            }
+            let now = crate::graph_store::now_isoformat();
+            finding.resolved_at = Some(now.clone());
+            finding.resolved_by_session_id = session.map(str::to_string);
+            stamped = Some(now);
+            *row = parsed.to_json();
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    let (status, resolved_at) = match (stamped, prior) {
+        (Some(now), _) => ("resolved", now),
+        (None, Some(before)) => ("already_resolved", before),
+        (None, None) => return Err(ApiError(format!("unknown finding {finding_id}"))),
+    };
+    Ok(ResolveReceipt {
+        finding_id: finding_id.to_string(),
+        status: status.into(),
+        resolved_at,
+        version: fresh_version(store),
+    })
+}
+
+/// Open or resolved findings, optionally scoped to one node. A store read
+/// error is Err, never an empty list.
+pub fn findings(
+    store: &Store,
+    node_id: Option<&str>,
+    open_only: bool,
+) -> Result<Vec<Finding>, ApiError> {
+    let mut out: Vec<Finding> = Vec::new();
+    for row in read_rows(store)? {
+        let Ok(node) = Node::from_json(&row) else {
+            continue;
+        };
+        if let Some(id) = node_id {
+            if node.id != id {
+                continue;
+            }
+        }
+        for finding in node.findings.unwrap_or_default() {
+            if open_only && finding.resolved_at.is_some() {
+                continue;
+            }
+            out.push(finding);
+        }
+    }
+    Ok(out)
 }
 
 pub fn pull_request_attach(

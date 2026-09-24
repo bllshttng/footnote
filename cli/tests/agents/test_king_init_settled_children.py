@@ -24,6 +24,9 @@ def court(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     monkeypatch.setattr("fno.king.state.king_loop_enabled", lambda: True)
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json", lambda *a, **k: (None, {"ready": True})
+    )
     return tmp_path
 
 
