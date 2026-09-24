@@ -168,7 +168,7 @@ effort = "high"
 [[routing.models]]
 name = "luna-codex"
 harness = "codex"
-model = "gpt-5.6-luna"
+model = "luna"
 effort = "xhigh"
 ```
 
@@ -219,7 +219,9 @@ A small built-in table sits under this key as a **fallback**, never the authorit
 
 The fallback keeps a tier request answerable where nothing is declared. Review level names a model for every level. Answering nothing drops `/code-review` to the provider default everywhere. The grid is unaffected and stays config-first. A virgin install records `grid=no-inventory-declared` and injects nothing. The grid asks whether config declared a row, not whether any row exists.
 
-`cli/src/fno_routing_sample/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config route init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+`cli/src/fno_routing_sample/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config route init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr. The row table itself is rendered by the route-slot binary. With that binary unavailable the command prints a `route-slot-unavailable` refusal instead of a table.
+
+A codex row's `model` can name a family instead of a version: `sol`, `astra`, `terra`, or `luna`. At spawn, route-slot resolves the family to the newest `gpt-<version>-<family>` in codex's own `models_cache.json`. Codex refreshes that list without an fno release. The resolution prints a `slot family` chain line. A claude row can name the alias (`opus`, `sonnet`, `haiku`, `fable`), and the claude harness resolves it. A value that is already a full id is a pin: route-slot never rewrites it. A codex row pinned below the newest listed version of its family prints one `drift` line under `fno doctor route`.
 
 ## The strict inventory policy
 
