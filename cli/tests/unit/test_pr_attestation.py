@@ -302,6 +302,16 @@ def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(feature)
+    branch_result = subprocess.run(
+        ["bash", str(script), "feature/pr-42"],
+        cwd=canonical,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert branch_result.returncode == 0, branch_result.stderr
+    assert branch_result.stdout.strip() == str(feature)
 
 
 def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):

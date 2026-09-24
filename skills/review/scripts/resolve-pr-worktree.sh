@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pr="${1:-}"
-[[ "$pr" =~ ^[1-9][0-9]*$ ]] || {
-  echo "resolve-pr-worktree: expected a positive PR number" >&2
+target="${1:-}"
+[[ -n "$target" && "$target" != -* ]] || {
+  echo "resolve-pr-worktree: expected a PR number or head branch" >&2
   exit 2
 }
 
-branch="$(gh api "repos/{owner}/{repo}/pulls/${pr}" --jq '.head.ref')" || {
-  echo "resolve-pr-worktree: could not read PR ${pr} head branch" >&2
-  exit 3
-}
+branch="$target"
+if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
+  branch="$(gh api "repos/{owner}/{repo}/pulls/${target}" --jq '.head.ref')" || {
+    echo "resolve-pr-worktree: could not read PR ${target} head branch" >&2
+    exit 3
+  }
+fi
 [[ -n "$branch" ]] || {
-  echo "resolve-pr-worktree: PR ${pr} returned no head branch" >&2
+  echo "resolve-pr-worktree: target ${target} returned no head branch" >&2
   exit 3
 }
 
