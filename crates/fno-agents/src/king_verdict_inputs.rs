@@ -226,12 +226,12 @@ fn generation_start(
             registry_path.display()
         )
     })?;
-    let start = if row_created < manifest_created.clone() {
-        row.created_at.clone()
+    let (start, source) = if row_created < manifest_created.clone() {
+        (row.created_at.clone(), "registry")
     } else {
-        manifest_created_at.to_string()
+        (manifest_created_at.to_string(), "manifest")
     };
-    Ok((start, "registry".to_string()))
+    Ok((start, source.to_string()))
 }
 
 /// Alias members (a project's `short_name` spelling) resolve to their
@@ -839,6 +839,22 @@ mod tests {
         assert_eq!(inputs.generation_start_source, "manifest");
         assert_eq!(inputs.inherited_undelivered, 2);
         assert_eq!(inputs.filed_undelivered, 0);
+    }
+
+    #[test]
+    fn generation_start_source_names_the_selected_timestamp() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("FNO_CONFIG");
+        let dir = tmp("later-holder-generation-start");
+        let (manifest, registry) =
+            generation_setup(&dir, &[inherited_holder_row("2026-09-20T00:00:00Z")]);
+        let inputs =
+            resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
+                .expect("the earlier manifest timestamp bounds the generation");
+        assert_eq!(inputs.generation_start, "2026-09-18T20:48:22Z");
+        assert_eq!(inputs.generation_start_source, "manifest");
     }
 
     #[test]
