@@ -297,9 +297,10 @@ impl std::fmt::Display for ScopeDrainError {
         match self {
             ScopeDrainError::TimedOut { scope, bound } => write!(
                 f,
-                "king drain for {scope} timed out after {}ms and was killed (a spent fire budget leaves a late read only its {}ms floor); wait for a quieter fire or rerun the drain",
+                "king drain for {scope} timed out after {}ms and was killed (drain floor {}ms; {}ms of harness margin left); wait for a quieter fire or rerun the drain",
                 bound.as_millis(),
-                crate::loopcheck::STOPGATE_BOUND_FLOOR.as_millis()
+                crate::loopcheck::STOPGATE_DRAIN_FLOOR.as_millis(),
+                crate::loopcheck::stopgate_harness_margin_remaining_ms()
             ),
             ScopeDrainError::Failed(detail) => write!(f, "{detail}"),
         }

@@ -175,6 +175,7 @@ def _seed_node(g: Path, plan_path: str) -> None:
         "plan_path": plan_path,
         "cost_usd": None,
         "cost_sessions": [],
+        "artifact_url": "https://example.test/artifact",
     }]}) + "\n")
 
 
@@ -219,6 +220,7 @@ def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
         "plan_path": "internal/plans/costed.md",
         "cost_usd": 9.99,
         "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
+        "artifact_url": "https://example.test/artifact",
     }]}) + "\n")
     ledger.write_text(json.dumps({"entries": [{
         "plan_path": "internal/plans/costed.md", "cost_usd": 1.20,

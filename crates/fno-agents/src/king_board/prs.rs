@@ -1,5 +1,5 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting};
+use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting, Budget};
 use super::queues::NODE_ID_BODY;
 use super::{is_terminal, s_i64, s_str, SourceRead};
 use crate::graph_store::entry_id;
@@ -121,7 +121,7 @@ fn split_failed_listing(listing: &SourceRead) -> (SourceRead, SourceRead) {
 /// row is judged.
 pub(crate) fn read_prs(
     cwd: &Path,
-    slice: Duration,
+    deadline: Instant,
     max_pr_reads: usize,
     entries: Option<&[Value]>,
 ) -> (SourceRead, SourceRead, Vec<String>) {
@@ -136,7 +136,12 @@ pub(crate) fn read_prs(
         "--json".to_string(),
         "number,title,mergeable,statusCheckRollup,headRefName,url,body".to_string(),
     ];
-    let listing = run_json(cmd, cwd, slice);
+    let bound = Budget::spawn_bound(deadline);
+    let listing = if bound.is_zero() {
+        SourceRead::over_budget("not-read: board budget exhausted before the read".to_string())
+    } else {
+        run_json(cmd, cwd, bound)
+    };
     if !listing.is_ok() {
         let (mergeable, undriven) = split_failed_listing(&listing);
         return (mergeable, undriven, Vec::new());
@@ -246,9 +251,9 @@ fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, Str
 pub(crate) fn read_pr_gates(
     cwd: &Path,
     numbers: &[i64],
-    slice: Option<Duration>,
+    deadline: Option<Instant>,
 ) -> (SourceRead, Vec<String>) {
-    let Some(slice) = slice else {
+    let Some(deadline) = deadline else {
         return (
             SourceRead::err("merge gate not read: board budget exhausted before the source"),
             Vec::new(),
@@ -258,7 +263,6 @@ pub(crate) fn read_pr_gates(
     // asking the gate, but every candidate at once would spend the fleet's
     // shared gh quota faster than any slice can police.
     const GATE_FANOUT: usize = 4;
-    let deadline = Instant::now() + slice;
     let mut rows: Vec<Value> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -671,7 +675,11 @@ mod tests {
 
     #[test]
     fn no_candidates_reads_the_gate_ok_and_empty() {
-        let (read, warnings) = read_pr_gates(Path::new("."), &[], Some(Duration::from_secs(1)));
+        let (read, warnings) = read_pr_gates(
+            Path::new("."),
+            &[],
+            Some(Instant::now() + Duration::from_secs(1)),
+        );
         assert!(read.is_ok());
         assert!(read.rows().is_empty());
         assert!(warnings.is_empty());

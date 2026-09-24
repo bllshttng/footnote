@@ -173,6 +173,11 @@ struct StoreFile {
     /// until their first drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feed_width: Option<serde_json::Value>,
+    /// The experimental backlog board in the sidebar menu. Default
+    /// absent = off: the view is experimental, so the next toggle persists a
+    /// clean value. Same contract as `confirm_lifecycle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    experimental_backlog_view: Option<serde_json::Value>,
 }
 
 /// Read the operator's stop/remove confirm pref. Absent, corrupt, or
@@ -217,6 +222,29 @@ pub fn load_feed_width() -> Option<u16> {
 pub fn save_feed_width(width: u16) {
     mutate(|file| {
         file.feed_width = serde_json::to_value(width).ok();
+    });
+}
+
+/// Read the experimental backlog board pref. Absent, corrupt, or
+/// non-bool reads as `false` - the view is off until the operator turns it
+/// on, and the next toggle persists a clean value. The same degrade posture
+/// every pref here keeps.
+pub fn load_experimental_backlog_view() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .experimental_backlog_view
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Persist the experimental backlog board pref. Best-effort like every
+/// other write here.
+pub fn save_experimental_backlog_view(on: bool) {
+    mutate(|file| {
+        file.experimental_backlog_view = serde_json::to_value(on).ok();
     });
 }
 
@@ -651,6 +679,20 @@ mod tests {
     fn missing_file_loads_empty() {
         let _s = Scratch::new("missing");
         assert!(load().is_empty());
+    }
+
+    // The experimental backlog toggle: absent reads off, a corrupt
+    // value reads off, and save/load round-trips (AC3-HP).
+    #[test]
+    fn experimental_backlog_view_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("backlog-view");
+        assert!(!load_experimental_backlog_view(), "absent reads off");
+        std::fs::write(view_path(), r#"{"experimental_backlog_view":"yes-please"}"#).unwrap();
+        assert!(!load_experimental_backlog_view(), "corrupt reads off");
+        save_experimental_backlog_view(true);
+        assert!(load_experimental_backlog_view());
+        save_experimental_backlog_view(false);
+        assert!(!load_experimental_backlog_view());
     }
 
     // An unknown key or value is dropped entry-wise, not fatally: a file
