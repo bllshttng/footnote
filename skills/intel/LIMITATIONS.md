@@ -11,5 +11,5 @@
 - Opencode rows carry no activity counters: their tokens, lines, tool errors, and languages read null, and `activity.unmeasured` names the harness.
 - Hours, response time, and the parallel measure are empty for history without witness coverage. Witnessed user turns are the only input, and sessions folded before the witness existed have none.
 - Line counts come from edit arguments, so a rejected edit still counts its lines, the same choice Claude's `/insights` makes.
-- The HTML scrub is pattern-based. A secret with no known shape under 40 characters, and paraphrased transcript text with no quotes, pass through. A quoted span outside Operator corrections is dropped, so a needed quote outside that section must move into it.
+- The HTML scrub is pattern-based. A secret with no known shape under 40 characters, and paraphrased transcript text with no quotes, pass through. A quoted span outside `Operator corrections` is dropped, so a needed quote outside that section must move into it.
 - The HTML copy is a snapshot. When the markdown or the fold JSON changes, the copy does not update. Re-run `--render` to refresh it. The retention rule prunes stamped copies past the 12 newest. A hand-renamed HTML outside the stamp pattern is never pruned.

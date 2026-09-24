@@ -302,7 +302,9 @@ pub(crate) fn evaluate(
 
 /// The daemon-facing pass over the court payload the arm_watch tick already
 /// read. Every child is bounded; a failed read or send names itself in the
-/// note and never mails a half answer.
+/// note and never mails a half answer. The status read rides the shared
+/// `run_fno_output` helper, and the mail child resolves the porcelain
+/// through `scrape::fno_bin()` - no second resolver lives here.
 pub fn run(payload: &Value, config_cwd: &Path, now_unix: u64) -> SettleOutcome {
     let store = crate::operator_notice::notify_signals_path();
     let graph_path = crate::king_board::scope::graph_json_path(config_cwd);
@@ -310,24 +312,17 @@ pub fn run(payload: &Value, config_cwd: &Path, now_unix: u64) -> SettleOutcome {
         crate::graph_store::read_pr_rows(&graph_path, Some(pr)).map_err(|e| e.to_string())
     };
     let mut status = |cwd: &Path, pr: i64| -> Result<Value, String> {
-        let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-        let mut cmd = std::process::Command::new(&fno);
-        cmd.args(["do", "pr", "status", &pr.to_string()])
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null());
-        let out = crate::bounded_cmd::output_with_timeout(cmd, STATUS_READ_BUDGET_S)
-            .ok_or_else(|| format!("the status read timed out after {STATUS_READ_BUDGET_S}s"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "fno do pr status failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("the status payload did not parse: {e}"))
+        let pr_arg = pr.to_string();
+        let out = crate::provider_cap_verbs::run_fno_output(
+            &["do", "pr", "status", pr_arg.as_str()],
+            Some(cwd),
+            std::time::Duration::from_secs(STATUS_READ_BUDGET_S),
+        )
+        .ok_or_else(|| "the status read failed or timed out".to_string())?;
+        serde_json::from_str(&out).map_err(|e| format!("the status payload did not parse: {e}"))
     };
     let mut mail = |scope: &str, text: &str| -> bool {
-        let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+        let fno = crate::scrape::fno_bin();
         let mut cmd = std::process::Command::new(&fno);
         cmd.args([
             "agents",
