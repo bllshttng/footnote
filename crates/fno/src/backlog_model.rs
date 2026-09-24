@@ -850,6 +850,7 @@ pub(crate) fn resolve_row<'a>(inp: &'a Inputs, id: &str) -> Option<&'a Value> {
 
 /// One link from a row field of ids to the nodes the read holds.
 fn links(inp: &Inputs, e: &Value, field: &str) -> Vec<Link> {
+    let order = order_of(inp);
     e.get(field)
         .and_then(Value::as_array)
         .map(|arr| {
@@ -861,7 +862,6 @@ fn links(inp: &Inputs, e: &Value, field: &str) -> Vec<Link> {
                         .map(str::to_string);
                     let (column, status) = match resolve_row(inp, id) {
                         Some(r) => {
-                            let order = order_of(inp);
                             let blocked = false;
                             let card = card_of(inp, r, &order, blocked);
                             (card.as_ref().map(|c| c.column), node_status_text(r))
@@ -890,13 +890,13 @@ fn reverse_links(inp: &Inputs, id: &str, field: &str) -> Vec<Link> {
             _ => false,
         }
     };
+    let order = order_of(inp);
     inp.rows
         .iter()
         .filter(|r| r.get(field).is_some_and(names))
         .filter_map(|r| {
             let rid = r.get("id").and_then(Value::as_str)?;
             let title = r.get("title").and_then(Value::as_str).map(str::to_string);
-            let order = order_of(inp);
             let card = card_of(inp, r, &order, false);
             Some(Link {
                 id: rid.to_string(),

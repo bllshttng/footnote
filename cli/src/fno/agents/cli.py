@@ -2311,6 +2311,8 @@ def cmd_spawn(
                 no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
                 account=account or dispatch_account,
+                seed=message,
+                session_phase=session_phase,
                 succession_scope=crown_scope if succeed else None,
             )
             break

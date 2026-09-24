@@ -141,7 +141,7 @@ Start the row's Action cell with one of three words:
 
 - `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
 - `Delete` - the row removes Python and adds none.
-- `Grant d-XXXXXXXX +N` - the operator ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`, and the row declares the added lines it spends as `+N`. The rows are summed against `config.blueprint.python_repair_added_lines` (default 30). A Grant with no `+N` is a finding.
+- `Grant d-XXXXXXXX +N` - the superuser ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`, and the row declares the added lines it spends as `+N`. The rows are summed against `config.blueprint.python_repair_added_lines` (default 30). A Grant with no `+N` is a finding.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
@@ -223,12 +223,9 @@ Do NOT auto-insert a block to silence the gate. The point is to force the enumer
 
 ## Executor Lock Transcription (when a design doc supplies a Locked Decision)
 
-When a design doc carries a frontend or mixed surface, `/blueprint` runs the
-structural surface detector (`references/detect-surface.sh`) and captures the
-executor decision as a Locked Decisions entry (see
-`references/executor-routing-prompt.md`). `/blueprint` transcribes that lock
-into the plan's frontmatter so the operator's three-tier resolver honors it
-without a runtime surface-inference fallback.
+When a design doc carries a frontend or mixed surface, `/blueprint` runs `references/detect-surface.sh`. The detector captures the executor decision as a Locked Decisions entry. See `references/executor-routing-prompt.md`.
+
+`/blueprint` copies that lock to plan frontmatter. The `waves` resolver honors it without runtime surface inference.
 
 Transcription is purely mechanical: same Locked Decisions input yields the
 same frontmatter output. No LLM judgment in this step.
@@ -248,12 +245,11 @@ Then:
 - **`tdd` or `impeccable`** - write `executor: <value>` to the plan `.md`
   frontmatter (the single doc is the only plan shape). Replace any existing
   `# executor:` comment from the template; never duplicate the key.
-- **`mixed`** - write `executor: tdd` at plan level (the safe default), then
-  emit `executor: impeccable` task blocks for any task whose file list
-  matches the operator's locked surface-inference patterns
-  (`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`).
-  This mirrors the operator resolver and keeps cost honest: impeccable runs
-  only where it earns its keep.
+- **`mixed`** - both signals fire.
+  - Set plan-level `executor: tdd` as the safe default.
+  - When task files match the user's locked surface patterns, add `executor: impeccable`.
+  - Patterns: `**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, and `src/styles/**`.
+  - The `waves` resolver follows these patterns. Run impeccable only where it earns its keep.
 - **Empty** - write nothing. The runtime surface-inference fallback handles
   the plan correctly. No prompt; no warning.
 
@@ -352,11 +348,9 @@ Blueprint provenance is written by the identity-guarded `fno backlog session clo
 
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 
-When `/blueprint` generates a plan that locks `executor: impeccable` at the plan
-level OR via per-task overrides, it MUST check for a valid PRODUCT.md before
-the auto-intake step. This is the spec-time half of the defense-in-depth
-prereq strategy (decision 3a); the runtime half lives in the operator
-dispatch gate (Phase 03).
+When `/blueprint` locks `executor: impeccable` at plan or task level, it MUST check for a valid PRODUCT.md before auto-intake.
+
+This is the spec-time half of the defense-in-depth prerequisite strategy (decision 3a). The runtime half lives in the `waves` dispatch gate (Phase 03).
 
 Run the check script after writing the plan files but before collision check
 and auto-intake:
@@ -731,7 +725,7 @@ blasting.
 
 Every plan answers five questions before designing, into a `## Five questions` section (schema: `quick-template.md`). Each answer is a named thing or the word `none`. The word `none` is a claim, judged like any other.
 
-1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? Name the person: operator, crowned king, worker session, or plugin user. Tie the cost to a source the plan cites.
+1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? Name the person: user, crowned king, worker session, or plugin user. Tie the cost to a source the plan cites.
 2. **Surface fit**: which existing verb, skill or config does this extend? Name it, or name the one you searched for and why it does not cover this.
 3. **Uncovered case**: which realistic input or state breaks the design as written? Two sessions at once, a moved index or branch, an empty or stale input the plan already relies on.
 4. **Deletable**: what can you delete and still ship the stated goal?
@@ -741,4 +735,4 @@ After step 3's validate-and-finalize, `fno doctor observer judge --plan "$PLAN_P
 
 The judge asks a plan the dimensions its node's kind calls for. Every plan gets the shared readers: surface_fit, deletable, duplication, epic_fit, mission_fit and code_truth. A feature, epic or roadmap node also gets the product readers: `persona`, `uncovered_case`, `customer_fit`, `competitive_fit`, `ship_quality` and `partner_challenge`. The last three are the competitive read, the AI ship-quality read and the partner challenge questions. A bug node gets the cause readers instead of the product pack. They ask whether the plan reproduced the failure (`reproduced`) and named a root cause (`root_cause`). They also ask whether it checked the sibling callers (`sibling_callers`) and whether a test proves the fix (`regression_test`). `competitive_fit` reads `PRODUCT.md` the way `customer_fit` does, so an `## Alternatives` section there is what it argues from. epic_fit reads the parent epic and its siblings. mission_fit reads the nearest vision_path ancestors and `config.project.vision`. code_truth reads the plan's own line citations, resolved on disk. A missing source, or a missing lens file, is a coverage gap and not a fail. A source reader's fail quotes its source. A fail that quotes nothing real stays a gap.
 
-On a fail: revise the plan once, or write a one-line disposition under that question in `## Five questions`. Never loop, and never block intake. The judge has not been calibrated against the operator's own judgment yet. It informs a human decision instead of replacing one. The pass criteria live only in the judge's own lens files, which the planner never reads. Never copy them into a skill or a plan.
+On a fail: revise the plan once, or write a one-line disposition under that question in `## Five questions`. Never loop, and never block intake. The judge has not been calibrated against the user's own judgment yet. It informs a human decision instead of replacing one. The pass criteria live only in the judge's own lens files, which the planner never reads. Never copy them into a skill or a plan.

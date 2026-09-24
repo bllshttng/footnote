@@ -59,7 +59,9 @@ pub(super) fn evaluate_plan_fidelity(
         timeout,
     ) {
         BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
-        BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed => FidelityGate::Absent,
+        BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed | BoundedRun::Refused => {
+            FidelityGate::Absent
+        }
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
                 "plan fidelity check timed out after {:.1}s running `{} do plan fidelity {} --json` \

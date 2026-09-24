@@ -41,12 +41,13 @@ Each phrasing below was weighed against the table during the authority rename an
 - **operator override** - config precedence the human set (`EVENTS_SCHEMA_PATH`, `FNO_AGENTS_BIN`). It names a setting, not the authority a gate checks.
 - **queue lanes** - the king board's operator-request lane, the `fno inbox user` queue's internal "operator lane" file name, and the origin-keyed voter lane. They hang off the wire value and the stored rows.
 - **operator typing** for pane provenance - keystroke provenance in `mux_cli.rs`, not the mail-probe warning. The mail-probe pitfall family says superuser typing.
-- **the OPERATOR as the addressed boss** in king skills - the address sense. A separate vocabulary decision from this one.
 
 ## A deliberate omission
 
 `crates/fno-agents/src/finalize.rs` keeps its generic human-facing string. A Rust copy of `display_name()` is a second implementation of one behavior. A parity harness forcing the two to agree costs more than the string staying generic.
 
 ## Before you run sed
+
+The address sense in skill prose is `user`. `scripts/ci/check-operator-address.sh` prevents drift.
 
 Read the tables first. Every row except the authority sense, which is done, is out of scope by decision, not by oversight. A rename of the address sense goes through `cli/src/fno/user.py` (`UserBlock`, `display_name()`), the three address strings that import it, and the `fno inbox user` verb. It does not touch the reserved senses, the wire values, the graph rows, the shipped config keys, or the shell homonym.
