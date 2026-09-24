@@ -320,9 +320,9 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
             };
             let board = backlog_model::board(b.inputs.as_ref().expect("set one line above"), &q);
             b.errors = board.errors.clone();
-            // A read that returned errors with no lanes never repaints a
-            // good board empty: keep the last good body, show the errors.
-            if !board.lanes.is_empty() || b.body.is_none() {
+            // A failed read (errors with no lanes) never repaints a good
+            // board empty; a filter matching nothing (empty errors) does.
+            if !board.lanes.is_empty() || board.errors.is_empty() || b.body.is_none() {
                 b.body = Some(board);
             }
             focus_card(b, focus.as_deref());
@@ -1191,7 +1191,10 @@ fn rederive(b: &mut BoardView) {
     };
     let board = backlog_model::board(inputs, &q);
     b.errors = board.errors.clone();
-    if !board.lanes.is_empty() || b.body.is_none() {
+    // A filter that matches nothing has empty errors and REPLACES the
+    // body: the zeroed board is the honest answer. Only a failed read
+    // (errors with no lanes) keeps the last good body.
+    if !board.lanes.is_empty() || board.errors.is_empty() || b.body.is_none() {
         b.body = Some(board);
     }
 }
