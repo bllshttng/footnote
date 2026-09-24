@@ -230,7 +230,7 @@ pub(crate) use review_findings::event_lines;
 #[cfg(test)]
 use review_findings::OpenFinding;
 use review_findings::{
-    build_findings_block_reason, demote_unmeasured_coverage, open_review_findings,
+    build_findings_block_reason, demote_unmeasured_coverage, open_findings_from_store,
     review_journal_text,
 };
 pub use review_findings::{unattested_reviewers_scan, UnattestedReviewer};
@@ -841,17 +841,20 @@ pub(crate) fn decide_with_payload(
     }
 
     // node_id is resolved once above, beside the <help> distress emit.
-    let (open_findings, malformed_findings) = match node_id.as_deref() {
-        Some(n) => open_review_findings(&project_events, n),
-        None => (Vec::new(), 0),
+    // Findings live in the store, not a rotating journal: the reader names a
+    // read error instead of reading it as zero (AC5 - could-not-read is not
+    // zero).
+    let (open_findings, findings_read_error) = match node_id.as_deref() {
+        Some(n) => open_findings_from_store(&crate::graph_get::default_graph_path(), n),
+        None => (Vec::new(), None),
     };
-    if malformed_findings > 0 {
+    if let Some(error) = &findings_read_error {
         emit(
-            "loop_check_malformed_finding",
+            "loop_check_finding_store_error",
             serde_json::json!({
                 "session_id": session_id,
                 "node": node_id,
-                "malformed_lines": malformed_findings
+                "error": error
             }),
         );
     }
@@ -980,11 +983,17 @@ pub(crate) fn decide_with_payload(
         // the session gives up rather than looping forever on an unresolved
         // finding. Fires on a promise OR a mute-probe (the paths that would
         // otherwise terminate-allow), never on an ordinary working fire.
-        if !open_findings.is_empty()
+        if (!open_findings.is_empty() || findings_read_error.is_some())
             && !backstop_tripped
             && (intent == Intent::Promise || consecutive_after >= MUTE_PROBE_N)
         {
-            let reason = build_findings_block_reason(&open_findings, malformed_findings);
+            let reason = match &findings_read_error {
+                Some(error) => format!(
+                    "finding store unreadable for {}: {error} - the gate refuses to read it as zero",
+                    node_id.as_deref().unwrap_or("?")
+                ),
+                None => build_findings_block_reason(&open_findings),
+            };
             fire_row(
                 "block",
                 if intent == Intent::Promise {
@@ -998,7 +1007,7 @@ pub(crate) fn decide_with_payload(
                     "ci": last_ci,
                     "reviewed": false,
                     "open_findings": open_findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
-                    "malformed_findings": malformed_findings
+                    "finding_store_error": findings_read_error
                 }),
             );
             return (
@@ -1651,8 +1660,11 @@ pub(crate) fn decide_with_payload(
                 // session whose lease renewal succeeds and whose harness can
                 // idle; a fall-through there must not reach a terminal built
                 // from absence.
-                let observed_async_wait =
-                    async_wait_class(&pr_info, open_findings.is_empty(), head_shipped);
+                let observed_async_wait = async_wait_class(
+                    &pr_info,
+                    open_findings.is_empty() && findings_read_error.is_none(),
+                    head_shipped,
+                );
 
                 //: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
@@ -1805,7 +1817,7 @@ pub(crate) fn decide_with_payload(
                         build_block_reason(
                             &pr_info,
                             &head_sha,
-                            open_findings.is_empty(),
+                            open_findings.is_empty() && findings_read_error.is_none(),
                             head_shipped,
                         )
                     });
