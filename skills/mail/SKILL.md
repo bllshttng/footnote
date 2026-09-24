@@ -40,9 +40,8 @@ happens when that misses, and it is recovery, not delivery.**
 
 `fno agents mail send` tries a live inject first. On success the `<fno_mail>` turn lands in the recipient's session and an audit-only `delivery: hosted` row records it in `messages.jsonl`. Recipient drains ignore that row because delivery already happened. When no live inject confirms, the envelope instead enters the durable queue and waits on a drain the recipient does not reliably run. Both exit 0, so **read the receipt, not the exit code**:
 
-- `msg-<id> delivered (hosted)` - the inject was confirmed into the recipient's session and is visible in the sender's outbox. This is the normal outcome.
-- `msg-<id> queued (durable)` - live delivery was **not confirmed**, so treat it
-  as not delivered. Nobody checks their voicemail.
+- `msg-<id> delivered (hosted)` - the live inject was accepted. It does not prove the recipient read it.
+- `msg-<id> queued (durable)` - live delivery was not confirmed. This is durable fallback, not delivery.
 
 The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
 fallback queue, which is why they read like a mailbox. They are the recovery
@@ -151,7 +150,7 @@ fno agents mail send --to-project "<to_project>" "<body>"
 
 `fno agents mail send` exits 0 for both outcomes, so the receipt line is the only signal:
 
-- `msg-<id> delivered (hosted)` - a live recipient took it now. Report it plainly.
+- `msg-<id> delivered (hosted)` - the live inject was accepted. That does not prove the recipient read it.
 - `msg-<id> queued (durable)` - **report this as NOT delivered**, not as success.
   The CLI prints the recovery ladder on stderr; relay it. Offer to `resume` the
   session and re-send rather than telling the user to wait for a drain.

@@ -385,7 +385,7 @@ pub fn apply(
                     text,
                 ];
                 let (code, stdout, _) = runner(&argv, "");
-                let mut landed = crate::mail_inject::mail_send_landed(code, &stdout);
+                let mut landed = crate::mail_inject::mail_send_accepted(code, &stdout);
                 let mut fallback = false;
                 // Exit 0 is only a queue acceptance. When the receipt says
                 // the lane cannot reach the session (the verb prints both
