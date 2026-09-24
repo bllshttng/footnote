@@ -38,9 +38,9 @@ pr_app = typer.Typer(
 
 @pr_app.callback()
 def _select_pr_worktree(ctx: typer.Context) -> None:
-    if not (command := ctx.invoked_subcommand) or command not in {"verify", "status", "base-lineage-check", "merge-result-check", "coverage-check", "hold-check"}:
+    if not (command := ctx.invoked_subcommand) or command not in {"verify", "status", "base-lineage-check", "merge-result-check", "coverage-check"}:
         return
-    if pr := next((arg for arg in sys.argv[sys.argv.index(command) + 1:] if arg.isdigit()), None):
+    if pr := next((arg.partition("=")[2] if arg.startswith("--pr-number=") else arg for arg in sys.argv[sys.argv.index(command) + 1:] if arg.isdigit() or arg.startswith("--pr-number=")), None):
         from fno.pr._review_hold import resolve_pr_worktree
 
         try:
@@ -759,9 +759,9 @@ def hold_check(
     repo: Optional[str] = typer.Option(None, "--repo", help="Repository working directory."),
 ) -> None:
     """Refuse a PR whose bound plan ancestry carries an active or unreadable hold."""
-    from fno.pr._hold import merge_hold_reason
+    from fno.pr import _hold, _review_hold
 
-    reason = merge_hold_reason(pr_number, repo or os.getcwd())
+    reason = _hold.merge_hold_reason(pr_number, _review_hold.resolve_pr_worktree(pr_number, repo or os.getcwd()))
     if reason:
         typer.echo(reason, err=True)
         raise typer.Exit(code=3)

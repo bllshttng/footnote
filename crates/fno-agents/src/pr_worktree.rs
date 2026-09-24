@@ -181,6 +181,8 @@ mod tests {
         git(&canonical, &["config", "user.email", "test@example.com"]);
         git(&canonical, &["config", "user.name", "test"]);
         git(&canonical, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let nested = canonical.join("nested");
+        std::fs::create_dir(&nested).unwrap();
         git(
             &canonical,
             &[
@@ -194,6 +196,7 @@ mod tests {
         );
 
         assert_eq!(resolve(&canonical, "feature/pr-42").unwrap(), feature);
+        assert_eq!(resolve(&nested, "feature/pr-42").unwrap(), feature);
         assert!(resolve(&canonical, "main").unwrap() == PathBuf::from(&canonical));
         assert!(resolve(&canonical, "feature/missing").is_err());
     }

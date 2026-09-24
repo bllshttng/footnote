@@ -76,26 +76,28 @@ def test_key_is_branch_scoped_and_repo_local():
     assert claims_root_for(key) is None
 
 
-def test_pr_worktree_resolution_from_canonical_uses_the_pr_branch(tmp_path: Path, monkeypatch):
+def test_pr_worktree_resolution_from_canonical_subdir_uses_the_pr_branch(tmp_path: Path, monkeypatch):
     canonical = tmp_path / "canonical"
     feature = tmp_path / "feature-worktree"
     canonical.mkdir()
+    nested = canonical / "nested"
+    nested.mkdir()
     (canonical / ".git").mkdir()
     feature.mkdir()
     seen: list[dict] = []
 
     def verb_call(verb, payload, unavailable=None):
         assert verb == "pr-worktree"
-        assert payload == {"cwd": str(canonical), "pr": 42}
+        assert payload == {"cwd": str(nested), "pr": 42}
         seen.append(payload)
         return {"worktree": str(feature)}
 
     monkeypatch.setattr("fno.rust_binary.verb_call", verb_call)
 
-    resolved = _review_hold.resolve_pr_worktree(42, str(canonical))
+    resolved = _review_hold.resolve_pr_worktree(42, str(nested))
 
     assert resolved == str(feature)
-    assert seen == [{"cwd": str(canonical), "pr": 42}]
+    assert seen == [{"cwd": str(nested), "pr": 42}]
 
 
 def test_free_hold_and_no_worktree_is_clear(tmp_path: Path):

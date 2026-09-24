@@ -333,6 +333,14 @@ def enabled(monkeypatch, tmp_path):
     # tests/conftest.py defaults hold_for_pr to no hold for every test.
 
 
+@pytest.fixture(autouse=True)
+def _stub_pr_worktree_resolution(monkeypatch):
+    """Keep merge tests hermetic; the resolver has its own real-worktree test."""
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+
+
 def _last_json(capsys, *, stream="out") -> dict:
     cap = capsys.readouterr()
     text = cap.out if stream == "out" else cap.err
