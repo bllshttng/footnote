@@ -254,22 +254,28 @@ fn save_state(path: &Path, state: &ScanState) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot rename into place: {e}"))
 }
 
-/// Every line of the ack ledger that parses as an object with a string
-/// `turn_id`; an unreadable ledger is an empty set.
-fn read_acked_turn_ids(path: &Path) -> HashSet<String> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return HashSet::new();
+/// Acked turn ids; an absent ledger means none have been acked, while malformed
+/// or unreadable ledgers are errors.
+fn read_acked_turn_ids(path: &Path) -> Result<HashSet<String>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(format!("ack ledger {} unreadable: {error}", path.display())),
     };
     let mut acked = HashSet::new();
-    for line in raw.lines() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+    for (line_no, line) in raw.lines().enumerate() {
+        let row = serde_json::from_str::<Value>(line).map_err(|error| {
+            format!(
+                "ack ledger {} line {} malformed: {error}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
         if let Some(id) = row.get("turn_id").and_then(|v| v.as_str()) {
             acked.insert(id.to_string());
         }
     }
-    acked
+    Ok(acked)
 }
 
 fn build_payload(state: ScanState, now_epoch: f64, cursor_error: Option<String>) -> QueuePayload {
@@ -356,7 +362,7 @@ fn read_queue(
     }
     // A torn trailing row waits for its newline above, so a read never parses
     // a half-written row and derived turn ids stay stable across reads.
-    let acked = read_acked_turn_ids(&ledger_path(capture_dir, session));
+    let acked = read_acked_turn_ids(&ledger_path(capture_dir, session))?;
     state.turns.retain(|t| !acked.contains(&t.turn_id));
     state.head_sha256 = head_digest(&head, state.offset);
     let mut warnings = Vec::new();
@@ -388,6 +394,57 @@ pub(crate) fn pending_stand_down(
         .filter(|turn| turn.stand_down)
         .map(|turn| (turn.turn_id, turn.excerpt))
         .collect())
+}
+
+pub(crate) fn capture_dir(cwd: &Path) -> Option<PathBuf> {
+    std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))
+}
+
+pub(crate) fn session_queue_depth(
+    get: &impl Fn(&str) -> Option<String>,
+    home: &crate::paths::AgentsHome,
+    cwd: &Path,
+    now_epoch: f64,
+) -> Result<usize, String> {
+    let session_pin = get("FNO_OPERATOR_SESSION_ID").filter(|value| !value.trim().is_empty());
+    let harness_pin = get("FNO_OPERATOR_HARNESS").filter(|value| !value.trim().is_empty());
+    let identity = (session_pin.is_none() || harness_pin.is_none())
+        .then(|| crate::spawn_context::resolve_self_identity(get, None, None, home));
+    let session = session_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.session_id.clone())
+        })
+        .ok_or_else(|| "no resolvable session identity".to_string())?;
+    let harness = harness_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.harness.clone())
+        })
+        .unwrap_or_else(|| "claude".to_string());
+    let transcript = if let Some(path) =
+        get("FNO_OPERATOR_TRANSCRIPT").filter(|value| !value.trim().is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        match harness.as_str() {
+            "claude" => crate::claude_drive::find_transcript(&session),
+            "codex" => crate::codex_store::codex_rollout_path(None, &session),
+            _ => return Err(format!("harness {harness} keeps no transcript file")),
+        }
+        .ok_or_else(|| format!("no transcript found for {harness} session {session}"))?
+    };
+    let capture_dir = get("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| capture_dir(cwd))
+        .ok_or_else(|| "no operator capture directory could be resolved".to_string())?;
+    read_queue(&session, &transcript, &capture_dir, now_epoch).map(|outcome| outcome.payload.depth)
 }
 
 /// CLI entry: `fno-agents compaction operator-turns --session <id>
@@ -623,6 +680,83 @@ mod tests {
         let tp = dir.join("transcript.jsonl");
         write_jsonl(&tp, rows);
         read(&dir, &tp)
+    }
+
+    fn pinned_operator_turns(
+        dir: &Path,
+        transcript: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([
+            ("FNO_OPERATOR_SESSION_ID".into(), "fixture-session".into()),
+            ("FNO_OPERATOR_HARNESS".into(), "claude".into()),
+            (
+                "FNO_OPERATOR_TRANSCRIPT".into(),
+                transcript.display().to_string(),
+            ),
+            ("FNO_OPERATOR_CAPTURE_DIR".into(), dir.display().to_string()),
+        ])
+    }
+
+    #[test]
+    fn session_queue_depth_reads_planted_turn_and_ack() {
+        let dir = tmp_dir("session-depth");
+        let transcript = dir.join("transcript.jsonl");
+        write_jsonl(&transcript, &[user_row(json!("first ask"), "u-1")]);
+        let vars = pinned_operator_turns(&dir, &transcript);
+        let get = |key: &str| vars.get(key).cloned();
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(1));
+        std::fs::write(
+            ledger_path(&dir, "fixture-session"),
+            "{\"turn_id\":\"u-1\"}\n",
+        )
+        .unwrap();
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(0));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unreadable_transcript() {
+        let dir = tmp_dir("session-depth-errors");
+        let missing = dir.join("missing.jsonl");
+        let vars = pinned_operator_turns(&dir, &missing);
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn session_queue_depth_refuses_unreadable_or_malformed_ack_ledger() {
+        let dir = tmp_dir("session-depth-ack-errors");
+        let transcript = dir.join("transcript.jsonl");
+        write_jsonl(&transcript, &[user_row(json!("first ask"), "u-1")]);
+        let ledger = ledger_path(&dir, "fixture-session");
+        std::fs::create_dir(&ledger).unwrap();
+        let vars = pinned_operator_turns(&dir, &transcript);
+        let get = |key: &str| vars.get(key).cloned();
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("ack ledger"));
+        std::fs::remove_dir(&ledger).unwrap();
+        std::fs::write(&ledger, "not-json\n").unwrap();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("malformed"));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unsupported_harness() {
+        let dir = tmp_dir("session-depth-unsupported");
+        let mut vars = pinned_operator_turns(&dir, &dir.join("unused.jsonl"));
+        vars.insert("FNO_OPERATOR_HARNESS".into(), "opencode".into());
+        vars.remove("FNO_OPERATOR_TRANSCRIPT");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("opencode"));
     }
 
     #[test]
