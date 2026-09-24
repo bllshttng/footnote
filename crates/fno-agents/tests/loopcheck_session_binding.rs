@@ -323,8 +323,9 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     // drain read shells to the scripted binary. created_at is NOW: a stale
     // stamp puts the crown past its 96h default span and the term gate
     // blocks before the drain read ever runs. FNO_HOME carries a seeded
-    // graph.json: the scope read demands an epic entry, and an ambient
-    // graph cannot be opened from a test.
+    // graph.json and FNO_CONFIG a workspace config: the scope read demands
+    // an epic entry and a work.workspaces mapping, and neither may lean on
+    // an ambient machine's graph or config.
     let created = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let king_md = cwd.join("king.md");
     fs::write(
@@ -338,6 +339,17 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
         r#"{"entries":[{"id":"x-2440","type":"epic","priority":"p1","status":"in_progress"}]}"#,
     )
     .unwrap();
+    let config = graph_home.path().join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            graph_home.path().join("graph.json").to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let saved_config = std::env::var_os("FNO_CONFIG");
+    std::env::set_var("FNO_CONFIG", &config);
     std::env::set_var("FNO_HOME", graph_home.path());
     // The board's quiet verdict needs its own sources readable: fno-py and gh
     // answer empty queues from a stub dir on PATH. The scripted drain sleeps
@@ -384,6 +396,10 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     }
     if let Some(v) = saved_path {
         std::env::set_var("PATH", v);
+    }
+    match saved_config {
+        Some(v) => std::env::set_var("FNO_CONFIG", v),
+        None => std::env::remove_var("FNO_CONFIG"),
     }
     std::env::remove_var("FNO_HOME");
     let v: Value = serde_json::from_str(&out).unwrap();
