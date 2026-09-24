@@ -1116,26 +1116,24 @@ pub(crate) fn write_changed(
             continue;
         }
         match new {
+            // A row moving between the carry and the typed tables is written
+            // before its old copy is deleted: the insert reads the old
+            // version, so the move never restarts it at 0.
             Some(body) => {
                 let mut node = match Node::from_json(body) {
-                    Ok(node) => {
-                        // A row that leaves the raw carry (the model now
-                        // represents it) stops riding verbatim.
-                        crate::backlog::nodes::delete_raw(connection, &id)?;
-                        node
-                    }
+                    Ok(node) => node,
                     Err(_error) if strict => {
                         // SQLite is the only store: an unrepresentable row
                         // is CARRIED verbatim, never refused (the caller's
                         // write would lose data) and never dropped. The
                         // typed copy dies with the carry: one row per id.
-                        delete_aggregate(connection, &id)?;
                         crate::backlog::nodes::save_raw(
                             connection,
                             &id,
                             ordinals.get(id.as_str()).copied().unwrap_or(0),
                             body,
                         )?;
+                        delete_aggregate(connection, &id)?;
                         report.present_ids.push(id);
                         continue;
                     }
@@ -1143,6 +1141,9 @@ pub(crate) fn write_changed(
                 };
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
+                // A row that leaves the raw carry (the model now represents
+                // it) stops riding verbatim.
+                crate::backlog::nodes::delete_raw(connection, &id)?;
                 report.present_ids.push(id);
             }
             None => {

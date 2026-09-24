@@ -3493,18 +3493,31 @@ mod tests {
         })
     }
 
-    // The fixtures seed each row at the status the publish derives for a
-    // planless node under an empty rung map: a row the first publish
-    // re-derives really moved underneath the second writer, and conflicts.
+    /// Seed graph.json, then publish once. The first publish writes each
+    /// seeded row in its full form (default lists, derived status), and a
+    /// row it rewrites really moved underneath a second writer.
+    fn seeded(dir: &tempfile::TempDir, entries: &str) -> PathBuf {
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, entries).unwrap();
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let noop = json!({
+            "base_version": begin["version"],
+            "changed": [],
+            "removed": [],
+            "plan_rungs": {},
+        });
+        handle_commit_rows(&state, &noop).unwrap();
+        graph
+    }
+
     #[test]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
+        let graph = seeded(
+            &dir,
             r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
-        )
-        .unwrap();
+        );
         let state = row_commit_state(graph.clone());
         let begin = handle_begin(&state).unwrap();
         let mut left = begin["entries"][0].clone();
@@ -3595,6 +3608,9 @@ mod tests {
         );
     }
 
+    /// The seed row has no status, so it rides the raw carry until the
+    /// first commit moves it into nodes. The move must not restart the
+    /// row's version at the value the second writer's begin saw.
     #[test]
     fn commit_rows_same_row_conflicts_and_names_the_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -3615,13 +3631,10 @@ mod tests {
     }
 
     fn three_rows(dir: &tempfile::TempDir) -> PathBuf {
-        let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
+        seeded(
+            dir,
             r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
         )
-        .unwrap();
-        graph
     }
 
     /// The exec lane's shape: every request builds a fresh StoreState. The

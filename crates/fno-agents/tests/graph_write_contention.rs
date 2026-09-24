@@ -127,6 +127,9 @@ fn commit(stream: &mut UnixStream, id: u64, snap: &Value, row: Value, extra: Val
     rpc(stream, id, "commit_rows", params)
 }
 
+/// The seed rows have no status, so they ride the raw carry until a
+/// publish writes their full form. One empty commit does that here, so a
+/// test's first real commit moves only the rows it names.
 fn write_graph(tag: &str) -> (PathBuf, PathBuf, PathBuf, Keeper) {
     let home = temp_home(tag);
     let graph = home.join("graph.json");
@@ -138,6 +141,16 @@ fn write_graph(tag: &str) -> (PathBuf, PathBuf, PathBuf, Keeper) {
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper(tag, &graph, &sock);
     wait_for_socket(&sock);
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let snap = begin(&mut stream, 900);
+    let params = json!({
+        "base_version": snap["version"],
+        "changed": [],
+        "removed": [],
+        "plan_rungs": {},
+    });
+    let reply = rpc(&mut stream, 901, "commit_rows", params);
+    assert_eq!(reply["ok"], json!(true), "seed publish: {reply}");
     (home, graph, sock, keeper)
 }
 

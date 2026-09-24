@@ -16,7 +16,9 @@
 //!
 //! Schema 4: `nodes.version` and `nodes_raw.version` count the writes of
 //! that row, and the statement that writes the row is the only one that
-//! bumps it; the keeper's commit_rows compares them (see [`versions`]).
+//! bumps it; the keeper's commit_rows compares them (see [`versions`]). A
+//! row moving between the two tables starts one above its old version, so
+//! the move itself reads as a write.
 //! The claim's lock time is the claim row's created_at. A schema-3 binary
 //! still writes request_origin/origin_evidence into extras, so load reads
 //! the provenance columns first and those extras keys second.
@@ -241,7 +243,8 @@ pub fn save_raw(
     let text = serde_json::to_string(body).map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT INTO nodes_raw(id, ordinal, body) VALUES(?1, ?2, ?3)
+            "INSERT INTO nodes_raw(id, ordinal, body, version)
+             VALUES(?1, ?2, ?3, (SELECT COALESCE(MAX(version) + 1, 0) FROM nodes WHERE id = ?1))
              ON CONFLICT(id) DO UPDATE SET ordinal = excluded.ordinal, body = excluded.body,
                  version = nodes_raw.version + 1",
             params![id, ordinal, text],
@@ -410,10 +413,11 @@ pub fn save(connection: &Connection, node: &Node) -> Result<(), String> {
                  created_at, touched_at, completed_at, completion_note, deferred_at,
                  deferred_reason, deferred_kind, queued_at, queued_reason, reopened_at,
                  reopened_reason, archived_at, session_id, has_brief, blocks_everything,
-                 cost_usd, vision_path, artifact_url, extras)
+                 cost_usd, vision_path, artifact_url, extras, version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                  ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                 ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)
+                 ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
+                 (SELECT COALESCE(MAX(version) + 1, 0) FROM nodes_raw WHERE id = ?1))
              ON CONFLICT(id) DO UPDATE SET ordinal = excluded.ordinal, slug = excluded.slug,
                  title = excluded.title, kind = excluded.kind, status = excluded.status,
                  priority = excluded.priority, rank = excluded.rank,
