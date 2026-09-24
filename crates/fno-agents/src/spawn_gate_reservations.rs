@@ -211,7 +211,7 @@ mod tests {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
         }
-        let refusal = got.err().expect("lane 2/2 must refuse a stranger");
+        let refusal = got.expect_err("lane 2/2 must refuse a stranger");
         assert_eq!(refusal.exit_code, EXIT_PROVIDER_CAP);
         let receipt = refusal
             .receipt

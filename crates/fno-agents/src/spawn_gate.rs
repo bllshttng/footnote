@@ -1281,23 +1281,25 @@ const REVIEW_SESSION_REMEDY: &str = "run the review in the session that did the 
 
 /// Refuse before `--force` and `FNO_SPAWN_GATE=0`: a review runs in the
 /// session that did the work, never in a new one.
-fn review_session_gate(input: &GateInput) -> Result<(), Refusal> {
+fn review_session_gate(input: &GateInput) -> Option<Refusal> {
     let seeded = input
         .seed
         .as_deref()
         .and_then(crate::spawn_phase::seed_phase);
     if input.session_phase.as_deref() != Some("review") && seeded != Some("review") {
-        return Ok(());
+        return None;
     }
-    Err(Refusal::with_receipt(
-        EXIT_REVIEW_SESSION,
-        serde_json::json!({
-            "status": "refused",
-            "reason": "review_session",
-            "remedy": REVIEW_SESSION_REMEDY,
-        }),
+    Some(
+        Refusal::with_receipt(
+            EXIT_REVIEW_SESSION,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "review_session",
+                "remedy": REVIEW_SESSION_REMEDY,
+            }),
+        )
+        .ev("axis", serde_json::json!("review")),
     )
-    .ev("axis", serde_json::json!("review")))
 }
 
 /// The held keys of a [`GateGuard`], taken out before the guard drops so a
@@ -1339,7 +1341,9 @@ fn decide_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
-    review_session_gate(&input)?;
+    if let Some(refusal) = review_session_gate(&input) {
+        return Err(refusal);
+    }
 
     // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     // precedent): test suites exercising spawn plumbing must not queue behind
@@ -2732,7 +2736,7 @@ mod tests {
                 seed: Some(seed.to_string()),
                 ..Default::default()
             })
-            .expect_err(seed);
+            .expect(seed);
             assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
             let receipt = refusal.receipt.as_ref().unwrap();
             assert_eq!(receipt["reason"], "review_session");
@@ -2752,7 +2756,7 @@ mod tests {
                 session_phase: phase.map(str::to_string),
                 ..Default::default()
             })
-            .expect_err(seed);
+            .expect(seed);
             assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
         }
 
@@ -2767,9 +2771,9 @@ mod tests {
                 seed: Some(seed.to_string()),
                 ..Default::default()
             })
-            .is_ok());
+            .is_none());
         }
-        assert!(review_session_gate(&GateInput::default()).is_ok());
+        assert!(review_session_gate(&GateInput::default()).is_none());
     }
 
     /// The no_wait specimen renders the verdict line the plan pins: axis and
