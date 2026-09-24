@@ -50,7 +50,7 @@ Branch once on what the harness supports, before arming anything. Claude gets th
 
 The daemon mails the settle push on every harness:
 
-1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green and once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
 On Claude, inject the loop as the cheap heartbeat:
 

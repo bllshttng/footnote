@@ -1,6 +1,6 @@
 # Beat by harness
 
-The reign has one push contract on every harness: the daemon's `king_settle` arm mails the crown once per covered PR that settles green and once per covered node that merges and closes. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
+The reign has one push contract on every harness. The daemon's `king_settle` arm mails the crown when a covered PR settles green. It mails again when a covered node merges and closes. The cheap heartbeat varies by harness. An unverified cell is an explicit gap, not a claim.
 
 | Harness | Heartbeat |
 |---|---|

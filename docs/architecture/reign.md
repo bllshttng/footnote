@@ -12,7 +12,7 @@ Three facts fix the design, all measured against the harness internals:
 
 ## The one arm, and the demand reads
 
-The `king_settle` arm is the one push arm. The daemon reads the court on its 300s beat and mails the crown once per covered PR that settles green and once per covered node that merges and closes, so the king arms no watch.
+The `king_settle` arm is the one push arm. The daemon reads the court on its 300s beat. It mails the crown once per covered PR that settles green, and once per covered node that merges and closes. The king arms no watch.
 
 1. **Settle mail, 300s.** The daemon's `king_settle` arm joins the court's owned nodes to their PR status reads. A green settled PR mails the crown the merge lever, and a node that merged and closed mails the next-dispatch lever. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
