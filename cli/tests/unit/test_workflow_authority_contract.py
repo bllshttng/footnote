@@ -181,10 +181,11 @@ def test_reign_branches_on_harness_capability_before_arming():
     text = _skill("skills/reign/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "On Claude, arm ONE monitor, not six" in arm
-    assert "Nudge-escalation wake" in arm
-    assert "arm nothing native" in arm
-    assert "wake arm" in arm  # the codex beat is the external wake contract
+    assert "Claude gets the native `/loop` heartbeat and a shell watch" in arm
+    assert "Codex uses provider-backed goal actions" in arm
+    assert "positive `provider_goal` receipt" in arm
+    assert "separate positive `stop` receipt" in arm
+    assert "Every Codex wake runs the check-in body" in arm
 
 
 def test_reign_checkin_binds_worker_age_to_the_top_json_payload():

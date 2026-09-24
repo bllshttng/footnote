@@ -2109,7 +2109,9 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     }
 
 
-def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatch) -> None:
+def test_cmd_spawn_pane_refuses_unbound_codex_receipt(
+    tmp_path: Path, monkeypatch, loop_admission_ready
+) -> None:
     """The public CLI never exits zero with an unaddressable Codex pane."""
     from typer.testing import CliRunner
 

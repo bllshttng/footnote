@@ -174,6 +174,10 @@ fn run_context_probe(args: &[String]) -> i32 {
     let mut json_output = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
+        if crate::json_output::is_flag(arg) {
+            json_output = true;
+            continue;
+        }
         match arg.as_str() {
             "--transcript" => transcript = rest.next().map(String::as_str),
             "--session" => {
@@ -183,7 +187,6 @@ fn run_context_probe(args: &[String]) -> i32 {
                     .unwrap_or_default()
                     .to_string()
             }
-            "--json" => json_output = true,
             other => {
                 eprintln!("context-run --probe: unknown argument `{other}`");
                 return 2;

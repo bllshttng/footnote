@@ -799,6 +799,7 @@ def test_native_verbs_roster_is_filled_from_measured_sources():
         "/model",
         "/status",
         "/compact",
+        "/goal",
     ]
     assert capabilities("pi")["native_verbs"] == ["/name"]
     assert capabilities("gemini").get("native_verbs") is None

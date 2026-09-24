@@ -373,7 +373,7 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
 
 @pytest.mark.parametrize("bypass", ["--yolo", "-Y"])
 def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path, bypass
+    monkeypatch, tmp_path, bypass, loop_admission_ready
 ) -> None:
     """x-8d88: a derived node makes this a node-bearing spawn, which takes
     the Python dispatch lane; the client exec is stubbed at its terminus."""
@@ -523,7 +523,7 @@ def test_sandbox_probe_runs_only_for_bounded_codex_code_spawns(monkeypatch, tmp_
 
 
 def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, loop_admission_ready
 ) -> None:
     """x-8d88: the derived node takes the Python dispatch lane."""
     from fno.cli import app

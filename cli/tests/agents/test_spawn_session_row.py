@@ -702,7 +702,9 @@ def test_reap_open_do_fills_and_keeps(graph_cli_home) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_do_row_records_refusal_without_config(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_do_row_records_refusal_without_config(
+    workdir_claude, resolvable_uuid, loop_admission_ready
+) -> None:
     """No standing grant: the row still records an EXPLICIT approved=false, so
     absence-on-a-row never has to be guessed at resolve time."""
     from fno.agents.cli import agents_app
@@ -723,7 +725,9 @@ def test_spawn_do_row_records_refusal_without_config(workdir_claude, resolvable_
     assert grant["recorded_at"]
 
 
-def test_spawn_do_row_records_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+def test_spawn_do_row_records_config_grant(
+    workdir_claude, resolvable_uuid, monkeypatch, loop_admission_ready
+) -> None:
     """enabled=true + grant=dispatch: the row records the positive grant with
     source naming the config."""
     from fno.agents.cli import agents_app
