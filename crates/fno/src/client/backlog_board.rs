@@ -150,9 +150,11 @@ pub(crate) struct BoardView {
     pub(crate) pick: Option<PickState>,
     /// `f` facet picker: cursor per level (facet, then value).
     pub(crate) facet: Option<FacetPick>,
-    /// The drill-down overlay, when open.
     /// Pending escape bytes in board-key mode (split-arrow safety).
     board_esc: Vec<u8>,
+    /// The drill-down overlay, when open (wave 4).
+    pub(crate) detail: Option<node_detail::NodeDetailOverlay>,
+    pub(crate) detail_esc: Vec<u8>,
     /// The write verb queued for the run loop (one at a time).
     pub(crate) write_action: Option<WriteAction>,
 }
@@ -240,6 +242,8 @@ impl BoardView {
             pick: None,
             facet: None,
             board_esc: Vec::new(),
+            detail: None,
+            detail_esc: Vec::new(),
             write_action: None,
         }
     }
@@ -496,7 +500,7 @@ fn push_query_line(b: &BoardView, lines: &mut Vec<String>, board: &Board, w: usi
 }
 
 /// Truncate one line to `w` chars (the painter wraps nothing).
-fn trunc(s: &str, w: usize) -> String {
+pub(crate) fn trunc(s: &str, w: usize) -> String {
     s.chars().take(w).collect()
 }
 
@@ -661,6 +665,9 @@ pub(crate) async fn board_keys(
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(StdinFlow::Continue);
     };
+    if b.detail.is_some() {
+        return node_detail::detail_keys(view, bytes, sock_w).await;
+    }
     if b.input.is_some() {
         input_keys(view, bytes);
         return Ok(StdinFlow::Continue);
@@ -925,8 +932,12 @@ fn queue_write(b: &mut BoardView, action: WriteAction) -> bool {
     true
 }
 
-/// The write's target: the cursor card.
+/// The write's target: the drill-down's node when open, else the cursor
+/// card. The board's own keys and the drill-down's edit keys share it.
 pub(crate) fn edit_target(b: &BoardView) -> Option<String> {
+    if let Some(d) = &b.detail {
+        return Some(d.node_id.clone());
+    }
     cursor_card_id(b)
 }
 
@@ -940,7 +951,7 @@ fn gated(b: &BoardView, feature: &str) -> Option<String> {
 }
 
 /// `e`: the title editor, pre-filled with the current title.
-fn edit_title(view: &mut View) -> Result<(), String> {
+pub(crate) fn edit_title(view: &mut View) -> Result<(), String> {
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(());
     };
@@ -975,7 +986,7 @@ fn card_title(b: &BoardView, id: &str) -> String {
 }
 
 /// `p`: the priority picker (p0-p3).
-fn edit_priority(view: &mut View) -> Result<(), String> {
+pub(crate) fn edit_priority(view: &mut View) -> Result<(), String> {
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(());
     };
@@ -989,7 +1000,7 @@ fn edit_priority(view: &mut View) -> Result<(), String> {
 }
 
 /// `s`: the size picker (S, M, L).
-fn edit_size(view: &mut View) -> Result<(), String> {
+pub(crate) fn edit_size(view: &mut View) -> Result<(), String> {
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(());
     };
@@ -1004,7 +1015,7 @@ fn edit_size(view: &mut View) -> Result<(), String> {
 
 /// `S`: the status picker (idea, design, ready, deferred, done). A
 /// deferred move carries the reason the patch door requires.
-fn edit_status(view: &mut View) -> Result<(), String> {
+pub(crate) fn edit_status(view: &mut View) -> Result<(), String> {
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(());
     };
@@ -1023,7 +1034,7 @@ fn edit_status(view: &mut View) -> Result<(), String> {
 
 /// `D`: append one paragraph to the node's details. The text is typed
 /// now; the fresh store read happens inside the write task.
-fn append_details(view: &mut View) -> Result<(), String> {
+pub(crate) fn append_details(view: &mut View) -> Result<(), String> {
     let Some(b) = view.backlog_board.as_mut() else {
         return Ok(());
     };
@@ -1547,15 +1558,23 @@ fn pick_commit(view: &mut View) {
     }
 }
 
-/// Enter on a board card: the drill-down lands with the plan's wave 4
-/// (the overlay reads `backlog_model::node` and is held here); until then
-/// the notice says so and nothing launches.
+/// Enter on a board card: open the drill-down for the cursor's card,
+/// held inside the board (a re-open of the SAME node keeps the trail).
 pub(crate) fn open_detail(view: &mut View) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
-    if cursor_card_id(b).is_some() {
-        view.set_notice("drill-down pending (plan wave 4)".into());
+    let Some(id) = cursor_card_id(b) else {
+        return;
+    };
+    let same = b.detail.as_ref().is_some_and(|d| d.node_id == id);
+    if !same {
+        b.detail = Some(node_detail::NodeDetailOverlay {
+            node_id: id,
+            trail: Vec::new(),
+            sel: 0,
+            details_open: false,
+        });
     }
 }
 

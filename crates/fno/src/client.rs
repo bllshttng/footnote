@@ -2064,6 +2064,7 @@ pub(crate) enum AuxAction {
 }
 
 mod backlog_board;
+mod node_detail;
 mod settings_modal;
 mod update_menu;
 
@@ -6000,7 +6001,23 @@ impl View {
                 None,
             );
         } else if let Some(b) = &self.backlog_board {
-            if let Some(m) = backlog_board::pick_popup(b) {
+            if b.detail.is_some() {
+                let w = overlay_dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+                let (lines, follow) = node_detail::overlay_lines(b, w);
+                let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
+                    .footer("enter open · b plan · A king · d details · esc back");
+                draw_lines_overlay(
+                    &mut cells,
+                    rows,
+                    cols,
+                    overlay_origin,
+                    overlay_dims,
+                    &chrome,
+                    &lines,
+                    &self.theme,
+                    follow,
+                );
+            } else if let Some(m) = backlog_board::pick_popup(b) {
                 draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
             } else if let Some(m) = backlog_board::facet_popup(b) {
                 draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
