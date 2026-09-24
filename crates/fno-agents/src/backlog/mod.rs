@@ -1997,15 +1997,18 @@ mod tests {
 
     #[test]
     fn flipgate_shadow_normalization_only_change_reaches_the_store() {
-        // AC1-HP: the file row lacks the default lists; a mutation on a
+        // AC1-HP: the file row lacks the default tags; a mutation on a
         // DIFFERENT node publishes the defaulted form. The diff must see
         // that change against the raw baseline and save the row.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
-        let raw = raw_rows(&graph);
+        let mut raw = raw_rows(&graph);
+        raw[0].as_object_mut().unwrap().remove("tags");
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         // Seed the store from the raw file: the db now holds ab-one with no
         // tags key, exactly what the last publish wrote.
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         after[0]
@@ -2065,6 +2068,7 @@ mod tests {
         );
         std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw_rows(&graph);
         after[0]
