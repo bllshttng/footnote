@@ -106,7 +106,9 @@ def resolve_king_manifest_path(
             "the row is unstamped, so no crown proves this session's authority"
         )
     try:
-        path = king_manifest_path(scope, state_root=state_root)
+        # The read keys on the crown row's cwd, the same key the writer arms under.
+        root = state_root or _owner_state_root(getattr(row, "cwd", None))
+        path = king_manifest_path(scope, state_root=root)
     except ValueError as exc:
         return None, str(exc)
     if not path.is_file():

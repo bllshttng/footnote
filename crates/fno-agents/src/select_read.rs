@@ -311,14 +311,11 @@ pub fn run(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     fn stub(body: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fno-py");
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_exec_stub(dir.path(), "fno-py", body);
         dir
     }
 

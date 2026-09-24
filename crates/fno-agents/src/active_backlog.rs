@@ -2385,8 +2385,6 @@ mod tests {
     // claims root, so it reads real state for a key that never exists (and never
     // writes there).
 
-    use std::os::unix::fs::PermissionsExt;
-
     /// Hold this for the whole body of any test that shells `fno_cmd`.
     ///
     /// `fno_cmd` resolves its binary from the process-global `$FNO_BIN` IN
@@ -2412,16 +2410,14 @@ mod tests {
     /// assert which `backlog done`/`defer` side effects the reconcile fired.
     fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2430,19 +2426,17 @@ mod tests {
     /// is unreachable with it, and the whole thing passes green when reverted.
     fn stub_fno_defer_fails(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [ \"$2\" = \"defer\" ]; then echo 'node not found' >&2; exit 1; fi\n\
                  exit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2451,19 +2445,17 @@ mod tests {
     /// records its argv and exits 0.
     fn stub_fno_get(dir: &std::path::Path, record: &std::path::Path, node_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [ \"$2\" = \"get\" ]; then printf '%s' '{}'; exit 0; fi\n\
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 node_json,
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2492,8 +2484,7 @@ mod tests {
         let p = tmp.path().join("bin").join("fno");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         // exec: the kill hits the sleeper itself, not a shell wrapper.
-        std::fs::write(&p, "#!/bin/bash\nexec sleep 10\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = crate::write_exec_stub(p.parent().unwrap(), "fno", "#!/bin/bash\nexec sleep 10\n");
         let mut cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
         cfg.advance_timeout_s = 1;
         let (journal, project_journal) = test_journal(tmp.path());
@@ -2812,13 +2803,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'node has open blockers' >&2; exit 1; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, _pj) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2851,13 +2840,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'awaiting merge: PR OPEN' >&2; exit 5; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2895,13 +2882,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-aaaa could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2938,13 +2923,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // failure_limit 1 so a single exit-6 trips and emits the parked event.
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 1);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -3238,16 +3221,14 @@ mod tests {
     /// stdout (exit 0). Any other subcommand is a no-op exit 0.
     fn stub_fno_advance(dir: &std::path::Path, receipt_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{receipt_json}\nJSON\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3261,10 +3242,10 @@ mod tests {
         node_json: &str,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{advance_json}\nJSON\nexit 0; fi\n\
@@ -3272,9 +3253,7 @@ mod tests {
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3285,20 +3264,18 @@ mod tests {
         observer_marker: Option<&std::path::Path>,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
         let observer = observer_marker
             .map(|path| format!("printf 'called' > '{}'\n", path.display()))
             .unwrap_or_default();
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \\
                  cat <<'JSON'\n{advance_json}\nJSON\nelif [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \\
                  {observer}printf '%s' '{observer_json}'\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3388,10 +3365,10 @@ mod tests {
         cwd: &std::path::Path,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
@@ -3403,9 +3380,7 @@ mod tests {
                 record.display(),
                 cwd.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -4244,10 +4219,10 @@ mod tests {
     /// The receipt itself is native now, so the fixture files carry it.
     fn stub_fno_converge(dir: &std::path::Path, log: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
@@ -4255,9 +4230,7 @@ mod tests {
                  exit 0\n",
                 log = log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 

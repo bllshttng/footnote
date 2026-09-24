@@ -11795,12 +11795,7 @@ mod tests {
         let dir = tmp.path();
 
         let stub = |body: &str| -> std::path::PathBuf {
-            let p = dir.join(format!("stub-{}", body.len()));
-            std::fs::write(&p, body).unwrap();
-            #[allow(clippy::permissions_set_readonly_false)]
-            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-                .unwrap();
-            p
+            crate::write_exec_stub(dir, &format!("stub-{}", body.len()), body)
         };
 
         let good = stub("#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n");
@@ -15261,15 +15256,11 @@ git_bounded();";
         pr.unattested_reviewers[0].name = "code-review".to_string();
 
         let tmp = tempfile::tempdir().unwrap();
-        let stub = tmp.path().join("fno-stub");
-        std::fs::write(
-            &stub,
+        let stub = crate::write_exec_stub(
+            tmp.path(),
+            "fno-stub",
             "#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n",
-        )
-        .unwrap();
-        #[allow(clippy::permissions_set_readonly_false)]
-        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
 
         std::env::set_var(var, stub.to_str().unwrap());
         let sized_reason = build_block_reason(&pr, "abc", true, true);
@@ -15379,16 +15370,7 @@ git_bounded();";
         assert!(graphql_exhausted_reason(&q).contains("~0m"));
     }
 
-    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     // ── gh probe: spawn trouble is never absence ─────────────────────────────
 

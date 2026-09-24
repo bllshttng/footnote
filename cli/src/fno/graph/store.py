@@ -926,6 +926,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    filter_args: "list[str] | None" = None,
     occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
@@ -953,6 +954,8 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
+    if filter_args:
+        params["filter_args"] = filter_args
     if occupancy is not None:
         params["claimed"] = sorted(occupancy)
     else:
@@ -981,6 +984,8 @@ def ready(
         result = _client_for(_paths.graph_json()).request("ready", params)
     except RuntimeError as exc:
         text = str(exc)
+        if "ready filter: " in text:
+            raise ValueError(text[text.index("ready filter: ") :]) from None
         if "no such node" in text:
             # The verb's own refusal wording, without the store-error prefix
             # the transport wraps it in.
