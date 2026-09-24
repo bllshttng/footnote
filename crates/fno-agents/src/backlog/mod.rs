@@ -2035,11 +2035,9 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 0,
-            "defaulted row reached the store: {report:?}"
-        );
+        let stored = read_entries(&graph).unwrap();
+        assert_eq!(stored[0]["tags"], serde_json::json!([]));
+        assert_eq!(stored[1]["title"], "Two changed");
     }
 
     #[test]
@@ -2088,11 +2086,9 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 0,
-            "the settle reached the store: {report:?}"
-        );
+        let stored = read_entries(&graph).unwrap();
+        assert_eq!(stored[1]["status"], "superseded");
+        assert_eq!(stored[1]["superseded_by"], "ab-one");
     }
 
     #[test]
@@ -2354,8 +2350,8 @@ mod tests {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
         // authority. The first schema-3 open keeps the rows, stamps the new
-        // schema, and leaves no soak key; parity still reports the mirror's
-        // staleness instead of papering over it with a rebuild.
+        // schema, and leaves the soak key because no rebuild ran. Parity still
+        // reports the mirror's staleness instead of rebuilding from json.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
         let entries = read_entries(&graph).unwrap();
@@ -2381,7 +2377,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(soak, 0, "the soak keys were deleted");
+        assert_eq!(soak, 1, "the sqlite backend does not rebuild from json");
     }
 
     #[test]

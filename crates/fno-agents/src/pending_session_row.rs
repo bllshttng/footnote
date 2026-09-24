@@ -301,6 +301,7 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
+        crate::backlog::set_backend(&graph, crate::backlog::Backend::Json).unwrap();
         std::env::set_var("FNO_HOME", &dir);
         seed_row(&registry, "w1", Some("x-defr"));
         park(&park_payload(&registry, "do")).unwrap();
