@@ -177,7 +177,10 @@ def collect_failures(
     """
     out: list[dict] = []
     for check in list(failing)[:MAX_DETAILED_FAILURES]:
-        entry: dict = {"check": _check_name(check)}
+        entry: dict = {
+            "check": _check_name(check),
+            **({"first_error": check["timeout"]} if check.get("timeout") else {}),
+        }
         ref = _job_ref(check)
         if ref is None:
             entry["detail"] = "not an Actions job (commit status); no job log to read"
@@ -200,7 +203,7 @@ def collect_failures(
                 entry["step"] = step
                 err = first_error(log_text, step)
                 if err:
-                    entry["first_error"] = err
+                    entry.setdefault("first_error", err)
             runner_unreached = unreached_runner_steps(log_text)
             if runner_unreached:
                 entry["unreached_steps"] = runner_unreached

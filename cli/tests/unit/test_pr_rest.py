@@ -1093,6 +1093,41 @@ def test_zero_job_failure_rows_read_red(monkeypatch):
     assert "runs" not in payload
 
 
+def test_timeout_annotation_relabels_the_check_run_and_keeps_its_cause(monkeypatch):
+    import fno.rust_binary as rust_binary
+
+    message = "The job has exceeded the maximum execution time of 35m0s"
+    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
+
+    def fake_verb(verb, payload, **kw):
+        assert verb == "authorized-merge"
+        assert payload["check_runs"][0]["conclusion"] == "cancelled"
+        return {
+            "rows": [],
+            "listing": [],
+            "check_runs": [
+                {
+                    **payload["check_runs"][0],
+                    "conclusion": "timed_out",
+                    "timeout": message,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
+    check = {
+        **_cr("stress", "completed", "cancelled"),
+        "id": 123,
+        "output": {"annotations_count": 1},
+        "details_url": "https://github.com/Owner/Repo/actions/runs/5/job/8",
+    }
+    pr_json, reason = _rest.fetch_pr_rest("42", runner=_runner(check_runs=[check]))
+    assert reason == "" and pr_json is not None
+    row = pr_json["statusCheckRollup"][0]
+    assert row["conclusion"] == "timed_out"
+    assert row["timeout"] == message
+
+
 def test_zero_job_read_failure_is_loud_never_green(monkeypatch):
     """AC3-ERR: an unavailable binary answers (None, reason) - the module's
     loud-failure contract, which run_status renders as verdict: error."""
