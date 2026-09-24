@@ -4,8 +4,6 @@ import typer
 
 from fno.tombstones import tombstone_group_cls
 
-# retired-ok: refusal messages naming the replacement are the gate's own
-# sanctioned shape (scripts/ci/check-retired-command-strings.sh, narrowing 3).
 annotate_app = typer.Typer(
     no_args_is_help=True,
     help=(
