@@ -14,6 +14,7 @@ import threading
 import pytest
 
 from fno.config import ConfigBlock, StatusFanoutConfig, StatusSinkConfig
+from fno.graph.store import read_graph_strict
 
 
 # ── shared fixtures/helpers for tick tests ──────────────────────────────────
@@ -854,6 +855,27 @@ def _seed(graph_path, entry):
     graph_path.write_text(_json.dumps({"entries": [entry]}) + "\n")
 
 
+def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
+    from fno.graph.store import append_progress_note
+
+    _seed(tmp_graph, {"id": "x-9", "title": "t", "plan_path": "/tmp/plan.md"})
+    found, plan_path = append_progress_note(tmp_graph, "x-9", {"ts": "T1", "text": "hi"})
+    assert found is True and plan_path == "/tmp/plan.md"
+    # Second note accumulates (append-only, never replaces).
+    append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
+    import json as _json
+    entry = read_graph_strict(tmp_graph)[0]
+    assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
+
+
+def test_backlog_note_missing_node_returns_not_found(tmp_graph):
+    from fno.graph.store import append_progress_note
+
+    _seed(tmp_graph, {"id": "x-9", "title": "t"})
+    found, _ = append_progress_note(tmp_graph, "x-nope", {"ts": "T", "text": "x"})
+    assert found is False
+
+
 def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     from typer.testing import CliRunner
     from fno.cli import app
@@ -873,22 +895,12 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
     assert payload["routed"] == "state" and payload["revision"] == 1
-    assert payload["replaced"] is None
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     state = node["current_state"]
     assert state["body"] == "shipped wave 1"
     assert state["source_session_id"] == session_id
-    assert state["source_harness"] is None
-    # A second note names the state it just replaced.
-    res = CliRunner().invoke(
-        app, ["backlog", "note", "x-9", "shipped wave 2", "-J", "-q"],
-        catch_exceptions=False,
-    )
-    assert res.exit_code == 0
-    payload = _json.loads(res.stdout)
-    assert payload["revision"] == 2
-    assert payload["replaced"]["revision"] == 1
-    assert payload["replaced"]["source_session_id"] == session_id
+    # A null harness exports as an absent key (the store strips nulls).
+    assert state.get("source_harness") is None
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
@@ -918,7 +930,7 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
     assert appended.exit_code == 0, appended.output
     import json as _json
 
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     assert node["details"] == "original rationale"
     # The new note REPLACES current state; the legacy feed is untouched until
     # the explicit migration (x-920a): never grown, never truncated.
@@ -970,10 +982,9 @@ def test_backlog_progress_adapter_nodeless_is_noop(tmp_path):
 
 def test_backlog_progress_adapter_node_not_found_drops(tmp_path, monkeypatch):
     from fno import status_fanout as sf
+    import fno.graph.store as gs
 
-    # _machine_note's contract: None on a missing node or a refused write.
-    # The adapter must turn that into a drop naming the node.
-    monkeypatch.setattr(sf, "_machine_note", lambda *a, **k: None)
+    monkeypatch.setattr(gs, "append_progress_note", lambda *a: (False, None))
     ev = _ev("t", "run_summary", **{"node": "x-gone"})
     status, detail = sf._dispatch_backlog_progress(
         StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)

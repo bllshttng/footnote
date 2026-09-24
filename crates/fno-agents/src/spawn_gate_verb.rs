@@ -347,18 +347,27 @@ mod probe {
         if let Err(refusal) = spawn_gate_lanes::check_registry_schema(&registry_path, &mut warnings)
         {
             let receipt = refusal.receipt.unwrap_or(Value::Null);
-            return json!({
-                "verdict": "refused",
-                "reason": "registry_schema",
-                "message": format!(
-                    "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
-                    receipt.get("on_disk").map(|v| v.to_string()).unwrap_or_default(),
-                    receipt.get("understood").map(|v| v.to_string()).unwrap_or_default()
-                ),
-                "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
-                "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
-                "rows": [],
-            });
+            let message = format!(
+                "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
+                receipt
+                    .get("on_disk")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                receipt
+                    .get("understood")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            );
+            return refuse_with(
+                "registry_schema",
+                message,
+                json!({
+                    "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
+                    "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
+                }),
+                &[],
+                out,
+            );
         }
 
         // Read provider lanes before any refusal so the answer preserves the
@@ -374,6 +383,31 @@ mod probe {
         );
         if let Ok(lanes) = &lanes_result {
             out.insert("lanes".into(), lanes.clone());
+        }
+
+        match crate::fleet_incident::verdict() {
+            crate::fleet_incident::Verdict::Clear(_) => {}
+            crate::fleet_incident::Verdict::Stopped(record) => {
+                return refuse_with(
+                    "fleet-stop",
+                    format!(
+                        "fleet incident stop is active (generation {}, reason: {})",
+                        record.generation, record.reason
+                    ),
+                    json!({"generation": record.generation}),
+                    &[],
+                    out,
+                );
+            }
+            crate::fleet_incident::Verdict::Unavailable(detail) => {
+                return refuse_with(
+                    "fleet-stop-unavailable",
+                    format!("fleet incident state is unreadable ({detail})"),
+                    json!({"detail": detail}),
+                    &[],
+                    out,
+                );
+            }
         }
 
         // The route axis of the quota wall: the SAME call the gate makes, so
@@ -665,6 +699,22 @@ fn refuse_with(
     rows: &[Value],
     mut out: Map<String, Value>,
 ) -> Value {
+    let mut refusal_rows = rows.to_vec();
+    if !refusal_rows.iter().any(|row| {
+        matches!(
+            row.get("verdict").and_then(Value::as_str),
+            Some("refuse" | "hold")
+        )
+    }) {
+        refusal_rows.push(json!({
+            "name": "gate-verdict",
+            "measured": reason,
+            "threshold": "accepted",
+            "verdict": "refuse",
+            "note": message.clone(),
+        }));
+    }
+
     out.insert("verdict".into(), json!("refused"));
     out.insert("reason".into(), json!(reason));
     out.insert("message".into(), json!(message));
@@ -675,7 +725,7 @@ fn refuse_with(
             out.insert(k, v);
         }
     }
-    out.insert("rows".into(), json!(rows));
+    out.insert("rows".into(), json!(refusal_rows));
     Value::Object(out)
 }
 
@@ -984,6 +1034,123 @@ mod tests {
     use super::*;
     use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
 
+    #[test]
+    fn probe_registry_schema_refusal_names_its_reason_row() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("fno-verb-registry-schema-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let registry_path = home.join("registry.json");
+        let on_disk = crate::state::REGISTRY_SCHEMA_VERSION as u64 + 1;
+        std::fs::write(
+            &registry_path,
+            format!(r#"{{"schema_version":{on_disk},"entries":[]}}"#),
+        )
+        .unwrap();
+
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+
+        let answer = probe::answer(&json!({
+            "name": "probe-registry-schema",
+            "substrate": "headless",
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "registry_schema");
+        assert_eq!(answer["on_disk"], on_disk);
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "registry_schema");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], answer["message"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuse_with_emits_gate_verdict_when_no_measurement_row_refuses() {
+        let message = "king share is active";
+        let answer = refuse_with(
+            "king_share",
+            String::from(message),
+            json!({}),
+            &[],
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "king_share");
+        assert_eq!(rows[0]["threshold"], "accepted");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], message);
+    }
+
+    #[test]
+    fn refuse_with_keeps_an_existing_refusal_without_adding_a_generic_row() {
+        let measured = fleet_row(3, 3);
+        let answer = refuse_with(
+            "max_live",
+            "fleet full".to_string(),
+            json!({}),
+            std::slice::from_ref(&measured),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], measured);
+        assert_eq!(rows[0]["name"], "fleet-rows");
+        assert_eq!(rows[0]["verdict"], "refuse");
+    }
+
+    #[test]
+    fn refuse_with_keeps_a_held_measurement_without_adding_a_generic_row() {
+        let held = json!({
+            "name": "cpu-share",
+            "measured": "2.10/12.00 cores",
+            "threshold": "50%",
+            "verdict": "hold",
+            "note": "measurement unavailable",
+        });
+        let answer = refuse_with(
+            "fleet_cpu_share",
+            "CPU measurement unavailable".to_string(),
+            json!({}),
+            std::slice::from_ref(&held),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], held);
+        assert_eq!(rows[0]["name"], "cpu-share");
+        assert_eq!(rows[0]["verdict"], "hold");
+    }
+
     fn mem(
         avail: Option<f64>,
         swap: Option<f64>,
@@ -1159,9 +1326,102 @@ mod tests {
         }
         assert_eq!(answer["live_workers"], 3, "slots stay rows + reservations");
         assert_eq!(answer["verdict"], "accepted");
+        assert_ne!(answer["reason"], "fleet-stop");
 
         std::env::remove_var(crate::paths::HOME_ENV);
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_mirrors_fleet_incident_verdict_before_capacity_and_keeps_lanes() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-incident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        std::fs::write(
+            home.join("registry.json"),
+            serde_json::json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "entries": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let incident_path =
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home));
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 19,
+            changed_at: "2026-09-18T19:48:00Z".into(),
+            changed_by: "test".into(),
+            reason: "repro".into(),
+            source: Some("file".into()),
+        };
+        std::fs::write(&incident_path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        let stopped = probe::answer(&json!({}));
+        assert_eq!(stopped["verdict"], "refused");
+        assert_eq!(stopped["reason"], "fleet-stop");
+        assert!(stopped["message"]
+            .as_str()
+            .unwrap()
+            .contains("generation 19"));
+        assert!(stopped["lanes"].is_object(), "{stopped}");
+
+        std::fs::write(&incident_path, b"broken").unwrap();
+        let unreadable = probe::answer(&json!({}));
+        assert_eq!(unreadable["verdict"], "refused");
+        assert_eq!(unreadable["reason"], "fleet-stop-unavailable");
+        assert!(unreadable["message"]
+            .as_str()
+            .unwrap()
+            .contains("unreadable"));
+
+        let _ = std::fs::remove_file(&incident_path);
+        let clear = probe::answer(&json!({}));
+        assert_eq!(clear["verdict"], "accepted");
+        assert_ne!(clear["reason"], "fleet-stop");
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
         match prior_config {
             Some(value) => std::env::set_var("FNO_CONFIG", value),
             None => std::env::remove_var("FNO_CONFIG"),

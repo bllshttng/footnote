@@ -55,7 +55,11 @@ def _invoke(*args, input=None):
 
 
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _plan_status(path: Path):
@@ -536,17 +540,16 @@ def test_supersede_records_pending_evidence_and_terminals_status(tmp_graph, tmp_
     assert result.exit_code == 0, result.output
     old = {e["id"]: e for e in _read_entries(tmp_graph)}["ab-old"]
     assert old["superseded_by"] == "ab-new"
+    # Store rows omit null fields, so the empty slots read as absent keys.
     assert old["supersession"] == {
         "successor": "ab-new",
         "cause": "old implementation replaced",
-        # No --reason was passed, so the slot is present and empty rather than
-        # absent: readers get one shape either way.
-        "reason": None,
         "surfaces": ["src/old.py"],
-        "verified_at": None,
-        "evidence_pr": None,
         "matched_surfaces": [],
     }
+    assert old["supersession"].get("reason") is None
+    assert old["supersession"].get("verified_at") is None
+    assert old["supersession"].get("evidence_pr") is None
     assert old.get("deferred_at") is None
     assert old["status"] == "superseded"
 

@@ -2567,8 +2567,26 @@ WAIVE_HEAD = "f" * 40
 
 @pytest.fixture(autouse=True)
 def _sandbox_decision_graph(tmp_path, monkeypatch):
-    """Keep this module's graph-backed decision reads beside its JSONL index."""
+    """Keep this module's decision reads entirely inside the test's tmp.
+
+    The graph-backed reads resolve through paths.graph_json, and the engine's
+    index seam derives decisions.jsonl from paths.ledger_json - both must land
+    in the SAME per-test directory, or the seeder writes one file while the
+    reader reads the worker's shared conftest sandbox, where an earlier
+    test's import leaves rows that shadow the fresh seed.
+    """
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
+    monkeypatch.setattr(
+        "fno.paths.ledger_json", lambda: tmp_path / ".decision-index" / "ledger.json"
+    )
+    monkeypatch.setattr(
+        "fno.paths.decisions_jsonl",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
+    monkeypatch.setattr(
+        "fno.decide._decisions_index_path",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
 
 
 def test_law_authority_reads_the_real_index_three_ways(tmp_path):
@@ -2773,11 +2791,20 @@ def test_recorded_scoped_waiver_covers_only_its_head(
 def _seed_waiver_law_row(
     subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"
 ):
-    """One live law-lane row at an exact subject, in the sandboxed index."""
-    from fno import paths
+    """One live law-lane row at an exact subject, in the sandboxed index.
 
-    paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-    paths.decisions_jsonl().open("a", encoding="utf-8").write(
+    The store beside the index imports the jsonl ONCE per store, and the
+    conftest sandbox is shared across every test in a worker process: a
+    leftover db resurrects an earlier test's rows under the same fixed ids
+    and the fresh seed reads as already-seen. Reset it with the file.
+    """
+    from fno import paths
+    from fno.events.store_client import store_db_path
+
+    index = paths.decisions_jsonl()
+    index.parent.mkdir(parents=True, exist_ok=True)
+    store_db_path(index).unlink(missing_ok=True)
+    index.open("a", encoding="utf-8").write(
         json.dumps(
             {
                 "type": "operator_decision",

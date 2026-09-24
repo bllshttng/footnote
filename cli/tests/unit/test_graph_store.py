@@ -5,9 +5,11 @@ They run the module functions directly (no subprocess) for speed.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -18,9 +20,8 @@ from fno.graph.store import (
     _apply_graph_defaults,
     append_session_record,
     _read_json,
-    _write_json,
-    locked_mutate_graph,
-    read_graph,
+    commit_rows_via_store,
+    read_graph_strict,
     render_canonical_views,
 )
 
@@ -80,8 +81,9 @@ def test_clearing_owner_clears_harness_stamp():
 
 
 def test_ac7_edge_mixed_version_round_trip(tmp_path):
-    """AC7-EDGE: legacy node (session_id only) round-trips through a mutation
-    with locked_by == original session_id and status still 'claimed'."""
+    """AC7-EDGE: a legacy row the node model cannot represent (no title)
+    round-trips through a mutation VERBATIM: the raw carry preserves every
+    field the store has no column for, and the mutation still lands."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     p = _make_graph(tmp_path, [{
@@ -92,11 +94,10 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     def mutator(entries):
         entries[0]["details"] = "touched"
         return entries
-    locked_mutate_graph(p, mutator)
-    saved = json.loads(p.read_text())["entries"][0]
-    assert saved["locked_by"] == "worker-7"
-    assert saved["session_id"] == "worker-7"  # mirror written
-    assert saved["status"] == "in_progress"
+    commit_rows_via_store(p, mutator)
+    saved = read_graph_strict(p)[0]
+    assert saved["session_id"] == "worker-7"  # carried verbatim
+    assert saved["details"] == "touched"  # the mutation landed on the raw row
 
 
 def test_the_raw_flock_helpers_are_retired():
@@ -133,33 +134,6 @@ def test_ac1_hp_read_json_valid_entries(tmp_path):
     assert result[0]["id"] == "ab-aabbccdd"
 
 
-def test_ac2_err_read_json_corrupt(tmp_path):
-    """AC2-ERR: _read_json raises GraphCorruptError on invalid JSON."""
-    p = tmp_path / "g.json"
-    p.write_text("not json at all")
-    with pytest.raises(GraphCorruptError):
-        _read_json(p)
-
-
-def test_ac1_hp_write_json_roundtrip(tmp_path):
-    """AC1-HP: _write_json creates file, _read_json reads it back."""
-    p = tmp_path / "g.json"
-    entries = [{"id": "ab-11223344", "title": "Roundtrip"}]
-    _write_json(entries, p)
-    result = _read_json(p)
-    assert result == entries
-
-
-def test_ac1_hp_write_json_atomic(tmp_path):
-    """AC1-HP: _write_json uses temp file + os.replace (no partial writes)."""
-    p = tmp_path / "g.json"
-    entries = [{"id": "ab-aaaabbbb"}]
-    _write_json(entries, p)
-    assert p.exists()
-    # No .tmp file should linger
-    assert list(tmp_path.glob("*.tmp")) == []
-
-
 def test_ac1_hp_apply_graph_defaults():
     """AC1-HP: _apply_graph_defaults fills in expected fields."""
     entries = [{"id": "ab-12345678", "title": "T"}]
@@ -178,14 +152,14 @@ def test_ac1_hp_apply_graph_defaults():
 def test_scenario1_lazy_migration_artifact_url_default(tmp_path):
     """Scenario 1 (HP): Legacy entry without artifact_url key gets None on read."""
     path = _make_graph(tmp_path, [{"id": "ab-legacy01", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["artifact_url"] is None
 
 
 def test_scenario1_lazy_migration_completion_note_default(tmp_path):
     """Scenario 1 (HP): Legacy entry without completion_note key gets None on read."""
     path = _make_graph(tmp_path, [{"id": "ab-legacy02", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["completion_note"] is None
 
 
@@ -195,7 +169,7 @@ def test_scenario3_edge_preserves_shim_artifact_url(tmp_path):
         tmp_path,
         [{"id": "ab-shim0001", "title": "T", "artifact_url": "https://figma/foo"}],
     )
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["artifact_url"] == "https://figma/foo"
 
 
@@ -205,20 +179,21 @@ def test_scenario3_edge_preserves_shim_completion_note(tmp_path):
         tmp_path,
         [{"id": "ab-shim0002", "title": "T", "completion_note": "closed Q2"}],
     )
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["completion_note"] == "closed Q2"
 
 
-def test_ac1_hp_locked_mutate_graph(tmp_path):
-    """AC1-HP: locked_mutate_graph reads, applies mutator, writes back."""
+def test_ac1_hp_commit_rows_via_store(tmp_path):
+    """AC1-HP: commit_rows_via_store reads, applies mutator, writes back."""
     path = tmp_path / "graph.json"
 
     def mutator(entries):
         entries.append({"id": "ab-newnode0", "title": "New"})
         return entries
 
-    locked_mutate_graph(path, mutator)
-    result = _read_json(path)
+    commit_rows_via_store(path, mutator)
+    # The store write lands in graph.db; the json file is only an export.
+    result = read_graph_strict(path)
     assert any(e.get("id") == "ab-newnode0" for e in result)
 
 
@@ -234,7 +209,7 @@ def test_touched_at_stamped_on_curation_change(tmp_path):
                 e["priority"] = "p1"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-1")
     assert node.get("touched_at")
@@ -263,7 +238,7 @@ def test_touched_at_unchanged_on_non_curation_write(tmp_path):
                 e["cwd"] = "/new/path"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-1")
     assert node.get("touched_at") == "2020-01-01T00:00:00+00:00"
@@ -278,7 +253,7 @@ def test_touched_at_null_on_new_node(tmp_path):
         entries.append({"id": "ab-brand-new", "title": "New", "priority": "p2"})
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-brand-new")
     assert node.get("touched_at") is None
@@ -313,7 +288,7 @@ def test_touched_at_unchanged_on_blocked_node_unrelated_write(tmp_path):
                 e["details"] = "unrelated edit"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     blocked = next(e for e in result if e["id"] == "ab-blocked")
     assert blocked.get("touched_at") == "2020-01-01T00:00:00+00:00"
@@ -341,9 +316,10 @@ def test_render_pass_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
         return entries
 
     # Must not raise despite vault_root() blowing up.
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     render_canonical_views()
-    result = _read_json(path)
+    # The store write lands in graph.db; the json file is only an export.
+    result = read_graph_strict(path)
     assert any(e.get("id") == "ab-failopen" for e in result)
     # graph.md rendered, fail-open without Obsidian frontmatter.
     md = (tmp_path / "graph.md").read_text()
@@ -380,7 +356,7 @@ def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch
         entries.append({"id": "ab-sibling1", "title": "Sib"})
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     render_canonical_views()
 
     # Renders land beside the canonical store the pass read.
@@ -418,7 +394,7 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
         entries.append({"id": "ab-canon01", "title": "Canon"})
         return entries
 
-    locked_mutate_graph(graph_json, mutator)
+    commit_rows_via_store(graph_json, mutator)
     render_canonical_views()
 
     # Board targets (state_dir) get the render, not graph.json's siblings.
@@ -430,24 +406,29 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
+    from fno.graph.store import _worker_binary
+
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     graph_json = state_dir / "graph.json"
-    archive_json = state_dir / "graph-archive.json"
-    archive_json.write_text(
+    # The archived row is a stamped resident of the same store, not a sibling
+    # advisory file; it must be seeded before the first db open folds the seed.
+    graph_json.write_text(
         json.dumps({"entries": [
             {"id": "ab-archive1", "title": "ARCHIVE-AUTO-RENDER-MARKER",
-             "status": "done", "project": "fno"},
+             "status": "done", "project": "fno",
+             "archived_at": "2026-08-01T00:00:00Z"},
         ]}),
         encoding="utf-8",
     )
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
     monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive_json)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_json)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
 
-    locked_mutate_graph(
+    commit_rows_via_store(
         graph_json,
         lambda entries: [*entries, {"id": "ab-live0001", "title": "live"}],
     )
@@ -459,27 +440,21 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
 def test_ac1_hp_read_graph_returns_with_defaults(tmp_path):
     """AC1-HP: read_graph applies defaults to entries."""
     path = _make_graph(tmp_path, [{"id": "ab-12341234", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert len(entries) == 1
     assert entries[0]["priority"] == "p2"
 
 
-def test_ac2_err_read_graph_corrupt_returns_empty(tmp_path):
-    """AC2-ERR: read_graph returns [] on corruption (does not raise)."""
-    path = tmp_path / "corrupt.json"
-    path.write_text("{ INVALID JSON }")
-    entries = read_graph(path)
-    assert entries == []
-
-
-def test_legacy_underscore_status_key_migrates_on_read(tmp_path):
-    """A pre-rename row carries `_status`; read_graph folds it into `status`."""
+def test_legacy_underscore_status_key_migrates_on_import(tmp_path):
+    """A pre-rename row carries `_status`; the import folds it into `status`
+    and runs the same vocabulary migration a literal `status` gets."""
     path = _make_graph(
         tmp_path, [{"id": "ab-12341234", "title": "T", "_status": "claimed"}]
     )
-    entry = read_graph(path)[0]
+    entry = read_graph_strict(path)[0]
     assert "_status" not in entry
-    # STATUS_MIGRATION still applies after the key fold.
+    # claimed -> in_progress (STATUS_MIGRATION), the rename the legacy
+    # spelling exists to receive.
     assert entry["status"] == "in_progress"
 
 
@@ -488,6 +463,11 @@ def _ready_plan_entry(tmp_path: Path, node_id: str = "ab-open0001") -> tuple[Pat
     plan.write_text("---\nstatus: ready\n---\n", encoding="utf-8")
     return plan, {
         "id": node_id,
+        "slug": node_id,
+        "title": node_id,
+        "type": "feature",
+        "status": "idea",
+        "priority": "p2",
         "cwd": str(tmp_path),
         "plan_path": plan.name,
         "sessions": [],
@@ -511,7 +491,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
             merge_grant={"approved": "yes", "source": "config",
                          "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z"},
         )
-    assert json.loads(path.read_text())["entries"][0]["sessions"] == []
+    assert read_graph_strict(path)[0]["sessions"] == []
 
     with pytest.raises(ValueError, match="unknown keys"):
         append_session_record(
@@ -537,7 +517,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
         merge_grant=grant,
     )
     assert (found, added) == (True, True)
-    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    row = read_graph_strict(path)[0]["sessions"][0]
     assert row["merge_grant"] == grant
 
     # A re-stamp with a DIFFERENT posture must not rewrite the recorded one.
@@ -551,7 +531,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
                      "recorded_by": "spawner", "recorded_at": "2026-08-20T01:00:00Z"},
     )
     assert (found, added) == (True, False)
-    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    row = read_graph_strict(path)[0]["sessions"][0]
     assert row["merge_grant"]["approved"] is True
 
 
@@ -572,7 +552,7 @@ def test_ac1_hp_one_row_per_session_and_phase_whatever_the_harness_spelling(tmp_
         session_id="legacy-1", ended_at="2026-09-04T11:00:00Z",
     )
     assert (found, added) == (True, False)
-    rows = json.loads(path.read_text())["entries"][0]["sessions"]
+    rows = read_graph_strict(path)[0]["sessions"]
     assert len(rows) == 1
     assert rows[0]["ended_at"] == "2026-09-04T11:00:00Z"
 
@@ -591,7 +571,7 @@ def test_ac1_err_wrong_shape_harness_is_refused_and_writes_nothing(tmp_path):
         append_session_record(
             path, entry["id"], phase="do", harness="claude", session_id=codex_id,
         )
-    assert json.loads(path.read_text())["entries"][0]["sessions"] == []
+    assert read_graph_strict(path)[0]["sessions"] == []
 
     found, added = append_session_record(
         path, entry["id"], phase="do", harness="codex", session_id=codex_id,
@@ -626,7 +606,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
         started_at="2026-08-20T00:00:00Z",
     )
     assert (found, added) == (True, True)
-    saved = json.loads(path.read_text())["entries"][0]
+    saved = read_graph_strict(path)[0]
     assert saved["status"] == "in_progress"
 
     found, added = append_session_record(
@@ -638,7 +618,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
         ended_at="2026-08-20T00:01:00Z",
     )
     assert (found, added) == (True, False)
-    saved = json.loads(path.read_text())["entries"][0]
+    saved = read_graph_strict(path)[0]
     assert saved["status"] == "ready"
     assert saved["sessions"][0]["ended_at"] == "2026-08-20T00:01:00Z"
 
@@ -665,7 +645,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
         session_id="session-one",
         ended_at="2026-08-20T00:01:00Z",
     )
-    assert json.loads(path.read_text())["entries"][0]["status"] == "in_progress"
+    assert read_graph_strict(path)[0]["status"] == "in_progress"
 
     append_session_record(
         path,
@@ -675,7 +655,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
         session_id="session-two",
         ended_at="2026-08-20T00:02:00Z",
     )
-    assert json.loads(path.read_text())["entries"][0]["status"] == "ready"
+    assert read_graph_strict(path)[0]["status"] == "ready"
 
 
 def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
@@ -716,7 +696,7 @@ def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
         # The keeper's receipt names the settled node on every form.
         "node_ids": ["ab-reap0001"],
     }
-    rows = json.loads(path.read_text())["entries"][0]["sessions"]
+    rows = read_graph_strict(path)[0]["sessions"]
     assert [(r["harness"], r["session_id"], bool(r.get("ended_at"))) for r in rows] == [
         ("codex", "dead-session", True),
         ("codex", "live-session", False),
@@ -752,7 +732,7 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     assert result["settled"] is True
     assert result["row_removed"] is False
     assert result["remaining_open_do"] == 0
-    assert json.loads(path.read_text())["entries"][0]["sessions"][0]["ended_at"]
+    assert read_graph_strict(path)[0]["sessions"][0]["ended_at"]
 
 
 # -- blocked_by edge settlement (settle_edges verb) --
@@ -943,43 +923,12 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
     monkeypatch.setattr(store_mod._ExecClient, "request", fake_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
-        tmp_path / "graph.json", "append_encounter",
-        {"node_id": "ab-1",
-         "record": {"ts": "t", "session_id": "s", "harness": "claude", "evidence": "x"}},
+        tmp_path / "graph.json", "append_progress_note",
+        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
     )
     assert result == {"found": True, "plan_path": "p.md"}
     assert methods == ["plan_refs", "op"], "a full begin never fires"
     assert seen == {"ab-1": "none", "ab-2": "design"}
-
-
-def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, monkeypatch):
-    """An installed worker behind the source answers `unknown store method`;
-    the op then derives the same map over a begin snapshot instead of
-    breaking, the same degrade the read_ids fast path takes."""
-    from fno.graph import store as store_mod
-
-    methods: list[str] = []
-
-    def stale_request(self, method, params):
-        methods.append(method)
-        if method == "plan_refs":
-            raise RuntimeError("store error (invalid): unknown store method \"plan_refs\"")
-        if method == "begin":
-            return {"entries": [{"id": "ab-1"}]}
-        if method == "op":
-            return {"outcome": {"version": "v2"}, "op": {"found": True, "plan_path": None}}
-        raise AssertionError(f"unexpected keeper method {method}")
-
-    monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
-    monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
-    monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
-    result = store_mod._run_op(
-        tmp_path / "graph.json", "append_encounter",
-        {"node_id": "ab-1",
-         "record": {"ts": "t", "session_id": "s", "harness": "claude", "evidence": "x"}},
-    )
-    assert result == {"found": True, "plan_path": None}
-    assert methods == ["plan_refs", "begin", "op"]
 
 
 def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
@@ -1075,7 +1024,11 @@ class _ScriptedClient:
     def request(self, method, params):
         if method == "begin":
             self.begins += 1
-            return {"version": f"v{self.begins}", "entries": []}
+            return {
+                "version": f"v{self.begins}",
+                "entries": [],
+                "base_digests": {},
+            }
         if method == "commit_rows":
             if self.conflicts > 0:
                 self.conflicts -= 1
@@ -1085,28 +1038,30 @@ class _ScriptedClient:
                 "dropped": 0,
                 "backup": None,
                 "closure_releases": [],
-                "is_canonical": False,
-            }
-        if method == "commit":
-            if self.conflicts > 0:
-                self.conflicts -= 1
-                raise store_mod._Conflict()
-            return {
-                "entries": [],
-                "dropped": 0,
-                "backup": None,
-                "closure_releases": [],
-                "is_canonical": False,
+                "is_canonical": True,
             }
         raise AssertionError(f"unexpected method {method}")
 
 
 def _run_tx(client, monkeypatch, record):
     monkeypatch.setattr(store_mod, "_client_for", lambda _path: client)
-    # Patch time.sleep on the store module (the loop's call path), the same
-    # seam the sibling tx-backoff tests record through.
-    monkeypatch.setattr(store_mod.time, "sleep", record)
-    return store_mod.locked_mutate_graph(client.path, lambda e: e)
+    # The post-publish render resolves paths.graph_json() and drives a REAL
+    # client (api.py binds _client_for at import, so the patch above does not
+    # reach it); with a per-test state root that is a keeper spawn whose
+    # poll sleeps land in `record` and read as retry delays. Not under test.
+    monkeypatch.setattr(store_mod, "render_view_projections", lambda *a, **k: None)
+    # Patch the store's OWN time binding, never the shared time module: the
+    # module object is global, so a background drain thread sleeping inside
+    # this window would land in `record` too and read as a retry delay.
+    monkeypatch.setattr(
+        store_mod,
+        "time",
+        types.SimpleNamespace(
+            sleep=record,
+            monotonic=store_mod.time.monotonic,
+        ),
+    )
+    return store_mod.commit_rows_via_store(client.path, lambda e: e)
 
 
 def test_two_colliding_writers_both_land_and_their_delays_differ(tmp_path, monkeypatch):
@@ -1154,18 +1109,19 @@ def test_the_retry_budget_is_bounded_and_every_delay_sits_in_its_band(tmp_path, 
 
 
 def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypatch):
-    """AC14-EDGE: the failure contract keeps its RuntimeError type, its
-    measurement, and its path when all five attempts conflict; change 5
-    adds the nothing-was-written remedy."""
-    doomed = _ScriptedClient(conflicts=5)
+    """AC14-EDGE: the failure contract is not part of this change - same
+    RuntimeError type, same message, when every attempt conflicts."""
+    doomed = _ScriptedClient(conflicts=store_mod._TX_ATTEMPTS)
     delays: list[float] = []
     with pytest.raises(RuntimeError) as exc:
         _run_tx(doomed, monkeypatch, delays.append)
     assert str(exc.value) == (
-        "graph mutated under us 5 times at /tmp/x1601-tx.json; "
-        "nothing was written, retry when the fleet quiets"
+        f"graph mutated under us {store_mod._TX_ATTEMPTS} times at "
+        "/tmp/x1601-tx.json; nothing was written, retry when the fleet quiets"
     )
-    assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
+    assert len(delays) == store_mod._TX_ATTEMPTS - 1, (
+        "the final conflict raises without a trailing sleep"
+    )
 
 def test_dead_socket_serves_by_exec_and_never_spawns(tmp_path, monkeypatch):
     """The spawn-needed branch execs a one-shot lane: no resident keeper is
@@ -1278,7 +1234,11 @@ def test_sent_write_resolves_done_and_restores_elided_entries(monkeypatch):
                 "result": {"entries": None, "entries_elided": True},
             },
         },
-        {"entries": [{"id": "x-written", "title": "written"}]},
+        {
+            "bytes_b64": base64.b64encode(
+                json.dumps({"entries": [{"id": "x-written", "title": "written"}]}).encode()
+            ).decode(),
+        },
     ])
     monkeypatch.setattr(store_mod._Keeper, "request", lambda self, method, params: next(replies))
 
@@ -1317,7 +1277,12 @@ def test_unconfirmed_commit_names_changed_ids_before_retrying(tmp_path, monkeypa
 
         def request(self, method, params):
             if method == "begin":
-                return {"version": "v1", "entries": []}
+                return {
+                    "version": "v1",
+                    "entries": [{"id": "x-seed", "title": "seed", "type": "feature",
+                                 "status": "idea", "priority": "p2"}],
+                    "base_digests": {"x-seed": "d1"},
+                }
             if method == "commit_rows":
                 raise store_mod.WriteUnconfirmed(store_mod.STATE_UNCONFIRMED, "outcome unknown")
             raise AssertionError(f"unexpected method {method}")
@@ -1326,7 +1291,8 @@ def test_unconfirmed_commit_names_changed_ids_before_retrying(tmp_path, monkeypa
     with pytest.raises(store_mod.WriteUnconfirmed) as exc:
         store_mod.commit_rows_via_store(
             UnconfirmedClient.path,
-            lambda entries: entries + [{"id": "x-minted", "title": "minted"}],
+            lambda entries: entries + [{"id": "x-minted", "title": "minted", "type": "feature",
+                                        "status": "idea", "priority": "p2"}],
         )
     assert exc.value.ids == ["x-minted"]
     assert "x-minted" in str(exc.value)

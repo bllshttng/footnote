@@ -281,6 +281,8 @@ Tree lines start with `kept tree`. They are decided only after the row verdict i
 
 A clean and merged tree prunes, and the branch stays (`gc.rs` `tree_action`). The removal contract for worktrees lives in [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
+A `kept tree` keeps its source. When no session holds it, its build output is reclaimed after 6h of quiet (`cargo_build_dirs.rs` `reclaim_idle_trees`).
+
 ## The sweep tried and did not finish
 
 Three lines mean the sweep acted on a retire decision and hit a refusal.

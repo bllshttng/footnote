@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 
 runner = CliRunner()
@@ -51,7 +52,7 @@ def test_backlog_add_requires_difficulty_noninteractive(tmp_graph):
 
     assert result.exit_code == 2
     assert "non-interactive filing requires --difficulty" in result.output
-    assert json.loads(tmp_graph.read_text())["entries"] == []
+    assert read_graph_strict(tmp_graph) == []
 
 
 def test_backlog_new_writes_difficulty(tmp_graph):
@@ -60,7 +61,7 @@ def test_backlog_new_writes_difficulty(tmp_graph):
     )
 
     assert result.exit_code == 0, result.output
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["source"] == "filed"
 
@@ -89,7 +90,7 @@ def test_capture_promote_requires_and_writes_difficulty(tmp_graph, tmp_path, mon
         ["backlog", "capture", "promote", item["id"], "--difficulty", "medium"],
     )
     assert accepted.exit_code == 0, accepted.output
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["difficulty"] == "medium"
 
 
@@ -152,7 +153,7 @@ def test_retro_default_create_attributes_history_to_retro(tmp_graph, tmp_path, m
     )
 
     row = next(
-        row for row in json.loads(tmp_graph.read_text())["entries"] if row["id"] == node_id
+        row for row in read_graph_strict(tmp_graph) if row["id"] == node_id
     )
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["source"] == "retro"

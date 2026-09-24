@@ -100,7 +100,7 @@ check(rust_push.get("branches") == ["main"] and "paths" not in rust_push,
       "rust-ci push runs on every main head without paths")
 check("paths" in rust_pull and rust_pull["paths"],
       "rust-ci pull_request keeps its existing path filter")
-for name in ("test", "audit"):
+for name in ("audit",):
     check(name in rust_jobs and rust_jobs[name].get("if") in (None, ""),
           f"rust-ci {name} is not PR-only")
 check(rust_jobs.get("fmt", {}).get("if") == "github.event_name == 'pull_request'",

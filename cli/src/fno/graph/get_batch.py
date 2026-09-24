@@ -24,6 +24,11 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
         if fast and fast["entries"] and not fast["missing"]:
             e = fast["entries"][0]
             if e.get("id") == token or e.get("slug") == token.lower():
+                if e.get("archived_at"):
+                    # read_ids serves archived residents raw; the get
+                    # contract stamps them read-only, same as the
+                    # slow path's archive walk.
+                    e["_archived"] = True
                 _echo_entry(e, field, grouped)
                 raise typer.Exit()
     return token

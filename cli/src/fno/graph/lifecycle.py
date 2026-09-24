@@ -151,7 +151,7 @@ def register_lifecycle_commands(
             classify_deferred_reason,
         )
         from fno.graph._intake import _find_dependents
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         if kind is not None and kind not in DEFERRED_KINDS:
             typer.echo(
@@ -174,7 +174,7 @@ def register_lifecycle_commands(
         # Resolve every id and abort naming ALL missing ones before any write,
         # mirroring cmd_queue's all-or-nothing batch atomicity. The door write
         # is per-node, so this pre-check is what keeps the batch atomic.
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         require_nodes(entries, ids)
         for tid in ids:
             dependents = _find_dependents(entries, tid)
@@ -219,11 +219,11 @@ def register_lifecycle_commands(
         # Call-time imports: the verbs must read whatever the running test or
         # caller patched onto the source modules, never a register-time copy.
         from fno.graph._intake import _find_node
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         ids = expand_valid_ids(task_ids)
 
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         require_nodes(entries, ids)
 
         # AC5-HP: on a node carrying BOTH facts the park rides on the
@@ -330,11 +330,11 @@ def register_lifecycle_commands(
         Full contract: docs/architecture/backlog-graph-verb-contracts.md
         """
         from fno.graph._intake import _find_node
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         # The door resolves id or slug (the read resolver's contract); the
         # receipt names the canonical id either way.
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         node = _find_node(entries, node_id)
         if node is None:
             typer.echo(f"Error: node {node_id} not found", err=True)
@@ -384,6 +384,6 @@ def register_lifecycle_commands(
         # reporting `ready` and a fail-closed `design` never makes the node
         # non-dispatchable. A no-op mutator still triggers the
         # recompute+write; idempotent on a clean call.
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import commit_rows_via_store
 
-        locked_mutate_graph(graph_path(), lambda e: e)
+        commit_rows_via_store(graph_path(), lambda e: e)

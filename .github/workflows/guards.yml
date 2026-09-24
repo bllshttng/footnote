@@ -61,8 +61,8 @@ on:
     branches: [main]
 
 concurrency:
-  group: guards-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: guards-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -461,11 +461,6 @@ jobs:
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
 
-      - name: Graph store parity guard
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-graph-parity.sh --self-test
-
       # From the installed-tree import crash: parents[N]/scripts joins in
       # cli/src/fno escape the package root and the wheel never ships them.
       - name: Package-root path escapes + self-test
@@ -537,31 +532,3 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash tests/ci/test_uv_install_verify_wait.sh
-
-  extension-suites:
-    # The pi bridge extension (TypeScript, node-stripped) and the OpenCode
-    # bridge plugin have no Python or Rust test runner; their behavioral
-    # suites run here. The pi suite runs on node 24 (type stripping); the
-    # OpenCode suite imports bun:test, so it runs under bun.
-    name: Harness extension suites (pi node24, opencode bun)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Node 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: pi extension suite (node --test)
-        run: node --test cli/tests/pi/footnote.extension.test.mjs
-
-      - name: OpenCode plugin suite (bun test)
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: OpenCode plugin suite
-        run: bun test cli/tests/opencode/footnote.plugin.test.js

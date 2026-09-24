@@ -3185,8 +3185,12 @@ def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch)
     """
     from fno.agents import discover
 
+    # A corrupt STORE is the unreadable case: the seed json below only
+    # marks the path as existing, so the wire read raises instead of
+    # answering an empty (absence-proven) store.
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{"id": "x-0001", "sessions": 42}]}), encoding="utf-8")
+    graph.write_text(json.dumps({"entries": [{"id": "x-0001", "sessions": []}]}), encoding="utf-8")
+    graph.with_suffix(".db").write_bytes(b"{broken")
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
     daemon = tmp_path / "daemon"
     daemon.mkdir()

@@ -529,7 +529,7 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
     code = (
         "import fno.config, fno.graph, inspect\n"  # config-first (the risky order)
         "import fno.graph.store as store\n"
-        "d = inspect.signature(store.read_graph).parameters['path'].default\n"
+        "d = inspect.signature(store.read_graph_strict).parameters['path'].default\n"
         "print(str(d))\n"
     )
     result = subprocess.run(

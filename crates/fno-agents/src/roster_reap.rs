@@ -31,8 +31,7 @@
 //! (the default) is the chain above, `all` widens to rows fno itself
 //! spawned (sessions or registry provenance) whose work is open. The rule
 //! under every value is positive: an unowned session retires only on an
-//! fno-ownership marker - a sessions[] row fno wrote, a recorded territory
-//! blueprinter name, or a reap receipt
+//! fno-ownership marker - a sessions[] row fno wrote, or a reap receipt
 //! an earlier retirement staged for the same session (the
 //! leaked-retirement class: the sweep that leaked a session is the sweep
 //! that staged its receipt). A name
@@ -860,7 +859,7 @@ fn write_receipt(
 /// removal cascade from the live seams.
 pub fn roster_reap(
     home: &crate::paths::AgentsHome,
-    cwd: &std::path::Path,
+    _cwd: &std::path::Path,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
     dry_run: bool,
@@ -885,7 +884,9 @@ pub fn roster_reap(
         }
     };
     let store = std::cell::RefCell::new(crate::gc_inventory::HarnessStoreIndex::default());
-    let scope_workers = crate::territory::recorded_scope_workers(cwd);
+    // The blueprinter record store is deleted, so no recorded scope workers
+    // exist and the sweep's blueprinter leg matches nothing.
+    let scope_workers = BTreeMap::new();
     run_with_scope_workers(
         home,
         grace_secs,

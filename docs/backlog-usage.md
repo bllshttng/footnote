@@ -108,7 +108,7 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
-The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
+The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write the graph store. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
 `demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
 
@@ -251,7 +251,7 @@ Machine-filed, unplanned idea rows use `backlog.max_open_ideas` in each nearest-
 
 ## Finding work by meaning: find --fts
 
-`fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
+`fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is an FTS5 table inside the graph.db store, never a second source of truth. It is rebuilt from scratch whenever the store moves under it, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
 
 ## Reviewing duplicate and expired work
 
@@ -265,7 +265,7 @@ The pass reads `deferred_kind` as a field. It does not parse reason text. Decide
 
 Each row reports `duplicate`, `satisfied`, `still_real`, or `undecided`. Evidence names a candidate node, merged PR, existing file, or the reason for uncertainty.
 
-The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes `graph.json`. An empty result includes a positive control. An all-match result is refused as a failed instrument.
+The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes the graph store. An empty result includes a positive control. An all-match result is refused as a failed instrument.
 
 ## Node-to-node edges
 

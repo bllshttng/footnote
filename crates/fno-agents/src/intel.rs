@@ -1,7 +1,8 @@
 //! `fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]
 //! [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]
-//! [--project NAME]... [--all-projects]` - the provenance fold: which of
-//! this machine's sessions did a person type into?
+//! [--project NAME]... [--all-projects] [--sample N|all]
+//! [--categories <run> --fold <saved fold JSON>]` - the provenance fold:
+//! which of this machine's sessions did a person type into?
 //!
 //! Read-only fold over transcripts, like [`crate::bash_census`]: no daemon,
 //! nothing written. Every user-shaped turn is classified by provenance
@@ -16,7 +17,7 @@ use crate::opencode_transcript::OpencodeSource;
 use crate::paths::AgentsHome;
 use crate::provenance::{BusIndex, ClaudeSource, CodexSource, Provenance, TranscriptSource};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -38,31 +39,90 @@ fn period_days(word: &str) -> Option<u64> {
 
 /// Per-session report row.
 #[derive(Debug, Serialize)]
-struct SessionRow {
-    harness: &'static str,
-    session: String,
-    path: String,
-    started: Option<String>,
-    duration_s: Option<i64>,
+pub(crate) struct SessionRow {
+    pub(crate) harness: &'static str,
+    pub(crate) session: String,
+    pub(crate) path: String,
+    pub(crate) started: Option<String>,
+    pub(crate) duration_s: Option<i64>,
     /// `attended` (operator or relay turns present) or `unattended`
     /// (neither; excluded from totals.operator_sessions).
-    kind: String,
+    pub(crate) kind: String,
     /// Every provenance counter, including zeros.
-    counters: BTreeMap<&'static str, u64>,
+    pub(crate) counters: BTreeMap<&'static str, u64>,
     /// Raw timestamps of each witnessed operator turn: the skill quotes
     /// only these when it judges the session.
-    operator_turns: Vec<String>,
-    tool_use: usize,
+    pub(crate) operator_turns: Vec<String>,
+    pub(crate) tool_use: usize,
     /// HEAD-sha transitions in the entry's loop_check fingerprints, the
     /// derivation digest.rs uses (events never carry a commit event).
-    commits: usize,
+    pub(crate) commits: usize,
     /// Transcript mtime + size: the facet-cache key the skill needs, so a
     /// resumed session re-judges instead of stranding on a stale cache.
-    mtime: u64,
-    size: u64,
+    pub(crate) mtime: u64,
+    pub(crate) size: u64,
     node: Option<String>,
     pr_number: Option<u64>,
     relay: Vec<RelayFacet>,
+    /// Activity counters (null for sources with no parser, never 0).
+    pub(crate) tokens: Option<crate::session_activity::Tokens>,
+    pub(crate) lines: Option<Lines>,
+    pub(crate) tool_errors: Option<BTreeMap<String, u64>>,
+    pub(crate) languages: Option<BTreeMap<String, u64>>,
+    /// Interrupt markers plus codex turn_aborted events.
+    pub(crate) interruptions: u64,
+    /// Gaps from witnessed operator turns back to the last assistant
+    /// timestamp, kept when 2 to 3600 s.
+    pub(crate) response_s: Vec<u64>,
+    /// 2+ operator/unknown turns and 60+ s.
+    pub(crate) substantive: bool,
+    /// Transcript untouched for IDLE_SECS.
+    pub(crate) idle: bool,
+    /// Picked by the --sample rank this run.
+    pub(crate) sampled: bool,
+}
+
+/// Added and removed lines, counted from edit arguments.
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
+pub(crate) struct Lines {
+    pub(crate) added: u64,
+    pub(crate) removed: u64,
+}
+
+#[cfg(test)]
+impl SessionRow {
+    /// A row with every counter at zero: tests mutate the pub(crate) fields.
+    pub(crate) fn test_row(session: &str, harness: &'static str) -> SessionRow {
+        SessionRow {
+            harness,
+            session: session.to_string(),
+            path: String::new(),
+            started: None,
+            duration_s: None,
+            kind: "unattended".to_string(),
+            counters: Provenance::all_labels()
+                .into_iter()
+                .map(|l| (l, 0u64))
+                .collect(),
+            operator_turns: Vec::new(),
+            tool_use: 0,
+            commits: 0,
+            mtime: 0,
+            size: 0,
+            node: None,
+            pr_number: None,
+            relay: Vec::new(),
+            tokens: None,
+            lines: None,
+            tool_errors: None,
+            languages: None,
+            interruptions: 0,
+            response_s: Vec::new(),
+            substantive: false,
+            idle: false,
+            sampled: false,
+        }
+    }
 }
 
 /// One bus row addressed to this session, judged.
@@ -112,6 +172,16 @@ struct Report {
     totals: Totals,
     /// The operator_submit witness receipt: what the mux saw and bound.
     witness: crate::operator_witness::WitnessReceipt,
+    /// Populations, activity totals, and the series the report and the
+    /// renderer read. Every number names its population.
+    populations: Value,
+    activity: Value,
+    hours: Value,
+    response_time: Value,
+    parallel: Value,
+    daily: Vec<Value>,
+    daily_undated: usize,
+    sample: Option<Value>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -269,7 +339,7 @@ pub(crate) fn bus_log_path(fno_dir: &Path) -> PathBuf {
     fno_dir.join("bus").join("messages.jsonl")
 }
 
-fn ts_secs(ts: &str) -> Option<u64> {
+pub(crate) fn ts_secs(ts: &str) -> Option<u64> {
     crate::state::rfc3339_like_to_secs(ts).or_else(|| {
         ts.get(..19)
             .and_then(|s| crate::state::rfc3339_like_to_secs(&format!("{s}Z")))
@@ -292,6 +362,7 @@ fn fold_session(
     // One read serves every parser: turns, tool calls, and the relay
     // delivery check all work from this text.
     let raw = source.read(file);
+    let activity = source.activity(&raw);
     let turns = source.turns(&raw);
     let mut counters: BTreeMap<&'static str, u64> = Provenance::all_labels()
         .into_iter()
@@ -394,6 +465,22 @@ fn fold_session(
         .get(&file.session_id)
         .cloned()
         .unwrap_or_else(|| (Vec::new(), None, None));
+    // Response gaps: witnessed operator turns vs the last assistant
+    // timestamp before each.
+    let duration_s = first_ts.zip(last_ts).map(|(f, l)| (l - f) as i64);
+    let interrupt_markers = counters
+        .get("harness_interrupt_marker")
+        .copied()
+        .unwrap_or(0);
+    let op_epochs: Vec<i64> = operator_turns
+        .iter()
+        .filter_map(|ts| ts_secs(ts).map(|s| s as i64))
+        .collect();
+    let assistant_ts: Vec<f64> = activity
+        .as_ref()
+        .map(|a| a.assistant_ts.clone())
+        .unwrap_or_default();
+    let response_s = crate::intel_insights::response_gaps(&op_epochs, &assistant_ts);
     let operator_count = counters.get("operator").copied().unwrap_or(0);
     let unknown_count = counters.get("unknown").copied().unwrap_or(0);
     let relay_turns: u64 = counters
@@ -406,7 +493,7 @@ fn fold_session(
         session: file.session_id.clone(),
         path: file.path.display().to_string(),
         started: first_ts.and_then(rfc3339_str),
-        duration_s: first_ts.zip(last_ts).map(|(f, l)| (l - f) as i64),
+        duration_s,
         // Attended now includes unwitnessed sessions: unknown turns mean the
         // session may hold operator speech the fold cannot witness yet, and
         // session totals must not shift.
@@ -424,6 +511,26 @@ fn fold_session(
         node,
         pr_number: pr,
         relay,
+        tokens: activity.as_ref().map(|a| a.tokens),
+        lines: activity.as_ref().map(|a| Lines {
+            added: a.lines_added,
+            removed: a.lines_removed,
+        }),
+        tool_errors: activity.as_ref().map(|a| {
+            a.tool_errors
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect()
+        }),
+        languages: activity.as_ref().map(|a| a.extensions.clone()),
+        interruptions: interrupt_markers + activity.as_ref().map(|a| a.aborted_turns).unwrap_or(0),
+        response_s,
+        substantive: crate::intel_insights::is_substantive(
+            operator_count + unknown_count,
+            duration_s,
+        ),
+        idle: ctx.now.saturating_sub(file.mtime) >= crate::intel_insights::IDLE_SECS,
+        sampled: false,
     }
 }
 
@@ -537,6 +644,12 @@ fn print_report(report: &Report) {
             report.scope.projects.join(",")
         }
     );
+    println!(
+        "  populations: {} transcripts, {} scanned, {} substantive",
+        report.populations["transcripts"].as_u64().unwrap_or(0),
+        report.populations["scanned"].as_u64().unwrap_or(0),
+        report.populations["substantive"].as_u64().unwrap_or(0)
+    );
     println!("  harness     session                              operator  relay  harness  keepalive  unknown  tool_use  commits  node");
     for s in &report.sessions {
         println!(
@@ -612,16 +725,21 @@ pub fn run_intel(args: &[String]) -> i32 {
         print!(
             "fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]\n\
              [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]\n\
-             [--project NAME]... [--all-projects]\n\n\
+             [--project NAME]... [--all-projects] [--sample N|all]\n\
+             [--categories <run> --fold <saved fold JSON>]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
-             row addressed to the session. Default window 30 days (--period 1m); the\n\
-             period words map to --days 14, 30, 60, 90 and 0 (--days 0 means every\n\
-             transcript, and --days beside --period is refused). Default scope is this\n\
-             project including its worktrees; --project NAME (repeatable, comma-\n\
-             separated) names other projects, --all-projects reads the machine,\n\
-             -H/--harness narrows the sources. Exit 3 when the window holds no\n\
-             sessions.\n"
+             row addressed to the session. Tokens, lines, tool errors, languages,\n\
+             interruptions, response time, hours, parallel sessions, a per-day series,\n\
+             populations, and a stable --sample of idle substantive sessions ride the\n\
+             same fold. --categories with --fold reads a saved fold JSON plus the\n\
+             skill's run file and prints it with per-category metrics; it reads no\n\
+             transcript. Default window 30 days (--period 1m); the period words map to\n\
+             --days 14, 30, 60, 90 and 0 (--days 0 means every transcript, and --days\n\
+             beside --period is refused). Default scope is this project including its\n\
+             worktrees; --project NAME (repeatable, comma-separated) names other\n\
+             projects, --all-projects reads the machine, -H/--harness narrows the\n\
+             sources. Exit 3 when the window holds no sessions.\n"
         );
         return 0;
     }
@@ -634,6 +752,9 @@ pub fn run_intel(args: &[String]) -> i32 {
     let mut all_projects = false;
     let mut harness_spec: Vec<String> = Vec::new();
     let mut projects: Vec<String> = Vec::new();
+    let mut sample = crate::intel_insights::SampleRequest::None;
+    let mut categories: Option<String> = None;
+    let mut fold_file: Option<String> = None;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut i = 0;
     while i < args.len() {
@@ -727,6 +848,43 @@ pub fn run_intel(args: &[String]) -> i32 {
                     }
                 }
             }
+            "--sample" => {
+                i += 1;
+                match args.get(i).map(|v| v.as_str()) {
+                    Some("all") => sample = crate::intel_insights::SampleRequest::All,
+                    Some(v) => match v.parse::<usize>() {
+                        Ok(n) if n > 0 => sample = crate::intel_insights::SampleRequest::N(n),
+                        _ => {
+                            eprintln!("fno-agents intel: --sample needs a positive integer or all");
+                            return 2;
+                        }
+                    },
+                    None => {
+                        eprintln!("fno-agents intel: --sample needs a positive integer or all");
+                        return 2;
+                    }
+                }
+            }
+            "--categories" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => categories = Some(v.clone()),
+                    None => {
+                        eprintln!("fno-agents intel: --categories needs --fold <saved fold JSON>");
+                        return 2;
+                    }
+                }
+            }
+            "--fold" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => fold_file = Some(v.clone()),
+                    None => {
+                        eprintln!("fno-agents intel: --categories needs --fold <saved fold JSON>");
+                        return 2;
+                    }
+                }
+            }
             "--json" | "-J" => json = true,
             "--all-projects" => all_projects = true,
             other => {
@@ -751,6 +909,14 @@ pub fn run_intel(args: &[String]) -> i32 {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
+    if categories.is_some() || fold_file.is_some() {
+        let (Some(run_path), Some(fold_path)) = (&categories, &fold_file) else {
+            eprintln!("fno-agents intel: --categories needs --fold <saved fold JSON>");
+            return 2;
+        };
+        let facets_dir = fno_dir.join("intel").join("facets");
+        return crate::intel_insights::run_categories(run_path, fold_path, &facets_dir);
+    }
     let selected = selected_harnesses(&harness_spec);
     let roots = if all_projects {
         None
@@ -775,6 +941,7 @@ pub fn run_intel(args: &[String]) -> i32 {
         days,
         node,
         session,
+        sample,
         selected,
         roots,
         projects,
@@ -871,6 +1038,7 @@ fn fold_all(
     days: u64,
     node: Option<String>,
     session: Option<String>,
+    sample: crate::intel_insights::SampleRequest,
     selected: Vec<&'static str>,
     roots: Option<Vec<PathBuf>>,
     projects: Vec<String>,
@@ -928,6 +1096,9 @@ fn fold_all(
     if let Some(want) = &node {
         rows.retain(|r| r.node.as_deref() == Some(want.as_str()));
     }
+    let transcripts = rows.len();
+    let (mut rows, dropped) =
+        crate::intel_insights::drop_rows(rows, crate::claims::resolve_identity().0.as_deref());
     let nodes = node_rows(&rows, &ctx.bus, ctx.now);
     let totals = totals_of(&rows);
     // The witness receipt over the --days window; `unwitnessed_sessions`
@@ -944,6 +1115,23 @@ fn fold_all(
         .filter(|r| !ctx.witness.has_session(&r.session))
         .count();
     let witness = ctx.witness.receipt(window_start_ms, unwitnessed_sessions);
+    let (eligible, sampled_n) = crate::intel_insights::mark_sampled(&mut rows, sample);
+    let populations =
+        crate::intel_insights::populations(transcripts, &dropped, &rows, eligible, sampled_n);
+    let activity = crate::intel_insights::activity_totals(&rows);
+    let hours = crate::intel_insights::hours(&rows);
+    let response_time = crate::intel_insights::response_time(&rows);
+    let parallel = crate::intel_insights::parallel(&rows);
+    let (daily, daily_undated) = crate::intel_insights::daily(&rows);
+    let sample_block = match sample {
+        crate::intel_insights::SampleRequest::None => None,
+        crate::intel_insights::SampleRequest::N(n) => Some(json!({
+            "requested": n, "rank": "blake3(session_id)", "idle_secs": crate::intel_insights::IDLE_SECS
+        })),
+        crate::intel_insights::SampleRequest::All => Some(json!({
+            "requested": "all", "rank": "blake3(session_id)", "idle_secs": crate::intel_insights::IDLE_SECS
+        })),
+    };
     Report {
         days,
         scope: Scope {
@@ -960,6 +1148,14 @@ fn fold_all(
         skipped,
         totals,
         witness,
+        populations,
+        activity,
+        hours,
+        response_time,
+        parallel,
+        daily,
+        daily_undated,
+        sample: sample_block,
     }
 }
 
@@ -1418,10 +1614,25 @@ mod tests {
         };
         let rows = fold_source(&claude, &mut ctx);
         let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
-        // The mail turn stays a relay; the submit stays unbound for a typed
-        // turn to claim.
+        // The mail turn stays a relay; the submit rows stay unbound.
         assert_eq!(row.counters.get("relay_fno_mail"), Some(&1));
         let receipt = ctx.witness.receipt(0, 0);
         assert_eq!(receipt.bound, 0);
+    }
+
+    #[test]
+    fn sample_and_categories_refusals_exit_two() {
+        // AC12-ERR, AC18-ERR flag half
+        assert_eq!(run_intel(&["--sample".into(), "0".into()]), 2);
+        assert_eq!(run_intel(&["--sample".into(), "abc".into()]), 2);
+        assert_eq!(run_intel(&["--sample".into()]), 2);
+        assert_eq!(
+            run_intel(&["--categories".into(), "/tmp/none-run.json".into()]),
+            2
+        );
+        assert_eq!(
+            run_intel(&["--fold".into(), "/tmp/none-fold.json".into()]),
+            2
+        );
     }
 }
