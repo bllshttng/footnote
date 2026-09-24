@@ -1,6 +1,6 @@
 # Role-based model routing
 
-fno spawns every claude worker on the primary model (Anthropic Opus, billed to the Max/coding pool). There was no per-task model selection, so auxiliary coordination work (backlog tidying, node orientation, memory consolidation) burned expensive coding usage. Role-based routing sends low-stakes coordination to a secondary provider (z.ai GLM by default, DeepSeek or others by config) while production work (writing the diff, the correctness verdict) stays on the primary model, without replacing the main models and without a proxy in the critical path.
+fno spawns every claude worker on the primary model (Anthropic Opus, billed to the Max/coding pool). There was no per-task model selection, so auxiliary coordination work (backlog tidying, node orientation, memory consolidation) burned expensive coding usage. Role-based routing sends low-stakes coordination to a secondary provider (z.ai GLM by default, DeepSeek or others by config). Inline self-review uses the model already routed to the authoring session; independent review follows an explicitly configured peer or external-review policy.
 
 ## Why route by role, not task
 
@@ -58,7 +58,7 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 
 **It does not keep the diff on the primary model.** `build` is a routable lane carrying exactly the payload `implement` names: `skills/target/scripts/dispatch-node.sh` attaches `--role build` to claude node dispatch, so a configured `build` route sends the worker that writes the diff to a secondary provider. That is deliberate, and config presence is the consent, but it means "no settings edit can route the diff" is false. `implement` is guarded; the lane that actually delivers is not.
 
-**It does not decide the reviewer's model.** No dispatch surface anywhere passes `--role review-verdict`; the name resolves nothing because nothing declares it. The model that renders a correctness verdict is the model of the session that runs the review, and routing sets every entry in `MODEL_ENV_KEYS` for the whole worker process. So a worker routed by `build` renders its own `/code-review` verdict on the routed model, and no per-spawn role guard can see that, because the verdict is a later activity inside an already-routed process. Keep the reviewer off the authoring worker (see [review lanes](review-lanes.md)); a role table cannot enforce it.
+**It does not decide the review model.** No dispatch surface passes `--role review-verdict`; the name resolves nothing because nothing declares it. The fno self-review lane runs inline in the authoring session, so it uses that session's routed model. A role table does not select a separate reviewer. See [review lanes](review-lanes.md) for the inline and configured peer paths.
 
 `review_attestation` records the `model` and `provider` in effect when a local verdict was emitted, so this is auditable after the fact rather than assumed. Both fields are optional and best-effort: they report what the worker's environment *claimed*, which is not proof of the model that answered. Empty means *not observable*, not "primary" - `resolve_codex_route` carries a codex worker's route in `-c model=...` config args and puts only the API key in the environment, so a routed codex verdict records empty on both fields.
 
