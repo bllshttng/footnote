@@ -672,7 +672,7 @@ mod tests {
             &differ[..differ.len().min(20)]
         );
         println!(
-            "rehearsal: {} nodes byte-identical after the wire renames; report {}",
+            "rehearsal: {} nodes export the same canonical JSON after the wire renames; report {}",
             after.len(),
             crate::backlog::meta(&connection, "schema_v4_report")
                 .unwrap()
