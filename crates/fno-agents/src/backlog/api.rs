@@ -1291,6 +1291,42 @@ pub fn session_end(
     }
 }
 
+/// Fill `ended_at` on every `phase` record of node `id` that has none,
+/// whoever opened it: a ship record ends at the merge, whichever session
+/// linked the PR. False when no record needed the fill, or when the node
+/// rides the raw carry.
+pub fn phase_end(
+    store: &Store,
+    id: &str,
+    phase: &str,
+    ended_at: &str,
+    ended_by: &str,
+) -> Result<bool, ApiError> {
+    mutate(store, "phase_end", |rows| {
+        let Some(row) = rows
+            .iter_mut()
+            .find(|row| crate::graph_store::entry_id(row) == Some(id))
+        else {
+            return Ok(false);
+        };
+        let Ok(mut parsed) = Node::from_json(row) else {
+            return Ok(false);
+        };
+        let mut filled = false;
+        for record in parsed.sessions.iter_mut().flatten() {
+            if record.phase == phase && record.ended_at.as_deref().is_none_or(str::is_empty) {
+                record.ended_at = Some(ended_at.to_string());
+                record.ended_by = Some(ended_by.to_string());
+                filled = true;
+            }
+        }
+        if filled {
+            *row = parsed.to_json();
+        }
+        Ok(filled)
+    })
+}
+
 pub fn encounter_create(
     store: &Store,
     id: &str,
