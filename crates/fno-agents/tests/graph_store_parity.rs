@@ -112,7 +112,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     use fno_agents::graph_keeper::apply_op_for_tests;
     use fno_agents::graph_store::{self, MutateInput};
 
-    let mutate = |entries: Vec<Value>, g: &Path| -> graph_store::MutateOutcome {
+    // The last publish's entries: under sqlite graph.json is a frozen mirror,
+    // so the published surface is what the pipeline computed, not the file.
+    let published: std::cell::RefCell<Option<Vec<Value>>> = std::cell::RefCell::new(None);
+    let mutate = |entries: Vec<Value>, g: &Path| {
         // Single-writer probes: no interleaving, so the snapshot is current.
         // Backend-aware: under the sqlite store the version is graph_meta's.
         let base = graph_store::base_version(g).expect("rust base version");
@@ -128,7 +131,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                     .map(|i| (i.to_string(), "none".to_string()))
             })
             .collect();
-        graph_store::locked_mutate(
+        let outcome = graph_store::locked_mutate(
             g,
             MutateInput {
                 entries,
@@ -138,13 +141,29 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
             },
             std::time::Duration::from_secs(5),
         )
-        .expect("rust locked_mutate")
+        .expect("rust locked_mutate");
+        *published.borrow_mut() = Some(outcome.entries);
     };
 
     // The store is graph.db; the json file is a frozen mirror under it.
     // read_rows runs the defaults pipeline, whose insertion order is the
-    // byte contract the goldens were captured with.
-    let read_store = |g: &Path| -> Vec<Value> { graph_store::read_rows(g).expect("rust read") };
+    // byte contract the goldens were captured with. The soft read swallows
+    // corruption to [] (read_graph's contract); the strict probe below
+    // surfaces the error kind.
+    let read_store = |g: &Path| -> Vec<Value> {
+        match graph_store::read_rows(g) {
+            Ok(rows) => rows,
+            Err(
+                e @ graph_store::StoreError::Corrupt(_)
+                | e @ graph_store::StoreError::MalformedRoot(_)
+                | e @ graph_store::StoreError::Unreadable(_, _),
+            ) => {
+                eprintln!("{e}");
+                vec![]
+            }
+            Err(e) => panic!("rust read: {e}"),
+        }
+    };
     let read_now = |g: &Path| -> String {
         let entries = read_store(g);
         graph_store::serialize_entries(&entries)
@@ -257,7 +276,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     }
 
     json_out.insert("steps".into(), Value::Array(steps));
-    let file = std::fs::read(graph).expect("rust published file");
+    let file = match published.into_inner() {
+        Some(entries) => graph_store::serialize_graph_file(&entries).into_bytes(),
+        None => std::fs::read(graph).expect("rust fixture file"),
+    };
     json_out.insert(
         "file".into(),
         Value::String(base64::engine::general_purpose::STANDARD.encode(&file)),
