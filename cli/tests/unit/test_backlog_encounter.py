@@ -575,7 +575,7 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
     assert stored[0]["evidence"] == evidence
 
     carriers = [
-        path.name.removesuffix("-wal").removesuffix("-shm").removesuffix("-journal")
+        "graph.db" if path.name.startswith("graph.db") else path.name
         for path in probe.state.rglob("*")
         if path.is_file() and evidence.encode() in path.read_bytes()
     ]

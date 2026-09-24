@@ -2365,7 +2365,7 @@ def test_open_pr_heal_fills_an_unstamped_node(cli_env, tmp_path, monkeypatch):
 def test_open_pr_heal_ambiguous_prs_mutate_nothing(cli_env, tmp_path, monkeypatch):
     """AC4: one node named by two open PRs -> advisory, no graph mutation."""
     graph_path, _sentinel = cli_env
-    _make_graph(graph_path, [_node("ab-3b9e", cwd=str(tmp_path))])
+    _make_graph(graph_path, [_node("ab-3b9e", cwd=str(tmp_path), status="idea", slug="ab-3b9e")])
     before = _store_state(graph_path)
     monkeypatch.setattr(
         rec, "list_open_pr_branches", _open_rows({10: "feature/ab-3b9e", 11: "target/x-ab-3b9e"})

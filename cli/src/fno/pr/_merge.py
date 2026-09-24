@@ -749,7 +749,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
             return
 
         path = graph_json()
-        if not path.exists():
+        if not path.with_suffix(".db").exists():
             return
 
         # The graph is cross-project: a bare PR number can collide across
@@ -922,9 +922,6 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         path = graph_json()
         external = active_backend_name() != "graph"
-        # graph_json is a stable anchor; graph-mode close needs its SQLite store.
-        if not external and not path.with_suffix(".db").exists():
-            return []
         pr_url = ""
         view = _gh(
             ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],

@@ -151,11 +151,6 @@ def _scan_state_file(
     eval_session_ids: set[str],
     surface_key: str,
 ) -> list[Violation]:
-    """Scan a state file line by line for eval session ids.
-
-    Reports the 1-based line number of the first match per (id, file).
-    Missing files are silently skipped (clean result).
-    """
     if surface_key != "graph_json" and not path.exists():
         return []
 

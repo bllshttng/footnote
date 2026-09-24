@@ -766,24 +766,16 @@ def locks_dir() -> Path:
 
 
 def graph_json() -> Path:
-    """Return the graph.db store anchor path."""
+    """Return the path to graph.json."""
     return state_dir() / "graph.json"
 
 
 def graph_archive_json() -> Path:
-    """Return the path to graph-archive.json (terminal-node archive sweep).
-
-    A sibling of the graph store anchor. It is never meaningful to separate
-    the archive from its working graph.
-    """
     return graph_json().parent / "graph-archive.json"
 
 
 def relatedness_json() -> Path:
     """Return the path to relatedness.json (node-to-node relatedness sidecar).
-
-    A sibling of the graph store anchor (like graph-archive.json) and is inherently shared across
-    worktrees. Regenerable artifact, never part of graph.json.
     """
     return graph_json().parent / "relatedness.json"
 

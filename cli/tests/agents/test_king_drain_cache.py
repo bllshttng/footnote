@@ -100,7 +100,11 @@ def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> Non
     for i in range(CHILDREN):
         child = _entry(f"{SCOPE}-c{i}", type="feature", project="web", parent=SCOPE)
         if i < done_children:
-            child.update(status="done", completed_at="2026-01-01T00:00:00Z")
+            child.update(
+                status="done",
+                completed_at="2026-01-01T00:00:00Z",
+                completion_note="fixture closure evidence",
+            )
         entries.append(child)
     if done_epic:
         entries[FILLER].update(

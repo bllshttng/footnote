@@ -114,18 +114,20 @@ impl Fleet {
     fn seed(&self) {
         std::fs::create_dir_all(self.dir.join("work")).unwrap();
         let agents = self.dir.join("agents");
-        std::fs::write(
-            self.dir.join("graph.json"),
-            format!(
-                r#"{{"entries": [
-                {{"id": "{NODE}", "type": "feature", "status": "done",
-                  "merge_status": "merged",
-                  "sessions": [
-                    {{"session_id": "{U1}", "phase": "review"}},
-                    {{"session_id": "{U3}", "phase": "review"}}
-                  ]}}
-            ]}}"#
-            ),
+        fno_agents::graph_store::seed_rows(
+            &self.dir.join("graph.json"),
+            &[serde_json::json!({
+                "id": NODE,
+                "type": "feature",
+                "status": "done",
+                "completed_at": "2026-09-01T00:00:00Z",
+                "completion_note": "fixture closure evidence",
+                "merge_status": "merged",
+                "sessions": [
+                    {"session_id": U1, "phase": "review"},
+                    {"session_id": U3, "phase": "review"}
+                ]
+            })],
         )
         .unwrap();
         std::fs::write(

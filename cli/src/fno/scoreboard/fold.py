@@ -279,12 +279,10 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
 
 
 def read_graph_nodes(path: Path) -> list[dict]:
-    """Read the optional survival signal from the store; failures mean n/a."""
-    from fno.graph.api import wire_rows
-    from fno.graph.store import STORE_READ_ERRORS
+    from fno.graph.store import STORE_READ_ERRORS, read_graph_strict
 
     try:
-        return wire_rows(path=Path(path))
+        return read_graph_strict(Path(path))
     except STORE_READ_ERRORS:
         return []
 

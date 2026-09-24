@@ -1034,24 +1034,7 @@ def read_file_bytes(path: Path) -> bytes:
 
 
 def _read_json(path: Path) -> list[dict]:
-    """Raw read of a JSON entries file through the keeper's byte read.
-
-    Raises GraphCorruptError on JSON parse failure OR when the root value is
-    not a JSON object. Empty stores return an empty entries list; unavailable
-    keepers raise StoreUnavailable.
-    """
-    path = Path(path)
-    raw = read_file_bytes(path)
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GraphCorruptError(str(path)) from exc
-    if not isinstance(data, dict):
-        raise GraphCorruptError(str(path))
-    entries = data.get("entries", [])
-    if not isinstance(entries, list):
-        raise GraphCorruptError(str(path))
-    return entries
+    return _read_snapshot(_client_for(Path(path)))[1]
 
 
 def _graph_lock_path(path: Path) -> Path:
