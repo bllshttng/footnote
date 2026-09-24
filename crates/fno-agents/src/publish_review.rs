@@ -463,9 +463,11 @@ pub fn publish_held(payload: &Value, gh: &dyn Gh, journals: &[PathBuf]) -> HeldA
         );
     }
 
-    // Idempotency: scan existing comments for this exact marker.
+    // Idempotency: scan existing comments for this exact marker. --paginate
+    // walks every page, so a busy PR cannot push its marker past the scan.
     let list: Vec<String> = [
         "api",
+        "--paginate",
         &format!("/repos/{slug}/issues/{number}/comments?per_page=100"),
     ]
     .iter()
