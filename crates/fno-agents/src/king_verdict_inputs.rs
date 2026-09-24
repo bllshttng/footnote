@@ -861,15 +861,18 @@ mod tests {
 
     /// An unreadable registry refuses naming the read failure, never the
     /// misleading "no crowned registry row" the Python leg printed for this
-    /// case.
+    /// case. A MISSING file is a valid empty registry, so the fixture is a
+    /// corrupt one: the defect class is a registry the reader cannot parse.
     #[test]
     fn unreadable_registry_refuses_by_name_not_no_crowned_row() {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tmp("unreadable");
+        let path = dir.join("registry.json");
+        fs::write(&path, "{not json").unwrap();
         with_crowned_identity(|| {
-            let err = resolve_scope(None, &dir.join("missing.json")).expect_err("must refuse");
+            let err = resolve_scope(None, &path).expect_err("must refuse");
             assert!(
                 err.contains("the agent registry could not be read"),
                 "{err}"
