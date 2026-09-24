@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -713,6 +714,7 @@ def test_open_binding_heal_fills_a_trailer_named_node(tmp_path):
     # reverse key.
     from fno.graph._reconcile import collect_open_binding_heals
 
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     entries = [_node(id="x-0001", status="ready", cwd=str(tmp_path))]
     heals, advisories = collect_open_binding_heals(
         entries,

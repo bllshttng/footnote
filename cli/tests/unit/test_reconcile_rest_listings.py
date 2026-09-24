@@ -50,7 +50,7 @@ def _install(monkeypatch, payloads, *, tmp_path):
 
     def run(cmd, *, cwd=None, timeout=None, **kwargs):
         calls.append(list(cmd))
-        if cmd[:3] == ["git", "remote", "get-url", "origin"]:
+        if cmd[:3] == ["git", "remote", "get-url"]:
             result = real_run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
             return Result(result.returncode, result.stdout, result.stderr)
         page = int(cmd[2].rsplit("page=", 1)[1])

@@ -89,7 +89,7 @@ def _install_fake_rest(monkeypatch, *, merged_rows, open_rows, tmp_path):
 
     def fake_run(cmd, *, cwd=None, timeout=None, **kwargs):
         calls.append(list(cmd))
-        if cmd[:3] == ["git", "remote", "get-url", "origin"]:
+        if cmd[:3] == ["git", "remote", "get-url"]:
             result = real_run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
             return Result(result.returncode, result.stdout, result.stderr)
         assert cmd[:2] == ["gh", "api"], f"unexpected command: {cmd}"
@@ -217,7 +217,7 @@ def test_pending_supersession_successor_takes_the_query_not_the_listing(
     assert _gh_calls(calls), "listing fetches still happened for the rest"
 
 
-def test_cwd_outside_any_repo_groups_under_itself(tmp_path):
+def test_cwd_outside_any_repo_is_skipped(tmp_path):
     plain = [tmp_path / "not-a-repo-a", tmp_path / "not-a-repo-b"]
     for d in plain:
         d.mkdir()
@@ -232,7 +232,7 @@ def test_cwd_outside_any_repo_groups_under_itself(tmp_path):
         return []
 
     heals, advisories = collect_open_binding_heals(entries, list_open=list_open)
-    assert asked == [str(d) for d in plain]
+    assert asked == []
     assert heals == [] and advisories == []
 
 
