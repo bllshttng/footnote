@@ -163,6 +163,7 @@ fn birth_exec_fences_the_client_argv_and_cleans_the_supervisor_env() {
     let birth_dump = dir.join("birth-env.txt");
     let argv_dump = dir.join("client-argv.txt");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "claude-birth-exec",
             "--",
@@ -220,6 +221,7 @@ fn birth_exec_requires_a_fence_and_a_client_argv() {
         vec!["claude-birth-exec", "claude", "--bg"],
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+            .envs(fno_agents::test_run::self_owner_env())
             .args(args)
             .output()
             .unwrap();
@@ -234,6 +236,7 @@ fn birth_exec_maps_a_missing_claude_cli_to_127() {
         .join(".fno-birth-exec-missing-claude")
         .join(".claude");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["claude-birth-exec", "--", "claude", "--bg", "hi"])
         .env("PATH", &empty_bin)
         .env("CLAUDE_CONFIG_DIR", config_dir)
