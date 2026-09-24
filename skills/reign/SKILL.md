@@ -13,8 +13,10 @@ metadata:
 
 # Reign
 
-When `$CODEX_THREAD_ID` is nonblank, before anything else, Print exactly once:
-`codex posture: reign uses the externally owned wake arm on codex; no native commands are injected.`
+When `$CODEX_THREAD_ID` is nonblank, the Codex provider goal is the primary
+continuation receipt. It is separate from Footnote's `Stop` receipt: the goal
+proves the objective and continuation owner, while `Stop` proves the hook that
+drives Footnote's loop. Neither receipt substitutes for the other.
 
 You are the tenured king over `<scope>`. With `--once` you rule one wave and abdicate. Without it you stay. Your job is not to build. It is to keep the territory moving. Read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
 
@@ -42,15 +44,15 @@ How a crown is bestowed, the ladder and succession: [the crown model](references
 
 ## One wave: --once
 
-With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term and native beat. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
+With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term and native beat. Do not arm a native monitor or inject `/goal` or `/loop` through raw mail; the one-wave controller owns its provider receipts. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md). None of the harnesses injects `/goal` or arms a Monitor.
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, not raw prompt-line `/goal` or `/loop`; read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
 
 The daemon mails the settle push on every harness:
 
-1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks. Codex arms nothing native: its provider goal and Stop receipts are the beat.
 
 On Claude, inject the loop as the cheap heartbeat:
 
@@ -58,7 +60,7 @@ On Claude, inject the loop as the cheap heartbeat:
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
 ```
 
-Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it, and use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
+Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it. For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`. Use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -147,7 +149,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook.
+Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective. The wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
 
 ## The three halts
 
@@ -161,4 +163,4 @@ The one-wave pass, the crown model, and the minion contract are in [references/]
 
 ## Known Limitations and Deferred Work
 
-- A codex reign has no scheduled beat. A `--once` pass does not supervise the workers it spawns. The court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).
+- A Codex reign has no native cron or Monitor beat; its provider goal and Footnote Stop receipts are read independently, and the external wake arm supplies cadence. A `--once` pass does not supervise the workers it spawns. The court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).

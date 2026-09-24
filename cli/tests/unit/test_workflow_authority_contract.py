@@ -183,7 +183,10 @@ def test_reign_branches_on_harness_capability_before_arming():
     assert "Branch once on what the harness supports" in arm
     assert "king_settle" in arm  # the daemon settle mail pushes on every harness
     assert "arms no watch" in arm  # the king arms nothing; the daemon mails
-    assert "externally owned wake" in arm  # the codex beat is the external wake contract
+    assert "Codex uses provider-backed goal actions" in arm
+    assert "positive `provider_goal` receipt" in arm
+    assert "separate positive `stop` receipt" in arm
+    assert "Every Codex wake runs the check-in body" in arm
 
 
 def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
