@@ -45,7 +45,7 @@ Why it is not a mailed cap. It was tried, and it caught nothing. On 2026-08-22 f
 
 ## Legacy native Skill-tool invocation
 
-This section records the older harness-native path. It is not the worker self-review route: workers use `/fno:review` or `$fno:review` inline. If the inline lane refuses, report the literal refusal and stop; do not fall through to a native verb or another session.
+This section records the older harness-native path. Workers use `/fno:review` or `$fno:review` inline. If that lane refuses, report the literal refusal and stop. Do not try a native verb or another session.
 
 An in-session agent can launch the native review verb through the Skill
 tool with **bare args**, not by typing the slash command:
@@ -175,7 +175,7 @@ Do not conclude the lane is absent from an empty `--help` or an empty Python-tre
 
 ## The target ship loop and findings
 
-The target ship step runs the review rounds BEFORE the PR opens. The default round is `fno do target request-self-review` with no `--pr`, on the final local HEAD. It pins the local branch and HEAD against the origin base. Its prompt-line payload names `<branch> HEAD <sha> against origin/<base>` and uses `$fno:review` on Codex or `/fno:review` elsewhere. A rebase before the push moves HEAD and stales that attestation, so the round runs again on the new HEAD. The `--pr <n>` form is the post-push form. It resolves the PR head and base and refuses a local-head mismatch. Its payload names `HEAD <sha> of PR <n> against origin/<base>`. If the review is already active, the receipt is `started`; the inline lane surfaces findings and records the attestation. Fixes require a new-head review. This path uses no king, mail transport, daemon stream, or external reader. The ledger row is machine-local. A merge attempted from a second machine sees no attestation for that head. That limit is accepted here, not closed by this lane.
+The target ship step reviews the final local HEAD before PR creation. The bare `fno do target request-self-review` form pins the branch and HEAD against origin. It runs `$fno:review` on Codex or `/fno:review` elsewhere. The inline lane surfaces findings and emits a head-pinned attestation. A rebase makes that attestation stale. Review again after all rebases, not after each one. The `--pr <n>` form reads the PR head and base, then refuses a local mismatch. An already-active review returns `started`. This flow uses no king, mail, daemon stream, or external reader. The ledger is machine-local, so another machine cannot read the attestation.
 
 ## Worker self-review
 
@@ -187,7 +187,7 @@ A wrapped `fno agents mail send` cannot carry a verb. It writes an `<fno_mail ..
 
 ## Do not assert a cause for a refusal
 
-Invocation refusals have been observed, but no single cause is confirmed. Do not invent a mechanism or ask a worker to check a speculative flag. If the inline fno review skill refuses, report the exact refusal and stop; do not retry through raw mail, a native review verb, or another session. See [reign/references/review.md](../../skills/reign/references/review.md) for the worker contract.
+Invocation refusals have been observed, but no cause is confirmed. Do not invent a mechanism or ask workers to check speculative flags. If inline fno review refuses, report the exact refusal and stop. Do not retry through raw mail, a native verb, or another session. See [reign/references/review.md](../../skills/reign/references/review.md) for the worker contract.
 
 ## Counting invocations
 
@@ -460,7 +460,7 @@ That is a merge-authority decision, tracked separately.
 **A green PR whose only attestation is `self_attested` is covered. Merge it.**
 `self_attested` is not a hold condition and has never been one.
 
-**No spawned reviewer.** Worker self-review runs through the fno lane inline in the builder's session. A different session id alone does not establish independent review. When policy requires a non-self attestation, the configured `peer` lane must cross the harness or model; it is not a handoff to a same-work sibling.
+**No spawned-reviewer lane (operator law d-384d967c).** Worker self-review runs inline in the builder's session. A different session id alone does not establish independent review. When policy requires a non-self attestation, the configured `peer` lane must cross the harness or model. It is not a handoff to a same-work sibling.
 
 What survives from the retired lane is mechanics, not advice. An attestation from ANY session lands in the shared journal. The freshness and branch-scope predicates read it wherever it was emitted. Two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
 
@@ -478,7 +478,7 @@ A rebase replaces every sha on the branch, so a tiling keyed by sha alone resets
 
 The round budget is `config.review.max_rounds` (default 2). A round is one reviewed HEAD, counted across the whole life of the PR, so two verdicts at one unchanged head are one round. A pass is one round like any other and refunds nothing, though it still satisfies coverage. CI failures, lint failures and rebases are not rounds. A PR merges after one to three reviews and never waits for a clean round. The full statement, with the honest-limits contract, is [review-coverage-termination.md](review-coverage-termination.md). That contract covers what class-gating does and does not close, the CONFIRMED axis, and GitHub's per-identity limit.
 
-The configured `peer` lane can provide cross-model review. A GLM or Codex author's review must cross the model or harness to count as independent; a different session alone is not enough.
+The configured `peer` lane can provide cross-model review. A GLM or Codex author's review must cross the model or harness to count as independent. A different session alone is not enough.
 
 The identity scrub on every spawn substrate makes a cross-harness reviewer stamp its own session rather than the author's. Without it, the peer lane's honest `other_session` from a genuinely different reviewer is silently unreachable.
 
