@@ -3499,6 +3499,55 @@ event_types:
         sessions_error: { type: [string, "null"] }
     consumers: [operator]
 
+  - name: stop_decision
+    description: "The Stop hook's single correlated ownership decision for one harness fire. The control_plane_tick remains the aggregate projection; this row preserves the identity and output contract needed to audit who owned continuation."
+    sources: [hook]
+    data:
+      required: [session_id, raw_identity_candidates, turn_id, manifest, scope, node_id, driver, continuation_owner, decision, class, correlation_id, harness_output_contract]
+      properties:
+        session_id:
+          type: string
+          description: "Full harness session identity supplied by the Stop fire."
+        raw_identity_candidates:
+          type: array
+          items: { type: string }
+          description: "Every raw identity candidate considered by the resolver, in precedence order."
+        turn_id:
+          type: string
+          description: "Codex turn id from the Stop payload, or an empty string for non-Codex fires."
+        manifest:
+          type: string
+          description: "Resolved manifest path, or an empty string when no manifest owned the fire."
+        scope:
+          type: string
+          description: "Manifest scope/crown scope, or an empty string when unscoped."
+        node_id:
+          type: string
+          description: "Manifest node identity, or an empty string when no node is bound."
+        driver:
+          type: string
+          description: "The continuation driver that answered, or unknown when ownership could not be resolved."
+        continuation_owner:
+          type: string
+          enum: [goal, loop_check, none, refusal]
+          description: "The single owner selected for the next continuation."
+        decision:
+          type: string
+          enum: [allow, block, refuse]
+          description: "The Stop decision after continuation arbitration."
+        class:
+          type: string
+          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow]
+          description: "Typed reason class for the decision."
+        correlation_id:
+          type: string
+          description: "Stable id joining the project and aggregate projections for this Stop fire."
+        harness_output_contract:
+          type: string
+          enum: [empty, json_block, exit_2_stderr]
+          description: "The output contract the calling harness will consume for a block/refusal."
+    consumers: [operator, fno doctor]
+
   - name: evals_scheduled_run
     description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
     sources: [daemon, test]
@@ -6898,7 +6947,7 @@ event_types:
     consumers: [operator]
 
   - name: king_loop_check
-    description: "One king loop-check fire that found actionable work and blocked. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
     data:
       required: [session_id]
@@ -6917,6 +6966,36 @@ event_types:
         board_error:
           type: string
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
+        provider_goal_pause_error:
+          type: string
+          description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
+    consumers: [operator]
+
+  - name: king_goal_resumed
+    description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
+    sources: [loop]
+    data:
+      required: [session_id, scope, resumed, successor, provider_receipt]
+      properties:
+        session_id:
+          type: string
+          description: "The exact harness session whose provider goal resumed."
+        scope:
+          type: string
+          description: "The crown scope whose goal was resumed."
+        resumed:
+          type: boolean
+        successor:
+          type: boolean
+        reason:
+          type: string
+          description: "The admitted wake trigger, when the caller supplied one."
+        address:
+          type: string
+          description: "The matched inbox address for a mail wake, when present."
+        provider_receipt:
+          type: object
+          description: "The Codex readback confirming objective, active status and continuation owner."
     consumers: [operator]
 
   - name: king_drain_reserve

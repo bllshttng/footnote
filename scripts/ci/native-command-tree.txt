@@ -9,6 +9,7 @@ mux attach	leaf	visible	-	-
 mux block	group	visible	-	-
 mux block annotate	leaf	visible	-	-
 mux block pipe	leaf	visible	-	-
+mux command	leaf	visible	-	--empty-composer,--expect,--proof,--request-id,--text,--timeout-seconds
 mux doctor	leaf	visible	-	--json,-J
 mux kill-server	leaf	visible	-	--all,--end-unkept,--json,-J,--stale-idle
 mux layout	group	visible	-	!--session,--json,--server

@@ -603,7 +603,6 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
     }
-
     // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct
     // dispatch; no daemon RPC.
     if verb == "finalize" {
