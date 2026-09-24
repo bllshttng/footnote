@@ -176,7 +176,7 @@ def test_next_never_selects_a_closed_tombstone(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, rows, {
         "EXT-hi": {"plan_path": "/plans/hi.md"},
     })
-    r = runner.invoke(app, ["backlog", "next", "--json"], catch_exceptions=False)
+    r = runner.invoke(app, ["backlog", "next"], catch_exceptions=False)
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["id"] == "EXT-hi"
 

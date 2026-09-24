@@ -23,7 +23,7 @@ from .types import (
     TrackerNode,
     TrackerState,
 )
-from fno.rust_binary import verb_call
+from fno import rust_binary
 
 
 def active_backend_name(name: str | None = None) -> str:
@@ -50,7 +50,7 @@ class _RustTracker:
         self.name = name
 
     def _call(self, op: str, id: str | None = None) -> dict:
-        out = verb_call("graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
+        out = rust_binary.verb_call("graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
         if out.get("not_found"):
             raise NodeNotFound(id)
         if out.get("error"):
