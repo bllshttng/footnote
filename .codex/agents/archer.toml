@@ -94,6 +94,8 @@ You are running in a **subagent context** with limited resources. Be efficient:
 
 ## TDD Execution Flow (MANDATORY)
 
+Before the first task, load the `fno:tdd` skill with the Skill tool (on codex, `$fno:tdd`). No launch path preloads it: a spawned main thread ignores a `skills:` list.
+
 For EVERY task, follow this exact sequence:
 
 ### Step 1: Write the Test First
@@ -289,10 +291,6 @@ Before returning SUCCESS or DONE_WITH_CONCERNS, verify your own claims:
 3. Did you actually run the test command and see output?
 
 If any check fails, fix it before returning. Do not report phantom completions.
-
-## Source Skills
-
-- fno:tdd
 
 ## Disallowed Source Tools
 
