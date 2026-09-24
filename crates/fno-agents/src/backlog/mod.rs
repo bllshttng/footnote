@@ -227,12 +227,27 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
+    // First opens of a new file race to switch it to WAL. Each upgrades a
+    // read lock, and SQLite answers the loser busy at once, with no busy
+    // handler, since waiting could deadlock. By the retry the winner has
+    // switched the file, and the pragma is a no-op.
+    let mut tries = 0;
+    loop {
+        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy && tries < 50 =>
+            {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            outcome => {
+                outcome.map_err(|error| error.to_string())?;
+                break;
+            }
+        }
+    }
     connection
-        .execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=FULL;
-             PRAGMA foreign_keys=ON;",
-        )
+        .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
         .map_err(|error| error.to_string())?;
     connection
         .execute_batch(&graph_meta_ddl())
@@ -1753,6 +1768,31 @@ mod tests {
         transaction.commit().unwrap();
         opener.join().unwrap().unwrap();
         assert_eq!(version(&graph).unwrap(), "sqlite:first-write");
+    }
+
+    /// First opens of a brand-new store, all at once, all succeed.
+    #[test]
+    fn concurrent_first_opens_of_a_new_store_all_succeed() {
+        let mut failures = Vec::new();
+        for _ in 0..50 {
+            let (_dir, graph) = fixture("graph.json");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+            let openers: Vec<_> = (0..6)
+                .map(|_| {
+                    let (graph, barrier) = (graph.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open(&graph).map(drop)
+                    })
+                })
+                .collect();
+            for opener in openers {
+                if let Err(error) = opener.join().unwrap() {
+                    failures.push(error);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
