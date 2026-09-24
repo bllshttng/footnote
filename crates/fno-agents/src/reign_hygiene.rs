@@ -446,6 +446,16 @@ fn check5_context_timing_heuristic(entries: &[Entry]) -> CheckResult {
     )
 }
 
+pub(crate) fn run_checks(entries: &[Entry], shape: Option<&str>) -> [CheckResult; 5] {
+    [
+        check1_claim_before_read(entries),
+        check2_spawn_abdicate_rule(entries, shape),
+        check3_crown_before_ruling(entries),
+        check4_prwatch_before_dispatch(entries),
+        check5_context_timing_heuristic(entries),
+    ]
+}
+
 fn append_entry(
     entries: &mut Vec<Entry>,
     kind: &str,
@@ -650,7 +660,7 @@ fn codex_entries(raw: &str, path: &Path) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-fn entries_from_transcript(harness: &str, path: &Path) -> Result<Vec<Entry>, String> {
+pub(crate) fn entries_from_transcript(harness: &str, path: &Path) -> Result<Vec<Entry>, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: unreadable transcript: {e}", path.display()))?;
     match harness {

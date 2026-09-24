@@ -34,7 +34,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const REIGN_CHECKIN: &str = "reign_checkin";
 pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
@@ -794,6 +794,15 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         None
     };
     let term_reading = crate::king_term::reading(&manifest, now, term_transcript.as_deref());
+    let hygiene_transcript = hygiene_transcript_for_holder(&harness, &harness_session_id);
+    let crown_lineage = hygiene_crown_lineage(&registry, &harness, &harness_session_id);
+    let hygiene = hygiene_reading(
+        &harness,
+        &harness_session_id,
+        &manifest.shape,
+        hygiene_transcript.as_deref(),
+        &crown_lineage,
+    );
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -807,6 +816,9 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "inherited_undelivered": inputs.inherited_undelivered,
         "filed_undelivered": inputs.filed_undelivered,
         "inherited_closed_in_window": inputs.inherited_closed_in_window,
+        "generation_start": inputs.generation_start,
+        "generation_start_source": inputs.generation_start_source,
+        "hygiene": hygiene,
         "window": inputs.window,
         "fires": readings.fires,
         "last_actionable": readings.last_actionable,
@@ -885,6 +897,159 @@ pub(crate) fn bound_summary(v: Verdict, bounds: &[BoundRow]) -> String {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct CrownLineage {
+    inherited: Option<bool>,
+    from_session: Option<String>,
+}
+
+fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    match harness {
+        "claude" => crate::claude_drive::find_transcript_in(
+            &crate::claude_drive::claude_projects_dir(),
+            session_id,
+        ),
+        "codex" => {
+            let sessions = crate::codex_store::codex_home()?.join("sessions");
+            crate::daemon::index_tree(&sessions, 0)
+                .ok()?
+                .into_iter()
+                .find_map(|(name, path)| {
+                    crate::codex_store::codex_rollout_matches(&name, session_id).then_some(path)
+                })
+        }
+        _ => None,
+    }
+}
+
+fn hygiene_crown_lineage(registry_path: &Path, harness: &str, session_id: &str) -> CrownLineage {
+    let Ok(registry) = crate::state::load_registry(registry_path) else {
+        return CrownLineage::default();
+    };
+    let Some(row) = registry.find_by_session(harness, session_id) else {
+        return CrownLineage::default();
+    };
+    let inherited =
+        row.spawned_by_session.is_some() && row.crown_grantor.as_deref() != Some("human");
+    CrownLineage {
+        inherited: Some(inherited),
+        from_session: inherited.then(|| row.spawned_by_session.clone()).flatten(),
+    }
+}
+
+fn hygiene_reading(
+    harness: &str,
+    session_id: &str,
+    shape: &str,
+    transcript: Option<&Path>,
+    crown: &CrownLineage,
+) -> Value {
+    let crown = json!({
+        "inherited": crown.inherited,
+        "from_session": crown.from_session,
+    });
+    let Some(transcript) = transcript else {
+        return json!({
+            "state": "unmeasurable",
+            "reason": format!("transcript not found for {harness} session {session_id}"),
+            "transcript": null,
+            "applicable": 0,
+            "declared": 5,
+            "violations": [],
+            "crown": crown,
+        });
+    };
+    let entries = match crate::reign_hygiene::entries_from_transcript(harness, transcript) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return json!({
+                "state": "unmeasurable",
+                "reason": error,
+                "transcript": transcript.display().to_string(),
+                "applicable": 0,
+                "declared": 5,
+                "violations": [],
+                "crown": crown,
+            });
+        }
+    };
+    let checks = crate::reign_hygiene::run_checks(&entries, Some(shape));
+    let applicable = checks.iter().filter(|check| check.applicable).count();
+    let violations = checks
+        .iter()
+        .filter(|check| check.status == "violation")
+        .map(|check| {
+            json!({
+                "check": check.check,
+                "index": check.index,
+                "detail": check.detail,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "state": "measured",
+        "reason": null,
+        "transcript": transcript.display().to_string(),
+        "applicable": applicable,
+        "declared": checks.len(),
+        "violations": violations,
+        "crown": crown,
+    })
+}
+
+fn render_hygiene_line(hygiene: &Value) -> String {
+    if hygiene["state"].as_str() != Some("measured") {
+        return format!(
+            "hygiene: unmeasurable ({})",
+            hygiene["reason"].as_str().unwrap_or("reading unavailable")
+        );
+    }
+    let violations = hygiene["violations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let count = violations.len();
+    let noun = if count == 1 {
+        "violation"
+    } else {
+        "violations"
+    };
+    let mut line = format!(
+        "hygiene: {} of {} checks applicable, {count} {noun}",
+        hygiene["applicable"].as_u64().unwrap_or(0),
+        hygiene["declared"].as_u64().unwrap_or(5)
+    );
+    if !violations.is_empty() {
+        let details = violations
+            .iter()
+            .map(|violation| {
+                let check = violation["check"].as_str().unwrap_or("unknown check");
+                match violation["index"].as_u64() {
+                    Some(index) => format!("{check} at call {index}"),
+                    None => check.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!(" ({details})"));
+    }
+    match hygiene["crown"]["inherited"].as_bool() {
+        Some(true) => {
+            if let Some(session) = hygiene["crown"]["from_session"].as_str() {
+                line.push_str(&format!("; crown inherited from {session}"));
+            } else {
+                line.push_str("; crown inherited");
+            }
+        }
+        Some(false) => line.push_str("; crown not inherited"),
+        None => {}
+    }
+    line
+}
+
 fn render_verdict(payload: &Value) -> String {
     let mut lines = vec![format!(
         "verdict: {}",
@@ -920,6 +1085,9 @@ fn render_verdict(payload: &Value) -> String {
         lines.push(format!("compactions read: {error}"));
     }
     lines.push(render_term_line(&payload["term"]));
+    if let Some(hygiene) = payload.get("hygiene") {
+        lines.push(render_hygiene_line(hygiene));
+    }
     lines.join("\n")
 }
 
@@ -1872,5 +2040,189 @@ mod tests {
         assert_eq!(r.fires, 1, "{r:?}");
         assert_eq!(scanned, 1);
         assert_eq!(journals.len(), 1);
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn verdict_payload(hygiene: Value) -> Value {
+        json!({
+            "verdict": "healthy",
+            "manifest": {"path": "/tmp/king.md"},
+            "bounds": [],
+            "fires": 0,
+            "checkins": 0,
+            "checkins_expected": false,
+            "checkins_stale": false,
+            "compactions": 0,
+            "compactions_source": "manifest",
+            "compactions_error": null,
+            "inherited_undelivered": 0,
+            "inherited_closed_in_window": 0,
+            "scanned": 0,
+            "journals": [],
+            "term": {
+                "spec": "span:96h",
+                "declared": false,
+                "state": "within",
+                "used": "0h",
+                "of": "96h",
+                "unreadable_reason": null
+            },
+            "hygiene": hygiene
+        })
+    }
+
+    fn claude_tool(name: &str, input: Value) -> Value {
+        json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": name, "input": input}]
+            }
+        })
+    }
+
+    #[test]
+    fn holder_hygiene_is_measured_and_renders_after_term() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let projects = tempfile::tempdir().unwrap();
+        let project = projects.path().join("-Users-x-code-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let session_id = "a1b2c3d4-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session_id}.jsonl"));
+        let rows = [
+            claude_tool(
+                "Read",
+                json!({"file_path":"crates/fno-agents/src/king_history.rs"}),
+            ),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "crates/fno-agents/src/king_history.rs:40 owns the reading."}]
+                }
+            }),
+            claude_tool("Bash", json!({"command":"fno agents court --json"})),
+            claude_tool("Bash", json!({"command":"fno do pr watch status"})),
+            claude_tool("Bash", json!({"command":"fno whoami context"})),
+            claude_tool("Bash", json!({"command":"fno agents spawn worker"})),
+            claude_tool("Bash", json!({"command":"fno agents mail send ruling"})),
+        ];
+        std::fs::write(
+            &transcript,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let _projects_env = EnvRestore::set(crate::claude_drive::PROJECTS_DIR_ENV, projects.path());
+        let transcript = hygiene_transcript_for_holder("claude", session_id);
+        let crown = CrownLineage {
+            inherited: Some(true),
+            from_session: Some("grantor-session".to_string()),
+        };
+        let hygiene = hygiene_reading("claude", session_id, "court", transcript.as_deref(), &crown);
+        assert_eq!(hygiene["state"], "measured");
+        assert_eq!(hygiene["applicable"], 4);
+        assert_eq!(hygiene["declared"], 5);
+        assert!(hygiene["violations"].as_array().unwrap().is_empty());
+        assert_eq!(hygiene["crown"]["inherited"], true);
+        assert_eq!(hygiene["crown"]["from_session"], "grantor-session");
+
+        let rendered = render_verdict(&verdict_payload(hygiene));
+        let term_at = rendered.find("term:").expect("term line present");
+        let hygiene_at = rendered.find("hygiene:").expect("hygiene line present");
+        assert!(term_at < hygiene_at, "{rendered}");
+        assert!(rendered.contains(
+            "hygiene: 4 of 5 checks applicable, 0 violations; crown inherited from grantor-session"
+        ));
+    }
+
+    #[test]
+    fn missing_holder_transcript_is_unmeasurable() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let projects = tempfile::tempdir().unwrap();
+        let _projects_env = EnvRestore::set(crate::claude_drive::PROJECTS_DIR_ENV, projects.path());
+        let session_id = "a1b2c3d4-1111-2222-3333-444455556667";
+        let transcript = hygiene_transcript_for_holder("claude", session_id);
+        assert!(transcript.is_none());
+        let hygiene = hygiene_reading(
+            "claude",
+            session_id,
+            "court",
+            transcript.as_deref(),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "unmeasurable");
+        assert!(hygiene["reason"]
+            .as_str()
+            .unwrap()
+            .contains("claude session a1b2c3d4-1111-2222-3333-444455556667"));
+        let rendered = render_verdict(&verdict_payload(hygiene));
+        assert!(rendered.contains("hygiene: unmeasurable ("), "{rendered}");
+        assert!(rendered.starts_with("verdict: healthy"), "{rendered}");
+    }
+
+    #[test]
+    fn codex_rollout_context_probe_is_measured() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let session_id = "codex-thread-123";
+        let rollout = home
+            .path()
+            .join("sessions/2026/09/24/rollout-2026-codex-thread-123.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rollout,
+            concat!(
+                "{\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"How much context remains?\"}}\n",
+                "{\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"fno whoami context\"}}\n"
+            ),
+        )
+        .unwrap();
+        let _codex_env = EnvRestore::set("CODEX_HOME", home.path());
+        let transcript = hygiene_transcript_for_holder("codex", session_id)
+            .expect("matching rollout is found under CODEX_HOME");
+        assert_eq!(transcript, rollout);
+        let hygiene = hygiene_reading(
+            "codex",
+            session_id,
+            "court",
+            Some(&transcript),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "measured");
+        assert!(hygiene["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["check"] == "check5_context_timing_heuristic" }));
     }
 }
