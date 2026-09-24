@@ -20,6 +20,7 @@
 #                                             the concrete default level)
 #   cli/tests/unit/fixtures/                  recorded reign history, data a
 #                                             worker is never told to copy
+#   crates/fno-agents/tests/fixtures/king_reign/ recorded reign history too
 #   this script                              it carries the canary control
 #
 # Both controls are load-bearing. An absence-only pass has two explanations
@@ -38,7 +39,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$REPO_ROOT"
 
 PATTERN='(/code-review[[:space:]]+)(low|medium|high|xhigh|max|ultra)([^a-z]|$)'
-ALLOW_RE='^(cli/src/fno/review_capability.py|cli/tests/unit/test_review_capability.py|cli/tests/unit/fixtures/|scripts/ci/check-review-invocation-single-source.sh)'
+ALLOW_RE='^(cli/src/fno/review_capability.py|cli/tests/unit/test_review_capability.py|cli/tests/unit/fixtures/|crates/fno-agents/tests/fixtures/king_reign/|scripts/ci/check-review-invocation-single-source.sh)'
 
 fail() {
     echo "check-review-invocation-single-source: $*" >&2
