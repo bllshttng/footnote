@@ -24,7 +24,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`. `1m` is the default and maps to 30 days. `2w` maps to 14 days, `2m` to 60, `3m` to 90. `all` removes the window (`--days 0`). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default). Each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. Every word after the flags is the user question. With no question, use `What were the user's sessions about, and where did they stall?`. The question key is the first 8 hex of sha256 over the question lowercased with runs of whitespace collapsed (`printf %s "$Q" | shasum -a 256 | cut -c1-8`). Default `--sample 50`. Run the fold once, under a 10-minute Bash timeout, and save its JSON beside the report:
 
    ```bash
-   fno-agents intel --json --days 30 --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
+   fno-agents intel --json --period 1m --project fno --sample 50 > <vault>/fno/intel/<date>-<question key>.fold.json
    ```
 
    The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
@@ -77,6 +77,14 @@ The fold names its populations, and the report keeps them apart. Every number sa
    The script is watermark-idempotent: a second run adds no rows.
 
 8. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
+
+9. Render the shareable HTML copy. Run:
+
+   ```bash
+   fno-agents intel --render <report.md>
+   ```
+
+   Its stdout line is the HTML path. The renderer reads the report and the fold JSON named in the frontmatter `fold:` field. It scrubs secrets, home paths, quoted blocks, and quotes outside Operator corrections, and draws the fold counters as inline SVG. End the run by telling the operator both paths, one line each: `Report: <md path>` and `Shareable copy: <html path> (open in a browser; print to PDF; latest.html beside it is always the newest)`. A nonzero exit is relayed with its stderr line. The markdown report stands either way: it stays the file every later step reads.
 
 Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
 
