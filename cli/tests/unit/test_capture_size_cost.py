@@ -175,6 +175,7 @@ def _seed_node(g: Path, plan_path: str) -> None:
         "plan_path": plan_path,
         "cost_usd": None,
         "cost_sessions": [],
+        "artifact_url": "https://example.test/artifact",
     }]}) + "\n")
 
 

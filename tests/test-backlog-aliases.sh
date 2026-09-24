@@ -179,7 +179,7 @@ print(entries[-1]['id'] if entries else '')
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
-    done_out=$(run_fno backlog done "$node_id" 2>&1)
+    done_out=$(run_fno backlog done "$node_id" --note "smoke alias fixture" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
     else
