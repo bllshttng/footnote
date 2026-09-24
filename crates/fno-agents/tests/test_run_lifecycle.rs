@@ -64,16 +64,6 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// One raw line to fd 2. The libtest per-test capture swallows `eprintln!`
-/// from this process on the runner, so the diagnostic trace rides the raw
-/// descriptor that capture cannot intercept.
-fn raw_note(line: &str) {
-    use std::io::Write as _;
-    let mut out = std::io::stderr().lock();
-    let _ = out.write_all(format!("{line}\n").as_bytes());
-    let _ = out.flush();
-}
-
 /// The dump rides three channels because the first run's stderr dump never
 /// reached the CI log: the ordinary stderr write, a raw fd 2 write that no
 /// output capture can intercept, and `GITHUB_STEP_SUMMARY`, whose file the
@@ -612,7 +602,6 @@ fn the_run_timeout_names_the_wait_and_the_run() {
 #[test]
 fn a_queued_run_keeps_its_whole_budget() {
     let root = tmp_claims_root("whole-budget");
-    raw_note("t5: spawning holder");
     let mut holder = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -622,7 +611,6 @@ fn a_queued_run_keeps_its_whole_budget() {
         .spawn()
         .expect("spawn holder");
     std::thread::sleep(Duration::from_millis(300));
-    raw_note("t5: spawning waiter");
     let out = test_run(&root)
         .args(["--timeout", "5"])
         .arg("--")
@@ -631,7 +619,6 @@ fn a_queued_run_keeps_its_whole_budget() {
         .stderr(std::process::Stdio::piped())
         .output()
         .expect("run the queued waiter");
-    raw_note("t5: waiter returned");
     assert!(holder.try_wait().unwrap().is_some());
     let _ = holder.wait();
     assert!(
