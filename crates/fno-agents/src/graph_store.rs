@@ -2398,30 +2398,6 @@ pub fn locked_mutate_with_hook(
         .len()
         .saturating_sub(raw.iter().filter(|e| is_dict(e)).count());
     let mut entries = input.entries;
-    let explicit_progress_notes: std::collections::BTreeSet<String> = entries
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|_| entry.get("progress_notes").is_some())
-                .map(str::to_owned)
-        })
-        .collect();
-    apply_defaults(&mut entries, false);
-    for entry in entries.iter_mut() {
-        let Some(id) = entry.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !explicit_progress_notes.contains(id)
-            && entry
-                .get("progress_notes")
-                .and_then(Value::as_array)
-                .is_some_and(|items| items.is_empty())
-        {
-            entry.as_object_mut().unwrap().remove("progress_notes");
-        }
-    }
 
     // The presence invariant holds at the STORE boundary, not only at the
     // typed update path: the Python mutator runs client-side against plain

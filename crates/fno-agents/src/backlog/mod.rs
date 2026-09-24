@@ -1840,7 +1840,6 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        set_backend(&graph, Backend::Json).unwrap();
         graph
     }
 
