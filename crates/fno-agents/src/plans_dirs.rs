@@ -234,7 +234,6 @@ mod tests {
     use super::*;
     use crate::claims::test_env_lock;
     use std::fs;
-    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     /// Pins FNO_CONFIG, PATH, and the cache dir for one test. FNO_CONFIG
@@ -316,12 +315,14 @@ mod tests {
             .unwrap();
             let fake_bin = base.join("bin");
             fs::create_dir_all(&fake_bin).unwrap();
-            let fake = fake_bin.join("fno");
             // Answers from its own cwd; `$PWD` comes back in the physical
             // form (`/private/var/...` on macOS), which the expectations
             // below must match.
-            fs::write(&fake, "#!/bin/sh\necho \"$PWD/plans/20260101-x.md\"\n").unwrap();
-            fs::set_permissions(&fake, Permissions::from_mode(0o755)).unwrap();
+            crate::write_exec_stub(
+                &fake_bin,
+                "fno",
+                "#!/bin/sh\necho \"$PWD/plans/20260101-x.md\"\n",
+            );
             fs::create_dir_all(base.join("cache")).unwrap();
             Fixture { base }
         }
@@ -395,8 +396,7 @@ mod tests {
     fn plans_dirs_cache_hit_skips_probes_until_stamp_moves() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = Fixture::new("cache");
-        fs::write(fx.fake_bin().join("fno"), count_script()).unwrap();
-        fs::set_permissions(fx.fake_bin().join("fno"), Permissions::from_mode(0o755)).unwrap();
+        crate::write_exec_stub(&fx.fake_bin(), "fno", &count_script());
         let _env = guard_for(&fx);
 
         let _ = plans_dirs(&fx.base);
@@ -428,12 +428,11 @@ mod tests {
 
         // The fake fno exits 1 for the beta project, so only alpha's dir
         // comes back.
-        fs::write(
-            fx.fake_bin().join("fno"),
+        crate::write_exec_stub(
+            &fx.fake_bin(),
+            "fno",
             "#!/bin/sh\ncase \"$PWD\" in */beta) exit 1;; esac\necho \"$PWD/plans/20260101-x.md\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(fx.fake_bin().join("fno"), Permissions::from_mode(0o755)).unwrap();
+        );
         let dirs = plans_dirs(&fx.base);
         assert_eq!(
             dirs,
@@ -451,12 +450,11 @@ mod tests {
         fs::write(&path, "plans_dir = \".fno/plans/\"\n").unwrap();
         let now = std::time::SystemTime::now();
         set_mtime(&path, now + std::time::Duration::from_secs(5));
-        fs::write(
-            fx.fake_bin().join("fno"),
+        crate::write_exec_stub(
+            &fx.fake_bin(),
+            "fno",
             "#!/bin/sh\necho \"plans/20260101-x.md\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(fx.fake_bin().join("fno"), Permissions::from_mode(0o755)).unwrap();
+        );
         let dirs = plans_dirs(&fx.base);
         assert!(dirs.is_empty(), "relative probe lines are not dirs");
     }

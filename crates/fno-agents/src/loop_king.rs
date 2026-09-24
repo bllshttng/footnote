@@ -890,55 +890,14 @@ mod tests {
     /// A shell script standing in for `fno`, executable, printing its
     /// argument on stdout.
     fn write_fno_stub(dir: &Path, stdout: &str) -> std::path::PathBuf {
-        // Published atomically (temp sibling + rename, same fix as
-        // tests/common/mod.rs): a direct write onto the exec'd path leaves a
-        // write-open fd that a sibling thread's fork window turns into a
-        // CI-only ETXTBSY.
-        let tmp = dir.join(format!(".fno.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let p = dir.join("fno");
-        std::fs::rename(&tmp, &p).unwrap();
-        p
-    }
-
-    /// Exec the stub, retrying a CI-only ETXTBSY.
-    ///
-    /// `write_fno_stub` publishes atomically, so the exec'd path is never
-    /// itself write-open. What is left is a sibling test thread forking
-    /// while this thread still holds the TEMP file's write fd: the child
-    /// inherits it, the rename makes that inherited fd the exec'd path, and
-    /// the exec fails with "Text file busy" until the child reaches its own
-    /// exec and CLOEXEC fires. Microseconds, and not closable from here, so
-    /// the call is retried rather than the test ignored.
-    fn escalate_retrying(
-        fno: &str,
-        dir: &Path,
-        targets: &[String],
-        reason: &str,
-        scope: &str,
-    ) -> String {
-        for _ in 0..50 {
-            let out = escalate_stalled(fno, dir, targets, reason, scope);
-            if !out.contains("Text file busy") {
-                return out;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        // Out of retries: return the real output so the assertion names the
-        // busy-file failure rather than a timeout of this helper's own.
-        escalate_stalled(fno, dir, targets, reason, scope)
+        crate::write_exec_stub(dir, "fno", &format!("#!/bin/sh\nprintf '%s' '{stdout}'\n"))
     }
 
     #[test]
     fn escalate_stalled_names_the_presiding_king_from_a_king_prefixed_target() {
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "king:l1-king");
-        let out = escalate_retrying(
+        let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -952,7 +911,7 @@ mod tests {
     fn escalate_stalled_names_the_operator_from_an_operator_prefixed_target() {
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "operator:q-abcd1234");
-        let out = escalate_retrying(
+        let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -968,7 +927,7 @@ mod tests {
         // as a blank presiding-king name.
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "q-legacy");
-        let out = escalate_retrying(
+        let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -983,14 +942,12 @@ mod tests {
         // The verdict read keys on the scope; without it the question carries
         // no verdict sentence and no handoff offer.
         let dir = tempfile::tempdir().unwrap();
-        let stub_path = dir.path().join("fno-stub");
-        std::fs::write(&stub_path, "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.txt\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let out = escalate_retrying(
+        let stub_path = crate::write_exec_stub(
+            dir.path(),
+            "fno-stub",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.txt\n",
+        );
+        let out = escalate_stalled(
             stub_path.to_str().unwrap(),
             dir.path(),
             &[crate::king_escalation::reading_undelivered("x-bbbb")],
@@ -1033,13 +990,7 @@ mod tests {
         // A stub that exits 1 stands in for a stale fno / naming refusal: the
         // walk refuses (Err) instead of dispatching under an uncoded key.
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("fno");
-        std::fs::write(&p, "#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let p = crate::write_exec_stub(dir.path(), "fno", "#!/bin/sh\nexit 1\n");
         let out = mint_walk_key(p.to_str().unwrap(), dir.path(), "epic-x");
         assert!(out.is_err(), "a failed mint must refuse the walk");
     }
@@ -1136,8 +1087,6 @@ mod tests {
 
     #[test]
     fn termination_reads_the_scope_drain_not_the_actionable_board() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
@@ -1152,10 +1101,9 @@ mod tests {
         .unwrap();
         let registry = dir.join("no-registry.json");
         let stub = |body: &str, name: &str| -> String {
-            let path = dir.join(name);
-            fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-            path.to_string_lossy().to_string()
+            crate::write_exec_stub(&dir, name, &format!("#!/bin/sh\necho '{body}'\n"))
+                .to_string_lossy()
+                .to_string()
         };
 
         // The 2026-09-06 incident state: every row driven, nothing shipped. An
@@ -1190,18 +1138,14 @@ mod tests {
 
     #[test]
     fn drain_rejects_json_from_a_failed_command() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain-failed");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fno-drain-failed");
-        fs::write(
-            &path,
+        let path = crate::write_exec_stub(
+            &dir,
+            "fno-drain-failed",
             "#!/bin/sh\necho '{\"scope\":\"epic-x\",\"undelivered\":0}'\nexit 1\n",
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = scope_undelivered_count(path.to_str().unwrap(), &dir, "epic-x");
 
@@ -1214,12 +1158,8 @@ mod tests {
 
     #[test]
     fn drain_kills_a_hung_command_inside_its_read_bound() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fno-drain-hung");
-        fs::write(&path, "#!/bin/sh\nsleep 1\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = crate::write_exec_stub(dir.path(), "fno-drain-hung", "#!/bin/sh\nsleep 1\n");
 
         let started = std::time::Instant::now();
         let result = scope_undelivered_count_with_timeout(
