@@ -87,6 +87,7 @@ class TestClosureReleaseHook:
                     "locked_by": HOLDER,
                     "claimed_at": "2026-08-21T00:00:00Z",
                     "session_id": HOLDER,
+                    "completion_note": "fixture close",
                 }
             ],
         )

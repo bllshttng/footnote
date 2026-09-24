@@ -674,7 +674,9 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     _seed(
         tmp_graph,
         [
-            _node("ab-blkE2E"),  # blocker (no plan_path -> done skips the stamp)
+            # blocker carries an artifact link so the close-evidence rule
+            # passes; no plan_path still keeps the stamp skip.
+            _node("ab-blkE2E", artifact_url="https://example.test/artifact"),
             _ready("ab-depE2E", blocked_by=["ab-blkE2E"]),
         ],
     )

@@ -117,6 +117,7 @@ def test_deferred_overrides_blocked(tmp_graph, tmp_path):
 def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     """Done wins over deferred. A completed node stays done."""
     node_id = _seed_with_plan(tmp_path, "Plan Done")
+    _invoke("backlog", "update", node_id, "--completion-note", "done-beats-deferred fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
@@ -212,6 +213,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
     the patch door exists to close.
     """
     node_id = _seed_with_plan(tmp_path, "Plan Done Then Defer")
+    _invoke("backlog", "update", node_id, "--completion-note", "done-door fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
@@ -231,6 +233,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
 def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     """Triage apply lands the same done -> deferred transition cleanly."""
     node_id = _seed_with_plan(tmp_path, "Plan Triage Done Then Defer")
+    _invoke("backlog", "update", node_id, "--completion-note", "triage defer fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     proposal = tmp_path / "p.json"
@@ -559,6 +562,7 @@ def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path)
     """x-665f: the door refuses leaving done, so a batch naming a done node
     (first) refuses before the other ids are written."""
     done_node = _seed_with_plan(tmp_path, "Batch Done")
+    _invoke("backlog", "update", done_node, "--completion-note", "batch defer fixture")
     _invoke("backlog", "done", done_node, "--skip-stamp")
     idea_node = _seed_idea("Batch Idea")
 

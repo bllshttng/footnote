@@ -1710,3 +1710,22 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
     assert calls["quiet"] == QUIET_AFTER_S
     calls["done"] = True
     assert target_cli._classify_worktree_occupancy(wt)[0] == "available"
+
+
+def test_force_supersede_dispatch_node_records_its_reason(monkeypatch):
+    """The retro force-closer closes with a note, not a bare force.
+
+    The store refuses an evidence-less close, so the reason must ride as
+    the completion note for an addressed retro node to close at all.
+    """
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _run)
+    assert target_cli._force_supersede_dispatch_node("x-retro", "addressed upstream")
+    assert calls == [
+        ["fno", "backlog", "done", "x-retro", "--note", "addressed upstream"]
+    ]

@@ -502,7 +502,7 @@ fn claims_planning(node_id: &str, root: Option<&Path>) -> Option<Verdict> {
     let live = matches!(state, ClaimState::Live | ClaimState::Suspect);
     let planner = record
         .as_ref()
-        .map(|rec| rec.holder.starts_with("blueprint-session:"))
+        .map(|rec| rec.holder.starts_with(claims::BLUEPRINT_HOLDER_PREFIX))
         .unwrap_or(false);
     (live && planner).then_some(Verdict::Planning)
 }

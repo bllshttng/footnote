@@ -1166,10 +1166,10 @@ def run_status(
                 sys.stderr.write(
                     f"note: reviewer_refused: {', '.join(empty)} ran and refused "
                     "to attest (an empty diff at the reviewer's checkout: it "
-                    "sat on the base branch, so the review read nothing). Fire "
-                    "from the PR worktree session (`fno do target "
-                    "request-self-review --pr <n>`) or spawn the reviewer with "
-                    "--cwd <worktree>.\n"
+                    "sat on the base branch, so the review read nothing). Run "
+                    "the review inline in the PR worktree session: `fno do "
+                    "target request-self-review --pr <n>`, or `/fno:review "
+                    "<level> <n>` (`$fno:review` on codex).\n"
                 )
             if unresolvable:
                 sys.stderr.write(

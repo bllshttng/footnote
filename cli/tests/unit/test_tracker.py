@@ -85,7 +85,11 @@ def test_state_closed_only_for_terminal_rungs(tmp_path):
 def test_close_sets_completed_and_flips_state(tmp_path):
     g = _write_graph(
         tmp_path / "graph.json",
-        [{"id": "ab-deadbeef", "plan_path": "/p.md"}],
+        [{
+            "id": "ab-deadbeef",
+            "plan_path": "/p.md",
+            "artifact_url": "https://example.test/artifact",
+        }],
     )
     t = GraphTracker(path=g)
     assert t.read("ab-deadbeef").state is TrackerState.open

@@ -141,7 +141,12 @@ def test_already_done_short_circuits_no_gh_call(tmp_graph, monkeypatch):
 
 def test_advisory_node_no_refs_closes_without_gh(tmp_graph, monkeypatch):
     """AC3-EDGE: node with no pr_number/additional_prs closes immediately, no gh."""
-    _seed(tmp_graph, [_node("ab-aaaaaa01")])
+    # The row carries an artifact link so the close-evidence rule passes:
+    # the subject is the no-gh close path, not the refusal.
+    _seed(
+        tmp_graph,
+        [{**_node("ab-aaaaaa01"), "artifact_url": "https://example.test/artifact"}],
+    )
 
     gh_called = []
 

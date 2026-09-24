@@ -132,7 +132,9 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     # --force: closing over live children is refused without it (x-a31a), and
     # the forced close re-parents the kids - irrelevant here, the owner is
-    # done either way and contain must still refuse.
+    # done either way and contain must still refuse. The completion note
+    # satisfies the close-evidence rule; the force keeps the child gate.
+    _invoke("backlog", "update", owner, "--completion-note", "setup: done owner")
     _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
@@ -225,6 +227,7 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     # _cascade_close_parents (an all-children-done epic closes automatically).
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     kid = kids[0]
+    _invoke("backlog", "update", kid, "--completion-note", "setup: done target")
     _invoke("backlog", "done", kid)
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"

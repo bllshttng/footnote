@@ -3177,6 +3177,7 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
     entries = read_graph_strict(g)
     closed = next(e for e in entries if e["id"] == unit)
     closed["completed_at"] = "2026-07-01T00:00:00+00:00"
+    closed["artifact_url"] = "https://example.test/artifact"
     closed.pop("deferred_at", None)
     from fno.graph.store import commit_rows_via_store
 

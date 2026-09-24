@@ -131,7 +131,7 @@ def test_committed_cells(renderer) -> None:
     assert target["gemini"] == "absent"
     assert target["cursor-agent"] == "capable"
     assert target["hermes"] == "unmeasured"
-    assert dict(zip(harnesses, rows["pr"]))["opencode"] == "unmeasured"
+    assert dict(zip(harnesses, rows["pr"]))["opencode"] == "native"
     keepalive = dict(zip(harnesses, rows["cache-keepalive"]))
     assert keepalive["claude"] == "native" and keepalive["grok"] == "absent"
 
