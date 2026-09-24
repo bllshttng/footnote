@@ -302,6 +302,7 @@ def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
             "FNO_REQUESTS": str(requests),
             "FNO_WORKTREE": str(feature),
         },
@@ -318,6 +319,7 @@ def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
             "FNO_REQUESTS": str(requests),
             "FNO_WORKTREE": str(feature),
         },
@@ -357,14 +359,22 @@ def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' feature/pr-42\n", encoding="utf-8")
-    fake_gh.chmod(0o755)
+    fake_agents = fake_bin / "fno-agents"
+    fake_agents.write_text(
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"worktree\":\"%s\"}\\n' \"$FNO_WORKTREE\"\n",
+        encoding="utf-8",
+    )
+    fake_agents.chmod(0o755)
     resolver = Path(__file__).parents[3] / "skills/review/scripts/resolve-pr-worktree.sh"
     resolved = subprocess.run(
         ["bash", str(resolver), "42"],
         cwd=canonical,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
+            "FNO_WORKTREE": str(feature),
+        },
         capture_output=True,
         text=True,
         check=False,
