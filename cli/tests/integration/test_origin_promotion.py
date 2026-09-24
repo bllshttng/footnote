@@ -39,11 +39,24 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return g
 
 
+@pytest.fixture
+def operator_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_backlog_door) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "uuid": "turn-1", "timestamp": "2026-09-24T00:00:00Z",
+        "message": {"role": "user", "content": "status on your nodes?"},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(transcript))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
+
+
 def _entries(g: Path) -> list[dict]:
     return json.loads(g.read_text(encoding="utf-8"))["entries"]
 
 
-def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path):
+def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path, operator_turn: None):
     """A capture promoted in a later session keeps the item's substrate
     reference as birth evidence; the recorder is never the requester."""
     added = _invoke(
@@ -69,9 +82,7 @@ def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path):
     node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
     assert node["source_kind"] == "operator_request"
     assert node["origin_evidence"] == f"{fu_id} source: PR#1700"
-    from fno.graph._constants import REQUEST_ORIGINS
-
-    assert node["request_origin"] in REQUEST_ORIGINS
+    assert node["request_origin"] == "operator_request"
 
 
 def test_ac2_hp_promotion_without_source_line_still_names_the_fu_id(hermetic: Path):
@@ -97,7 +108,7 @@ def test_ac2_hp_promotion_without_source_line_still_names_the_fu_id(hermetic: Pa
     assert node["origin_evidence"] == "fu-7a3d9c"
 
 
-def test_ac2_edge_repromotion_is_idempotent_and_birth_stable(hermetic: Path):
+def test_ac2_edge_repromotion_is_idempotent_and_birth_stable(hermetic: Path, operator_turn: None):
     _invoke(
         "backlog", "capture", "add",
         "Once only",
@@ -125,8 +136,30 @@ def test_ac2_edge_repromotion_is_idempotent_and_birth_stable(hermetic: Path):
     from fno.graph.store import read_graph_strict
 
     node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
-    assert node["request_origin"] in ("operator_request", "unknown")
+    assert node["request_origin"] == "operator_request"
     assert node["origin_evidence"]
+
+
+def test_ac4_err_promotion_refuses_empty_queue_without_striking_item(
+    hermetic: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_backlog_door
+):
+    inbox = tmp_path / "inbox.md"
+    inbox.write_text("- [ ] fu-7a3d9c - Keep this capture (p2)\n", encoding="utf-8")
+    absent = tmp_path / "empty-transcript.jsonl"
+    absent.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(absent))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
+    monkeypatch.setattr("fno.backlog.capture._inbox_path", lambda: inbox)
+    refused = _invoke(
+        "backlog", "capture", "promote", "fu-7a3d9c",
+        "--source-kind", "operator_request", "--difficulty", "low",
+    )
+    assert refused.exit_code == 1
+    assert "queue is empty" in refused.output
+    assert _entries(hermetic) == []
+    assert "- [ ] fu-7a3d9c" in inbox.read_text(encoding="utf-8")
 
 
 def _first_fu(inbox: Path) -> str:

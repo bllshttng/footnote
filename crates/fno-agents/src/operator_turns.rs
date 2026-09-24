@@ -390,6 +390,57 @@ pub(crate) fn pending_stand_down(
         .collect())
 }
 
+pub(crate) fn capture_dir(cwd: &Path) -> Option<PathBuf> {
+    std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))
+}
+
+pub(crate) fn session_queue_depth(
+    get: &impl Fn(&str) -> Option<String>,
+    home: &crate::paths::AgentsHome,
+    cwd: &Path,
+    now_epoch: f64,
+) -> Result<usize, String> {
+    let session_pin = get("FNO_OPERATOR_SESSION_ID").filter(|value| !value.trim().is_empty());
+    let harness_pin = get("FNO_OPERATOR_HARNESS").filter(|value| !value.trim().is_empty());
+    let identity = (session_pin.is_none() || harness_pin.is_none())
+        .then(|| crate::spawn_context::resolve_self_identity(get, None, None, home));
+    let session = session_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.session_id.clone())
+        })
+        .ok_or_else(|| "no resolvable session identity".to_string())?;
+    let harness = harness_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.harness.clone())
+        })
+        .unwrap_or_else(|| "claude".to_string());
+    let transcript = if let Some(path) =
+        get("FNO_OPERATOR_TRANSCRIPT").filter(|value| !value.trim().is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        match harness.as_str() {
+            "claude" => crate::claude_drive::find_transcript(&session),
+            "codex" => crate::codex_store::codex_rollout_path(None, &session),
+            _ => return Err(format!("harness {harness} keeps no transcript file")),
+        }
+        .ok_or_else(|| format!("no transcript found for {harness} session {session}"))?
+    };
+    let capture_dir = get("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| capture_dir(cwd))
+        .ok_or_else(|| "no operator capture directory could be resolved".to_string())?;
+    read_queue(&session, &transcript, &capture_dir, now_epoch).map(|outcome| outcome.payload.depth)
+}
+
 /// CLI entry: `fno-agents compaction operator-turns --session <id>
 /// --transcript <path> --capture-dir <dir>`. Session and transcript
 /// resolution stay in Python; this binary resolves neither.
@@ -623,6 +674,63 @@ mod tests {
         let tp = dir.join("transcript.jsonl");
         write_jsonl(&tp, rows);
         read(&dir, &tp)
+    }
+
+    fn pinned_operator_turns(
+        dir: &Path,
+        transcript: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([
+            ("FNO_OPERATOR_SESSION_ID".into(), "fixture-session".into()),
+            ("FNO_OPERATOR_HARNESS".into(), "claude".into()),
+            (
+                "FNO_OPERATOR_TRANSCRIPT".into(),
+                transcript.display().to_string(),
+            ),
+            ("FNO_OPERATOR_CAPTURE_DIR".into(), dir.display().to_string()),
+        ])
+    }
+
+    #[test]
+    fn session_queue_depth_reads_planted_turn_and_ack() {
+        let dir = tmp_dir("session-depth");
+        let transcript = dir.join("transcript.jsonl");
+        write_jsonl(&transcript, &[user_row(json!("first ask"), "u-1")]);
+        let vars = pinned_operator_turns(&dir, &transcript);
+        let get = |key: &str| vars.get(key).cloned();
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(1));
+        std::fs::write(
+            ledger_path(&dir, "fixture-session"),
+            "{\"turn_id\":\"u-1\"}\n",
+        )
+        .unwrap();
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(0));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unreadable_transcript() {
+        let dir = tmp_dir("session-depth-errors");
+        let missing = dir.join("missing.jsonl");
+        let vars = pinned_operator_turns(&dir, &missing);
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unsupported_harness() {
+        let dir = tmp_dir("session-depth-unsupported");
+        let mut vars = pinned_operator_turns(&dir, &dir.join("unused.jsonl"));
+        vars.insert("FNO_OPERATOR_HARNESS".into(), "opencode".into());
+        vars.remove("FNO_OPERATOR_TRANSCRIPT");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("opencode"));
     }
 
     #[test]

@@ -100,10 +100,7 @@ pub(crate) fn stand_down_gate(
         .harness_session_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())?;
-    let capture_dir = std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))?;
+    let capture_dir = crate::operator_turns::capture_dir(cwd)?;
     let pending = match crate::operator_turns::pending_stand_down(
         session,
         transcript,
