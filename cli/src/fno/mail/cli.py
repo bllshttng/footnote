@@ -3497,11 +3497,9 @@ def cmd_send(
     ),
     from_name: str | None = typer.Option(
         None, "--from-name",
-        help=(
-            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
-            "agent send, the working dir's project for an inbox-kind send."
-        ),
+        help="XML-safe sender. Unset: session handle or 'fno' for agents; project for inbox notes.",
     ),
+    lock_timeout: float | None = typer.Option(None, "--lock-timeout", hidden=True),
     origin: str | None = typer.Option(
         None,
         "--origin",
@@ -4191,6 +4189,7 @@ def cmd_send(
             message=message,
             provider=harness,
             cwd=workdir,
+            **({"lock_timeout": lock_timeout} if lock_timeout is not None else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
         )

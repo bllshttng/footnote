@@ -98,6 +98,9 @@ fn mail_argv(arm: MailArm, session_id: Option<&str>, recipient: &str, body: &str
     if let Some(from_name) = sender_name(arm, session_id) {
         argv.extend(["--from-name".into(), from_name]);
     }
+    if arm == MailArm::NotePointer {
+        argv.extend(["--lock-timeout".into(), "5".into()]);
+    }
     if let Some(origin) = arm.origin() {
         argv.extend(["--origin".into(), origin.into()]);
     }
@@ -241,6 +244,8 @@ mod tests {
                 "send",
                 "--from-name",
                 "a1535d0b",
+                "--lock-timeout",
+                "5",
                 "--",
                 "reader",
                 "body",
@@ -254,6 +259,8 @@ mod tests {
                 "send",
                 "--from-name",
                 "note-pointer",
+                "--lock-timeout",
+                "5",
                 "--",
                 "reader",
                 "body",

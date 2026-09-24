@@ -267,6 +267,16 @@ def test_inbox_namespace_is_retired(runner, mailbox):
 # AC1-HP / AC2-HP: publish durable-first, cursor-consume, ack advances cursor
 # ---------------------------------------------------------------------------
 
+def test_hidden_lock_timeout_is_forwarded_to_agent_dispatch(runner, mailbox, monkeypatch):
+    calls = _hosted_dispatch(monkeypatch)
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "sess-worker", "short note", "--lock-timeout", "5"],
+    )
+    assert sent.exit_code == 0, sent.output
+    assert calls[0]["lock_timeout"] == 5.0
+
+
 def test_send_then_unread_then_ack(runner, mailbox):
     sent = runner.invoke(
         app,
