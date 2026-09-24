@@ -8,13 +8,13 @@
 //! `fno backlog get`'s Python forwarder (>1 id) and, through the stdin door,
 //! the tracker seam's Python client and the mux's `read_snapshot`.
 //!
-//!
 //! The census this verb answers: `backlog get` was 1,516 single-node calls
 //! over 21 days, one graph read each. A caller naming several ids in one
 //! invocation pays that read once.
 
 use crate::graph_store;
 use serde_json::Value;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// The graph entry's lifecycle-status key, and its read. Lives here, not in

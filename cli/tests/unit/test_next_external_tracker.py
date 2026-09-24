@@ -12,7 +12,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app

@@ -47,7 +47,7 @@ IDS=()
 while IFS= read -r id; do
   [[ -n "$id" ]] && IDS+=("$id")
 done < <(jq -r --arg p "$TITLE_PREFIX" \
-  '.entries // [] | map(select((.title // "") | startswith($p) and ((.state // "open") == "open"))) | .[].id' "$SNAP")
+  '.entries // [] | map(select((.title // "" | startswith($p)) and ((.state // "open") == "open"))) | .[].id' "$SNAP")
 
 if [[ ${#IDS[@]} -eq 0 ]]; then
   echo "retire-round-cap-findings: 0 open nodes titled '$TITLE_PREFIX ...'; nothing to retire"

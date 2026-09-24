@@ -223,7 +223,6 @@ def test_ac1_hp_graph_add_with_priority(tmp_graph):
 
 
 def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-    from types import SimpleNamespace
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
@@ -248,7 +247,6 @@ def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
 
 
 def test_add_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-    from types import SimpleNamespace
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
@@ -2866,7 +2864,6 @@ def test_update_dispatch_verb_dollar_prefix_stores_namespaced(tmp_graph):
 def test_update_dispatch_verb_configured_allowlist_verb_writes(tmp_graph):
     """A verb outside the static name table but inside the configured
     allowlist writes, with a warning naming the drain's name-mint gap."""
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     settings = SimpleNamespace(

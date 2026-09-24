@@ -17,7 +17,6 @@ import pytest
 from fno.paths import sidecar_path
 from fno.tracker import (
     NodeNotFound,
-    TrackerCandidate,
     TrackerError,
     TrackerNode,
     TrackerState,

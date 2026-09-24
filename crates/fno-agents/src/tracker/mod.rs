@@ -83,10 +83,7 @@ pub trait Tracker {
     }
     /// Sidecar fields for one id. The default reads the per-id sidecar file;
     /// a backend that stores sidecar fields in the row overrides it.
-    fn sidecar(
-        &self,
-        id: &str,
-    ) -> Result<serde_json::Map<String, Value>, TrackerError> {
+    fn sidecar(&self, id: &str) -> Result<serde_json::Map<String, Value>, TrackerError> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         sidecar::load(&sidecar::root(&cwd), id)
     }

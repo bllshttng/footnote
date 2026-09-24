@@ -1,6 +1,6 @@
 //! Recorded-response tests for the tracker seam (mounted by `mod.rs`).
 
-use super::github::{GhRun, GitHubTracker};
+use super::github::GitHubTracker;
 use super::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
