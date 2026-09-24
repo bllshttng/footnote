@@ -411,6 +411,19 @@ pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<String>, Option<usize>) {
     for e in &b.errors {
         lines.push(format!("! {e}"));
     }
+    // A filter matching nothing says so over a zeroed board; it never
+    // falls back to the unfiltered body (AC11 shape).
+    let shown: usize = board
+        .lanes
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
+        .sum();
+    if shown == 0 {
+        lines.push(match b.query.q.as_deref() {
+            Some(q) => format!("no cards match: {q}"),
+            None => "no cards match".into(),
+        });
+    }
     push_lanes(b, &mut lines, &mut follow, board, w);
     (lines, follow)
 }
