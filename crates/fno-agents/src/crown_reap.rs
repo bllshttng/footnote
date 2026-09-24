@@ -40,7 +40,12 @@ pub(crate) fn no_witness_reason(harness: Option<&str>) -> Option<String> {
 /// transcript witness (b) fires only on a KNOWN, warning-free roster - a
 /// partial list could hide the row, and absence from it is not death. The
 /// absence proof is the shared predicate, so it cannot diverge between the
-/// readers that apply it.
+/// readers that apply it. Absence plus a quiet transcript is NOT death: a
+/// machine reboot empties the roster and lets every transcript go quiet
+/// while its sessions stay resumable, so the verdict names the orphan for
+/// the court instead of handing the sweep a death receipt. Only
+/// `claude_death_reason`'s positive witnesses (terminal roster state, gone
+/// roster pid) read Dead.
 pub(crate) fn holder_verdict(
     harness: Option<&str>,
     session: &str,
@@ -87,8 +92,8 @@ pub(crate) fn holder_verdict(
         return HolderVerdict::Unknown("transcript not found".to_string());
     };
     if age > window_s {
-        HolderVerdict::Dead(format!(
-            "absent from the roster; transcript quiet {age}s > window {window_s}s"
+        HolderVerdict::Unknown(format!(
+            "absent from the roster; transcript quiet {age}s > window {window_s}s; silence is not death"
         ))
     } else {
         HolderVerdict::Live(format!("transcript quiet {age}s <= {window_s}s"))
@@ -569,7 +574,8 @@ mod tests {
             .collect()
     }
 
-    /// The AC1 shape: dead holder, old transcript, old manifest.
+    /// The positive-death shape: old manifest, and the roster lists the
+    /// holder in a terminal state - the one receipt that still vacates.
     fn dead_fixture(tag: &str, session: &str) -> (PathBuf, PathBuf, PathBuf, String) {
         let dir = tmp(tag);
         pin_window(&dir, None);
@@ -582,10 +588,15 @@ mod tests {
         (dir, manifest, registry, session.to_string())
     }
 
+    /// AC1-ERR: a roster row in a terminal state is positive death evidence;
+    /// the applied sweep vacates once and emits one receipt.
     #[test]
-    fn a_dead_holder_vacates_under_apply() {
+    fn a_roster_finished_holder_vacates_under_apply() {
         let (dir, manifest, registry, session) =
             dead_fixture("vacates", "aaaa1111-0000-4000-8000-000000000001");
+        let short = &session[..8];
+        let roster =
+            || ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new(short, Some("stopped"))]);
         let emitter = events_of(&dir);
         let out = sweep(
             &dir,
@@ -593,7 +604,7 @@ mod tests {
             &dir,
             &emitter,
             true,
-            &empty_roster,
+            &roster,
             &transcript(Some(30 * 86_400)),
             Utc::now(),
         );
@@ -603,11 +614,7 @@ mod tests {
         assert_eq!(v.scope, "zed");
         assert_eq!(v.holder_session.as_deref(), Some(session.as_str()));
         assert_eq!(v.inheritor, "operator");
-        assert!(
-            v.evidence.contains("absent from the roster"),
-            "{}",
-            v.evidence
-        );
+        assert!(v.evidence.contains("state stopped"), "{}", v.evidence);
         assert_eq!(v.cleared_rows, vec!["stale-row".to_string()]);
         assert!(!manifest.exists(), "manifest must be gone");
         assert!(
@@ -631,6 +638,46 @@ mod tests {
         assert!(stale["crown_scope"].is_null(), "{stale}");
         assert!(stale["crown_level"].is_null(), "{stale}");
         assert!(stale["crown_grantor"].is_null(), "{stale}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC1-HP: the reboot shape. The holder is absent from a clean roster
+    /// and the transcript went quiet while the machine was down, so the old
+    /// sweep read death and deleted the manifest. Silence is not death: the
+    /// manifest stands and the reason names the orphan for the court.
+    #[test]
+    fn a_reboot_absent_holder_with_an_old_transcript_keeps_the_crown() {
+        let (dir, manifest, registry, _session) =
+            dead_fixture("reboot-keeps", "aaaa1111-0000-4000-8000-000000000001");
+        let emitter = events_of(&dir);
+        let out = sweep(
+            &dir,
+            &registry,
+            &dir,
+            &emitter,
+            true,
+            &empty_roster,
+            &transcript(Some(30 * 86_400)),
+            Utc::now(),
+        );
+        assert!(out.unread.is_none(), "{:?}", out.unread);
+        assert!(out.vacated.is_empty(), "{:?}", out.vacated);
+        assert_eq!(out.kept.len(), 1, "{:?}", out.kept);
+        assert!(
+            out.kept[0].reason.contains("silence is not death"),
+            "{}",
+            out.kept[0].reason
+        );
+        assert!(manifest.exists(), "a kept crown is never removed");
+        assert!(
+            manifest.with_extension("cancelled").exists(),
+            "the cancel sentinel is not the sweep's to take"
+        );
+        assert!(read_events(&dir).is_empty());
+        // The terminal row keeps its crown fields: nothing was vacated.
+        let rows: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        assert_eq!(rows["agents"][0]["crown_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -895,13 +942,16 @@ mod tests {
         write_crown_manifest(&dir, "x-epic1,x-epic2", session, old_created(), "claude");
         let registry = registry_file(&dir, &[l1]);
         let emitter = events_of(&dir);
+        let short = &session[..8];
+        let roster =
+            || ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new(short, Some("stopped"))]);
         let out = sweep(
             &dir,
             &registry,
             &dir,
             &emitter,
             false,
-            &empty_roster,
+            &roster,
             &transcript(Some(30 * 86_400)),
             Utc::now(),
         );
@@ -915,7 +965,7 @@ mod tests {
             &dir,
             &emitter,
             false,
-            &empty_roster,
+            &roster,
             &transcript(Some(30 * 86_400)),
             Utc::now(),
         );
@@ -926,7 +976,10 @@ mod tests {
     #[test]
     fn a_dry_run_reports_without_touching_anything() {
         let (dir, manifest, registry, session) =
-            dead_fixture("dry-run", "aabb0000-0000-4000-8000-000000000007");
+            dead_fixture("dry-run", "aabb0000-0000-4000-8000-060000000007");
+        let short = &session[..8];
+        let roster =
+            || ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new(short, Some("stopped"))]);
         let emitter = events_of(&dir);
         let out = sweep(
             &dir,
@@ -934,7 +987,7 @@ mod tests {
             &dir,
             &emitter,
             false,
-            &empty_roster,
+            &roster,
             &transcript(Some(30 * 86_400)),
             Utc::now(),
         );
