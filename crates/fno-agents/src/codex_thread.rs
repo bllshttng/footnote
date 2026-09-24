@@ -29,6 +29,7 @@ use crate::codex_inject::{
     AppServerStream, ReviewDelivery, ReviewTarget,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -47,6 +48,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// burst of notification frames with quiet gaps while the model thinks, so
 /// this deadline is the ONLY bound on the wait for `turn/completed`.
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+/// Manual compaction runs a provider turn. Share that whole-turn bound and
+/// require the same-thread completion receipt before reporting success.
+const COMPACTION_TIMEOUT: Duration = TURN_TIMEOUT;
 /// How long the daemon's `ask` waits on a submitter's reply before answering
 /// `in_flight`. Comfortably under the client's 120s `RESPONSE_DEADLINE`
 /// (crates/fno-agents/src/bin/client.rs) so a bounded receipt, not a silent
@@ -154,6 +158,51 @@ pub struct TurnResult {
     pub raw: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    #[serde(rename = "complete")]
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGoal {
+    pub thread_id: String,
+    pub objective: String,
+    pub status: GoalStatus,
+    pub usage: GoalUsage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalUsage {
+    pub token_budget: Option<i64>,
+    pub tokens_used: i64,
+    pub time_used_seconds: i64,
+}
+
+impl GoalUsage {
+    pub fn preserves(&self, previous: &Self) -> bool {
+        self.token_budget == previous.token_budget
+            && self.tokens_used >= previous.tokens_used
+            && self.time_used_seconds >= previous.time_used_seconds
+    }
+
+    pub fn receipt_value(&self) -> Value {
+        json!({
+            "token_budget": self.token_budget,
+            "tokens_used": self.tokens_used,
+            "time_used_seconds": self.time_used_seconds,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewResult {
     pub turn_id: String,
@@ -214,6 +263,260 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
         }
     })
     .to_string()
+}
+
+/// Resume one exact thread for provider control without changing its model,
+/// sandbox, approval policy, or thread config.
+pub(crate) fn thread_resume_control_request_json(id: u64, thread_id: &str, cwd: &Path) -> String {
+    json!({
+        "id": id,
+        "method": "thread/resume",
+        "params": {
+            "threadId": thread_id,
+            "cwd": cwd,
+        }
+    })
+    .to_string()
+}
+
+/// Build the typed native compaction action. The caller must prove completion
+/// from the same thread's `contextCompaction` lifecycle item; this frame is
+/// only the submit half of that transaction.
+pub fn thread_compact_start_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/compact/start",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+enum CompactionLifecycle {
+    Started(String, String),
+    Completed(String, String, Value),
+    ContextCompacted(Value),
+}
+
+fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<CompactionLifecycle> {
+    let method = value.get("method").and_then(Value::as_str)?;
+    if method == "thread/compacted" {
+        let params = value.get("params")?;
+        if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+            return None;
+        }
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())?;
+        return Some(CompactionLifecycle::ContextCompacted(json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "type": "contextCompaction",
+            "status": "completed",
+        })));
+    }
+    if !matches!(method, "item/started" | "item/completed") {
+        return None;
+    }
+    let params = value.get("params").unwrap_or(value);
+    if params
+        .get("threadId")
+        .or_else(|| value.get("threadId"))
+        .and_then(Value::as_str)
+        != Some(thread_id)
+    {
+        return None;
+    }
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| value.get("turnId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
+    let item = params.get("item").or_else(|| value.get("item"))?;
+    if item.get("type").and_then(Value::as_str) != Some("contextCompaction") {
+        return None;
+    }
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
+    let completed_at_ms = if method == "item/completed" {
+        Some(params.get("completedAtMs").and_then(Value::as_u64)?)
+    } else {
+        None
+    };
+    match method {
+        "item/started" => Some(CompactionLifecycle::Started(turn_id, item_id)),
+        "item/completed" => Some(CompactionLifecycle::Completed(
+            turn_id,
+            item_id.clone(),
+            json!({
+                "threadId": thread_id,
+                "turnId": params.get("turnId").or_else(|| value.get("turnId")),
+                "itemId": item_id,
+                "type": "contextCompaction",
+                "status": "completed",
+                "completedAtMs": completed_at_ms,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// Read the native goal for one exact full thread id.
+pub fn thread_goal_get_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/get",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+/// Set or pause a native goal without exposing a clear operation. The
+/// controller preserves the objective and usage across a pause.
+pub fn thread_goal_set_request_json(
+    id: u64,
+    thread_id: &str,
+    objective: &str,
+    status: &str,
+) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/set",
+        "params": {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": status,
+        },
+    })
+    .to_string()
+}
+
+pub fn reign_objective(scope: &str) -> String {
+    format!("$fno:reign {}", scope.trim())
+}
+
+pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|_| ThreadDriverError::Protocol("invalid thread/goal response".into()))?;
+    parse_goal_value(&value)
+}
+
+pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    let goal = value.pointer("/result/goal").or_else(|| value.get("goal"));
+    let Some(goal) = goal else {
+        return Ok(None);
+    };
+    if goal.is_null() {
+        return Ok(None);
+    }
+    let object = goal.as_object().ok_or_else(|| {
+        ThreadDriverError::Protocol("thread/goal response carried a non-object goal".into())
+    })?;
+    let thread_id = object
+        .get("threadId")
+        .or_else(|| object.get("thread_id"))
+        .and_then(Value::as_str)
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no thread id".into()))?
+        .to_string();
+    let objective = object
+        .get("objective")
+        .or_else(|| object.get("goal"))
+        .and_then(Value::as_str)
+        .filter(|objective| !objective.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no objective".into()))?
+        .to_string();
+    let status = match object
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no status".into()))?
+    {
+        "active" => GoalStatus::Active,
+        "paused" => GoalStatus::Paused,
+        "blocked" => GoalStatus::Blocked,
+        "usageLimited" | "usage_limited" => GoalStatus::UsageLimited,
+        "budgetLimited" | "budget_limited" => GoalStatus::BudgetLimited,
+        "complete" | "completed" | "done" => GoalStatus::Completed,
+        other => {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/goal response has unknown status {other:?}"
+            )))
+        }
+    };
+    let token_budget_value = object
+        .get("tokenBudget")
+        .or_else(|| object.get("token_budget"))
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no token budget".into())
+        })?;
+    let token_budget = if token_budget_value.is_null() {
+        None
+    } else {
+        Some(
+            token_budget_value
+                .as_i64()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    ThreadDriverError::Protocol("thread/goal token budget is invalid".into())
+                })?,
+        )
+    };
+    let tokens_used = object
+        .get("tokensUsed")
+        .or_else(|| object.get("tokens_used"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid tokens used".into())
+        })?;
+    let time_used_seconds = object
+        .get("timeUsedSeconds")
+        .or_else(|| object.get("time_used_seconds"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid time used".into())
+        })?;
+    Ok(Some(NativeGoal {
+        thread_id,
+        objective,
+        status,
+        usage: GoalUsage {
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+        },
+    }))
+}
+
+pub fn ensure_reign_goal(
+    current: Option<&NativeGoal>,
+    scope: &str,
+    continuation_owner: &str,
+) -> Result<GoalStatus, ThreadDriverError> {
+    let expected = reign_objective(scope);
+    if let Some(goal) = current {
+        if goal.objective != expected {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing native goal {:?}; expected {:?}; continuation owner {}",
+                goal.objective, expected, continuation_owner
+            )));
+        }
+        if !matches!(goal.status, GoalStatus::Active | GoalStatus::Paused) {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
+            )));
+        }
+    }
+    Ok(GoalStatus::Active)
 }
 
 /// Build a `turn/start` request for the held driver.
@@ -718,6 +1021,35 @@ impl CodexThread {
         Self::resume_with_state_dirs(cwd, thread_id, model, posture, effort, &[], config).await
     }
 
+    /// Resume one exact thread for provider actions without overriding its
+    /// existing permission or model settings.
+    pub(crate) async fn resume_for_control(
+        cwd: impl Into<PathBuf>,
+        thread_id: &str,
+    ) -> Result<Self, ThreadDriverError> {
+        if thread_id.trim().is_empty() {
+            return Err(ThreadDriverError::Protocol(
+                "harness_session_id is required for codex resume".into(),
+            ));
+        }
+        let cwd = cwd.into();
+        let mut driver = Self::launch(cwd.clone()).await?;
+        let request = thread_resume_control_request_json(1, thread_id, &cwd);
+        let response = driver.request(1, request).await?;
+        let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
+            .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
+        if confirmed_id != thread_id {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/resume returned {confirmed_id}, expected {thread_id}"
+            )));
+        }
+        driver.thread_id = confirmed_id;
+        driver.rollout_path = PathBuf::from(rollout_path);
+        driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
+        Ok(driver)
+    }
+
     /// [`CodexThread::resume`] plus the state-root grant. A resumed thread
     /// re-resolves its posture server-side, so a resume that forgot the roots
     /// would be the same silent defect with a slower fuse.
@@ -1040,6 +1372,260 @@ impl CodexThread {
         // accept the ack shape and let the caller's own loaded-list check
         // prove the effect.
         Ok(())
+    }
+
+    pub async fn compact(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let id_value = Value::from(id);
+        self.write_frame(&thread_compact_start_request_json(id, &self.thread_id))
+            .await?;
+        let deadline = Instant::now() + COMPACTION_TIMEOUT;
+        let mut acknowledged = false;
+        let mut started_items = Vec::new();
+        let mut completed_items = HashMap::new();
+        loop {
+            if acknowledged {
+                if let Some(receipt) = started_items
+                    .iter()
+                    .find_map(|item_id| completed_items.remove(item_id))
+                {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let value = self.read_value(remaining).await?;
+            if value.get("id") == Some(&id_value) {
+                provider_response(value)?;
+                acknowledged = true;
+                continue;
+            }
+            match parse_compaction_lifecycle(&value, &self.thread_id) {
+                Some(CompactionLifecycle::Started(turn_id, item_id)) => {
+                    started_items.push((turn_id, item_id));
+                }
+                Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) => {
+                    completed_items.insert((turn_id, item_id), receipt);
+                }
+                Some(CompactionLifecycle::ContextCompacted(receipt)) => {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
+                }
+                None => park_frame(&mut self.pending, &mut self.completed_turns, value),
+            }
+        }
+    }
+
+    pub async fn goal_get(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(id, thread_goal_get_request_json(id, &self.thread_id))
+            .await
+            .and_then(provider_response)
+    }
+
+    pub async fn goal_set(
+        &mut self,
+        objective: &str,
+        status: &str,
+    ) -> Result<Value, ThreadDriverError> {
+        if objective.trim().is_empty() || !matches!(status, "active" | "paused") {
+            return Err(ThreadDriverError::Protocol(
+                "goal set needs a non-empty objective and active|paused status".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(
+            id,
+            thread_goal_set_request_json(id, &self.thread_id, objective, status),
+        )
+        .await
+        .and_then(provider_response)
+    }
+
+    pub async fn goal_get_typed(&mut self) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        let value = self.goal_get().await?;
+        let goal = parse_goal_value(&value)?;
+        if goal
+            .as_ref()
+            .is_some_and(|goal| goal.thread_id != self.thread_id)
+        {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/get returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
+    }
+
+    /// Read one live provider goal without resuming or changing the thread.
+    /// Stop hooks use this short direct query to distinguish an active native
+    /// continuation from a missing or unreadable goal.
+    pub(crate) async fn read_goal_for_stop(
+        thread_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        if thread_id.trim().is_empty() || timeout.is_zero() {
+            return Err(ThreadDriverError::Protocol(
+                "Stop goal read needs an exact thread id and positive timeout".into(),
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        let socket = crate::codex_inject::codex_app_server_socket_path();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (mut sink, mut stream) =
+            tokio::time::timeout(remaining, crate::codex_inject::connect_app_server(&socket))
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?
+                .map_err(|error| {
+                    ThreadDriverError::Protocol(format!(
+                        "Codex goal connection unavailable: {error}"
+                    ))
+                })?;
+        let id = Value::from(1);
+        let request = thread_goal_get_request_json(1, thread_id);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::timeout(remaining, sink.send(Message::Text(request.into())))
+            .await
+            .map_err(|_| ThreadDriverError::Timeout)?
+            .map_err(|error| {
+                ThreadDriverError::Protocol(format!("Codex goal request write failed: {error}"))
+            })?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let frame = tokio::time::timeout(remaining, stream.next())
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?;
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    let value: Value = serde_json::from_str(text.trim()).map_err(|_| {
+                        ThreadDriverError::Protocol("Codex goal response is not JSON".into())
+                    })?;
+                    if value.get("id") != Some(&id) {
+                        continue;
+                    }
+                    let value = provider_response(value)?;
+                    if let Some(goal) = value
+                        .pointer("/result/goal")
+                        .or_else(|| value.get("goal"))
+                        .filter(|goal| !goal.is_null())
+                    {
+                        let returned_thread = goal
+                            .get("threadId")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                ThreadDriverError::Protocol(
+                                    "Codex goal response has no thread id".into(),
+                                )
+                            })?;
+                        if returned_thread != thread_id {
+                            return Err(ThreadDriverError::Protocol(format!(
+                                "Codex goal response returned {returned_thread}, expected {thread_id}"
+                            )));
+                        }
+                    }
+                    return parse_goal_value(&value);
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => {
+                    return Err(ThreadDriverError::Protocol(format!(
+                        "Codex goal response read failed: {error}"
+                    )))
+                }
+                None => {
+                    return Err(ThreadDriverError::Protocol(
+                        "Codex app-server closed before the goal response".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    pub async fn goal_set_typed(
+        &mut self,
+        objective: &str,
+        status: GoalStatus,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let status_wire = match status {
+            GoalStatus::Active => "active",
+            GoalStatus::Paused => "paused",
+            GoalStatus::Blocked => "blocked",
+            GoalStatus::UsageLimited => "usageLimited",
+            GoalStatus::BudgetLimited => "budgetLimited",
+            GoalStatus::Completed => "complete",
+        };
+        if objective.trim().is_empty() || !matches!(status, GoalStatus::Active | GoalStatus::Paused)
+        {
+            return Err(ThreadDriverError::Protocol(
+                "typed goal set needs a non-empty active or paused objective".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let value = self
+            .request_value(
+                id,
+                thread_goal_set_request_json(id, &self.thread_id, objective, status_wire),
+            )
+            .await
+            .and_then(provider_response)?;
+        let goal = parse_goal_value(&value)?.ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal/set returned no typed goal".into())
+        })?;
+        if goal.thread_id != self.thread_id {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/set returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
+    }
+
+    pub async fn ensure_reign_goal_typed(
+        &mut self,
+        scope: &str,
+        continuation_owner: &str,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let current = self.goal_get_typed().await?;
+        ensure_reign_goal(current.as_ref(), scope, continuation_owner)?;
+        let objective = reign_objective(scope);
+        match current {
+            Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
+            Some(goal) if goal.status == GoalStatus::Paused => {
+                let resumed = self.goal_set_typed(&objective, GoalStatus::Active).await?;
+                if !resumed.usage.preserves(&goal.usage) {
+                    return Err(ThreadDriverError::Protocol(
+                        "thread/goal/set did not preserve goal usage".into(),
+                    ));
+                }
+                Ok(resumed)
+            }
+            Some(goal) => Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
+            ))),
+            None => self.goal_set_typed(&objective, GoalStatus::Active).await,
+        }
     }
 
     /// Unarchive this thread id so `thread/resume` finds it in the same
@@ -1987,6 +2573,13 @@ fn thread_resume_request_with_options(
     json!({"id": id, "method": "thread/resume", "params": params}).to_string()
 }
 
+fn provider_response(value: Value) -> Result<Value, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    Ok(value)
+}
+
 fn server_error(error: &Value) -> String {
     error
         .get("message")
@@ -2011,6 +2604,195 @@ mod tests {
         assert_eq!(value["method"], "thread/resume");
         assert_eq!(value["params"]["threadId"], "thread-1");
         assert_eq!(value["params"]["cwd"], "/tmp/worktree");
+    }
+
+    #[test]
+    fn compaction_lifecycle_parser_reads_thread_and_item_identity() {
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "item": { "id": "compact-1", "type": "contextCompaction" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&started, "thread-a"),
+            Some(CompactionLifecycle::Started(turn_id, item_id))
+                if turn_id == "turn-a" && item_id == "compact-1"
+        ));
+        let completed = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
+                "item": { "id": "compact-1", "type": "contextCompaction" }
+            }
+        });
+        let Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) =
+            parse_compaction_lifecycle(&completed, "thread-a")
+        else {
+            panic!("item/completed proves lifecycle completion without item.status");
+        };
+        assert_eq!(
+            (turn_id.as_str(), item_id.as_str()),
+            ("turn-a", "compact-1")
+        );
+        assert_eq!(receipt["threadId"], "thread-a");
+        assert_eq!(receipt["turnId"], "turn-a");
+        assert_eq!(receipt["itemId"], "compact-1");
+        assert_eq!(receipt["status"], "completed");
+        assert_eq!(receipt["completedAtMs"], 1_790_000_000_000_u64);
+        crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap();
+        assert!(parse_compaction_lifecycle(&completed, "thread-b").is_none());
+        let completed_without_start = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
+                "item": { "id": "compact-2", "type": "contextCompaction" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&completed_without_start, "thread-a"),
+            Some(CompactionLifecycle::Completed(turn_id, item_id, _))
+                if turn_id == "turn-a" && item_id == "compact-2"
+        ));
+    }
+
+    #[test]
+    fn compacted_notification_is_a_same_thread_completion_receipt() {
+        let event = serde_json::json!({
+            "method": "thread/compacted",
+            "params": {"threadId": "thread-a", "turnId": "turn-1"}
+        });
+        let Some(CompactionLifecycle::ContextCompacted(receipt)) =
+            parse_compaction_lifecycle(&event, "thread-a")
+        else {
+            panic!("Codex compaction notification should prove completion");
+        };
+
+        assert_eq!(
+            crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap()
+                ["turnId"],
+            "turn-1"
+        );
+        assert!(parse_compaction_lifecycle(&event, "thread-b").is_none());
+    }
+
+    #[test]
+    fn control_resume_does_not_override_existing_thread_policy() {
+        let value: Value = serde_json::from_str(&thread_resume_control_request_json(
+            7,
+            "thread-full-id",
+            Path::new("/worktrees/feature"),
+        ))
+        .unwrap();
+        assert_eq!(value["method"], "thread/resume");
+        assert_eq!(value["params"]["threadId"], "thread-full-id");
+        assert_eq!(value["params"]["cwd"], "/worktrees/feature");
+        assert!(value["params"].get("sandbox").is_none());
+        assert!(value["params"].get("approvalPolicy").is_none());
+        assert!(value["params"].get("model").is_none());
+        assert!(value["params"].get("config").is_none());
+    }
+
+    #[test]
+    fn native_provider_actions_pin_the_full_thread_id() {
+        let compact: Value = serde_json::from_str(&thread_compact_start_request_json(
+            7,
+            "00000000-0000-4000-8000-000000000001",
+        ))
+        .unwrap();
+        assert_eq!(compact["method"], "thread/compact/start");
+        assert_eq!(
+            compact["params"]["threadId"],
+            "00000000-0000-4000-8000-000000000001"
+        );
+
+        let goal: Value = serde_json::from_str(&thread_goal_set_request_json(
+            8,
+            "thread-full",
+            "$fno:reign x-0000",
+            "active",
+        ))
+        .unwrap();
+        assert_eq!(goal["method"], "thread/goal/set");
+        assert_eq!(goal["params"]["status"], "active");
+        assert_eq!(goal["params"]["objective"], "$fno:reign x-0000");
+        assert!(goal["params"].get("continuationOwner").is_none());
+    }
+
+    #[test]
+    fn native_goal_parser_requires_positive_status_and_keeps_provider_limits() {
+        let goal = parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000",
+                "status": "budgetLimited",
+                "tokenBudget": 50_000,
+                "tokensUsed": 12_345,
+                "timeUsedSeconds": 67
+            }}
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(goal.thread_id, "thread-full");
+        assert_eq!(goal.status, GoalStatus::BudgetLimited);
+        assert_eq!(goal.usage.token_budget, Some(50_000));
+        assert_eq!(goal.usage.tokens_used, 12_345);
+        assert_eq!(goal.usage.time_used_seconds, 67);
+
+        assert!(parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000"
+            }}
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn goal_usage_readback_rejects_a_reset_and_allows_monotone_time() {
+        let before = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 67,
+        };
+        let after = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 68,
+        };
+        assert!(after.preserves(&before));
+        assert!(!GoalUsage::default().preserves(&before));
+        assert!(!GoalUsage {
+            token_budget: Some(40_000),
+            ..after
+        }
+        .preserves(&before));
+    }
+
+    #[test]
+    fn ensure_goal_never_reopens_a_provider_limited_or_completed_goal() {
+        let limited = NativeGoal {
+            thread_id: "thread-full".into(),
+            objective: "$fno:reign x-0000".into(),
+            status: GoalStatus::BudgetLimited,
+            usage: GoalUsage {
+                token_budget: Some(50_000),
+                tokens_used: 12_345,
+                time_used_seconds: 67,
+            },
+        };
+        assert!(ensure_reign_goal(Some(&limited), "x-0000", "king:x-0000").is_err());
+        let completed = NativeGoal {
+            status: GoalStatus::Completed,
+            ..limited
+        };
+        assert!(ensure_reign_goal(Some(&completed), "x-0000", "king:x-0000").is_err());
     }
 
     #[test]

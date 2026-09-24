@@ -509,6 +509,61 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
 }
 
 #[test]
+fn unowned_visitor_stop_accepts_empty_scope_only_without_a_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let visitor = json!({
+        "ts": "2026-09-17T12:00:00Z",
+        "type": "stop_decision",
+        "source": "hook",
+        "data": {
+            "session_id": "thread-1",
+            "raw_identity_candidates": [],
+            "turn_id": "turn-1",
+            "manifest": "",
+            "scope": "",
+            "node_id": "",
+            "driver": "unknown",
+            "continuation_owner": "none",
+            "decision": "allow",
+            "class": "visitor",
+            "correlation_id": "stop:thread-1:turn-1",
+            "harness_output_contract": "empty"
+        }
+    })
+    .to_string();
+
+    let parsed = map_row(&visitor, 0);
+    assert_eq!(parsed.3.as_deref(), Some(""));
+    assert_eq!(parsed.4, None);
+    append_envelope(&live, &visitor, None).unwrap();
+    assert_eq!(count_type(&store_path(&live), "stop_decision"), 1);
+
+    let owned = json!({
+        "ts": "2026-09-17T12:00:00Z",
+        "type": "stop_decision",
+        "source": "hook",
+        "data": {
+            "session_id": "thread-1",
+            "raw_identity_candidates": [],
+            "turn_id": "turn-2",
+            "manifest": "/private/kings/x-aaaa.md",
+            "scope": "",
+            "node_id": "",
+            "driver": "king",
+            "continuation_owner": "goal",
+            "decision": "allow",
+            "class": "delegated-to-goal",
+            "correlation_id": "stop:thread-1:turn-2",
+            "harness_output_contract": "empty"
+        }
+    })
+    .to_string();
+    let error = append_envelope(&live, &owned, None).unwrap_err();
+    assert!(error.contains("canonical crown scope"), "error: {error}");
+}
+
+#[test]
 fn append_requires_type_source_data_object() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

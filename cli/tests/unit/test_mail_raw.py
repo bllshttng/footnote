@@ -1245,6 +1245,33 @@ def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys,
     assert "injected" in capsys.readouterr().out
 
 
+def test_mail_inject_codex_preserves_rust_refusal_reason(monkeypatch):
+    from fno.agents import dispatch
+
+    expected = (
+        "native-command: use fno mux command <selector> --text <verb> "
+        "--proof <compact|goal-active|screen>"
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda _thread: None)
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout=json.dumps({"delivered": False, "reason": expected}),
+            stderr="",
+        ),
+    )
+    reason = []
+
+    assert not dispatch._mail_inject_codex(SID_CODEX, "/compact", reason_out=reason)
+    assert reason == [expected]
+
+
 def test_review_start_codex_uses_structured_binary_argv(monkeypatch):
     from fno.agents import dispatch
 
