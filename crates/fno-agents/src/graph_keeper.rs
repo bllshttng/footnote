@@ -708,6 +708,12 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
+    // Open the store before the seat serves: first contact takes the
+    // creation lock, and a request paying it flattens a busy lock into an
+    // unreadable answer instead of lock_timeout.
+    if let Err(error) = crate::backlog::version(&cfg.graph) {
+        eprintln!("store keeper: store not opened at startup: {error}");
+    }
     let listener = match UnixListener::bind(&cfg.sock) {
         Ok(l) => l,
         // A listener appeared between the probe and the bind: the seat filled.

@@ -339,8 +339,8 @@ fn read_file_returns_the_bytes_load_graph_validates() {
     let on_disk = std::fs::read(&graph).unwrap();
     assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
     assert!(
-        result["sha256"].as_str().unwrap().starts_with("sha256:"),
-        "the digest labels its algorithm"
+        result["sha256"].as_str().unwrap().starts_with("sqlite:"),
+        "the version token labels the store it names"
     );
 }
 
