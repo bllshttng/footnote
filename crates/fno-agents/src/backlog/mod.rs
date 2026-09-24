@@ -534,14 +534,16 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     Ok(())
 }
 
+const CLEAR_SOAK_METADATA_SQL: &str = "DELETE FROM graph_meta WHERE key IN (
+    'soak_clean_since_ms', 'soak_clean_days', 'soak_last_sample_ms', 'soak_last_divergent')";
+
 /// Schema 3: a populated schema-2 store under the json backend rebuilds
 /// its rows once from authoritative graph.json. The raw-baseline shadow
 /// diff and the child-extras columns stop NEW drift; this rebuild visits
 /// the rows that already drifted while normalization-only changes were
 /// being skipped. It is also the soak restart: the rebuild deletes the
 /// graph_meta soak keys, so the next clean sample starts a fresh 7-day
-/// clock. Under the sqlite backend graph.json is not authoritative, so
-/// the stamp moves and nothing is rewritten.
+/// clock. The sqlite path also clears soak metadata without rewriting rows.
 fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     // Pinned at 3: the schema-4 rebuild is schema_v4's, and it never needs
     // graph.json. A schema-2 store still rebuilds here once, into v4 tables.
@@ -553,7 +555,21 @@ fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(),
         return Ok(());
     }
     if backend(graph) == Backend::Sqlite {
-        return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let raced: i64 = meta(&transaction, "schema_version")?
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .unwrap_or(2);
+        if raced >= target {
+            return Ok(());
+        }
+        transaction
+            .execute(CLEAR_SOAK_METADATA_SQL, [])
+            .map_err(|error| error.to_string())?;
+        stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(());
     }
     // The rebuild reads graph.json; a file that does not parse, or that
     // carries no entries ARRAY, is left for the next open, and parity
@@ -2091,16 +2107,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
-        // The seed is the UN-defaulted form: no tags key, what an older
-        // file's row looked like before the defaults pipeline ran.
-        raw[0].as_object_mut().unwrap().remove("tags");
+        let one = raw[0].as_object_mut().unwrap();
+        for key in [
+            "tags",
+            "locked_by",
+            "locked_at",
+            "dispatch_verb",
+            "sessions",
+        ] {
+            one.remove(key);
+        }
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
+        // Keep the raw row un-defaulted and unlocked so owner normalization
+        // cannot change its status while this test isolates missing tags.
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
-        after[0]
-            .as_object_mut()
-            .unwrap()
-            .insert("tags".to_string(), Value::Array(vec![]));
+        crate::graph_store::apply_defaults(&mut after, false);
+        assert_eq!(after[0]["tags"], Value::Array(vec![]));
         // A change on the other node is what triggers the publish.
         after[1]
             .as_object_mut()
@@ -2123,8 +2147,7 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; graph.json is frozen under it, so the
-        // assertion reads the store, never file-vs-store parity.
+        // graph.db is the only store; graph.json is frozen under it.
         let stored = read_entries(&graph).unwrap();
         let one = stored
             .iter()
@@ -2164,6 +2187,7 @@ mod tests {
             Value::String("pending supersession".into()),
         );
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        set_backend(&graph, Backend::Json).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw.clone();
         after[0]
@@ -2187,7 +2211,7 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; the settle is read back from it.
+        // graph.db is the only store; read the settled row back from it.
         let stored = read_entries(&graph).unwrap();
         let two = stored
             .iter()
@@ -2423,9 +2447,9 @@ mod tests {
     fn schema_v3_population_keeps_its_rows_and_stamps_three() {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The schema-3 open keeps the rows and stamps the new
-        // schema; parity still reports the mirror's staleness instead of
-        // papering over it with a rebuild.
+        // authority. The first schema-3 open keeps the rows and stamps the
+        // schema; parity still reports the
+        // mirror's staleness instead of papering over it with a rebuild.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
         let entries = read_entries(&graph).unwrap();

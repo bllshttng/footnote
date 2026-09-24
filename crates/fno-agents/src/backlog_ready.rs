@@ -1654,36 +1654,104 @@ pub fn select(entries: &[Value], opts: &ReadyOpts) -> Result<ReadyReply, NoSuchP
 
     // Epics-first, then flat priority: the key is built from the FULL graph
     // so epic parents resolve even when filtered out of the candidate set.
-    let child_progress = epics_with_child_progress(&by_id);
+    let (ordered, _tables) =
+        order_by_selection_key(survivors, entries, &by_id, &opts.claimed, opts.now_ms);
+
+    Ok(ReadyReply {
+        rows: ordered.iter().map(|e| dispatch_node_summary(e)).collect(),
+        drops,
+    })
+}
+
+/// The sort tables the board mode reads, built once per read from the full
+/// graph. The key's other three inputs (child progress, fan-out, orphans)
+/// stay local to [`order_by_selection_key`]: nothing reads them back.
+struct KeyTables {
+    effective_priority: BTreeMap<String, String>,
+    epic_in_progress: BTreeSet<String>,
+}
+
+/// The one selection order: `rows` sorted by [`selection_sort_key`], with the
+/// tables it was built from handed back so the board mode answers from the
+/// same facts instead of rebuilding them.
+fn order_by_selection_key(
+    rows: Vec<Value>,
+    entries: &[Value],
+    by_id: &BTreeMap<String, Value>,
+    claimed: &BTreeSet<String>,
+    now_ms: i64,
+) -> (Vec<Value>, KeyTables) {
+    let child_progress = epics_with_child_progress(by_id);
     let dependents = dependents_fanout(entries);
-    let effective_priority = make_effective_priority(&by_id, &child_progress);
-    let orphans = orphan_ids(entries, &by_id);
-    let epic_in_progress = in_progress_epic_ids(entries, &by_id, &child_progress, &opts.claimed);
-    let mut keyed: Vec<(Vec<Term>, Value)> = survivors
+    let effective_priority = make_effective_priority(by_id, &child_progress);
+    let orphans = orphan_ids(entries, by_id);
+    let epic_in_progress = in_progress_epic_ids(entries, by_id, &child_progress, claimed);
+    let mut keyed: Vec<(Vec<Term>, Value)> = rows
         .into_iter()
         .map(|e| {
             let key = selection_sort_key(
                 &e,
-                &by_id,
+                by_id,
                 &child_progress,
                 &dependents,
                 &effective_priority,
                 &orphans,
                 &epic_in_progress,
-                opts.now_ms,
+                now_ms,
             );
             (key, e)
         })
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let tables = KeyTables {
+        effective_priority,
+        epic_in_progress,
+    };
+    let ordered = keyed.into_iter().map(|(_, e)| e).collect();
+    (ordered, tables)
+}
 
-    Ok(ReadyReply {
-        rows: keyed
-            .into_iter()
-            .map(|(_, e)| dispatch_node_summary(&e))
-            .collect(),
-        drops,
-    })
+/// The board's whole-graph facts, from the tables the ready order uses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoardFacts {
+    /// Every entry id, in selection-key order, no admission, no cascade.
+    pub ids: Vec<String>,
+    /// Epics whose work is underway (in_progress_epic_ids).
+    pub underway: BTreeSet<String>,
+    /// Ids whose live epic promotes their priority, to the promoted value.
+    pub effective_priority: BTreeMap<String, String>,
+}
+
+/// Whole-graph board facts: every dict entry with an id, in selection-key
+/// order. No admission and no cascade - the board lists everything and its
+/// renderer filters. `effective_priority` keeps only ids whose live epic
+/// actually promotes them, so the reply stays small.
+pub fn board_facts(entries: &[Value], claimed: &BTreeSet<String>, now_ms: i64) -> BoardFacts {
+    let by_id: BTreeMap<String, Value> = entries
+        .iter()
+        .filter(|e| is_dict(e))
+        .filter_map(|e| entry_id(e).map(|id| (id.to_string(), e.clone())))
+        .collect();
+    let sortables: Vec<Value> = by_id.values().cloned().collect();
+    let (ordered, tables) = order_by_selection_key(sortables, entries, &by_id, claimed, now_ms);
+    let ids = ordered
+        .iter()
+        .filter_map(|e| entry_id(e).map(str::to_string))
+        .collect();
+    let effective_priority: BTreeMap<String, String> = tables
+        .effective_priority
+        .into_iter()
+        .filter(|(id, effective)| {
+            by_id
+                .get(id)
+                .is_some_and(|e| &priority_name(e) != effective)
+        })
+        .collect();
+    BoardFacts {
+        ids,
+        underway: tables.epic_in_progress,
+        effective_priority,
+    }
 }
 
 /// Ids of nodes that are some other node's `parent` (`cli._container_ids`):
@@ -1807,6 +1875,43 @@ mod tests {
         assert_eq!(reply.rows.len(), 1);
         assert_eq!(reply.rows[0].get("id"), Some(&json!("x-c")));
         assert!(reply.drops.iter().all(|d| d.reason != "no-difficulty"));
+    }
+
+    // -- the board mode: whole-graph facts in selection order --
+
+    #[test]
+    fn board_mode_orders_every_entry_like_selection() {
+        let entries = vec![
+            json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
+            json!({"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"}),
+            json!({"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
+                   "completed_at": "2026-09-01T00:00:00Z"}),
+            json!({"id": "x-loose", "status": "ready", "priority": "p1"}),
+        ];
+        let reply = select(&entries, &opts(true)).unwrap();
+        let facts = board_facts(&entries, &Default::default(), 0);
+        // The board lists everything; the admitted subsequence must match
+        // selection's own order exactly.
+        let admitted: Vec<&str> = reply
+            .rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .collect();
+        let in_board_order: Vec<&str> = facts
+            .ids
+            .iter()
+            .filter(|id| admitted.contains(&id.as_str()))
+            .map(|id| id.as_str())
+            .collect();
+        assert_eq!(in_board_order, admitted);
+        assert!(facts.ids.contains(&"x-e".to_string()));
+        assert!(facts.ids.contains(&"x-c2".to_string()));
+        assert!(facts.underway.contains("x-e"));
+        assert_eq!(
+            facts.effective_priority.get("x-c1"),
+            Some(&"p1".to_string())
+        );
+        assert_eq!(facts.effective_priority.get("x-loose"), None);
     }
 
     // -- the ported lifecycle table (effective_verb) + is_blueprint_doc --

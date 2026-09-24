@@ -1888,7 +1888,7 @@ def _claude_create_path(
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}"
+                f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                 if king_unarmed_reason
                 else "; king loop disabled, no scope manifest armed"
             )

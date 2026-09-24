@@ -662,6 +662,11 @@ def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
     return _ExecClient(path)
 
 
+def _refusal(exc: Exception, message: str) -> Exception:
+    exc.fno_refusal = message  # type: ignore[attr-defined]
+    return exc
+
+
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)
@@ -672,12 +677,13 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "lock_timeout":
         raise GraphLockTimeout(message)
     if kind == "empty_field_update":
-        raise ValueError(message)
+        raise _refusal(ValueError(message), message)
     if kind == "conflict":
         raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
-    raise RuntimeError(f"store error ({kind}): {message}")
+    err = RuntimeError(f"store error ({kind}): {message}")
+    raise _refusal(err, message) if kind == "invalid" else err
 
 
 class _Conflict(Exception):
