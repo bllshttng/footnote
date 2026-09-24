@@ -212,8 +212,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let still_running = child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+        #[cfg(target_os = "linux")]
+        let procfs_pid_mismatch = still_running
+            && read.as_ref().is_some_and(|child_argv| {
+                process_argv(std::process::id())
+                    .as_ref()
+                    .is_some_and(|own_argv| own_argv == child_argv)
+            });
+        #[cfg(not(target_os = "linux"))]
+        let procfs_pid_mismatch = false;
         child.kill().ok();
         child.wait().ok();
+        if procfs_pid_mismatch {
+            eprintln!(
+                "skipping child-probe leg: /proc/{} resolves to the caller's argv while the spawned sleep child is live; pid namespaces do not match",
+                child.id()
+            );
+            return;
+        }
         let Some(read) = read else {
             let hidden = why.contains("alive but /proc entry hidden") && still_running;
             // A hardened platform may hide other pids' procfs entries
