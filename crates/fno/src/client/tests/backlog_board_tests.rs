@@ -144,3 +144,117 @@ fn empty_filter_match_totals_zero_and_names_itself() {
         "{lines:?}"
     );
 }
+
+// The `t` key's view flow: a board wrapped in a live View with a wire
+// buffer standing in for the socket.
+fn key_view(b: BoardView) -> View {
+    let mut v = super::super::tests::two_pane_view();
+    v.term = (24, 80);
+    v.backlog_board = Some(b);
+    v
+}
+
+// x-1 carries a cwd so the prefill can select the node's project.
+fn target_inputs() -> backlog_model::Inputs {
+    let mut inp = board_inputs();
+    if let Some(r) = inp.rows.get_mut(0) {
+        r["cwd"] = json!("/r/footnote");
+    }
+    inp
+}
+
+// AC10-HP: `t` on an unclaimed card closes the board, prefills the dock
+// with /fno:target <id> and the node's project, and writes NOTHING to the
+// wire - nothing spawns before the operator's Launch press.
+#[test]
+fn t_key_prefills_the_launcher_from_a_card() {
+    let mut b = board_with(target_inputs());
+    focus_card(&mut b, Some("x-1"));
+    let mut v = key_view(b);
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, &[b't'], &mut sock)
+            .await
+            .expect("t folds");
+    });
+    assert!(v.backlog_board.is_none(), "the board closes");
+    assert!(sock.is_empty(), "nothing spawns on t");
+    let l = v.launcher.as_ref().expect("the dock is open");
+    assert_eq!(l.draft.message, "/fno:target x-1");
+    let idx = l.draft.project_idx;
+    assert_eq!(l.draft.projects[idx], "/r/footnote");
+    assert_eq!(l.draft.node.as_deref(), Some("x-1"));
+}
+
+// AC11-ERR: a claimed card refuses BEFORE the dock opens; the board stays
+// open and the notice names the in-flight case (the plan-refusal wording).
+#[test]
+fn t_key_refuses_a_card_already_being_worked() {
+    let mut b = board_with(board_inputs());
+    focus_card(&mut b, Some("x-2")); // status in_progress -> claimed
+    let mut v = key_view(b);
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, &[b't'], &mut sock)
+            .await
+            .expect("t folds");
+    });
+    assert!(
+        v.backlog_board.is_some(),
+        "the board stays open on the refusal"
+    );
+    assert!(v.launcher.is_none(), "the dock never opens");
+    let notice = v.notice.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
+    assert_eq!(
+        notice,
+        "x-2 is already being worked; open its session instead"
+    );
+}
+
+// AC12-HP: `t` inside the drill-down targets the drill-down's node, the
+// same prefill as a card press.
+#[test]
+fn t_key_inside_the_drilldown_targets_its_node() {
+    let mut b = board_with(target_inputs());
+    focus_card(&mut b, Some("x-1"));
+    let mut v = key_view(b);
+    open_detail(&mut v);
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        node_detail::detail_keys(&mut v, &[b't'], &mut sock)
+            .await
+            .expect("t folds");
+    });
+    assert!(v.backlog_board.is_none(), "the board closes");
+    let l = v.launcher.as_ref().expect("the dock is open");
+    assert_eq!(l.draft.message, "/fno:target x-1");
+}
+
+// AC13-EDGE: a kept non-empty draft is never overwritten; the dock shows
+// it and the notice names the way out.
+#[test]
+fn t_key_keeps_a_held_draft_and_says_so() {
+    let mut b = board_with(target_inputs());
+    focus_card(&mut b, Some("x-1"));
+    let mut v = key_view(b);
+    // The dock is already open holding a draft.
+    super::super::agent_launcher::open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "fix the flake".into();
+        l.draft.revision += 1;
+    }
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, &[b't'], &mut sock)
+            .await
+            .expect("t folds");
+    });
+    let l = v.launcher.as_ref().expect("the dock stays open");
+    assert_eq!(l.draft.message, "fix the flake", "the kept draft survives");
+    let notice = v.notice.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
+    assert!(notice.contains("holds a draft"), "notice: {notice}");
+}
