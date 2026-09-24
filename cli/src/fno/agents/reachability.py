@@ -462,7 +462,7 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     if falsifier is not None and getattr(entry, "harness", None) == "claude":
         sid = getattr(entry, "harness_session_id", None)
         try:
-            proven = bool(sid) and _claude_holder_proven(sid)
+            proven = isinstance(sid, str) and _claude_holder_proven(sid)
         except Exception:  # noqa: BLE001 -- a broken probe never changes a verdict
             proven = False
         if proven:
