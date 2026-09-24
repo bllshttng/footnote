@@ -112,7 +112,11 @@ pub(crate) async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
-pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
+pub(crate) fn build_sideline_menu(
+    anchor: Anchor,
+    update: Option<&UpdateOutcome>,
+    backlog_on: bool,
+) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -167,6 +171,18 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
     }
     rows.push(entry("♺", "sweep threads"));
     rows.push(entry("＋", "new agent"));
+    // The experimental backlog board: a toggle row always, the open
+    // row only when on. Off by default (the pref's own default), so the
+    // menu of an operator who never opted in is unchanged.
+    rows.push(entry(
+        if backlog_on { "☑" } else { "☐" },
+        "experimental: backlog view",
+    ));
+    actions.push(AuxAction::ToggleBacklogView);
+    if backlog_on {
+        rows.push(entry("▦", "backlog"));
+        actions.push(AuxAction::OpenBacklogView);
+    }
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));

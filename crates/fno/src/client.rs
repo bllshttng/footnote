@@ -1073,6 +1073,10 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The experimental backlog board overlay, when open (one at a time).
+    backlog_board: Option<backlog_board::BoardView>,
+    /// The persisted experimental toggle for the backlog board view.
+    experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
@@ -2030,6 +2034,11 @@ pub(crate) enum AuxAction {
     SweepSquads,
     Detach,
     ToggleHoverFocus,
+    /// The experimental backlog board: flip the persisted pref, then
+    /// rebuild the open sidebar menu so its rows track it.
+    ToggleBacklogView,
+    /// Open the backlog board overlay (off unless the pref is on).
+    OpenBacklogView,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -2054,38 +2063,11 @@ pub(crate) enum AuxAction {
     LaneColorSet(String, String, String),
 }
 
-/// The settings modal's tabs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
-    General,
-    Theme,
-    Keys,
-    Colors,
-}
-
-const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
-
-fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxAction>) {
-    let mut rows = vec![PopupRow::Header(format!("prefix: {live_prefix}"))];
-    let mut actions = Vec::new();
-    for spec in PREFIX_PICKS {
-        let active = live_prefix == spec;
-        rows.push(PopupRow::Entry {
-            glyph: if active { "●".into() } else { "○".into() },
-            label: spec.into(),
-            hint: if active {
-                "active".into()
-            } else {
-                String::new()
-            },
-            enabled: true,
-        });
-        actions.push(AuxAction::ApplyPrefix(spec.into()));
-    }
-    (rows, actions)
-}
-
+mod backlog_board;
+mod settings_modal;
 mod update_menu;
+
+use settings_modal::SettingsTab;
 
 // The sideline new-agent launcher: composer state, input folding,
 // and the typed launch request. client.rs keeps only the integration
@@ -2271,6 +2253,8 @@ impl View {
             hover_focus: true,
             theme: Theme::default_theme(),
             backlog: Vec::new(),
+            backlog_board: None,
+            experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
             hover_pending: None,
@@ -3214,7 +3198,11 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
+        self.aux = Some(build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        ));
         self.aux_esc.clear();
         self.update_probe_want = true;
     }
@@ -3234,86 +3222,14 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
+        let mut menu = build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        );
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
-    }
-
-    /// Build the settings modal: general toggles plus theme and prefix pickers.
-    fn build_settings_modal(&self) -> AuxPopup {
-        let tab = self.settings_tab;
-        let mut rows = Vec::new();
-        let mut actions: Vec<AuxAction> = Vec::new();
-        match tab {
-            SettingsTab::General => {
-                let toggle = |on: bool, label: &str| PopupRow::Entry {
-                    glyph: if on { "☑".into() } else { "☐".into() },
-                    label: label.into(),
-                    hint: String::new(),
-                    enabled: true,
-                };
-                rows.push(toggle(self.hover_focus, "focus follows mouse"));
-                rows.push(toggle(self.status_on, "status row"));
-                rows.push(toggle(
-                    self.resource_meter_on,
-                    "resource meter (needs macmon)",
-                ));
-                rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
-                actions.push(AuxAction::ToggleHoverFocus);
-                actions.push(AuxAction::ToggleStatus);
-                actions.push(AuxAction::ToggleResourceMeter);
-                actions.push(AuxAction::ToggleConfirmLifecycle);
-            }
-            SettingsTab::Theme => {
-                // The four shipped palettes; the active one is marked. Enter on a
-                // name applies it (an explicit action, not a cursor-move preview).
-                for name in crate::theme::THEME_NAMES {
-                    let active = self.theme.name == name;
-                    rows.push(PopupRow::Entry {
-                        glyph: if active { "●".into() } else { "○".into() },
-                        label: name.into(),
-                        hint: if active {
-                            "active".into()
-                        } else {
-                            String::new()
-                        },
-                        enabled: true,
-                    });
-                    actions.push(AuxAction::ApplyTheme(name.into()));
-                }
-            }
-            SettingsTab::Keys => {
-                (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
-            }
-            SettingsTab::Colors => {
-                (rows, actions) = crate::lane_colors_panel::build_lane_color_rows(
-                    crate::sideline_color::palette(),
-                    &self.lane,
-                );
-            }
-        }
-        let popup = Popup::new(rows, Anchor::Center)
-            .title("settings")
-            .tabs(vec![
-                ("general".to_string(), tab == SettingsTab::General),
-                ("theme".to_string(), tab == SettingsTab::Theme),
-                ("keys".to_string(), tab == SettingsTab::Keys),
-                ("colors".to_string(), tab == SettingsTab::Colors),
-            ])
-            .footer("tab switches section · esc close");
-        AuxPopup { popup, actions }
-    }
-
-    /// Rebuild the settings modal after a toggle so its glyph reflects the new
-    /// state, preserving the current selection (a keyboard toggle must re-toggle
-    /// the SAME row on the next Enter, not reset to row 0).
-    fn reopen_settings_keeping_sel(&mut self) {
-        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
-        let mut modal = self.build_settings_modal();
-        let n = modal.popup.targets().len();
-        modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
-        self.aux = Some(modal);
     }
 
     /// The flat popup target under a screen cell while an aux popup is open.
@@ -6083,6 +5999,28 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if let Some(b) = &self.backlog_board {
+            if let Some(m) = backlog_board::pick_popup(b) {
+                draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
+            } else if let Some(m) = backlog_board::facet_popup(b) {
+                draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
+            } else {
+                let w = overlay_dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+                let (lines, follow) = backlog_board::render(b, w);
+                let chrome = chrome::Chrome::new("backlog", Anchor::Center)
+                    .footer("hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · esc close");
+                draw_lines_overlay(
+                    &mut cells,
+                    rows,
+                    cols,
+                    overlay_origin,
+                    overlay_dims,
+                    &chrome,
+                    &lines,
+                    &self.theme,
+                    follow,
+                );
+            }
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -6124,6 +6062,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
+            && self.backlog_board.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -9325,6 +9264,8 @@ async fn attach_and_run(
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+    let (board_tx, mut board_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -9448,6 +9389,50 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        // the backlog board's probe/gather kick, the same single-flight.
+        backlog_board::maybe_kick(&mut view, &board_tx);
+        // a queued board write verb runs off the UI loop too.
+        if let Some(action) = view
+            .backlog_board
+            .as_mut()
+            .and_then(|b| b.write_action.take())
+        {
+            let tx = board_tx.clone();
+            let gen = view.backlog_board.as_ref().map(|b| b.gen).unwrap_or(0);
+            tokio::spawn(async move {
+                let notice = match action {
+                    backlog_board::WriteAction::Args(args, stdin) => {
+                        backlog_board::run_backlog_verb(&args, stdin).await
+                    }
+                    backlog_board::WriteAction::Append { id, text } => {
+                        let id_for_read = id.clone();
+                        let current = tokio::task::spawn_blocking(move || {
+                            crate::store_client::node(
+                                &crate::backlog_view::graph_path(),
+                                &id_for_read,
+                            )
+                        })
+                        .await
+                        .unwrap_or(Ok(None))
+                        .ok()
+                        .flatten()
+                        .and_then(|n| n.get("details").cloned())
+                        .map(|d| d.to_string())
+                        .unwrap_or_default();
+                        let stdin = format!("{current}\n\n{text}");
+                        let args: Vec<String> = vec![
+                            "backlog".into(),
+                            "update".into(),
+                            id,
+                            "--details-file".into(),
+                            "-".into(),
+                        ];
+                        backlog_board::run_backlog_verb(&args, Some(stdin)).await
+                    }
+                };
+                let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));
+            });
+        }
         // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -10054,6 +10039,14 @@ async fn attach_and_run(
                 // same-generation panel (a result for a closed/superseded open
                 // is discarded, the needs arm's contract, one consumer).
                 feed_view::apply_fold(&mut view, gen, outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some((gen, msg)) = board_rx.recv() => {
+                // a backlog board fold landed; apply under the gen guard
+                // and repaint (the feed arm's contract, one consumer).
+                backlog_board::apply_fold(&mut view, gen, msg);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -12712,6 +12705,29 @@ async fn execute_aux_action(
             view.aux = None;
             return Ok(DispatchFlow::Detach);
         }
+        AuxAction::ToggleBacklogView => {
+            view.experimental_backlog = !view.experimental_backlog;
+            view_store::save_experimental_backlog_view(view.experimental_backlog);
+            let on = if view.experimental_backlog {
+                "on"
+            } else {
+                "off"
+            };
+            if !view.experimental_backlog {
+                view.backlog_board = None;
+            }
+            view.set_notice(format!("experimental backlog view: {on}"));
+            view.refresh_open_sideline_menu();
+        }
+        AuxAction::OpenBacklogView => {
+            view.aux = None;
+            let gen = view
+                .backlog_board
+                .as_ref()
+                .map(|b| b.gen.wrapping_add(1))
+                .unwrap_or(0);
+            view.backlog_board = Some(backlog_board::BoardView::new(gen));
+        }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
             let enabled = if view.hover_focus { "true" } else { "false" };
@@ -12722,53 +12738,10 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
-        AuxAction::ToggleStatus => {
-            view.status_on = !view.status_on;
-            // The status row changed the content area; report the new size so the
-            // panes reflow (same accounting as Event::ToggleStatus).
-            let (r, c) = view.content_dims();
-            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                .await
-                .map_err(|e| format!("resize send failed: {e}"))?;
-            let enabled = if view.status_on { "true" } else { "false" };
-            let notice = match spawn_config_set("mux.status_row", enabled).await {
-                Ok(()) => format!("status row: {enabled}"),
-                Err(_) => "status row applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleConfirmLifecycle => {
-            view.confirm_lifecycle = !view.confirm_lifecycle;
-            view_store::save_confirm_lifecycle(view.confirm_lifecycle);
-            let enabled = if view.confirm_lifecycle {
-                "true"
-            } else {
-                "false"
-            };
-            view.set_notice(format!("confirm before stop/remove: {enabled}"));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleResourceMeter => {
-            view.resource_meter_on = !view.resource_meter_on;
-            view.resource_meter_gate
-                .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
-            // The run loop owns the spawn (one-shot via resource_meter_sampling);
-            // clearing the text here means the row reads "sensor unavailable"
-            // until the first sample lands - never a stale reading.
-            view.resource_meter_sampling = view.resource_meter_on;
-            view.resource_meter_text = None;
-            let enabled = if view.resource_meter_on {
-                "true"
-            } else {
-                "false"
-            };
-            let notice = match spawn_config_set("resource_meter.enabled", enabled).await {
-                Ok(()) => format!("resource meter: {enabled}"),
-                Err(_) => "resource meter applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
+        AuxAction::ToggleStatus
+        | AuxAction::ToggleConfirmLifecycle
+        | AuxAction::ToggleResourceMeter => {
+            settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
             // Swap the in-memory theme first (immediate), then persist via the
@@ -12962,12 +12935,7 @@ async fn aux_keys(
                     .map(|m| !m.popup.chrome.tabs.is_empty())
                     .unwrap_or(false);
                 if has_tabs {
-                    view.settings_tab = match view.settings_tab {
-                        SettingsTab::General => SettingsTab::Theme,
-                        SettingsTab::Theme => SettingsTab::Keys,
-                        SettingsTab::Keys => SettingsTab::Colors,
-                        SettingsTab::Colors => SettingsTab::General,
-                    };
+                    view.settings_tab = settings_modal::SettingsTab::next(view.settings_tab);
                     // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();

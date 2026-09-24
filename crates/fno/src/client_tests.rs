@@ -5,6 +5,7 @@ mod chrome_hit_helpers;
 use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
+use settings_modal::{build_prefix_settings_rows, PREFIX_PICKS};
 
 // (x-0719) The nav filter/overlay test run lives in its own module; this
 // file is shrink-only under the file-budget gate.
@@ -7913,7 +7914,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // Centered (Full): keys modal, sideline MENU, settings.
     assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
     assert_chrome(
-        &build_sideline_menu(Anchor::Center, None).popup,
+        &build_sideline_menu(Anchor::Center, None, false).popup,
         chrome::Level::Full,
     );
     let v = two_pane_view();
@@ -7928,7 +7929,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
 
 #[test]
 fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None);
+    let menu = build_sideline_menu(Anchor::Center, None, false);
     let i = menu
         .popup
         .rows
