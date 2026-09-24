@@ -749,6 +749,7 @@ def list_prs_rest(
                         "title": row["title"],
                         "headRefName": head["ref"],
                         "url": row["html_url"],
+                        "mergedAt": row.get("merged_at"),
                         "body": row.get("body") or "",
                     }
                 )
@@ -760,7 +761,7 @@ def list_prs_rest(
         # rows. Loud on purpose: the old gh pr list path logged "possibly
         # truncated" for the same condition, and a silent ceiling is a sweep
         # that reads complete while missing its tail.
-        log.warning(
+        (log.warning if max_pages > 1 else log.debug)(
             "gh api pulls list for %s hit the max_pages=%d ceiling with a full last page:"
             " listing is possibly truncated after %d rows",
             slug,
