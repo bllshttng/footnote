@@ -86,8 +86,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # before this fixture runs. Without the clear, session resolution reads the
     # live target-state.md instead of this sandbox, and the ownership tests
     # would pass on the real session id rather than the one they set.
-    import fno.paths as paths_mod
-
     # The clear path projects decisions onto the subject node's graph entry,
     # resolving GRAPH_JSON through the module attribute. Pin it to a
     # nonexistent path so these tests never read or write the real machine
@@ -1768,8 +1766,6 @@ def capture_roots(
     for p in (this, other):
         p.mkdir(parents=True)
     monkeypatch.setenv("FNO_REPO_ROOT", str(this))
-    import fno.paths as paths_mod
-
     (this / ".fno").mkdir(exist_ok=True)
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps(
@@ -1876,12 +1872,11 @@ def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
     _write_inbox(this, ["- [ ] fu-aaaaaa - alpha"])
     # other/ has no inbox at all; also plant a graph cwd that does not exist.
     import fno.graph._constants as gc
-    import json as _json
 
-    graph = gc.GRAPH_JSON
-    data = _json.loads(graph.read_text())
-    data["entries"].append({"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"})
-    graph.write_text(_json.dumps(data))
+    seed_graph(
+        gc.GRAPH_JSON,
+        [{"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"}],
+    )
 
     res = runner.invoke(outstanding_app, [])
     assert res.exit_code == 0, res.output

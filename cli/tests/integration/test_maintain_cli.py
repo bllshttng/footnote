@@ -722,7 +722,16 @@ def validity_env(tmp_path, monkeypatch):
 
 def test_validity_ac1_hp_bounded_deck(tmp_graph, validity_env):
     # AC1-HP: >25 ideas older than 60d -> reviews the 25 oldest, writes a deck.
-    _seed(tmp_graph, [_old_idea(f"ab-i{i:03d}", 100 + i) for i in range(30)])
+    # Split candidates across cap scopes so this tests selection, not intake.
+    entries = [
+        _node("ab-epic-a", type="epic", status="ready"),
+        _node("ab-epic-b", type="epic", status="ready"),
+        *[
+            _old_idea(f"ab-i{i:03d}", 100 + i, parent="ab-epic-a" if i < 15 else "ab-epic-b")
+            for i in range(30)
+        ],
+    ]
+    _seed(tmp_graph, entries)
     r = _invoke([])
     assert r.exit_code == 0, r.output
     assert "validity: reviewed 25 ideas" in r.output
