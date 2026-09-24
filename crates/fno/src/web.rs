@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::backlog_model;
 use crate::client::humanize_ago;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,11 +115,20 @@ struct AppState {
     graph_html: PathBuf,
     reign_html: PathBuf,
     fleet_html: PathBuf,
+    /// The cached backlog read model (`None` until the first gather).
+    model: Arc<tokio::sync::Mutex<Option<CachedModel>>>,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
     /// complete: an open browser tab holds a connection that never closes on
     /// its own, so without this arm the bridge hangs past the signal and the
     /// state-file Drop the hook exists to guarantee never runs.
     shutdown: tokio::sync::watch::Receiver<bool>,
+}
+
+/// One gathered read model, reused while fresh and the store version holds.
+struct CachedModel {
+    version: Option<i64>,
+    at: Instant,
+    inputs: Arc<backlog_model::Inputs>,
 }
 
 fn graph_html_path_from_state_root(state_root: &Path) -> PathBuf {
@@ -714,6 +724,7 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         graph_html: graph_html_path(),
         reign_html: reign_html_path(),
         fleet_html: fleet_html_path(),
+        model: Default::default(),
         shutdown: shutdown_rx,
     };
     let app = router(state);
@@ -740,6 +751,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(page))
         .route("/backlog", get(backlog))
+        .route("/backlog/model.json", get(backlog_model))
+        .route("/backlog/node.json", get(backlog_node))
         .route("/crown", get(crown))
         .route("/fleet", get(fleet))
         .route("/ws", get(ws_handler))
@@ -986,6 +999,140 @@ async fn fleet(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     .await
 }
 
+/// `GET /backlog/model.json`: the whole board as JSON behind the token.
+async fn backlog_model(
+    Query(raw): Query<HashMap<String, String>>,
+    State(st): State<AppState>,
+) -> Response {
+    if !token_ok(raw.get("t").map(String::as_str), &st.token) {
+        return unauthorized();
+    }
+    let q = match backlog_model::Query::from_pairs(&raw) {
+        Ok(q) => q,
+        Err(msg) => return plain_status(StatusCode::BAD_REQUEST, &msg),
+    };
+    let inputs = model_inputs(&st).await;
+    json_response(&backlog_model::board(&inputs, &q))
+}
+
+/// `GET /backlog/node.json?id=<id>`: one node's answer behind the token.
+async fn backlog_node(
+    Query(raw): Query<HashMap<String, String>>,
+    State(st): State<AppState>,
+) -> Response {
+    if !token_ok(raw.get("t").map(String::as_str), &st.token) {
+        return unauthorized();
+    }
+    let Some(id) = raw.get("id").filter(|s| !s.is_empty()) else {
+        return plain_status(StatusCode::BAD_REQUEST, "id is required");
+    };
+    let inputs = model_inputs(&st).await;
+    node_response(&inputs, id)
+}
+
+/// The pure half of `/backlog/node.json`: 503 on a failed source read, 404
+/// when the read holds no such node, 200 with the body otherwise.
+fn node_response(inputs: &backlog_model::Inputs, id: &str) -> Response {
+    if let Some(err) = &inputs.rows_error {
+        return plain_status(StatusCode::SERVICE_UNAVAILABLE, err);
+    }
+    match backlog_model::node(inputs, id) {
+        Some(view) => json_response(&view),
+        None => plain_status(StatusCode::NOT_FOUND, &format!("no node {id}")),
+    }
+}
+
+fn plain_status(status: StatusCode, body: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+fn json_response<T: serde::Serialize>(v: &T) -> Response {
+    match serde_json::to_vec(v) {
+        Ok(body) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(e) => plain_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("model serialization failed: {e}"),
+        ),
+    }
+}
+
+/// The gathered inputs, cached under [`backlog_model::REGATHER_AFTER`] while
+/// the store version holds; the lock is held for the whole call so one
+/// gather runs at a time. A gather with a failed source read is returned
+/// uncached, so the next request retries it.
+async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
+    let mut cached = st.model.lock().await;
+    if let Some(c) = cached.as_ref() {
+        if c.at.elapsed() < backlog_model::REGATHER_AFTER {
+            let moved = match c.version {
+                // An external backend has no version: age alone gates it.
+                None => false,
+                Some(v) => {
+                    let graph = crate::backlog_view::graph_path();
+                    tokio::task::spawn_blocking(move || crate::store_client::version(&graph))
+                        .await
+                        .map(|r| r.ok() != Some(v))
+                        .unwrap_or(true)
+                }
+            };
+            if !moved {
+                return c.inputs.clone();
+            }
+        }
+    }
+    let (agents, roster_error) = match layout_agents(&st.snap) {
+        Some(agents) => (agents, None),
+        None => (
+            Vec::new(),
+            Some("no agent roster yet; live, king and session actions are unknown".to_string()),
+        ),
+    };
+    let graph = crate::backlog_view::graph_path();
+    let mut inputs = backlog_model::gather(&graph, agents).await;
+    if inputs.rows_error.is_some() {
+        return Arc::new(inputs);
+    }
+    if let Some(e) = roster_error {
+        inputs.errors.push(e);
+    }
+    let version = inputs.version;
+    let inputs = Arc::new(inputs);
+    *cached = Some(CachedModel {
+        version,
+        at: Instant::now(),
+        inputs: inputs.clone(),
+    });
+    inputs
+}
+
+/// The roster from the snapshot's last `Layout` JSON
+/// (`{"Layout": {"agents": [...]}}`). `None` when no layout has arrived yet.
+fn layout_agents(snap: &Arc<Mutex<Snapshot>>) -> Option<Vec<proto::AgentRow>> {
+    let guard = snap.lock().unwrap();
+    let text = guard.layout.as_ref()?;
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let agents = v.get("Layout")?.get("agents")?.as_array()?;
+    Some(
+        agents
+            .iter()
+            .filter_map(|a| serde_json::from_value(a.clone()).ok())
+            .collect(),
+    )
+}
+
 /// Which page the bridge serves; the shared nav fragment marks the current
 /// one so a reader always knows where they are.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1168,6 +1315,16 @@ fn with_nav(html: &str, current: NavPage) -> String {
     injected
 }
 
+/// The one 401 body, shared by every token-gated route.
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "invalid or missing token",
+    )
+        .into_response()
+}
+
 async fn backlog_response(
     path: &Path,
     supplied: Option<&str>,
@@ -1176,12 +1333,7 @@ async fn backlog_response(
     nav: NavPage,
 ) -> Response {
     if !token_ok(supplied, expected) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "invalid or missing token",
-        )
-            .into_response();
+        return unauthorized();
     }
     match std::fs::read_to_string(path) {
         Ok(body) => (
@@ -1328,6 +1480,106 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_agents_parses_the_snapshot_layout() {
+        let layout = serde_json::json!({
+            "Layout": {
+                "agents": [{
+                    "squad": null, "name": "w1", "pane_id": null,
+                    "badge": null, "reason": null, "exited": false,
+                    "harness_session_id": "s1"
+                }]
+            }
+        });
+        let mut snap = Snapshot::default();
+        snap.layout = Some(layout.to_string());
+        let snap = Arc::new(Mutex::new(snap));
+        let agents = layout_agents(&snap).expect("the layout parses");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "w1");
+        // No layout yet: None, never an empty roster that reads as truth.
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        assert!(layout_agents(&snap).is_none());
+    }
+
+    #[test]
+    fn node_response_maps_read_failure_miss_and_hit() {
+        // AC17-ERR: a failed source read is 503, never 404.
+        let mut inp = backlog_model::fixture(Vec::new());
+        inp.rows_error = Some("the store read failed".into());
+        let status = node_response(&inp, "x-1").status();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // Miss: 404 naming the id.
+        let inp = backlog_model::fixture(Vec::new());
+        let status = node_response(&inp, "x-nope").status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Hit: 200 with the card's id in the body.
+        let inp = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-1", "status": "ready", "priority": "p1"
+        })]);
+        let response = node_response(&inp, "x-1");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn backlog_json_routes_refuse_bad_tokens_and_queries() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            graph_html: dir.join("graph.html"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // AC9-ERR: no token, 401 on both routes, before any store read.
+        stream
+            .write_all(b"GET /backlog/model.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        assert!(reply.contains("invalid or missing token"), "{reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /backlog/node.json?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400"), "no id: {reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /backlog/model.json?t=right&lanes=sideways HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400"), "bad lanes: {reply}");
+        assert!(reply.contains("unknown lanes"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn constant_time_eq_matches_only_identical_bytes() {
@@ -1944,6 +2196,7 @@ console.log("evictedRowCount: 18 cases ok");
             graph_html: dir.join("graph.html"),
             reign_html: dir.join("reign.html"),
             fleet_html: fleet_path,
+            model: Default::default(),
             shutdown,
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
