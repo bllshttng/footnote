@@ -43,6 +43,7 @@ fn a_blind_read_refuses_after_bounded_rereads() {
     std::env::remove_var("FNO_CONFIG");
     let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     let seq = dir.join("payload-seq.txt");
     let blind = format!("{}\n", fixture_payload("undecidable"));
     std::fs::write(&seq, format!("{blind}{blind}{blind}")).unwrap();
@@ -74,6 +75,10 @@ fn a_blind_read_refuses_after_bounded_rereads() {
 
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
     match prior_spawn_gate {
         Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
         None => std::env::remove_var("FNO_SPAWN_GATE"),
@@ -120,6 +125,7 @@ fn no_wait_refuses_a_blind_read_on_the_first_sample() {
     std::env::remove_var("FNO_CONFIG");
     let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     let seq = dir.join("payload-seq.txt");
     let blind = format!("{}\n", fixture_payload("undecidable"));
     std::fs::write(&seq, format!("{blind}{blind}{blind}")).unwrap();
@@ -149,6 +155,10 @@ fn no_wait_refuses_a_blind_read_on_the_first_sample() {
 
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
     match prior_spawn_gate {
         Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
         None => std::env::remove_var("FNO_SPAWN_GATE"),
@@ -194,6 +204,7 @@ fn a_blind_read_then_an_admit_admits() {
     std::env::remove_var("FNO_CONFIG");
     let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     let seq = dir.join("payload-seq.txt");
     let admit = r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#;
     std::fs::write(
@@ -237,6 +248,10 @@ fn a_blind_read_then_an_admit_admits() {
 
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
     match prior_spawn_gate {
         Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
         None => std::env::remove_var("FNO_SPAWN_GATE"),
@@ -280,6 +295,7 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
     std::env::remove_var("FNO_CONFIG");
     let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
     let seq = dir.join("payload-seq.txt");
     let err_line = "ERR footprint unavailable: worker root liveness unavailable\n".repeat(3);
     std::fs::write(&seq, err_line).unwrap();
@@ -309,6 +325,10 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
 
     std::env::remove_var("FNO_CLAIMS_ROOT");
     std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
     match prior_spawn_gate {
         Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
         None => std::env::remove_var("FNO_SPAWN_GATE"),
