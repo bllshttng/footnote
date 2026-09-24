@@ -105,7 +105,7 @@ resolver	crates/fno-agents/src/plugin_install.rs	164	fn build_stage(source_root:
 resolver	crates/fno-agents/src/plugin_install.rs	677	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	294	pub(crate) fn run_fno_output(
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	343	fn real_deps() -> crate::provider_cap::LeaveDeps {
-resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {
+resolver	crates/fno-agents/src/reclaim.rs	114	fn fno_plugin_dir(root: &Path) -> PathBuf {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
