@@ -236,6 +236,7 @@ cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
+crates/fno-agents/src/claude_vault.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
