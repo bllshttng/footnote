@@ -1482,7 +1482,7 @@ fn handle_write_status(state: &StoreState, params: &Value) -> Result<Value, Stor
 /// absent the keeper resolves them from the claims store itself),
 /// `board` (optional - the whole-graph order and column facts, no admission).
 fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    use crate::backlog_ready::{select, NoSuchParent, ReadyOpts};
+    use crate::backlog_ready::{date_filter_from_params, select, NoSuchParent, ReadyOpts};
     use std::collections::BTreeSet;
 
     let opt_str_owned = |k: &str| -> Option<String> {
@@ -1552,21 +1552,27 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
         }
     };
     // The board mode: every entry in selection order plus the column
-    // facts, on the same fail-closed claim read as selection itself.
+    // facts, on the same fail-closed claim read as selection itself. The
+    // date filter below narrows the selection reply, not the whole-graph
+    // facts: the board's contract is every entry, no admission.
     if matches!(params.get("board").and_then(Value::as_bool), Some(true)) {
         let f = crate::backlog_ready::board_facts(entries, &opts.claimed, opts.now_ms);
         let reply = json!({"ids": f.ids, "underway": f.underway, "effective_priority": f.effective_priority});
         return Ok(reply);
     }
+    let window = date_filter_from_params(params, opts.now_ms).map_err(StoreError::Invalid)?;
     match select(entries, &opts) {
-        Ok(reply) => Ok(json!({
-            "rows": reply.rows,
-            "drops": reply
-                .drops
-                .iter()
-                .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
-                .collect::<Vec<_>>(),
-        })),
+        Ok(mut reply) => {
+            window.apply(&mut reply.rows);
+            Ok(json!({
+                "rows": reply.rows,
+                "drops": reply
+                    .drops
+                    .iter()
+                    .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
         Err(NoSuchParent(parent)) => Err(StoreError::Invalid(format!("no such node '{parent}'"))),
     }
 }
