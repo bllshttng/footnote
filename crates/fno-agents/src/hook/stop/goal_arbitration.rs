@@ -1,6 +1,7 @@
 //! Goal truth, continuation ownership and correlated Stop event emission.
 
-use super::{events_path, first_raw_field, global_events_path, Fire};
+use super::{events_path, first_raw_field, Fire};
+use crate::hook::global_events_path;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;

@@ -5,6 +5,13 @@
 use super::*;
 
 pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
+    // The drain reserve arms HERE, on the shared king entry, and not at the
+    // fire stamp: both king routes (the `--driver king` hook and the bound
+    // Crown row) converge on this function, so the route into it, not the
+    // driver string the fire was stamped with, decides who pays for the
+    // drain. A missing manifest allows right after the hold - an uncrowned
+    // session pays nothing.
+    super::stopgate_hold_drain_reserve();
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
     // would trap every ordinary session here.
@@ -583,6 +590,54 @@ mod stale_crown_doc_tests {
     use std::time::Duration;
 
     const CROWN_START: &str = "2026-09-15T00:00:00Z";
+
+    #[test]
+    fn king_decide_holds_the_drain_reserve_on_entry() {
+        // The Crown route enters the king path under a fire stamped reserve 0
+        // (the entry stamp is driver-blind now). The hold on the first line
+        // is what arms the drain slice on BOTH king routes; a missing
+        // manifest lets the call return at its first read with the hold
+        // already landed.
+        let dir = tempfile::tempdir().unwrap();
+        let parsed = LoopCheckArgs {
+            state_path: dir.path().join("no-such-king.md"),
+            transcript_path: dir.path().join("t.jsonl"),
+            cwd: dir.path().to_path_buf(),
+            global_settings_path: None,
+            events_path: Some(dir.path().join("events.jsonl")),
+            global_events_path: Some(dir.path().join("global-events.jsonl")),
+            settings_path: None,
+            ledger_path: None,
+            gh_budget_ledger: None,
+            now_override: None,
+            gh_bin: "/nonexistent-gh".into(),
+            git_bin: "/nonexistent-git".into(),
+            author_harness_override: Some("none".into()),
+            hook_input_stdin: false,
+            driver: "target".into(),
+            fno_bin: "/nonexistent-fno".into(),
+            read_timeout_ms: None,
+            harness: None,
+            harness_session: None,
+        };
+        super::stopgate_stamp_fire(0, std::time::Instant::now() + Duration::from_secs(50), 0);
+        let (code, out) = king_decide(&parsed);
+        assert_eq!(code, 0);
+        assert!(out.contains("no king manifest"), "{out}");
+        // The reserve is armed despite the driver-blind stamp: pre-drain
+        // reads clamp to remaining-minus-reserve (34s) under the 30s read
+        // ceiling, so 30s stands; the drain reads the full remaining.
+        let pre_drain = super::stopgate_read_timeout();
+        assert!(
+            pre_drain <= Duration::from_secs(30) && pre_drain >= Duration::from_secs(29),
+            "{pre_drain:?}"
+        );
+        let drain = super::stopgate_drain_timeout();
+        assert!(
+            drain <= Duration::from_secs(50) && drain >= Duration::from_secs(49),
+            "{drain:?}"
+        );
+    }
 
     fn manifest(harness: &str) -> KingManifest {
         KingManifest {
