@@ -16,11 +16,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from fno.rust_binary import verb_call as _REAL_VERB_CALL
+from fno.rust_binary import VerbUnavailable, verb_call as _REAL_VERB_CALL
 from fno.pr.closure import (
     bind_created_pr,
     BranchResolutionError,
-    ClosureBinaryError,
     ClosureQueryError,
     bind_closure_claims,
     contained_descendant_ids,
@@ -223,10 +222,10 @@ def test_render_forwarder_passes_the_ids_to_the_rust_leg(monkeypatch):
 
 def test_a_missing_rust_leg_stops_loudly(monkeypatch):
     def _missing(verb, payload, unavailable=None, **kwargs):
-        raise ClosureBinaryError("fno-agents binary not found")
+        raise VerbUnavailable("fno-agents binary not found")
 
     monkeypatch.setattr("fno.rust_binary.verb_call", _missing)
-    with pytest.raises(ClosureBinaryError):
+    with pytest.raises(VerbUnavailable):
         parse_closure_trailer("Fixes x-aaaa")
 
 
