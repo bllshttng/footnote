@@ -1313,3 +1313,52 @@ def test_write_connect_failure_says_write_was_not_sent(monkeypatch):
         client.request("commit_rows", {})
     assert not isinstance(exc.value, store_mod.WriteUnconfirmed)
     assert "the write was not sent" in str(exc.value)
+
+
+def test_cli_renders_invalid_store_refusal_as_one_line(monkeypatch, capsys):
+    """AC1-HP: invalid keeper refusals are concise CLI errors."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("invalid", "prose budget exceeded on x-1: limit=5000.")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == "Error: prose budget exceeded on x-1: limit=5000.\n"
+
+
+def test_cli_preserves_traceback_for_store_faults(monkeypatch):
+    """AC2-ERR: keeper faults still propagate as RuntimeError."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("sqlite", "database is unavailable")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(RuntimeError, match=r"store error \(sqlite\): database is unavailable"):
+        cli.main()
+
+
+def test_cli_renders_empty_field_refusal_and_preserves_invalid_text(monkeypatch, capsys):
+    """AC3-EDGE: empty-field refusals render and invalid text stays stable."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("empty_field_update", "a field update carries no value")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == "Error: a field update carries no value\n"
+
+    with pytest.raises(RuntimeError) as invalid:
+        store._raise_store_error("invalid", "unknown store method \"plan_refs\"")
+    assert str(invalid.value) == 'store error (invalid): unknown store method "plan_refs"'
