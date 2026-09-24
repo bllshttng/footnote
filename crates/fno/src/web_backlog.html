@@ -8,7 +8,7 @@
   good board when a poll fails. Titles, details, notes and decisions are
   free text any session writes, so every node string lands through
   textContent: no HTML is ever built from data. When the serving bridge
-  stamps <body data-writable="true"> the panel adds act controls that POST
+  stamps the body element writable, the panel adds act controls that POST
   the same verbs the agents run (the write_guard gates them server-side);
   on a read-only bridge the page runs nothing and shows each session's
   attach or resume command to copy.
@@ -530,7 +530,7 @@ function sessionCommand(s) {
     panelBody.appendChild(g);
   }
   // The act group: title, priority, size, status, rank and launches, drawn
-  // only when the serving bridge stamped data-writable. A control whose
+  // only when the serving bridge stamped the body writable. A control whose
   // feature the backend cannot answer (or whose card is already being
   // worked) renders disabled with its reason as the tooltip.
   function renderActs(view) {
