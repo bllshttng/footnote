@@ -526,22 +526,23 @@ pub fn resolve_reentry_with(
             argv.push(short_id.clone());
         }
         ReentryTransition::Resume | ReentryTransition::Recover => {
-            // Three restore routes, tried in order. `jobs/<short>/state.json`
-            // is what `claude respawn` reads; present means the row comes
-            // back under its own id from its saved launch. A mux row keeps
-            // `claude --resume` on its pane (a pane hosts a foreground
-            // session). Everything else - the bg row whose job dir the
-            // daemon reaper already took - comes back under its own id with
-            // `claude --bg --resume`: measured on 2.1.272, a stopped session
-            // continues under the SAME id, and a live one answers with a
-            // copy notice the launcher must refuse.
+            // A mux row is a foreground session and always resumes on its
+            // pane. Background rows use `claude respawn` when their saved job
+            // state remains; otherwise `claude --bg --resume` restores the
+            // same id (measured on 2.1.272; a live session answers with a copy
+            // notice the launcher must refuse).
             if short_id.is_empty() {
                 return Err(format!(
                     "row {name:?} derives no claude jobId from session {session_id}; \
                      no transport key for respawn or bg-resume"
                 ));
             }
-            if claude_home
+            if entry.mux.is_some() {
+                mechanism = "resume".to_string();
+                argv.push("claude".into());
+                argv.push("--resume".into());
+                argv.push(session_id.clone());
+            } else if claude_home
                 .jobs_dir_for(&short_id)
                 .join("state.json")
                 .is_file()
@@ -550,11 +551,6 @@ pub fn resolve_reentry_with(
                 argv.push("claude".into());
                 argv.push("respawn".into());
                 argv.push(short_id.clone());
-            } else if entry.mux.is_some() {
-                mechanism = "resume".to_string();
-                argv.push("claude".into());
-                argv.push("--resume".into());
-                argv.push(session_id.clone());
             } else {
                 mechanism = "bg-resume".to_string();
                 argv.push("claude".into());
@@ -1587,6 +1583,40 @@ mod tests {
             None,
         )
         .unwrap();
+        assert_eq!(plan.mechanism, "resume");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reentry_plan_keeps_a_mux_row_on_resume_when_bg_job_state_remains() {
+        let mut e = row("paned");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        e.mux = Some(MuxRef {
+            session: "main".into(),
+            pane_id: 0,
+        });
+        let (_tmp, home) = staged_home(&["9a1b2c3d"]);
+
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "paned",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+
         assert_eq!(plan.mechanism, "resume");
         assert_eq!(
             plan.argv,
