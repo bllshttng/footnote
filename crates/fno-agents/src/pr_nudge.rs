@@ -1163,7 +1163,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
