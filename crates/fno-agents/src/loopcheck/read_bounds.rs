@@ -141,6 +141,13 @@ pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
             Some(d) => {
                 let now = std::time::Instant::now();
                 let remaining = d.saturating_duration_since(now);
+                // An explicit --read-timeout-ms is an instruction, not a
+                // default: tests inject a small bound to force a kill, and
+                // the floor must not talk them out of it. The floor repairs
+                // the production DEFAULT ceiling only (override_ms == 0).
+                if override_ms > 0 {
+                    return clamp_to_fire_budget(configured, remaining);
+                }
                 let hard_remaining = d
                     .checked_add(STOPGATE_HARNESS_MARGIN)
                     .map(|hard| hard.saturating_duration_since(now))

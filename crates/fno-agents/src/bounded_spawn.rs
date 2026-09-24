@@ -137,11 +137,14 @@ mod tests {
         }
         let loopcheck = production(include_str!("loopcheck.rs"));
         let acceptance = production(include_str!("acceptance_evidence.rs"));
+        // run_bounded moved to its own module; the routed call site moved
+        // with it, so the guard scans that production half too.
+        let bounded_read = production(include_str!("loopcheck/bounded_read.rs"));
         // Positive control first: a zero-hit scan of the wrong haystack reads
         // identical to a clean one, so prove the routed sites are in view
         // before trusting the count below.
         assert!(
-            loopcheck
+            bounded_read
                 .matches("crate::bounded_spawn::spawn_bounded(")
                 .count()
                 >= 1,
@@ -159,6 +162,12 @@ mod tests {
             0,
             "loopcheck spawns only through bounded_spawn; the crate's one \
              detached direct spawn lives in operator_notice, and a new direct \
+             spawn here routes through spawn_bounded or amends this guard"
+        );
+        assert_eq!(
+            bounded_read.matches(".spawn()").count(),
+            0,
+            "bounded_read spawns only through bounded_spawn; a new direct \
              spawn here routes through spawn_bounded or amends this guard"
         );
         assert_eq!(
