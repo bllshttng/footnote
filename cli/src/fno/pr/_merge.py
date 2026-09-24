@@ -922,11 +922,8 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         path = graph_json()
         external = active_backend_name() != "graph"
-        # The graph-mode close path below needs the file; the external path
-        # does not and correctly has no local graph.json to check - a bare
-        # `not path.exists(): return` here would silently no-op every
-        # external-backend close on a project that never used graph mode.
-        if not external and not path.exists():
+        # graph_json is a stable anchor; graph-mode close needs its SQLite store.
+        if not external and not path.with_suffix(".db").exists():
             return []
         pr_url = ""
         view = _gh(

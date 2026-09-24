@@ -552,6 +552,7 @@ def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
 ):
     entries = _graph_entries(tmp_graph)
     entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
     seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
@@ -593,6 +594,7 @@ def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
 
     entries = _graph_entries(tmp_graph)
     entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
     seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
@@ -847,6 +849,7 @@ def test_default_decision_read_retains_history_for_replay(
 
     entries = _graph_entries(tmp_graph)
     entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
     seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,

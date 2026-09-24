@@ -28,7 +28,7 @@ def test_state_path_lint_catches_a_known_bad_fixture_line(tmp_path: Path):
     assert rel == "cli/src/fno/bad.py"
     assert filename == "ledger.json"
     assert "cli/src/fno/bad.py:4" in message
-    assert "fno.paths.graph_json" in message
+    assert "fno.paths.ledger_json" in message
 
 
 def test_state_path_lint_matches_the_committed_baseline():

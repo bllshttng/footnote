@@ -978,17 +978,15 @@ def _contained_graph(tmp_path, monkeypatch, *, owner="x-6320"):
     scope denominators, so the denominator gate at init must see it resolve; a
     placeholder path gets emptied at back-fill and the node reads as plan-less.
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("# plan\n", encoding="utf-8")
     plan_path = str(plan)
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": owner, "plan_path": plan_path, "status": "ready"},
         {"id": "x-261c", "plan_path": plan_path, "status": "ready",
          "contained_in": owner},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     return gp
 
@@ -1012,8 +1010,6 @@ def _init_env(tmp_path, monkeypatch):
 
 
 def _held_graph(tmp_path, monkeypatch):
-    import json
-
     plan = tmp_path / "held.md"
     plan.write_text(
         "---\nstatus: ready\ndispatch_hold:\n"
@@ -1024,21 +1020,10 @@ def _held_graph(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     gp = tmp_path / "graph-held.json"
-    gp.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-5a5c", "status": "ready", "plan_path": str(plan)},
-                    {
-                        "id": "x-1a2b",
-                        "status": "ready",
-                        "contained_in": "x-5a5c",
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    seed_graph(gp, {"entries": [
+        {"id": "x-5a5c", "status": "ready", "plan_path": str(plan)},
+        {"id": "x-1a2b", "status": "ready", "contained_in": "x-5a5c"},
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     return gp
 
@@ -1241,7 +1226,9 @@ def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
     one resolver, so the miss was doubled.
     """
     gp = _contained_graph(tmp_path, monkeypatch)
-    plan_path = json.loads(gp.read_text(encoding="utf-8"))["entries"][0]["plan_path"]
+    from fno.graph.store import read_graph_strict
+
+    plan_path = read_graph_strict(gp)[0]["plan_path"]
     node = target_cli._resolve_dispatch_node(None, plan_path)
     assert node is not None and node["id"] == "x-6320"
 
@@ -1252,27 +1239,23 @@ def test_two_uncontained_holders_stay_ambiguous(tmp_path, monkeypatch):
     Change 1.1 refuses to CREATE this state; a graph that predates it must not
     have one of the two picked silently.
     """
-    import json
-
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": "/p/one.md", "status": "ready"},
         {"id": "x-8a4f", "plan_path": "/p/one.md", "status": "ready"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
 
 
 def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypatch):
     """No delivery unit on the plan at all -> still a contained node."""
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
@@ -1334,15 +1317,13 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
     and skipped the redirect - the exact second-PR state the guard exists for.
     They all name one owner, so the destination is unambiguous.
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
         {"id": "x-3f8d", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
@@ -1354,13 +1335,11 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
 
 def test_contained_nodes_naming_different_owners_stay_ambiguous(tmp_path, monkeypatch):
     """Two owners means no single destination; do not pick one."""
-    import json
-
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
         {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-8a4f"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
 
@@ -1371,16 +1350,14 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     "run /fno:target <done node>" reads as a broken redirect rather than as
     "this already shipped".
     """
-    import json
-
     plan = tmp_path / "one.md"
     plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": str(plan), "pr_number": 700,
          "completed_at": "2026-07-29T00:00:00+00:00"},
         {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     _init_env(tmp_path, monkeypatch)
 
@@ -1468,18 +1445,16 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     Named separately from the shipped case because the remedy differs: this is
     stale containment that wants clearing, not work that already landed.
     """
-    import json
-
     owner_plan = tmp_path / "one.md"
     child_plan = tmp_path / "two.md"
     owner_plan.write_text("---\nstatus: ready\n---\n")
     child_plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    seed_graph(gp, {"entries": [
         {"id": "x-6320", "plan_path": str(owner_plan), "superseded_by": "x-9999",
          "deferred_at": "2026-07-29T00:00:00+00:00"},
         {"id": "x-261c", "plan_path": str(child_plan), "contained_in": "x-6320"},
-    ]}), encoding="utf-8")
+    ]})
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 

@@ -291,7 +291,7 @@ def test_edge_unhashable_provider_model_nid_never_crash():
 
 def test_ui_populated_render_formats_bounce_and_blanks_repeated_provider(tmp_path, monkeypatch):
     ts = (datetime.now() - timedelta(days=1)).isoformat()
-    graph = GRAPH + [{"id": "x-2", "caused_by": None}, {"id": "x-9", "caused_by": "x-1", "created_at": ts}]
+    graph = GRAPH + [{"id": "x-9", "caused_by": "x-1", "created_at": ts}]
     rows = [
         _row("claude", "opus", nid="x-1", cost=6.0, completed=ts),
         _row("claude", "haiku", nid="x-2", cost=2.0, completed=ts),

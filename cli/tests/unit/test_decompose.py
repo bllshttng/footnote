@@ -2205,7 +2205,9 @@ def test_ac10_no_adopt_key_leaves_contained_in_off_the_wire_entirely(graph_env):
     assert _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
     ).exit_code == 0
-    assert all("contained_in" not in entry for entry in _read_entries())
+    from fno.graph.store import _client_for, _read_snapshot
+
+    assert all("contained_in" not in entry for entry in _read_snapshot(_client_for(g))[1])
 
 
 def test_adopt_rerun_leaves_contained_in_byte_stable(graph_env):

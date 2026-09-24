@@ -279,42 +279,14 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
 
 
 def read_graph_nodes(path: Path) -> list[dict]:
-    """Best-effort graph read for the optional survival signal. A missing or
-    unreadable graph is not fatal - survival just degrades to n/a.
-
-    Runs the canonical ``_apply_graph_defaults`` pass so the scoreboard speaks the
-    same migrated vocabulary as every other reader; it used to parse raw, so a row
-    still on disk as ``claimed`` never matched an ``in_progress`` comparison here.
-
-    Deliberately NOT ``read_graph``, though that is the same defaults pass: on a
-    corrupt graph ``read_graph`` copies a ``.bak`` and warns on stderr before
-    degrading to ``[]``. Correct for a command whose job IS the graph, wrong for
-    an optional display signal - a read-only scoreboard must not write files, and
-    the warning lands in the ``-J`` stream and breaks the JSON. The census row
-    asked for one MIGRATION seam, not one corruption policy."""
-    from fno.graph.store import _apply_graph_defaults
+    """Read the optional survival signal from the store; failures mean n/a."""
+    from fno.graph.api import wire_rows
+    from fno.graph.store import STORE_READ_ERRORS
 
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # missing / unreadable / non-utf8 / bad json
+        return wire_rows(path=Path(path))
+    except STORE_READ_ERRORS:
         return []
-    nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
-    if isinstance(nodes, dict):
-        nodes = list(nodes.values())
-    if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
-        return []
-    # Seed rows keep the pre-rename `_status` key; recover it before the
-    # defaults pass drops it, or a seeded claimed row reads unclaimed.
-    for node in nodes:
-        if isinstance(node, dict) and node.get("status") is None:
-            legacy = node.get("_status")
-            if legacy == "claimed":
-                node["status"] = "in_progress"
-    # Filtered HERE rather than in the shared pass: this is a display signal, so
-    # a malformed row is nothing but noise. Other readers count those rows as
-    # evidence the graph is corrupt, which is why the migration pass skips them
-    # without removing them.
-    return _apply_graph_defaults([n for n in nodes if isinstance(n, dict)])
 
 
 def _parse_ts(raw) -> datetime | None:

@@ -137,7 +137,7 @@ def test_discover_expired_population_is_read_only(tmp_graph: Path, monkeypatch: 
         ],
     )
     monkeypatch.setattr(discovery, "candidates", lambda *args, **kwargs: discovery.CandidateResults())
-    before = tmp_graph.read_bytes()
+    before = tmp_graph.with_suffix(".db").read_bytes()
 
     result = runner.invoke(cli, ["discover", "--json"])
 
@@ -146,7 +146,7 @@ def test_discover_expired_population_is_read_only(tmp_graph: Path, monkeypatch: 
     assert report["assessed"] == 1
     assert report["excluded_by_kind"] == 1
     assert report["worklist"][0]["verdict"] == "undecided"
-    assert tmp_graph.read_bytes() == before
+    assert tmp_graph.with_suffix(".db").read_bytes() == before
 
 
 def test_discover_none_match_reports_positive_control(tmp_graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:

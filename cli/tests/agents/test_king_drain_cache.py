@@ -100,8 +100,13 @@ def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> Non
     for i in range(CHILDREN):
         child = _entry(f"{SCOPE}-c{i}", type="feature", project="web", parent=SCOPE)
         if i < done_children:
-            child["status"] = "done"
+            child.update(status="done", completed_at="2026-01-01T00:00:00Z")
         entries.append(child)
+    if done_epic:
+        entries[FILLER].update(
+            completed_at="2026-01-01T00:00:00Z",
+            completion_note="fixture closure evidence",
+        )
     seed_graph(path, entries)
 
 
@@ -150,11 +155,11 @@ def test_repeat_fire_answers_inside_the_stopgate_budget_without_the_store(
 
 def test_graph_change_invalidates_the_row(graph):
     _invoke_drain()
-    _write_graph(graph, done_children=CHILDREN)  # children delivered, epic open
+    _write_graph(graph, done_children=CHILDREN - 1)  # cache sees one fewer open child
 
     exit_code, payload, _ = _invoke_drain()
     assert exit_code == 0
-    assert payload["undelivered"] == 1
+    assert payload["undelivered"] == 2
     assert "cached" not in payload
 
     _write_graph(graph, done_children=CHILDREN, done_epic=True)  # scope drained

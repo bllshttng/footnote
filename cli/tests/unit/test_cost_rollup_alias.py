@@ -399,7 +399,7 @@ def test_cost_update_says_so_when_there_is_no_graph(tmp_path, capsys):
     from fno.cost import _update_graph_node
 
     assert _update_graph_node(tmp_path / "absent.json", "ab-12345678", "S1", 4.0) is False
-    assert "no graph at" in capsys.readouterr().err
+    assert "node ab-12345678 not found" in capsys.readouterr().err
 
 
 # -- AC9: a contained node projects no rollup at all (x-e957 task 1.4) --
