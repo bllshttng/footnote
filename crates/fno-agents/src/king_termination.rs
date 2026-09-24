@@ -2,7 +2,7 @@
 
 use crate::loopcheck::TerminationReason;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default)]
 pub(crate) struct KingManifest {
@@ -576,6 +576,7 @@ pub(crate) fn bound_breached(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn a_null_harness_session_is_treated_as_legacy_missing_identity() {
