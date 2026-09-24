@@ -1,7 +1,10 @@
 //! The whole-graph write cycle under contention: a stale base survives
 //! three intervening commits, a real conflict names the row that moved,
-//! concurrent disjoint writers all land, and a commit needs no base_digests.
-//! Properties, never durations: no sleeps, no timing assertions.
+//! concurrent disjoint writers all land, and a commit with no base_digests
+//! falls back to the whole-graph version compare. base_digests carries
+//! begin's per-row version map (graph.db `nodes.version`) back to
+//! commit_rows. Properties, never durations: no sleeps, no timing
+//! assertions.
 
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -99,28 +102,27 @@ fn rpc(stream: &mut UnixStream, id: u64, method: &str, params: Value) -> Value {
     v
 }
 
+/// A sqlite store answers begin with its row versions; a fixture that fell
+/// to the json leg fails here instead of passing on the fallback.
 fn begin(stream: &mut UnixStream, id: u64) -> Value {
     let reply = rpc(stream, id, "begin", json!({}));
     assert_eq!(reply["ok"], json!(true), "begin must succeed: {reply}");
+    assert!(reply["result"]["base_digests"].is_object(), "{reply}");
     reply["result"].clone()
 }
 
-fn commit(
-    stream: &mut UnixStream,
-    id: u64,
-    base_version: &str,
-    row: Value,
-    base_plan_rungs: Value,
-) -> Value {
+/// commit_rows over `snap`, the begin the row came from. `extra` merges
+/// into the params.
+fn commit(stream: &mut UnixStream, id: u64, snap: &Value, row: Value, extra: Value) -> Value {
     let mut params = json!({
-        "base_version": base_version,
-        "base_plan_rungs": base_plan_rungs,
+        "base_version": snap["version"],
+        "base_digests": snap["base_digests"],
         "changed": [row],
         "removed": [],
         "plan_rungs": {},
     });
-    if base_plan_rungs.is_null() {
-        params["base_plan_rungs"] = json!({});
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        params[key] = value.clone();
     }
     rpc(stream, id, "commit_rows", params)
 }
@@ -160,7 +162,6 @@ fn a_base_three_commits_behind_still_commits_when_rows_are_disjoint() {
     let mut stream = UnixStream::connect(&sock).unwrap();
 
     let first = begin(&mut stream, 1);
-    let base = first["version"].as_str().unwrap().to_string();
     // Two more begins, the shape of a caller's own retry attempts: they
     // must not cost the caller its base.
     let _ = begin(&mut stream, 2);
@@ -170,7 +171,6 @@ fn a_base_three_commits_behind_still_commits_when_rows_are_disjoint() {
     // never touches.
     for (i, id) in ["x-b", "x-c", "x-d"].iter().enumerate() {
         let snap = begin(&mut stream, 10 + i as u64);
-        let version = snap["version"].as_str().unwrap().to_string();
         let mut row = snap["entries"]
             .as_array()
             .unwrap()
@@ -179,7 +179,7 @@ fn a_base_three_commits_behind_still_commits_when_rows_are_disjoint() {
             .cloned()
             .unwrap();
         row["title"] = json!(format!("{id}-moved"));
-        let reply = commit(&mut stream, 20 + i as u64, &version, row, json!({}));
+        let reply = commit(&mut stream, 20 + i as u64, &snap, row, json!({}));
         assert_eq!(reply["ok"], json!(true), "intervening commit {id}: {reply}");
     }
 
@@ -192,7 +192,7 @@ fn a_base_three_commits_behind_still_commits_when_rows_are_disjoint() {
         .cloned()
         .unwrap();
     row["title"] = json!("a-moved");
-    let reply = commit(&mut stream, 30, &base, row, json!({}));
+    let reply = commit(&mut stream, 30, &first, row, json!({}));
     assert_eq!(
         reply["ok"],
         json!(true),
@@ -214,21 +214,19 @@ fn a_stale_base_over_a_moved_row_conflicts_naming_that_row() {
     let mut stream = UnixStream::connect(&sock).unwrap();
 
     let first = begin(&mut stream, 1);
-    let base = first["version"].as_str().unwrap().to_string();
 
     // An interleaving writer moves x-a.
     let snap = begin(&mut stream, 2);
-    let version = snap["version"].as_str().unwrap().to_string();
     let mut row = snap["entries"].as_array().unwrap()[0].clone();
     assert_eq!(row["id"], json!("x-a"));
     row["title"] = json!("a-theirs");
-    let reply = commit(&mut stream, 3, &version, row, json!({}));
+    let reply = commit(&mut stream, 3, &snap, row, json!({}));
     assert_eq!(reply["ok"], json!(true), "intervening commit: {reply}");
 
     // The stale mutation changes the same row.
     let mut mine = first["entries"].as_array().unwrap()[0].clone();
     mine["title"] = json!("a-mine");
-    let reply = commit(&mut stream, 4, &base, mine, json!({}));
+    let reply = commit(&mut stream, 4, &first, mine, json!({}));
     assert_eq!(
         reply["ok"],
         json!(false),
@@ -254,7 +252,6 @@ fn concurrent_writers_on_disjoint_nodes_all_land() {
             std::thread::spawn(move || {
                 let mut stream = UnixStream::connect(&sock).unwrap();
                 let snap = begin(&mut stream, 1);
-                let version = snap["version"].as_str().unwrap().to_string();
                 let id = format!("x-{}", ['a', 'b', 'c', 'd'][i]);
                 let mut row = snap["entries"]
                     .as_array()
@@ -264,7 +261,7 @@ fn concurrent_writers_on_disjoint_nodes_all_land() {
                     .cloned()
                     .unwrap();
                 row["title"] = json!(format!("{id}-w{i}"));
-                commit(&mut stream, 2, &version, row, json!({}))
+                commit(&mut stream, 2, &snap, row, json!({}))
             })
         })
         .collect();
@@ -283,19 +280,18 @@ fn concurrent_writers_on_disjoint_nodes_all_land() {
     }
 }
 
-/// A commit carrying non-empty base_plan_rungs does not conflict on an
-/// untouched row: the rung map feeds both sides of the compare.
+/// A commit still carrying non-empty base_plan_rungs (a client from before
+/// row versions) does not conflict on an untouched row: the keeper ignores
+/// the key and compares versions.
 #[test]
 fn nonempty_base_plan_rungs_do_not_conflict_on_an_untouched_row() {
     let (_home, _graph, sock, _keeper) = write_graph("rungs");
     let mut stream = UnixStream::connect(&sock).unwrap();
 
     let first = begin(&mut stream, 1);
-    let base = first["version"].as_str().unwrap().to_string();
 
     for (i, id) in ["x-b", "x-c", "x-d"].iter().enumerate() {
         let snap = begin(&mut stream, 10 + i as u64);
-        let version = snap["version"].as_str().unwrap().to_string();
         let mut row = snap["entries"]
             .as_array()
             .unwrap()
@@ -304,7 +300,7 @@ fn nonempty_base_plan_rungs_do_not_conflict_on_an_untouched_row() {
             .cloned()
             .unwrap();
         row["title"] = json!(format!("{id}-moved"));
-        let reply = commit(&mut stream, 20 + i as u64, &version, row, json!({}));
+        let reply = commit(&mut stream, 20 + i as u64, &snap, row, json!({}));
         assert_eq!(reply["ok"], json!(true), "intervening commit {id}: {reply}");
     }
 
@@ -316,7 +312,8 @@ fn nonempty_base_plan_rungs_do_not_conflict_on_an_untouched_row() {
         .cloned()
         .unwrap();
     row["title"] = json!("a-moved");
-    let reply = commit(&mut stream, 30, &base, row, json!({"x-a": "done"}));
+    let rungs = json!({"base_plan_rungs": {"x-a": "done"}});
+    let reply = commit(&mut stream, 30, &first, row, rungs);
     assert_eq!(
         reply["ok"],
         json!(true),
@@ -341,7 +338,6 @@ fn a_commit_that_omits_base_digests_commits() {
         "commit_rows",
         json!({
             "base_version": version,
-            "base_plan_rungs": {},
             "changed": [row],
             "removed": [],
             "plan_rungs": {},

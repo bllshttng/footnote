@@ -732,7 +732,6 @@ def _commit_rows(client, base_version: str, base_digests: dict,
     return client.request("commit_rows", {
         "base_version": base_version,
         "base_digests": {rid: base_digests[rid] for rid in touched if rid in base_digests},
-        "base_plan_rungs": _plan_rung_map(base_entries),
         "changed": changed,
         "removed": removed,
         "plan_rungs": plan_rungs,
