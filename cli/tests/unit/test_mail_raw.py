@@ -1015,7 +1015,36 @@ def test_raw_codex_review_refuses_empty_diff_subject(mailbox, monkeypatch, capsy
     assert "empty diff" in err
     assert entry.cwd in err, "the refusal names the checkout so the remedy is obvious"
     assert "request-self-review" in err
+    assert "$fno:review" in err
+    assert "--cwd <worktree>" not in err
     assert not fired, "the RPC must not fire on a refused subject"
+
+
+def test_raw_codex_fno_review_skips_the_empty_diff_guard(mailbox, monkeypatch, capsys):
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    checked = []
+
+    def reject_guard(*_args):
+        checked.append(True)
+        raise AssertionError("the prompt-line fno review must skip the RPC guard")
+
+    monkeypatch.setattr(mail_cli, "_codex_review_subject_nonempty", reject_guard)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex", lambda *_args, **_kwargs: True
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send(
+            "codexpeer",
+            "$fno:review high branch HEAD abc1234 against origin/main",
+            self_ok=False,
+        )
+
+    assert exc.value.exit_code == 0
+    assert "injected" in capsys.readouterr().out
+    assert not checked
 
 
 def test_raw_check_codex_review_answers_empty_diff_subject(mailbox, monkeypatch, capsys):

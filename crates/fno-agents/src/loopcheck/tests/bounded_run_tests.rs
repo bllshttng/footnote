@@ -144,6 +144,49 @@ fn bounded_kind(run: &BoundedRun) -> &'static str {
         BoundedRun::TimedOut(_) => "TimedOut",
         BoundedRun::SpawnFailed(_) => "SpawnFailed",
         BoundedRun::WaitFailed => "WaitFailed",
+        BoundedRun::Refused => "Refused",
+    }
+}
+
+/// A bound at the spent line refuses without spawning: enough floored reads
+/// would spend the drain's reserved slice, so the transport refuses instead.
+#[test]
+fn a_bound_at_the_spent_line_refuses_without_spawning() {
+    let deadline = std::time::Instant::now();
+    crate::loopcheck::stopgate_stamp_fire(0, deadline, 16_000);
+    let tmp = tempfile::tempdir().unwrap();
+    let run = run_bounded(
+        std::ffi::OsStr::new("/bin/sh"),
+        &["-c", "echo spawned"],
+        tmp.path(),
+        crate::loopcheck::read_bounds::STOPGATE_PRE_DRAIN_SPENT_BOUND,
+    );
+    assert!(
+        matches!(run, BoundedRun::Refused),
+        "got {}",
+        bounded_kind(&run)
+    );
+}
+
+/// A wedged child still reports TimedOut with its real bound - never a bare
+/// "unreadable" - so a killed drain names the kill that happened.
+#[test]
+fn a_wedged_child_still_reports_timed_out_with_its_real_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stub = write_exec(tmp.path(), "wedged", "#!/bin/sh\nsleep 30\n");
+    let started = std::time::Instant::now();
+    let run = run_bounded(
+        stub.as_os_str(),
+        &[],
+        tmp.path(),
+        std::time::Duration::from_millis(200),
+    );
+    match run {
+        BoundedRun::TimedOut(elapsed) => {
+            assert!(elapsed >= std::time::Duration::from_millis(200));
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        }
+        other => panic!("expected TimedOut, got {}", bounded_kind(&other)),
     }
 }
 

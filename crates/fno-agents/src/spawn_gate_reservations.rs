@@ -178,6 +178,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-gate-resv-ref-{}", std::process::id()));
+        let prior_agents_home = std::env::var_os("FNO_AGENTS_HOME");
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
         std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
@@ -198,12 +203,19 @@ mod tests {
             },
         );
 
-        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_agents_home {
+            Some(value) => std::env::set_var("FNO_AGENTS_HOME", value),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
         }
-        let refusal = got.err().expect("lane 2/2 must refuse a stranger");
+        let refusal = got.expect_err("lane 2/2 must refuse a stranger");
         assert_eq!(refusal.exit_code, EXIT_PROVIDER_CAP);
         let receipt = refusal
             .receipt

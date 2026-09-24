@@ -834,6 +834,7 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
     target = _invoke("--json", "backlog", "add", "Done work")
     target_id = json.loads(target.stdout)["id"]
     _invoke("backlog", "update", target_id, "--locked-by", "null")
+    _invoke("backlog", "update", target_id, "--completion-note", "terminal fixture")
     _invoke("backlog", "done", target_id)
     r = _invoke(
         "--json", "backlog", "idea", "Late finding",
