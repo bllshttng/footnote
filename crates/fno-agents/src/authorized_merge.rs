@@ -1930,7 +1930,7 @@ pub(crate) fn stale_overlap_verdict(
             eprintln!(
                 "pr-merge: ci_base_stale waived: {} files landed since CI base {}, none shared with PR {pr}",
                 result.landed,
-                &result.ci_base_sha[..result.ci_base_sha.len().min(8)]
+                result.ci_base_sha.chars().take(8).collect::<String>()
             );
             ProbeOutcome::Clear
         }
@@ -1950,7 +1950,7 @@ pub(crate) fn stale_overlap_verdict(
             ProbeOutcome::Refused(format!(
                 "{stale}; shares {} files with main since CI base {}: {shown}{extra}",
                 result.shared.len(),
-                &result.ci_base_sha[..result.ci_base_sha.len().min(8)]
+                result.ci_base_sha.chars().take(8).collect::<String>()
             ))
         }
         Err(error) => ProbeOutcome::Refused(format!("{stale}; file overlap unreadable ({error})")),
@@ -2846,6 +2846,20 @@ mod tests {
             Ok(crate::merge_gates::StaleOverlap {
                 ci_base_sha: "abcdef123456".to_string(),
                 landed: 4,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdefgé".to_string(),
+                landed: 1,
                 shared: Vec::new(),
             }),
         );

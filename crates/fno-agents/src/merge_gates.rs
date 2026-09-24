@@ -606,7 +606,7 @@ pub(crate) fn stale_overlap(
     if !head_check.status.success() {
         return Err(format!(
             "PR head {} not present locally",
-            &head_sha[..head_sha.len().min(8)]
+            head_sha.chars().take(8).collect::<String>()
         ));
     }
 
@@ -821,6 +821,16 @@ mod tests {
             error.contains("PR head deadbeef not present locally"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn stale_overlap_reports_a_malformed_missing_head_without_panicking() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        commit_at(repo.path(), "2026-01-01T00:00:00Z", "base");
+
+        let result = stale_overlap(repo.path(), "main", "abcdefgé", "2026-01-03T00:00:00Z");
+        assert!(matches!(result, Err(error) if error == "PR head abcdefgé not present locally"));
     }
 
     #[test]
