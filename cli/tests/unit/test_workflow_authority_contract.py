@@ -260,7 +260,7 @@ def test_execute_kill_criteria_reads_frontmatter_owner():
 def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
     text = _skill("docs/architecture/review-lanes.md")
     assert "d-384d967c" in text
-    assert "No spawned-reviewer lane" in text
+    assert "No spawned-reviewer lane (operator law d-384d967c)" in text
     assert "--model opus" not in text
     assert "the peer lane" in text
     assert "NO `--fix` remains the review contract" in text
@@ -303,13 +303,14 @@ def test_audit_deliverable_is_bounded_artifact_plans_only_when_authorized():
     assert "the resolved `--perspectives` set" in text
 
 
-def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
+def test_pr_create_and_using_fno_run_inline():
     ship = _skill("skills/ship/SKILL.md")
     assert "Haiku-capable provider" not in ship
     assert "configured role routing" in ship
     using = _skill("skills/using-fno/SKILL.md")
     assert "Haiku worker" not in using
-    assert "routed create worker" in using
+    assert "PR lifecycle: create inline" in using
+    assert "routed create worker" not in using
     assert "a skill spawns a new agent context" not in using
 
 

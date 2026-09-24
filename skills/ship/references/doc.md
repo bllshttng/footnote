@@ -40,7 +40,7 @@ fno do research "<topic>" [--node "$CLAIMS_ID"] [other allowed flags]
 ```
 
 - On success, `fno do research` writes `<slug>.md` + `<slug>.sources.jsonl` to `config.research.output_dir` and reports `DoneAdvisory`. Read the printed output path; set `BRIEF` to `<output_dir>/<slug>.md` and `SIDECAR` to the sibling `<slug>.sources.jsonl`.
-- If `config.research.output_dir` is unset, `fno do research` exits 5 (`OutputDirUnset`) and never guesses a path. Surface that verbatim and stop - the operator must set `config.research.output_dir` first. Do NOT fabricate a landing path.
+- If `config.research.output_dir` is unset, `fno do research` exits 5 (`OutputDirUnset`) and never guesses a path. Surface that verbatim and stop - the user must set `config.research.output_dir` first. Do NOT fabricate a landing path.
 - On any other non-zero exit (network failure, invalid flag, retrieval error), STOP immediately and surface the error verbatim. Do NOT proceed to Step 2 against a brief that was not written - there is nothing shipped to grade.
 
 ## Step 2: grade (the green)

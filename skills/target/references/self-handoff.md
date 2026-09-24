@@ -1,7 +1,7 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Explicit Capability Escalation
 
-Context pressure is a compaction trigger, never a succession trigger. Continue in this session across blueprint/do and wave boundaries. A fresh session is reserved for capability escalation after an external operator or supervising king selects a stronger destination.
+Context pressure is a compaction trigger, never a succession trigger. Continue in this session across blueprint/do and wave boundaries. A fresh session is reserved for capability escalation after an external user or supervising king selects a stronger destination.
 
 On Codex, provider goal continuation and Footnote `Stop` are separate
 capabilities. The verified provider goal is the primary continuation receipt;

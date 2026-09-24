@@ -56,4 +56,4 @@ Target invokes this skill as the docs phase. It passes:
 
 ## Completion contract
 
-Docs files written to disk are the proof this phase happened. No artifact write and no `fno gate` call is needed. If no docs were written (no affected roles configured), report that clearly so the operator can provide explicit role configuration and re-run.
+Docs files written to disk are the proof this phase happened. No artifact write and no `fno gate` call is needed. If no docs were written (no affected roles configured), report that clearly so the user can provide explicit role configuration and re-run.
