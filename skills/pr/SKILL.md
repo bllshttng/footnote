@@ -28,7 +28,7 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 Parse the first argument token:
 
-- **no argument** -> do NOT default and do NOT guess. Print the mode menu and stop with a non-zero result (dispatch nothing, open no PR):
+- **no argument** -> if the request that fired this skill plainly asks to open, create, or submit a PR, run `create` and print `running create (inferred from the request)`. Anything else (including a bare `/pr` with no PR request) prints the mode menu and stops with a non-zero result (dispatch nothing, open no PR). `check` and `merged` are never inferred:
 
   ```
   /pr needs a mode. valid modes:
@@ -99,6 +99,10 @@ candidate_fno() {
 candidate_fno do pr base-check --base "$BASE" || {
   rc=$?
   # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
+  # The refusal opens nothing, but the create flow is draft-first: run the
+  # gather-and-draft steps of references/create.md first, then print the
+  # refusal beside the drafted title and body and end
+  # RESULT: BLOCKED step=base reason=<the base-check refusal> draft=.fno/pr-body.md
   [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
 }
 policy_json="$(candidate_fno do pr evidence-required --base "$BASE")" || {
@@ -120,17 +124,17 @@ fi
 
 ### 2b. Run the canonical create flow inline
 
-Load [create.md](references/create.md) and execute it in this same context. The flow owns validation, push, description, PR creation, node binding, and its result contract. Do not spawn or dispatch a `pr-creator` worker, route create mode through `pr-create`, or hand off the work to another agent.
+Load [create.md](references/create.md) and execute it in this same context. The flow is draft-first: it composes the title and body from local history before any step that can fail, then owns validation, push, PR creation, node binding, and its result contract. On a blocked step, print the step, the reason, the title and the full body from `.fno/pr-body.md`, say no PR was created, and end `RESULT: BLOCKED step=<step> reason=<one line> draft=.fno/pr-body.md`. Do not spawn or dispatch a worker, route create mode through a model lane, or hand off the work to another agent.
 
-### 2c. Mirror the local verdict to GitHub after create
+### 2c. Mirror the local verdict and post held findings after create
 
-The inline review ran before the PR existed, so it did not auto-post to GitHub. After creating the PR, mirror that local head-pinned verdict:
+The inline review ran before the PR existed, so it did not auto-post to GitHub. After creating the PR, run one verb that does both halves:
 
 ```bash
 fno do pr publish-review --pr-number <N>
 ```
 
-The verb defaults its verdict to the newest head-pinned attestation for HEAD. It refuses on a collision or a stale pin. It can only re-post a verdict the local gate already accepted. On an unconfigured lane it prints one `bot-review: skipped` receipt and nothing else happens. Report the receipt line verbatim. A `refused` or `failed` receipt is a finding to surface. It is never a reason to stop the pipeline.
+The verdict leg defaults to the newest head-pinned attestation for HEAD. It refuses on a collision or a stale pin. It can only re-post a verdict the local gate already accepted. On an unconfigured lane it prints one `bot-review: skipped` receipt and nothing else happens. The held-findings leg is independent of that lane: it reads the newest attestation for the PR's branch (any head), and when it carries findings and the PR has no comment with its marker yet, posts them as ONE PR comment under the caller's own gh auth (`held: posted` in the JSON answer; `stale-posted` when the reviewed head is behind the PR head, with both shas named in the comment; `already-posted` on a re-run). `fno-agents finalize` re-runs that leg as a backstop at every terminal decision. Report the receipt lines verbatim. A `refused` or `failed` receipt is a finding to surface. It is never a reason to stop the pipeline.
 
 ## Step 3: check mode (poll for external review)
 
