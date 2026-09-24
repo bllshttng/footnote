@@ -819,10 +819,11 @@ pub(crate) fn superseded_manifests(
 /// roster read; the roster read stays lazy - it fires at most once, and
 /// only when a candidate survives every file filter. The holder verdict is
 /// the one function crown_reap also runs, so the court and the sweep
-/// cannot disagree about who is dead: a holder absent from a clean roster
-/// with a transcript quiet past `window_s` drops out here too. The
-/// transcript age, window, and `now` arrive as parameters for the same
-/// reason the roster fn does.
+/// cannot disagree about who is dead: a holder proven dead by a positive
+/// witness (terminal roster state, gone roster pid) drops out here too,
+/// while absence plus a quiet transcript reads Unknown and stays listed -
+/// the reboot orphan shape. The transcript age, window, and `now` arrive as
+/// parameters for the same reason the roster fn does.
 pub fn court_orphans(
     root: &Path,
     held: &[String],
@@ -1599,10 +1600,11 @@ mod tests {
     }
 
     #[test]
-    fn a_roster_absent_holder_with_an_old_transcript_drops_out() {
-        // AC10: the live specimen shape. Holder absent from a KNOWN, warning-free
-        // roster, transcript quiet 19h past a 12h window: the court drops
-        // the candidate instead of listing it forever.
+    fn a_reboot_absent_holder_with_an_old_transcript_stays_listed() {
+        // AC1-HP: the reboot shape. Holder absent from a KNOWN, warning-free
+        // roster, transcript quiet 19h past a 12h window: the machine was
+        // down, the session is resumable, so the court lists the orphan
+        // crown instead of dropping it as dead.
         let root = tmp("verdict-transcript");
         let sess = "aaaa7777-0000-4000-8000-000000000007";
         write_court_manifest(&root, "zed", sess, "2026-09-18T18:11:00Z");
@@ -1621,7 +1623,8 @@ mod tests {
             12 * 3600,
             chrono::Utc::now(),
         );
-        assert!(out.is_empty(), "a dead holder must not list: {out:?}");
+        assert_eq!(out.len(), 1, "the reboot orphan stays listed: {out:?}");
+        assert_eq!(out[0].manifest_session.as_deref(), Some(sess));
         fs::remove_dir_all(&root).ok();
     }
 

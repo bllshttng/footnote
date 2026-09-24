@@ -1232,3 +1232,140 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
         "the node id lands at the cursor"
     );
 }
+
+#[test]
+fn open_with_binds_message_project_and_node() {
+    // AC6-HP: the board prefill lands the message, the cursor at its end,
+    // the node's project (appended when it was not a candidate) and the
+    // node binding; the wire request carries the node. The phase resets to
+    // Editing so the operator's next Launch submits fresh.
+    let mut v = plain_view();
+    open(&mut v);
+    super::agent_launcher::open_with(
+        &mut v,
+        "/fno:target x-1".into(),
+        Some("/r/footnote"),
+        "x-1".into(),
+    )
+    .expect("a fresh draft yields");
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "/fno:target x-1");
+    assert_eq!(l.draft.cursor_chars, "/fno:target x-1".chars().count());
+    let idx = l.draft.project_idx;
+    assert_eq!(l.draft.projects[idx], "/r/footnote");
+    assert_eq!(l.draft.node.as_deref(), Some("x-1"));
+    assert_eq!(l.draft.request(9).node.as_deref(), Some("x-1"));
+    assert_eq!(l.phase, Phase::Editing);
+    assert_eq!(l.focus, Focus::Harness);
+}
+
+#[test]
+fn open_with_keeps_a_retained_nonempty_draft() {
+    // AC7-EDGE: a kept draft with typed text is never overwritten; the
+    // error names the way out and the draft is unchanged.
+    let mut v = plain_view();
+    open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "fix the flake".into();
+        l.draft.revision += 1;
+    }
+    let err = super::agent_launcher::open_with(
+        &mut v,
+        "/fno:target x-1".into(),
+        Some("/r/footnote"),
+        "x-1".into(),
+    )
+    .expect_err("a held draft refuses");
+    assert!(
+        err.contains("holds a draft"),
+        "the refusal names the kept draft: {err}"
+    );
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "fix the flake");
+    assert_eq!(l.draft.node, None);
+}
+
+#[test]
+fn open_with_keeps_the_draft_while_an_attempt_is_in_flight() {
+    // The in-flight guard: even an EMPTY draft does not yield while an
+    // owned attempt is Starting. A seedless launch's outcome must fold
+    // onto the dock it belongs to, never onto a fresh board prefill.
+    let mut v = plain_view();
+    open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+    }
+    apply_launch_update(
+        &mut v,
+        AgentLaunchUpdate {
+            request_id: 1,
+            state: LaunchState::Starting,
+        },
+    );
+    let err =
+        super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
+            .expect_err("an in-flight attempt holds the draft");
+    assert!(err.contains("holds a draft"), "err: {err}");
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.phase, Phase::Submitting { request_id: 1 });
+    assert_eq!(l.draft.node, None);
+}
+
+#[test]
+fn open_with_replaces_after_a_launched_attempt() {
+    // AC8-EDGE: a terminal `Launched` attempt makes way for another node's
+    // prefill; the phase is Editing again.
+    let mut v = plain_view();
+    open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "/fno:target x-9".into();
+        l.armed = Some(1);
+    }
+    apply_launch_update(
+        &mut v,
+        AgentLaunchUpdate {
+            request_id: 1,
+            state: LaunchState::Launched {
+                name: "w".into(),
+                pane: Some(3),
+                seed_delivered: Some(true),
+            },
+        },
+    );
+    super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
+        .expect("a launched draft yields");
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.message, "/fno:target x-1");
+    assert_eq!(l.draft.node.as_deref(), Some("x-1"));
+    assert_eq!(l.phase, Phase::Editing);
+}
+
+#[test]
+fn request_drops_a_stale_node_binding_when_the_message_moves() {
+    // AC9-EDGE: the binding rides only while the message's second word
+    // (sentence punctuation trimmed) still names the node. A retarget, a
+    // prose rewrite or an erasure never binds a stale node; appended
+    // prose after the same id keeps it.
+    let mut v = plain_view();
+    open(&mut v);
+    super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
+        .expect("a fresh draft yields");
+    let cases: &[(&str, Option<&str>)] = &[
+        ("/fno:target x-2", None),
+        ("fix the flake", None),
+        ("", None),
+        ("/fno:target x-1 focus on the flake", Some("x-1")),
+        ("/fno:target x-1.", Some("x-1")),
+    ];
+    for (message, want) in cases {
+        if let Some(l) = v.launcher.as_mut() {
+            l.draft.message = message.to_string();
+        }
+        let req = v.launcher.as_ref().unwrap().draft.request(1);
+        assert_eq!(
+            req.node.as_deref(),
+            *want,
+            "message {message:?} binds {want:?}"
+        );
+    }
+}

@@ -41,20 +41,6 @@ pub(crate) fn mesh_identity_assignments(
     Ok(pairs.iter().map(|(k, v)| format!("{k}={v}")).collect())
 }
 
-/// A row relaunches onto its mux pane when it HAS one and a session id to
-/// relaunch with. Keyed on evidence the registry row carries, never on a
-/// harness name (law d-dbf83820): `mux_spawn` writes the mux ref for every
-/// `--substrate pane` row, and the empty-`session_id` refusal for a harness
-/// whose resume needs one already ran before this predicate is consulted
-/// (: this replaces the `harness == "claude"` narrowing that sent every
-/// non-claude pane row to the in-terminal exec).
-pub(crate) fn pane_relaunch_target<'a>(
-    mux_session: Option<&'a str>,
-    resume_id: &str,
-) -> Option<&'a str> {
-    mux_session.filter(|_| !resume_id.is_empty())
-}
-
 /// The row name a relaunched pane may carry as `--worker`, or `None` when the
 /// name cannot ride the flag: the mux server validates it with the same
 /// registry charset (`[A-Za-z0-9._-]`, <= 64 chars) and refuses the WHOLE
@@ -153,8 +139,7 @@ pub(crate) fn mux_pane_run_failure_message(
 
 /// How long a relaunched pane gets to prove the worker stayed up (mirrors
 /// `_BINDING_WINDOW_S` in mux_spawn.py), and how often it is polled
-/// (`_BINDING_POLL_S`). Both fit inside `MUX_RESUME_CLAIM_TTL_MS` (120s) and
-/// the watchdog's 180s resume timeout.
+/// (`_BINDING_POLL_S`). Both fit inside the watchdog's 180s resume timeout.
 const PANE_PROOF_WINDOW: Duration = Duration::from_secs(8);
 const PANE_PROOF_POLL: Duration = Duration::from_millis(750);
 
@@ -632,6 +617,18 @@ pub(crate) fn build_resume_argv_split(
     grant_cwd: Option<&str>,
     pin_cd: bool,
 ) -> Option<Vec<String>> {
+    let argv = build_resume_argv_tokens_split(provider, session_id, grant_cwd, pin_cd)?;
+    crate::harness_capabilities::compose_pre_exec(provider, "interactive_resume", argv).ok()
+}
+
+/// Raw resume command tokens before the lane's declared `pre_exec` wrapper.
+/// Codex paths splice route args before composing the wrapper.
+pub(crate) fn build_resume_argv_tokens_split(
+    provider: &str,
+    session_id: &str,
+    grant_cwd: Option<&str>,
+    pin_cd: bool,
+) -> Option<Vec<String>> {
     // The declared form is the whole identity: cursor-agent's interactive_resume
     // tokens already end in --trust, and a second one is a duplicated flag,
     // never a stronger one. Python's builder renders the same form with no
@@ -693,7 +690,7 @@ pub(crate) fn build_resume_argv_split(
             }
         }
     }
-    crate::harness_capabilities::compose_pre_exec(provider, "interactive_resume", argv).ok()
+    Some(argv)
 }
 
 /// The env(1) assignment tokens for one env pair set, prefixed ahead of the
@@ -847,7 +844,7 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
 mod tests {
     use super::{
         last_lines, mesh_identity_assignments, mux_pane_run_argv, pane_death_receipt,
-        pane_relaunch_target, prove_pane_worker, worker_token, PaneProbes, PaneProof,
+        prove_pane_worker, worker_token, PaneProbes, PaneProof,
     };
     use crate::pane_stop::PaneSighting;
     use std::time::Duration;
@@ -1577,19 +1574,6 @@ mod tests {
         assert_eq!(worker_token(""), None);
         assert_eq!(worker_token(&"x".repeat(65)), None);
         assert_eq!(worker_token("x"), Some("x"));
-    }
-
-    #[test]
-    fn pane_relaunch_target_keys_on_evidence_not_harness() {
-        // AC1: a row with a mux ref and a session id takes the pane; the same
-        // row without an id (the empty-session-id guard already refused for
-        // harnesses that need one, so this is defense in depth) and a row
-        // with no mux ref (thread lane) both answer None - keyed on the pair
-        // the branch consults, never on a harness name (AC1-OC).
-        assert_eq!(pane_relaunch_target(Some("main"), "sid-1"), Some("main"));
-        assert_eq!(pane_relaunch_target(Some("main"), ""), None);
-        assert_eq!(pane_relaunch_target(None, "sid-1"), None);
-        assert_eq!(pane_relaunch_target(None, ""), None);
     }
 
     #[test]

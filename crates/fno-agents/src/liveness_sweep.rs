@@ -15,6 +15,91 @@ use crate::provider::ReachabilityProbeError;
 use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 
+/// The roster witness both reconcile decisions read. `bg_live` answers
+/// presence for the zombie flip; `crown_running` answers the POSITIVE
+/// running witness a crown revival needs - the row's session listed in a
+/// parsed `roster.json` whose worker pid is not gone. A MISSING roster
+/// parses as zero workers (no claude daemon ever ran); an UNREADABLE one is
+/// unknown liveness: the flip refuses to declare death on it, and the
+/// revival refuses to revive on it. Read once per sweep, not per row.
+/// Moved here from `run_reconcile_sweep` (the daemon file is shrink-only;
+/// the code the crown-revival change touched moves with it).
+pub(crate) struct BgRoster {
+    roster: Option<crate::claude_roster::ClaudeRoster>,
+    readable: bool,
+}
+
+impl BgRoster {
+    pub(crate) fn load() -> Self {
+        match crate::claude_roster::ClaudeRoster::load_default() {
+            Ok(roster) => Self {
+                roster: Some(roster),
+                readable: true,
+            },
+            Err(_) => Self {
+                roster: None,
+                readable: false,
+            },
+        }
+    }
+
+    pub(crate) fn readable(&self) -> bool {
+        self.readable
+    }
+
+    /// The exact-holder lookup: full recorded session id first, then the
+    /// row's short id.
+    fn find(&self, e: &RegistryEntry) -> Option<&crate::claude_roster::RosterWorker> {
+        let roster = self.roster.as_ref()?;
+        e.harness_session_id
+            .as_deref()
+            .and_then(|sid| roster.find(sid))
+            .or_else(|| roster.find(&e.short_id))
+    }
+
+    pub(crate) fn bg_live(&self, e: &RegistryEntry) -> bool {
+        if e.harness_name() != "claude" {
+            return false;
+        }
+        match &self.roster {
+            // Presence via either key: the same two-key lookup find() runs.
+            Some(_) => self.find(e).is_some(),
+            // An unreadable roster is unknown liveness: never declare death.
+            None => true,
+        }
+    }
+
+    /// A positive running marker off the roster: the exact recorded session
+    /// is listed, its worker pid still answers, and - when both sides
+    /// recorded a start time - the times still match. A worker without a
+    /// recorded pid cannot prove it is running; a stale pre-reboot row
+    /// carries a pid that answers ESRCH and reads as the absence it is, and
+    /// a RECYCLED pid answers kill(0) even though the worker is gone, so
+    /// presence plus not-gone alone must not pass.
+    pub(crate) fn crown_running(&self, e: &RegistryEntry) -> bool {
+        if e.harness_name() != "claude" {
+            return false;
+        }
+        let Some(w) = self.find(e) else {
+            return false;
+        };
+        if !w
+            .pid
+            .map(|pid| !crate::daemon::pid_is_gone(pid))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        match (w.proc_start, e.pid_start_time) {
+            // The lenient parse degrades a date-string procStart to None; a
+            // None on either side leaves the pid answer standing - degraded
+            // evidence, not a refusal.
+            (Some(roster_start), Some(row_start)) => roster_start == row_start,
+            _ => true,
+        }
+    }
+}
+
 /// The served liveness word for one probed row. A pane row (mux ref or
 /// interactive host) with a recorded pid is PTY-governed: its served word is
 /// the pid, whatever the session-store probe said - including an `Err`
@@ -54,6 +139,11 @@ pub(crate) struct ReconcileChange {
     /// probe inference. A process fact is writable by any sweep; a probe
     /// inference stays on the operator-driven sweeps.
     pub(crate) pid_proven: bool,
+    /// A guarded crown revival: the write must re-resolve the row by its own
+    /// (harness, session id) - never the name fallback - and skip unless the
+    /// crown fields still sit on it, so a concurrent stop or succession
+    /// cannot revive the wrong holder.
+    pub(crate) crown_revive: bool,
 }
 
 /// What a reconcile sweep did, for the `reconcile_done` event and tests.
@@ -153,6 +243,7 @@ where
                     }
                 },
                 pid_proven: false,
+                crown_revive: false,
             });
             continue;
         }
@@ -230,6 +321,7 @@ where
                     }
                 },
                 pid_proven: false,
+                crown_revive: false,
             });
             continue;
         }
@@ -343,9 +435,55 @@ where
             new_status,
             new_liveness: crate::liveness_sweep::served_word(entry, &measured, &mut pid_live),
             pid_proven: pid_proven_dead,
+            crown_revive: false,
         });
     }
     (changes, out)
+}
+
+/// The reboot arm of the reconcile sweep: an Exited claude CROWN row whose
+/// holder session actually came back. A reboot writes `Exited` on rows whose
+/// workers were merely absent (the machine was down), and a crown must not
+/// read dead while its session resumes - court, sideline, and king-share all
+/// count live-ish crowned rows. Recovery needs two POSITIVE witnesses - the
+/// roster lists the exact recorded session with a live pid, and the shared
+/// ladder answers Alive - and never revives from session-store existence, a
+/// transcript mtime, a stale or partial roster, a terminal roster state, or
+/// an unmeasured probe. Crowned rows only: a one-shot ask that exited stays
+/// exited. Plan-only; the batched write re-checks identity and crown fields
+/// under the lock.
+#[allow(clippy::type_complexity)]
+pub(crate) fn plan_crown_revivals<L>(
+    entries: &[RegistryEntry],
+    roster_readable: bool,
+    mut crown_running: impl FnMut(&RegistryEntry) -> bool,
+    mut liveness: L,
+) -> (Vec<ReconcileChange>, Vec<String>)
+where
+    L: FnMut(&RegistryEntry) -> RowLiveness,
+{
+    let mut changes = Vec::new();
+    let mut recovered = Vec::new();
+    if !roster_readable {
+        return (changes, recovered);
+    }
+    for entry in entries {
+        if entry.status != AgentStatus::Exited || entry.crown_scope.is_none() {
+            continue;
+        }
+        if !crown_running(entry) || liveness(entry) != RowLiveness::Alive {
+            continue;
+        }
+        recovered.push(entry.name.clone());
+        changes.push(ReconcileChange {
+            name: entry.name.clone(),
+            new_status: Some(AgentStatus::Live),
+            new_liveness: Some("alive"),
+            pid_proven: false,
+            crown_revive: true,
+        });
+    }
+    (changes, recovered)
 }
 
 /// Apply one planned reconcile change to its registry row. Always freshens
@@ -448,9 +586,18 @@ pub(crate) fn apply_reconcile_changes(
         let keyed = ident
             .as_ref()
             .and_then(|(h, sid)| sid.as_deref().and_then(|sid| r.find_by_session_mut(h, sid)));
-        let target = match keyed {
-            Some(e) => Some(e),
-            None => r.find_mut(&ch.name),
+        let target = if ch.crown_revive {
+            // A revival re-resolves by the row's own (harness, session id) -
+            // the name fallback could hand a successor's row the old
+            // holder's status - and only while the crown fields still sit on
+            // it: a succession that moved the scope mid-sweep ends the
+            // revival. A miss touches nothing, not even the stamp.
+            keyed.filter(|e| e.crown_scope.is_some() && e.crown_level.is_some())
+        } else {
+            match keyed {
+                Some(e) => Some(e),
+                None => r.find_mut(&ch.name),
+            }
         };
         if let Some(e) = target {
             let status = if mode_writes_status(mode, ch) {
@@ -510,6 +657,7 @@ pub(crate) fn maybe_sweep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn pane_entry(name: &str, pid: Option<u32>) -> RegistryEntry {
         let mut e = state::RegistryEntry::default();
@@ -606,6 +754,7 @@ mod tests {
             new_status: Some(AgentStatus::Exited),
             new_liveness: Some("dead"),
             pid_proven: false,
+            crown_revive: false,
         }];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -765,6 +914,7 @@ mod tests {
             new_status: Some(AgentStatus::Exited),
             new_liveness: Some("dead"),
             pid_proven,
+            crown_revive: false,
         };
         assert!(mode_writes_status(&SweepMode::Full, &mk(true)));
         assert!(mode_writes_status(&SweepMode::Full, &mk(false)));
@@ -953,5 +1103,210 @@ mod tests {
         assert_eq!(kind_of("sob-t-x-2-glm"), Some(Some("peer".into())));
         assert_eq!(kind_of("solo-x-2"), Some(None), "no edge, no word");
         assert_eq!(kind_of("king-x-1"), Some(None), "no edge, no word");
+    }
+
+    fn crowned_exited(name: &str, sid: &str, crowned: bool) -> RegistryEntry {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.harness_session_id = Some(sid.to_string());
+        e.status = AgentStatus::Exited;
+        e.exited_at = Some("2026-09-24T00:00:00Z".to_string());
+        if crowned {
+            e.crown_scope = Some("zed".to_string());
+            e.crown_level = Some(2);
+        }
+        e
+    }
+
+    #[test]
+    fn crown_running_rejects_a_recycled_pid_on_start_time_mismatch() {
+        // The roster pid must be LIVE on this machine (the test process's
+        // own), so the ESRCH probe passes and the start-time compare is what
+        // the assertions exercise.
+        let roster_json = format!(
+            r#"{{"proto":1,"supervisorPid":4242,"updatedAt":1,"workers":{{"a1b2c3d4":{{"pid":{},"procStart":111,"sessionId":"a1b2c3d4-1111-2222-3333-444455556666"}}}}}}"#,
+            std::process::id()
+        );
+        let roster = crate::claude_roster::ClaudeRoster::parse(roster_json.as_bytes()).unwrap();
+        let witness = BgRoster {
+            roster: Some(roster),
+            readable: true,
+        };
+        let mut e = state::RegistryEntry::default();
+        e.name = "king".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("a1b2c3d4-1111-2222-3333-444455556666".into());
+        // The recorded start time no longer matches the roster's: the pid
+        // was recycled, so the row is not a running witness.
+        e.pid_start_time = Some(222);
+        assert!(
+            !witness.crown_running(&e),
+            "a recycled pid fails the start-time compare"
+        );
+        e.pid_start_time = Some(111);
+        assert!(witness.crown_running(&e));
+        e.pid_start_time = None;
+        assert!(
+            witness.crown_running(&e),
+            "a missing row start time leaves the pid answer standing"
+        );
+    }
+
+    #[test]
+    fn a_resumed_crowned_exited_row_recovers_on_two_positive_witnesses() {
+        let entries = vec![crowned_exited("king", "s-king-uuid", true)];
+        let (changes, recovered) = plan_crown_revivals(
+            &entries,
+            true,
+            |e: &RegistryEntry| e.harness_session_id.as_deref() == Some("s-king-uuid"),
+            |_| RowLiveness::Alive,
+        );
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
+        assert_eq!(changes[0].new_liveness, Some("alive"));
+        assert!(changes[0].crown_revive);
+        assert!(!changes[0].pid_proven, "a revival is a probe inference");
+        assert_eq!(recovered, vec!["king".to_string()]);
+    }
+
+    #[test]
+    fn a_crown_revival_needs_every_witness() {
+        // One witness missing, no revival: an unmeasured ladder answer, a
+        // roster that does not list the session with a live pid, a row with
+        // no crown to restore, and an unreadable roster all leave the row
+        // Exited. Silence and partial reads never revive.
+        let measured: &[RowLiveness] = &[RowLiveness::Unknown, RowLiveness::Dead];
+        for answer in measured {
+            let entries = vec![crowned_exited("king", "s-1", true)];
+            let (changes, recovered) = plan_crown_revivals(&entries, true, |_| true, |_| *answer);
+            assert!(changes.is_empty() && recovered.is_empty(), "{answer:?}");
+        }
+        let entries = vec![crowned_exited("king", "s-1", true)];
+        let (changes, recovered) =
+            plan_crown_revivals(&entries, true, |_| false, |_| RowLiveness::Alive);
+        assert!(changes.is_empty() && recovered.is_empty());
+        // Not crowned: a finished one-shot ask stays exited.
+        let entries = vec![crowned_exited("ask", "s-2", false)];
+        let (changes, recovered) =
+            plan_crown_revivals(&entries, true, |_| true, |_| RowLiveness::Alive);
+        assert!(changes.is_empty() && recovered.is_empty());
+        // Unreadable roster: no revival.
+        let entries = vec![crowned_exited("king", "s-3", true)];
+        let (changes, recovered) =
+            plan_crown_revivals(&entries, false, |_| true, |_| RowLiveness::Alive);
+        assert!(changes.is_empty() && recovered.is_empty());
+    }
+
+    #[test]
+    fn the_revival_write_rechecks_identity_and_crown_fields_under_the_lock() {
+        let mk_change = || crate::daemon::ReconcileChange {
+            name: "king".into(),
+            new_status: Some(AgentStatus::Live),
+            new_liveness: Some("alive"),
+            pid_proven: false,
+            crown_revive: true,
+        };
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let entries = vec![crowned_exited("king", "s-king-uuid", true)];
+
+        // A succession moved the crown mid-sweep: the crown fields are gone
+        // from the row, so the revival is refused.
+        let mut reg = state::Registry::default();
+        let mut uncrowned = crowned_exited("king", "s-king-uuid", true);
+        uncrowned.crown_scope = None;
+        uncrowned.crown_level = None;
+        reg.entries = vec![uncrowned];
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[mk_change()],
+            &titles,
+            &SweepMode::Full,
+            "2026-09-10T12:00:00Z",
+        );
+        assert_eq!(
+            reg.entries[0].status,
+            AgentStatus::Exited,
+            "a succession that moved the scope is not revived onto the old row"
+        );
+
+        // The row re-bound to a different session between plan and write:
+        // the keyed lookup misses and the name fallback is refused.
+        let mut reg = state::Registry::default();
+        let mut rebound = crowned_exited("king", "s-successor", true);
+        rebound.crown_scope = None;
+        reg.entries = vec![rebound];
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[mk_change()],
+            &titles,
+            &SweepMode::Full,
+            "2026-09-10T12:00:00Z",
+        );
+        assert_eq!(
+            reg.entries[0].status,
+            AgentStatus::Exited,
+            "a different session id is not revived by name"
+        );
+    }
+
+    #[test]
+    fn a_revived_crown_clears_its_stamp_and_counts_in_live_crowns() {
+        // AC2-HP end to end at the store: the applied revival flips the row
+        // to Live, update_registry's drive-eligible rule drops the stale
+        // exited_at, and the court's registry source (which sideline and
+        // king-share read) counts one crown.
+        let dir = std::env::temp_dir().join(format!(
+            "crown-revive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = dir.join("registry.json");
+        let entry = crowned_exited("king", "s-king-uuid", true);
+        fs::write(
+            &registry,
+            serde_json::json!({"schema_version": 11, "agents": [entry]}).to_string(),
+        )
+        .unwrap();
+        let entries = vec![entry];
+        let change = crate::daemon::ReconcileChange {
+            name: "king".into(),
+            new_status: Some(AgentStatus::Live),
+            new_liveness: Some("alive"),
+            pid_proven: false,
+            crown_revive: true,
+        };
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        state::update_registry(&registry, |r| {
+            crate::liveness_sweep::apply_reconcile_changes(
+                r,
+                &entries,
+                &[change],
+                &titles,
+                &SweepMode::Full,
+                "2026-09-10T12:00:00Z",
+            );
+        })
+        .unwrap();
+        let rows: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        let king = &rows["agents"][0];
+        assert_eq!(king["status"], "live", "{king}");
+        assert!(
+            king["exited_at"].is_null(),
+            "the drive-eligible rule drops the stale stamp: {king}"
+        );
+        let crowns = crate::territory::live_crowns(&registry).unwrap();
+        assert_eq!(crowns.len(), 1, "{crowns:?}");
+        assert_eq!(crowns[0].holder, "king");
+        assert_eq!(crowns[0].scope, "zed");
+        fs::remove_dir_all(&dir).ok();
     }
 }

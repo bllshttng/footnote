@@ -273,6 +273,10 @@ pub(crate) struct LaunchDraft {
     /// Cursor into `message`, in CHARS (the editor is char-addressed so a
     /// split UTF-8 sequence can never wedge it).
     pub cursor_chars: usize,
+    /// The backlog node a board prefill bound to this draft. The request
+    /// carries it only while the message's second word still names it, so
+    /// an edit that retargets or erases the message drops the binding.
+    pub node: Option<String>,
     /// The model id the launch carries; empty = harness default (never an
     /// invented resolved value).
     pub model: String,
@@ -308,7 +312,7 @@ impl LaunchDraft {
             .unwrap_or_default()
     }
 
-    fn request(&self, request_id: u64) -> AgentLaunchRequest {
+    pub(crate) fn request(&self, request_id: u64) -> AgentLaunchRequest {
         // EMPTY substrate = the door's thread default; a thread placement
         // names the lane explicitly because its placement flags need it, and
         // the one pane entry pins the pane lane.
@@ -339,6 +343,16 @@ impl LaunchDraft {
             placement: placement.map(str::to_string),
             portal,
             split: split.map(str::to_string),
+            // A board prefill's binding rides only while the message's
+            // second whitespace word (trailing sentence punctuation
+            // trimmed, the same charset as node_seed's) is still that id.
+            node: self.node.clone().filter(|id| {
+                self.message
+                    .split_whitespace()
+                    .nth(1)
+                    .map(|w| w.trim_end_matches(['.', ',', ';', ':', '!', '?']))
+                    == Some(id.as_str())
+            }),
             message: self.message.clone(),
         }
     }
@@ -431,6 +445,59 @@ fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutcome>) {
     }
 }
 
+/// Open the launcher with a board prefill: the target message, the node's
+/// project and the node binding. Assumes the dock is visible (`show_composer`
+/// ran) and reuses [`open`]'s retained-draft reveal when it is not. A kept
+/// non-empty draft is never overwritten: the error names the way out, and
+/// the operator's harness, model and effort picks stay the session's
+/// remembered ones - only message, project and node bind.
+pub(crate) fn open_with(
+    view: &mut View,
+    message: String,
+    cwd: Option<&str>,
+    node: String,
+) -> Result<(), String> {
+    // A dock already on screen keeps its state: open() only ever ran on a
+    // closed dock before this seam, and re-running it would wipe a held
+    // draft with a fresh one.
+    if view.launcher.is_none() {
+        open(view);
+    }
+    let launcher = view
+        .launcher
+        .as_mut()
+        .expect("the dock is open after open()");
+    // An empty draft always yields. Otherwise only a terminal `Launched`
+    // attempt makes way: a refused or unknown one keeps its reason on
+    // screen, and an in-flight one must never be replaced.
+    let attempt = view.launch_attempt.as_ref().map(|a| &a.state);
+    let replaceable = !matches!(attempt, Some(AttemptState::Starting))
+        && (launcher.draft.message.is_empty()
+            || matches!(attempt, Some(AttemptState::Launched { .. })));
+    if !replaceable {
+        return Err("the launcher holds a draft; empty it and press t again".to_string());
+    }
+    launcher.draft.message = message.clone();
+    launcher.draft.cursor_chars = message.chars().count();
+    launcher.draft.node = Some(node);
+    if let Some(dir) = cwd.filter(|d| !d.is_empty()) {
+        let idx = launcher
+            .draft
+            .projects
+            .iter()
+            .position(|p| p == dir)
+            .unwrap_or_else(|| {
+                launcher.draft.projects.push(dir.to_string());
+                launcher.draft.projects.len() - 1
+            });
+        launcher.draft.project_idx = idx;
+    }
+    launcher.phase = Phase::Editing;
+    launcher.focus = Focus::Harness;
+    launcher.draft.bump();
+    Ok(())
+}
+
 fn fresh_draft(view: &View) -> LaunchDraft {
     // Project candidates: the active workspace's squads, cwd-most-recent is
     // the session's own launch cwd. The exact cwd sent is the one shown.
@@ -453,6 +520,7 @@ fn fresh_draft(view: &View) -> LaunchDraft {
         project_idx: 0,
         message: String::new(),
         cursor_chars: 0,
+        node: None,
         model: String::new(),
         model_row: None,
         effort: String::new(),
