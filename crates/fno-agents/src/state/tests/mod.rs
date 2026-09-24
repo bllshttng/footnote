@@ -2622,6 +2622,7 @@ fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
 #[test]
 fn registry_schema_fields() {
     use serde::de::value::Error as DeError;
+    use serde::de::Error as _;
     use serde::de::Visitor;
     use serde::Deserializer;
 
@@ -2685,6 +2686,25 @@ fn registry_schema_fields() {
             Err(DeError::custom("field names captured"))
         }
 
+        fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_tuple_struct<V>(
+            self,
+            _name: &'static str,
+            _len: usize,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
         fn deserialize_unit_struct<V>(
             self,
             _name: &'static str,
@@ -2719,15 +2739,13 @@ fn registry_schema_fields() {
             deserialize_option,
             deserialize_unit,
             deserialize_seq,
-            deserialize_tuple,
-            deserialize_tuple_struct,
             deserialize_map,
             deserialize_identifier,
             deserialize_ignored_any
         );
     }
 
-    let raw = include_str!("../../../registry_schema.toml");
+    let raw = include_str!("../../registry_schema.toml");
     let parsed: toml::Value = toml::from_str(raw).expect("registry_schema.toml must parse as TOML");
     let toml_names: Vec<String> = parsed
         .get("fields")

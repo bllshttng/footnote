@@ -850,7 +850,7 @@ mod tests {
         let dir = tmp("unknown-field");
         let path = write_registry(
             &dir,
-            vec![crowned_row(serde_json::json!({"future_field": "x"}))],
+            serde_json::json!([crowned_row(serde_json::json!({"future_field": "x"}))]),
         );
         with_crowned_identity(|| {
             let scope = resolve_scope(None, &path).expect("unknown key must not blind the read");
