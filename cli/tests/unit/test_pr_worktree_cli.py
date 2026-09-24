@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ def test_pr_commands_from_canonical_use_the_pr_worktree(
 
     monkeypatch.setattr("fno.pr._review_hold.resolve_pr_worktree", resolve)
     monkeypatch.setattr(handler, lambda *a, **k: handler_calls.append(Path.cwd()) or 0)
+    monkeypatch.setattr(sys, "argv", ["fno", "do", "pr", command, *args])
 
     result = CliRunner().invoke(pr_app, [command, *args])
 

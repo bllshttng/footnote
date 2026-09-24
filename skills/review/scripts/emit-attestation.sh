@@ -123,12 +123,6 @@ case "$output_contract" in
 esac
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 
-if [[ "${REVIEW_TARGET:-}" =~ ^[1-9][0-9]*$ ]]; then
-  script_dir="${BASH_SOURCE[0]%/*}"
-  pr_worktree="$(bash "${script_dir}/resolve-pr-worktree.sh" "$REVIEW_TARGET")" || exit $?
-  cd -- "$pr_worktree"
-fi
-
 head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   echo "emit-attestation: not a git repo (cannot head-pin); no event emitted" >&2
   exit 1

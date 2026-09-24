@@ -20,6 +20,7 @@ import functools
 import json
 import os
 import subprocess
+import sys
 from typing import List, Optional
 
 import typer
@@ -37,10 +38,9 @@ pr_app = typer.Typer(
 
 @pr_app.callback()
 def _select_pr_worktree(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand not in ("verify", "status", "base-lineage-check",
-                                      "merge-result-check", "coverage-check"):
+    if not (command := ctx.invoked_subcommand) or not command.endswith(("check", "status", "verify")):
         return
-    if pr := next((arg for arg in ctx.args if arg.isdigit()), None):
+    if pr := next((arg for arg in sys.argv[sys.argv.index(command) + 1:] if arg.isdigit()), None):
         from fno.pr._review_hold import resolve_pr_worktree
 
         try:

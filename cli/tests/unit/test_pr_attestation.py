@@ -332,6 +332,17 @@ def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):
     fake_gh = fake_bin / "gh"
     fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' feature/pr-42\n", encoding="utf-8")
     fake_gh.chmod(0o755)
+    resolver = Path(__file__).parents[3] / "skills/review/scripts/resolve-pr-worktree.sh"
+    resolved = subprocess.run(
+        ["bash", str(resolver), "42"],
+        cwd=canonical,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    assert resolved.stdout.strip() == str(feature)
     fno_capture = tmp_path / "fno-calls.txt"
     fake_fno = fake_bin / "fno"
     fake_fno.write_text(
@@ -344,13 +355,12 @@ def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):
     script = Path(__file__).parents[3] / "skills/review/scripts/emit-attestation.sh"
     result = subprocess.run(
         ["bash", str(script), "code-review"],
-        cwd=canonical,
+        cwd=feature,
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "FNO": str(fake_fno),
             "FNO_CAPTURE": str(fno_capture),
-            "REVIEW_TARGET": "42",
         },
         capture_output=True,
         text=True,

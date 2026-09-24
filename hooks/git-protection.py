@@ -495,7 +495,7 @@ def _worktree_for_branch(branch):
     try:
         result = subprocess.run(
             ['git', 'worktree', 'list', '--porcelain'],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True, text=True, timeout=1,
         )
     except Exception:
         return None
@@ -527,7 +527,7 @@ def _pr_worktree_root(pr_number):
     try:
         head = subprocess.run(
             ['gh', 'api', f'repos/{{owner}}/{{repo}}/pulls/{pr_number}', '--jq', '.head.ref'],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=1,
         )
     except Exception:
         return None
@@ -963,7 +963,8 @@ def _review_hold_refusal(command=""):
     this hook cannot.
 
     NOT a third `fno` subprocess. The two vetoes above already spend 25s each
-    against a 60s harness budget with under 6s of margin, and a hook that gets
+    against a 60s harness budget with under 6s of margin; PR lookup is bounded
+    to two more seconds so a hook that gets
     killed emits no verdict at all - so a third probe would let an unauthorized
     merge through on the very storm state the guard exists for. A claim lockfile
     is a file, so this reads the directory instead: microseconds, no budget.
