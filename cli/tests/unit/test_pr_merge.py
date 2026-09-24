@@ -70,6 +70,7 @@ class FakeRun:
         self.base_move_files = base_move_files
         self.pr_files = pr_files
         self.compare_truncated = compare_truncated
+        self.cwd_calls: list[str | None] = []
         # require_checks_pass is enforced in-process now (x-9d11), so the
         # default fake serves a GREEN rollup; tests exercising refusal paths
         # pass their own.
@@ -85,6 +86,7 @@ class FakeRun:
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
         self.calls.append(cmd)
+        self.cwd_calls.append(cwd)
         tool = cmd[0]
         if tool == "git":
             if cmd[1:3] == ["rev-parse", "--show-toplevel"]:
@@ -416,8 +418,13 @@ def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
 # ---- classification ----
 
 
-def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
-    (tmp_path / ".fno").mkdir()
+def test_merge_immediate_exit_0_uses_pr_worktree(enabled, monkeypatch, capsys, tmp_path):
+    feature = tmp_path / "feature-worktree"
+    (feature / ".fno").mkdir(parents=True)
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree",
+        lambda pr, repo: str(feature),
+    )
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
@@ -425,6 +432,7 @@ def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
     assert obj["outcome"] == "merged"
     assert obj["strategy"] == "merge"
     assert "invoker" not in obj
+    assert str(feature) in fake.cwd_calls
 
 
 def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tmp_path):

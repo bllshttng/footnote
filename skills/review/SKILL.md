@@ -94,6 +94,8 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prov
 
 > When any target token survives this step, export it as `REVIEW_TARGET` for the empty-diff guard below. A PR number resolves to its head ref here (`gh pr view <n> --json headRefName -q .headRefName`), so a PR named from a worktree that is not the PR's checkout is still inspected at its own head. A bare invocation leaves `REVIEW_TARGET` empty.
 
+> For a numeric PR target, resolve the local checkout with `bash "${SKILL_DIR}/scripts/resolve-pr-worktree.sh" "$REVIEW_TARGET"` and enter the returned path before Phase 0. If the PR branch has no listed worktree, stop with that refusal; reading source files from the caller's checkout would review a different tree. This also makes the later attestation measure the same branch and HEAD.
+
 ## Step 2: the default mode (the fno review lane)
 
 ### 2a. Empty-diff guard (before anything runs)

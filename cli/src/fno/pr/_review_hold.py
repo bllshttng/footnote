@@ -397,6 +397,14 @@ def _parse_worktree_list(stdout: str) -> list[dict]:
     return entries
 
 
+def resolve_pr_worktree(pr_number: int, repo: str) -> str:
+    if not (Path(repo) / ".git").exists():
+        return repo
+    from fno.rust_binary import verb_call
+
+    return str(verb_call("pr-worktree", {"cwd": repo, "pr": pr_number})["worktree"])
+
+
 def _worktree_probe(
     branch: str, pr_head: str, repo: str, runner: Callable
 ) -> tuple[str, str, dict]:

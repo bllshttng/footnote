@@ -35,6 +35,20 @@ pr_app = typer.Typer(
 )
 
 
+@pr_app.callback()
+def _select_pr_worktree(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand not in ("verify", "status", "base-lineage-check",
+                                      "merge-result-check", "coverage-check"):
+        return
+    if pr := next((arg for arg in ctx.args if arg.isdigit()), None):
+        from fno.pr._review_hold import resolve_pr_worktree
+
+        try:
+            os.chdir(resolve_pr_worktree(int(pr), os.getcwd()))
+        except Exception as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+
 class VerifyKind(str, enum.Enum):
     merged = "merged"
     reviews = "reviews"
