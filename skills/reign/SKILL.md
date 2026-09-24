@@ -46,24 +46,19 @@ With `--once` the crown rules one wave and expires. Run Who runs this and On cro
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat and a shell watch; the watch runs with `claude --bg --exec`, so a quiet interval invokes no model. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md). None of the harnesses injects `/goal` or arms a Monitor.
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md). None of the harnesses injects `/goal` or arms a Monitor.
 
-The old rule “On Claude, arm ONE monitor, not six” is retired; Claude now arms the loop and settled-PR watch.
+The daemon mails the settle push on every harness:
 
-The old “Nudge-escalation wake” arm label is retired; its event-driven behavior now lives in the settled-PR watch. Codex's branch must arm nothing native.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green and once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
-1. **Settled-PR watch, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch reads that event, the crown row whose `manifest_session` matches, and its `scope_nodes.nodes` rows marked `owned: true`. A matching node with a ready, blocker-free `fno do pr status <n>` mails the crown one wrapped merge-lever line and exits. A missing crown row, `unreadable_files`, or any failed probe mails `reign watch probe failed: <reading>` and exits 1. The watch lock makes a second launch print its live pid and exit 0. Other matches stay quiet until the next poll.
-
-The watch is a demand arm, not a second board reader. Mail, board, crown liveness, CI, capacity and the tenure verdict remain check-in readings. A red settle stays with the daemon nudge ladder, which names the failing checks.
-
-On Claude, inject the loop as the cheap heartbeat, then launch the watch as a background shell job:
+On Claude, inject the loop as the cheap heartbeat:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
-claude --bg --exec "bash <skill-dir>/scripts/settled-pr-watch.sh <scope> <harness-session-id>"
 ```
 
-The watch's lock makes relaunching it after each check-in or watch wake safe. Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with both receipts, and use the beat table for every other harness. A quiet watch costs zero king turns; only an event, mail or the heartbeat wakes the reign.
+Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it, and use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -152,7 +147,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next beat, mail or settled-PR watch wakes the reign. `NoProgress` after three unshrinking fires still escalates automatically and parks the session; the answer wakes it through the wake arm. Do not fight the hook.
+Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next beat or mail wakes the reign, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires still escalates automatically and parks the session; the answer wakes it through the wake arm. Do not fight the hook.
 
 ## The three halts
 
