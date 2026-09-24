@@ -205,7 +205,7 @@ pub(crate) fn session_record_holder(
 /// session id. Exit 0 whenever it printed; the caller reads `held`, never
 /// the exit code.
 pub fn run_holder_action(session_ids: &[String]) -> i32 {
-    let dirs = session_record_dirs();
+    let dirs = crate::claude_ask::ClaudeHome::from_env().sessions_dirs();
     let mut out = serde_json::Map::new();
     for sid in session_ids {
         let answer = session_record_holder(&dirs, sid, &|pid| {
