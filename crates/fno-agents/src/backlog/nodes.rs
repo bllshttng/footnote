@@ -16,7 +16,7 @@ use super::model::{
     Dispatch, Lifecycle, Node, NodeClaim, OwnershipDefect, Priority, Provenance, PullRequest,
     Relations, Status, Supersession,
 };
-use super::{comments, encounters, pull_requests, relations, sessions};
+use super::{comments, encounters, findings, pull_requests, relations, sessions};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 
@@ -244,6 +244,7 @@ pub fn save(connection: &Connection, node: &Node) -> Result<(), String> {
         (node.sessions.is_some(), "sessions"),
         (node.comments.is_some(), "comments"),
         (node.encounters.is_some(), "encounters"),
+        (node.findings.is_some(), "findings"),
         (node.relations.blocked_by.is_some(), "blocked_by"),
         (node.relations.related.is_some(), "related"),
         (node.relations.supersedes.is_some(), "supersedes"),
@@ -665,6 +666,7 @@ fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec
         sessions: None,
         comments: None,
         encounters: None,
+        findings: None,
         decisions: None,
         relations: Relations::default(),
         supersession: None,
@@ -763,6 +765,12 @@ pub(crate) fn load_with_claim(
     };
     let loaded = encounters::load(connection, id)?;
     node.encounters = if present("encounters") {
+        Some(loaded)
+    } else {
+        None
+    };
+    let loaded = findings::load(connection, id)?;
+    node.findings = if present("findings") {
         Some(loaded)
     } else {
         None

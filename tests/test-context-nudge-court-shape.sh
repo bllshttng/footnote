@@ -99,7 +99,7 @@ jq -n --arg ts "$FRESH_TS" '{schema_version: 13, agents: ([
 # Above the king trigger so the general context nudge fires: its presence is
 # the positive control that the hook RAN in the silent case, separating "court
 # resolved it" from "nothing happened".
-jq -nc '{type:"assistant",message:{model:"claude-sonnet-4-6",usage:{input_tokens:500000,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$SBX/t.jsonl"
+jq -nc '{type:"assistant",message:{model:"claude-sonnet-4-6",usage:{input_tokens:600000,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$SBX/t.jsonl"
 payload() {
   jq -nc --arg t "$SBX/t.jsonl" --arg s "$KING_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:false}'

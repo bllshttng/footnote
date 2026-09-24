@@ -31,8 +31,12 @@
 //!   per-reply shapes in [`render_reply`].
 
 mod completion;
+mod harness_command;
+mod pane_submit;
 mod restore;
 
+pub use self::harness_command::command;
+use self::pane_submit::{pane_text, send_pane_bytes, submit_pane};
 use self::restore::workspace_restore;
 
 use std::ffi::OsString;
@@ -5069,117 +5073,6 @@ fn wait_with_deadline(
     Ok((exit, rendered, diagnostics))
 }
 
-fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {
-    !after_cr.trim().is_empty() && after_cr != before_cr
-}
-
-fn pane_text(sock: &Path, session: &str, pane: u64) -> Result<String, ControlError> {
-    match control_roundtrip(
-        sock,
-        session,
-        ControlVerb::PaneRead {
-            pane,
-            lines: None,
-            block: None,
-        },
-    )? {
-        ServerMsg::PaneText { text, .. } => Ok(text),
-        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
-        other => Err(ControlError::Fatal(format!(
-            "unexpected pane read reply while confirming submit: {other:?}"
-        ))),
-    }
-}
-
-fn send_pane_bytes(
-    sock: &Path,
-    session: &str,
-    pane: u64,
-    bytes: Vec<u8>,
-    guarded: bool,
-    expected_identity: Option<&str>,
-) -> Result<(), ControlError> {
-    match control_roundtrip(
-        sock,
-        session,
-        ControlVerb::PaneSend {
-            pane,
-            bytes,
-            guarded,
-            expected_identity: expected_identity.map(str::to_string),
-        },
-    )? {
-        ServerMsg::Ok => Ok(()),
-        ServerMsg::Err { code, msg }
-            if code == err_code::TARGET_IDENTITY_MISMATCH || code == err_code::TARGET_DND =>
-        {
-            Err(ControlError::FatalCode { code, msg })
-        }
-        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
-        other => Err(ControlError::Fatal(format!(
-            "unexpected pane send reply while submitting: {other:?}"
-        ))),
-    }
-}
-
-fn submit_pane(
-    sock: &Path,
-    session: &str,
-    pane: u64,
-    bytes: Vec<u8>,
-    guarded: bool,
-    expected_identity: Option<&str>,
-    json: bool,
-) -> i32 {
-    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity) {
-        eprintln!("fno mux pane: {e}");
-        return match e {
-            ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
-            ControlError::Fatal(_) => EXIT_ERROR,
-            ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
-                EXIT_TARGET_IDENTITY_MISMATCH
-            }
-            ControlError::FatalCode { code, .. } if code == err_code::TARGET_DND => EXIT_TARGET_DND,
-            ControlError::FatalCode { .. } => EXIT_ERROR,
-        };
-    }
-    std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
-    let baseline = pane_text(sock, session, pane).ok();
-    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity) {
-        eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
-        if let ControlError::FatalCode { code, .. } = e {
-            if code == err_code::TARGET_IDENTITY_MISMATCH {
-                return EXIT_TARGET_IDENTITY_MISMATCH;
-            }
-            if code == err_code::TARGET_DND {
-                return EXIT_TARGET_DND;
-            }
-        }
-        return EXIT_SUBMIT_UNCONFIRMED;
-    }
-    for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
-        if let (Some(before), Ok(after)) = (baseline.as_deref(), pane_text(sock, session, pane)) {
-            if positive_post_submit_marker(before, &after) {
-                // Every failure arm prints, so silence was the ONLY quiet
-                // outcome: a reader with the "no --submit prints nothing"
-                // contract read a silent success as a non-submit and re-sent.
-                // One positive word on stdout, the channel WaitDone reports
-                // its outcome word on.
-                if !json {
-                    println!("submitted");
-                }
-                return render_reply(ServerMsg::Ok, json, false, None);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(SUBMIT_CONFIRM_INTERVAL_MS));
-        if (attempt + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity);
-        }
-    }
-    eprintln!("fno mux pane: text delivered, submission unconfirmed");
-    EXIT_SUBMIT_UNCONFIRMED
-}
-
 /// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
 /// [--force]`: read a COMPLETED block from the source pane and land its text
 /// in the target pane's input. Porcelain over `pane read --block` + `pane
@@ -5340,7 +5233,7 @@ const ANNOTATE_EXCERPT_CAP: usize = 2048;
 
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
-/// as an operator review finding against `--node` via `fno backlog annotate add`.
+/// as an operator review finding against `--node` via `fno backlog note <node> --blocking`.
 /// Unlike `block pipe` there is NO target-idle guard (nothing enters a
 /// recipient PTY - delivery is a mail inject the daemon queues); it reuses the
 /// same typed-block gate (an open/truncated/markerless block refuses) and caps
@@ -5412,38 +5305,27 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    review) and there is nothing to clean up.
     let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
 
-    // 2b. Resolve the --from pane's cwd so `fno backlog annotate add` records the finding
-    //     into THAT worktree's .fno/events.jsonl - the one loop-check reads for
-    //     the node - not the caller's cwd (codex P1: a mismatched cwd lands the
-    //     durable finding in the wrong project and never gates). Best-effort: on
-    //     a PaneLs miss inherit the caller cwd (the mail inject still lands).
-    let pane_cwd = pane_cwd_via_ls(&sock, &session, parsed.from);
-
-    // 3. Shell the Python core (`fno backlog annotate add`) via this binary's own `fno`
-    //    entrypoint, so the finding recording + claim-holder delivery ladder
-    //    lives in one place. The
-    //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
+    // 3. Shell the note verb (`fno backlog note <node> --blocking`) via this
+    //    binary's own `fno` entrypoint, so the finding recording + claim-holder
+    //    delivery ladder lives in one place. The excerpt rides stdin
+    //    (`--block-excerpt-file -`), never a temp file. The findings store is
+    //    not cwd-bound, so the caller's cwd is fine.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
     let mut cmd = crate::process_admission::std_command(&fno);
     cmd.args([
         OsString::from("backlog"),
-        OsString::from("annotate"),
-        OsString::from("add"),
-        OsString::from("--node"),
+        OsString::from("note"),
         OsString::from(&parsed.node),
-        OsString::from("--message"),
+        OsString::from("--blocking"),
         OsString::from(&parsed.message),
         OsString::from("--block-excerpt-file"),
         OsString::from("-"),
     ])
     .stdin(std::process::Stdio::piped());
-    if let Some(cwd) = pane_cwd {
-        cmd.current_dir(cwd);
-    }
     let mut child = match crate::process_admission::std_spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             return EXIT_ERROR;
         }
     };
@@ -5456,23 +5338,9 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     match child.wait() {
         Ok(s) => s.code().unwrap_or(EXIT_ERROR),
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             EXIT_ERROR
         }
-    }
-}
-
-/// Resolve `pane`'s cwd via a `PaneLs` round-trip. Returns `None` on any miss
-/// (unreachable server, pane absent, empty cwd) so the caller degrades to the
-/// inherited cwd rather than failing the annotation outright.
-fn pane_cwd_via_ls(sock: &Path, session: &str, pane: u64) -> Option<String> {
-    match control_roundtrip(sock, session, ControlVerb::PaneLs) {
-        Ok(ServerMsg::PaneList { panes }) => panes
-            .into_iter()
-            .find(|p| p.pane_id == pane)
-            .map(|p| p.cwd)
-            .filter(|c| !c.is_empty()),
-        _ => None,
     }
 }
 
@@ -5502,6 +5370,7 @@ pub fn block(op: crate::cli_args::BlockOp, args: &[OsString], env_session: Optio
 
 #[cfg(test)]
 mod tests {
+    use super::pane_submit::positive_post_submit_marker;
     use super::*;
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
     use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};

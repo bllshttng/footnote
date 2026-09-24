@@ -363,6 +363,21 @@ pub struct Encounter {
     pub extras: Map<String, Value>,
 }
 
+/// One findings[] item: a blocking review finding that holds the loop gate
+/// until `resolved_at` is stamped (a findings row; JSON key `findings`).
+#[derive(Clone, Debug)]
+pub struct Finding {
+    pub finding_id: String,
+    pub created_at: Option<String>,
+    pub body: String,
+    pub block_cmd: Option<String>,
+    pub block_excerpt: Option<String>,
+    pub source_session_id: Option<String>,
+    pub source_harness: Option<String>,
+    pub resolved_at: Option<String>,
+    pub resolved_by_session_id: Option<String>,
+}
+
 /// One decisions[] item. Waves 4 to 11 store these in node extras; wave 12
 /// promotes them to decisions rows, so the typed surface stays the identity
 /// and the body rides `extras` until then.
@@ -489,6 +504,7 @@ pub struct Node {
     pub sessions: Option<Vec<SessionRecord>>,
     pub comments: Option<Vec<Comment>>,
     pub encounters: Option<Vec<Encounter>>,
+    pub findings: Option<Vec<Finding>>,
     pub decisions: Option<Vec<DecisionRef>>,
     pub relations: Relations,
     pub supersession: Option<Supersession>,
@@ -654,6 +670,7 @@ impl Node {
             sessions: session_list(row)?,
             comments: comment_list(row)?,
             encounters: encounter_list(row)?,
+            findings: finding_list(row)?,
             decisions: decision_list(row)?,
             relations: Relations {
                 blocked_by: opt_str_list(row, "blocked_by")?,
@@ -1080,6 +1097,13 @@ impl Node {
                 .unwrap_or(Value::Null),
         );
         put(
+            "findings",
+            self.findings
+                .clone()
+                .map(|list| Value::Array(list.iter().map(finding_to_json).collect()))
+                .unwrap_or(Value::Null),
+        );
+        put(
             "decisions",
             self.decisions
                 .clone()
@@ -1419,6 +1443,28 @@ obj_list!(
 );
 
 obj_list!(
+    finding_list,
+    "findings",
+    Finding,
+    |o: &Map<String, Value>| -> Result<Finding, ModelError> {
+        Ok(Finding {
+            finding_id: sub_opt_str(o, "finding_id")
+                .ok_or_else(|| ModelError("findings item needs finding_id".into()))?,
+            created_at: sub_opt_str(o, "created_at"),
+            body: sub_opt_str(o, "body")
+                .ok_or_else(|| ModelError("findings item needs body".into()))?,
+            block_cmd: sub_opt_str(o, "block_cmd"),
+            block_excerpt: sub_opt_str(o, "block_excerpt"),
+            source_session_id: sub_opt_str(o, "source_session_id"),
+            source_harness: sub_opt_str(o, "source_harness"),
+            resolved_at: sub_opt_str(o, "resolved_at"),
+            resolved_by_session_id: sub_opt_str(o, "resolved_by_session_id"),
+        })
+    },
+    finding_to_json
+);
+
+obj_list!(
     encounter_list,
     "encounters",
     Encounter,
@@ -1593,6 +1639,26 @@ pub(crate) fn comment_to_json(c: &Comment) -> Value {
         }
     }
     put_extras(&mut obj, &c.extras);
+    Value::Object(obj)
+}
+
+pub(crate) fn finding_to_json(f: &Finding) -> Value {
+    let mut obj = Map::new();
+    obj.insert("finding_id".into(), json!(f.finding_id));
+    obj.insert("body".into(), json!(f.body));
+    for (key, value) in [
+        ("created_at", &f.created_at),
+        ("block_cmd", &f.block_cmd),
+        ("block_excerpt", &f.block_excerpt),
+        ("source_session_id", &f.source_session_id),
+        ("source_harness", &f.source_harness),
+        ("resolved_at", &f.resolved_at),
+        ("resolved_by_session_id", &f.resolved_by_session_id),
+    ] {
+        if let Some(v) = value {
+            obj.insert(key.to_string(), json!(v));
+        }
+    }
     Value::Object(obj)
 }
 
@@ -1831,6 +1897,7 @@ fn is_known_key(key: &str) -> bool {
             | "sessions"
             | "progress_notes"
             | "encounters"
+            | "findings"
             | "decisions"
             | "blocked_by"
             | "related"
