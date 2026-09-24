@@ -112,9 +112,13 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     use fno_agents::graph_keeper::apply_op_for_tests;
     use fno_agents::graph_store::{self, MutateInput};
 
-    let mutate = |entries: Vec<Value>, g: &Path| -> graph_store::MutateOutcome {
+    // The last publish's entries: under sqlite graph.json is a frozen mirror,
+    // so the published surface is what the pipeline computed, not the file.
+    let published: std::cell::RefCell<Option<Vec<Value>>> = std::cell::RefCell::new(None);
+    let mutate = |entries: Vec<Value>, g: &Path| {
         // Single-writer probes: no interleaving, so the snapshot is current.
-        let base = graph_store::file_content_version(g);
+        // Backend-aware: under the sqlite store the version is graph_meta's.
+        let base = graph_store::base_version(g).expect("rust base version");
         // The map is what the frozen Python leg's client computes: the
         // fixtures ship no plan documents, so ladder.plan_rung answers
         // "none" for every row.
@@ -127,7 +131,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                     .map(|i| (i.to_string(), "none".to_string()))
             })
             .collect();
-        graph_store::locked_mutate(
+        let outcome = graph_store::locked_mutate(
             g,
             MutateInput {
                 entries,
@@ -137,29 +141,31 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
             },
             std::time::Duration::from_secs(5),
         )
-        .expect("rust locked_mutate")
+        .expect("rust locked_mutate");
+        *published.borrow_mut() = Some(outcome.entries);
     };
 
-    // The soft read swallows corruption to [] (read_graph's contract); the
-    // strict read surfaces the error kind. The closure models the Python soft
-    // reader over the soft opts spelling; `read_defaulted` itself is strict.
-    let soft = |g: &Path| -> Result<Vec<Value>, graph_store::StoreError> {
-        match graph_store::read_defaulted_opts(g, false, true) {
-            Ok(v) => Ok(v),
+    // The store is graph.db; the json file is a frozen mirror under it.
+    // read_rows runs the defaults pipeline, whose insertion order is the
+    // byte contract the goldens were captured with. The soft read swallows
+    // corruption to [] (read_graph's contract); the strict probe below
+    // surfaces the error kind.
+    let read_store = |g: &Path| -> Vec<Value> {
+        match graph_store::read_rows(g) {
+            Ok(rows) => rows,
             Err(
                 e @ graph_store::StoreError::Corrupt(_)
                 | e @ graph_store::StoreError::MalformedRoot(_)
                 | e @ graph_store::StoreError::Unreadable(_, _),
             ) => {
                 eprintln!("{e}");
-                Ok(vec![])
+                vec![]
             }
-            Err(e) => Err(e),
+            Err(e) => panic!("rust read: {e}"),
         }
     };
-
     let read_now = |g: &Path| -> String {
-        let entries = soft(g).expect("rust read");
+        let entries = read_store(g);
         graph_store::serialize_entries(&entries)
     };
 
@@ -187,7 +193,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
         let name = op.get("name").and_then(Value::as_str).unwrap_or("");
         match name {
             "set_field" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let node = op.get("node_id").and_then(Value::as_str).unwrap_or("");
                 let field = op.get("field").and_then(Value::as_str).unwrap_or("");
                 let value = op.get("value").cloned().unwrap_or(Value::Null);
@@ -200,12 +206,12 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 mutate(entries, graph);
             }
             "new_node" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 entries.push(op.get("entry").cloned().unwrap_or(Value::Null));
                 mutate(entries, graph);
             }
             "set_related" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let node = op.get("node_id").and_then(Value::as_str).unwrap_or("");
                 let desired: Vec<String> = op
                     .get("desired")
@@ -230,7 +236,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 steps.push(serde_json::json!({"read_after": read_now(graph)}));
             }
             other => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let mut request = serde_json::Map::new();
                 request.insert("name".into(), Value::String(other.to_string()));
                 request.insert("params".into(), op.clone());
@@ -270,7 +276,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     }
 
     json_out.insert("steps".into(), Value::Array(steps));
-    let file = std::fs::read(graph).expect("rust published file");
+    let file = match published.into_inner() {
+        Some(entries) => graph_store::serialize_graph_file(&entries).into_bytes(),
+        None => std::fs::read(graph).expect("rust fixture file"),
+    };
     json_out.insert(
         "file".into(),
         Value::String(base64::engine::general_purpose::STANDARD.encode(&file)),
@@ -618,8 +627,10 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
             // The snapshot read runs outside the lock; a stale snapshot
             // answers Conflict and the cycle retries until it lands.
             loop {
-                let base = graph_store::file_content_version(&g);
-                let mut entries = graph_store::read_defaulted(&g, false).unwrap();
+                // Backend-aware snapshot: the store version plus the store's
+                // own rows; a stale snapshot answers Conflict and retries.
+                let base = graph_store::base_version(&g)?;
+                let mut entries = graph_store::read_rows(&g)?;
                 entries.push(serde_json::json!({
                     "id": format!("ab-c0nc{i:04}"),
                     "title": format!("concurrent {i}")
@@ -648,7 +659,7 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
         }
     }
     assert_eq!(landed, 8, "every retried writer eventually lands");
-    let final_entries = graph_store::read_defaulted(&graph, false).unwrap();
+    let final_entries = graph_store::read_rows(&graph).unwrap();
     let ids: Vec<String> = final_entries
         .iter()
         .filter_map(|e| graph_store::entry_id(e).map(str::to_string))
