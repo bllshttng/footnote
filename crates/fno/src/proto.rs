@@ -328,7 +328,9 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 87;
+/// v88: `AgentLaunchRequest.node` (serde default), the board's target key
+/// binds the launch to its node; floor stays 58.
+pub const PROTO_VERSION: u32 = 88;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1854,14 +1856,9 @@ pub enum Command {
         name: String,
         text: String,
     },
-    /// (v34) Respawn an EXITED claude bg row from the peek overlay (`r`).
-    /// The server resolves `name` fail-closed, refuses a still-live row, refuses
-    /// a row with no recorded `claude_session_uuid` (which also covers non-claude
-    /// providers, since `derive_rows` carries the uuid only for claude rows),
-    /// shape-validates the uuid before it reaches argv, then shells `fno agents
-    /// spawn <name> --resume <uuid> --substrate bg` OFF-loop. The 1s registry
-    /// poll owns the row flipping live; the notice is advisory (fact beats
-    /// report). Rides revive-in-place: the porcelain is shelled as-is.
+    /// (v34) Run `fno agents resume <name>` for a row selected by the mux
+    /// Resume gesture. The door owns harness routing and race-time refusals;
+    /// its result returns as the gesture's notice.
     RespawnAgent {
         name: String,
     },
@@ -4100,7 +4097,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 87);
+        assert_eq!(PROTO_VERSION, 88);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
