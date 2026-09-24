@@ -33,7 +33,7 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
-**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder. Keep `BLUEPRINT_STARTED_AT` as well: the close passes it, so a run that plans under another holder's claim still records when it started.
+**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder. Keep `BLUEPRINT_STARTED_AT` as well. The close passes it on, so a run that plans under another holder's claim still records its start.
 
 ```bash
 OPENED_HOLDER=""
