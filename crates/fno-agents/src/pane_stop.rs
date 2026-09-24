@@ -528,7 +528,7 @@ fn session_holder_live(e: &RegistryEntry) -> SessionHolder {
             // stays as the fallback for rows the records cannot answer.
             let sid = e.harness_session_id.as_deref().unwrap_or("");
             let answer = crate::claude_sessions::session_record_holder(
-                &crate::claude_sessions::session_record_dirs(),
+                &crate::claude_ask::ClaudeHome::from_env().sessions_dirs(),
                 sid,
                 &|pid| crate::claims::process_create_time_ms(pid as i32),
             );

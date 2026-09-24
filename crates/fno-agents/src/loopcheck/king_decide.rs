@@ -450,11 +450,15 @@ fn stale_crown_doc_gate(
     // The handoffs-dir resolver lives only in the Python CLI; shell it rather
     // than copy it, then pick newest + mtime with the same resolver
     // king_checkin uses, so the two cannot drift.
-    let out = std::process::Command::new(fno_bin)
-        .args(["config", "paths", "handoff", "--scope", scope])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let out = match run_bounded(
+        std::ffi::OsStr::new(fno_bin),
+        &["config", "paths", "handoff", "--scope", scope],
+        cwd,
+        stopgate_read_timeout(),
+    ) {
+        BoundedRun::Completed(out) => out,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -506,7 +510,6 @@ fn stale_doc_block(
 #[cfg(test)]
 mod stale_crown_doc_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     const CROWN_START: &str = "2026-09-15T00:00:00Z";
@@ -536,17 +539,15 @@ mod stale_crown_doc_tests {
     /// The CLI stub answers `config paths handoff --scope` with a path inside
     /// `handoffs_dir`, the way the real verb prints the scope's newest doc.
     fn stub_fno(dir: &Path, handoffs_dir: &Path) -> String {
-        let stub = dir.join("fno-stub.sh");
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            &stub,
-            format!(
+        let stub = crate::write_exec_stub(
+            dir,
+            "fno-stub.sh",
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' '{}'\n",
                 handoffs_dir.join("unused-crown-footnote.md").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         stub.to_string_lossy().into_owned()
     }
 
