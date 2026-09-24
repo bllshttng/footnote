@@ -338,7 +338,9 @@ def test_codex_code_payload_after_provider_fence_is_checked() -> None:
     )
 
 
-def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
+def test_codex_code_spawn_in_a_repo_keeps_launch_path(
+    monkeypatch, tmp_path, loop_admission_ready
+) -> None:
     """A resolved grant is the positive control and must not refuse."""
     from fno.agents import sandbox_probe
     from fno.cli import app
@@ -373,7 +375,7 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
 
 @pytest.mark.parametrize("bypass", ["--yolo", "-Y"])
 def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path, bypass
+    monkeypatch, tmp_path, bypass, loop_admission_ready
 ) -> None:
     """x-8d88: a derived node makes this a node-bearing spawn, which takes
     the Python dispatch lane; the client exec is stubbed at its terminus."""
@@ -447,7 +449,7 @@ def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> No
     ],
 )
 def test_bounded_codex_code_spawn_is_probed_before_it_routes(
-    monkeypatch, tmp_path, verdict, blocked, routed, marker
+    monkeypatch, tmp_path, verdict, blocked, routed, marker, loop_admission_ready
 ) -> None:
     """x-8d88: the derived node takes the Python dispatch lane, so the
     routed branch is observed at the codex thread terminus."""
@@ -523,7 +525,7 @@ def test_sandbox_probe_runs_only_for_bounded_codex_code_spawns(monkeypatch, tmp_
 
 
 def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, loop_admission_ready
 ) -> None:
     """x-8d88: the derived node takes the Python dispatch lane."""
     from fno.cli import app
