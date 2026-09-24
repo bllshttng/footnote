@@ -1685,8 +1685,8 @@ def classify_open_pr_bindings(
     map's ``_branch_matches_node`` agrees with; when it yields nothing, the
     graph's own ``(pr_number, pr_url)`` back-pointer read through
     ``node_pr_refs``, scoped by URL because a ``pr_number`` is only unique
-    within one repository; when both miss, the row body's exact
-    ``Backlog-Closure:`` trailer. The branch key wins whenever it
+    within one repository; when both miss, the row body's exact closure line
+    (``Fixes``, or the retired ``Backlog-Closure:`` spelling). The branch key wins whenever it
     hits, so existing verdicts are unchanged. A row produced without a
     ``body`` field never reads the trailer; the ``untracked`` detail names
     that absence instead of reading it as an empty body.
@@ -1765,7 +1765,7 @@ def classify_open_pr_bindings(
                                     else "no url, back-pointer not read"
                                 )
                                 + (
-                                    "; body carries no Backlog-Closure trailer"
+                                    "; body carries no closure line"
                                     if body_supplied
                                     else "; body not supplied, trailer not read"
                                 )

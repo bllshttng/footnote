@@ -257,7 +257,7 @@ const SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "closure-trailer",
-        plan: "edit-body: write ONE Backlog-Closure line naming every node the branch names",
+        plan: "edit-body: write ONE Fixes line naming every node the branch names",
         matches: |c| {
             c.check.contains("check-pr-node-closure")
                 && c.log.contains("the exact trailer claims none")
@@ -1041,28 +1041,17 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
     healed
 }
 
-/// True when the line IS a `Backlog-Closure:` trailer line (anchored at the
-/// line start, case-insensitive - the same match the gate's grep makes).
+/// True when the line IS a closure line (anchored at the line start,
+/// case-insensitive, either spelling - the same match the gate's grep makes).
 fn is_trailer_line(line: &str) -> bool {
-    let prefix = "backlog-closure:";
-    line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
+    crate::king_board::pr_closure::is_closure_line(line)
 }
 
-/// The ids one `Backlog-Closure:` line claims: the label's own colon
-/// stripped, tokens split on whitespace and comma - the grammar
-/// `parse_closure_trailer` reads.
+/// The ids one closure line claims: the keyword and its optional colon
+/// stripped, tokens split on whitespace and comma, malformed tokens making
+/// the line prose. The grammar `pr_closure::parse` reads.
 fn closure_line_ids(line: &str) -> Vec<String> {
-    let Some((label, rest)) = line.split_once(':') else {
-        return Vec::new();
-    };
-    if !label.eq_ignore_ascii_case("backlog-closure") {
-        return Vec::new();
-    }
-    rest.split([' ', '\t', ','])
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::king_board::pr_closure::line_ids(line)
 }
 
 /// The remedy's own node ids, across every EditBody finding, in order.
@@ -1121,8 +1110,8 @@ fn edit_body_cmd(nodes: &[String]) -> String {
     }
 }
 
-/// Edit the PR body so exactly ONE Backlog-Closure line names every node the
-/// heal covers plus every id the body's existing trailer lines held. No
+/// Edit the PR body so exactly ONE closure line names every node the
+/// heal covers plus every id the body's existing closure lines held. No
 /// commit and no push: the closure workflow re-fires on an `edited` event.
 fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Result<bool, String> {
     let union = closure_union(findings, body);

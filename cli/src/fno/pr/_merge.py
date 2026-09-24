@@ -889,7 +889,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
     Delegates entirely to ``fno backlog reconcile --pr-number --repo`` (the
     same plural mode the post-merge ritual uses): it binds every node this
-    PR's exact ``Backlog-Closure`` trailer names, THEN runs the existing
+    PR's exact closure line names, THEN runs the existing
     forward scan (which also finds a node stamped at creation the old
     ``_find_pr_node_id`` match used to backfill by hand) plus the reverse
     branch-name map. A single-node PR with no trailer at all still closes via
@@ -937,7 +937,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             pr_url = view.stdout.strip()
 
         if external:
-            # External selection has no Backlog-Closure trailer concept of its
+            # External selection has no closure-trailer concept of its
             # own yet (that is graph-only) - resolve the ONE node this
             # PR's ref matches via the tracker-agnostic sidecar projection,
             # backfill its primary link, and close through the shared

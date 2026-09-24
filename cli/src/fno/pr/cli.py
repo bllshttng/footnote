@@ -948,7 +948,7 @@ def ritual(
 @pr_app.command(
     "closure-trailer",
     help=(
-        "Print the exact `Backlog-Closure:` trailer for NODE plus its "
+        "Print the exact `Fixes` closure line for NODE plus its "
         "contained_in descendants. Compose it into a PR body before "
         "`gh pr create` so every node the PR ships gets bound at merge, not "
         "just the one stamped by --pr-number. Prints nothing (exit 0) when "

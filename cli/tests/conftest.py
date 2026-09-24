@@ -1,6 +1,7 @@
 """Shared pytest fixtures for fno CLI tests."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -918,6 +919,53 @@ def native_backlog_door(monkeypatch):
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
+@pytest.fixture(autouse=True)
+def _closure_leg_hermetic(monkeypatch):
+    """Hermetic default for the closure-line forwarders.
+
+    `fno.pr.closure.parse_closure_trailer`/`render_closure_trailer` are thin
+    forwarders to the Rust leg (`fno-agents pr closure parse|render`). In the
+    test environment that resolver can find an installed binary without the
+    new verb, or none at all, so the default answers from a test-local copy
+    of the shared-corpus grammar; tests that pin the forwarder WIRING stub
+    `fno.pr.closure.closure_call` themselves, and the corpus test runs the
+    real dev binary when one exists (skip otherwise, the same contract as
+    `native_backlog_door`).
+    """
+    from fno.graph._constants import is_wellformed_node_id
+    from fno.pr import closure as closure_mod
+
+    def _fake_call(args, payload):
+        mode = args[0] if args else ""
+        if mode == "render":
+            ids = [t for t in dict.fromkeys(args[1:]) if is_wellformed_node_id(t)]
+            return f"Fixes {' '.join(ids)}\n" if ids else "\n"
+
+        def _line_ids(line):
+            stripped = line.strip()
+            for kw in ("fixes", "backlog-closure"):
+                if stripped.lower().startswith(kw):
+                    rest = stripped[len(kw):]
+                    if rest.startswith(":"):
+                        rest = rest[1:]
+                    if rest and not rest[0].isspace():
+                        return None  # glued word, not the keyword
+                    toks = [t for t in rest.replace(",", " ").split() if t]
+                    if not toks or not all(is_wellformed_node_id(t) for t in toks):
+                        return None  # one bad token: the line is prose
+                    return list(dict.fromkeys(toks))
+            return None
+
+        best = None
+        for line in (payload or "").splitlines():
+            ids = _line_ids(line)
+            if ids is not None:
+                best = ids
+        return f"{json.dumps(best or [])}\n"
+
+    monkeypatch.setattr(closure_mod, "closure_call", _fake_call)
 
 
 @pytest.fixture(autouse=True)

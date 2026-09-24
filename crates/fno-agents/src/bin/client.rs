@@ -941,6 +941,11 @@ async fn run(args: Vec<String>) -> i32 {
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
     }
+    // `pr closure`: the one parser/renderer for the PR-body closure line;
+    // the Python readers forward here (binary-direct, like `pr-body-check`).
+    if matches!(verb, "pr") {
+        return fno_agents::king_board::pr_closure::run(&args[1..]);
+    }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
     }

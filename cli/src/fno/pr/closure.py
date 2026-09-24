@@ -1,4 +1,4 @@
-"""Exact `Backlog-Closure:` trailer: parse, render, and bind PR-to-node closure.
+"""The PR-body closure line: parse, render, and bind PR-to-node closure.
 
 A merged PR's body may name several backlog nodes, but only the ONE node
 stamped into `.fno/target-state.md` at creation ever gets its `pr_number`
@@ -9,9 +9,19 @@ the reverse branch-name map only carries the primary node's id.
 Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") are
 measurement-only (see `scripts/metrics/pr-node-closure-audit.py`) and must
 NEVER become a closure claim - a dependency note or a follow-up filing reads
-identically to a close claim to a prose scanner. The exact trailer is the
-only runtime-recognized closure grammar, so a claim is either the literal
-line or it does not exist.
+identically to a close claim to a prose scanner. The exact line is the only
+runtime-recognized closure grammar, so a claim is either the literal line or
+it does not exist.
+
+The LINE FORMAT lives in one leg: the Rust parser (`crates/fno-agents/src/
+king_board/pr_closure.rs`), exposed as `fno-agents pr closure parse|render`.
+`parse_closure_trailer` and `render_closure_trailer` are thin forwarders to
+that verb, so the Python and Rust readers can never disagree about what a
+body claims. The keyword sits at the start of a line, case-insensitive, with
+or without a colon; every token after it is a well-formed node id, split by
+commas and/or spaces; one malformed token makes the line prose and it claims
+nothing; the LAST well-formed line wins. Writers emit only `Fixes`; readers
+also accept the retired `Backlog-Closure:` spelling while open PRs carry it.
 """
 from __future__ import annotations
 
@@ -23,51 +33,66 @@ from typing import Callable, Iterable, Optional
 
 from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
 
-TRAILER_KEY = "Backlog-Closure"
 
-# Anchored to the START of a line (MULTILINE): a sentence merely containing
-# "the Backlog-Closure trailer is..." mid-paragraph must never parse as the
-# trailer itself, matching git trailer convention.
-_TRAILER_LINE_RE = re.compile(
-    rf"^{re.escape(TRAILER_KEY)}:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE
-)
+class ClosureBinaryError(RuntimeError):
+    """The Rust closure leg failed or is missing; callers stop loudly rather
+    than read a claim with a broken parser."""
+
+
+def closure_call(args: list[str], payload: Optional[str]) -> str:
+    """One call to `fno-agents pr closure <mode>`. `payload` rides stdin when
+    given (parse); otherwise the ids come as argv (render). Module-level so
+    tests can pin the leg without a binary."""
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise ClosureBinaryError(
+            "fno-agents binary not found; the closure-line parser is the Rust "
+            "leg (fno-agents pr closure). Reinstall fno, run `fno doctor update "
+            "--rust`, or set FNO_AGENTS_BIN."
+        )
+    proc = subprocess.run(
+        [str(binary), "pr", "closure", *args],
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise ClosureBinaryError(
+            f"pr closure {args[0] if args else '?'} failed "
+            f"(rc={proc.returncode}): {(proc.stderr or '').strip()}"
+        )
+    return proc.stdout
 
 
 def parse_closure_trailer(body: str) -> list[str]:
-    """Well-formed node ids named on the LAST exact ``Backlog-Closure:`` line.
+    """Well-formed node ids named on the LAST closure line of ``body``.
 
-    Order-preserved, deduplicated. Only a line that starts exactly with the
-    trailer key counts (AC2-EDGE) - prose in a Dependencies/Follow-ups/
-    Collisions section never becomes a claim, however it phrases a mention.
-    Multiple trailer lines (e.g. after a rebase carried a stale one forward):
-    only the LAST wins, mirroring git trailer semantics. A malformed token on
-    an otherwise-good line (typo, stray punctuation) is silently dropped here;
-    the CI backstop (``check-pr-node-closure.sh``) is what enforces
-    well-formedness at PR-open time, not this runtime parser refusing an
-    otherwise-legitimate merge over one bad token.
+    A thin forwarder to the Rust leg (`fno-agents pr closure parse`); the
+    grammar and its edge cases live there and in the shared corpus fixture
+    (`tests/fixtures/pr-closure-cases.json`). Raises ``ClosureBinaryError``
+    when the leg is missing or fails.
     """
     if not isinstance(body, str) or not body:
         return []
-    lines = _TRAILER_LINE_RE.findall(body)
-    if not lines:
-        return []
-    ids: list[str] = []
-    seen: set[str] = set()
-    for token in lines[-1].replace(",", " ").split():
-        if is_wellformed_node_id(token) and token not in seen:
-            seen.add(token)
-            ids.append(token)
-    return ids
+    import json
+
+    out = closure_call(["parse"], body).strip()
+    return json.loads(out) if out else []
 
 
 def render_closure_trailer(node_ids: list[str]) -> str:
     """The one place a trailer LINE is built, so parse<->render round-trips.
 
-    Drops malformed/duplicate ids; returns "" (no line) when nothing well-formed
-    remains, so a caller can safely append the result to a body unconditionally.
+    A thin forwarder to the Rust leg (`fno-agents pr closure render`); the
+    Rust renderer drops malformed/duplicate ids and returns "" (no line) when
+    nothing well-formed remains, so a caller can safely append the result to
+    a body unconditionally. Emits only the ``Fixes`` spelling.
     """
-    ids = [n for n in dict.fromkeys(node_ids) if is_wellformed_node_id(n)]
-    return f"{TRAILER_KEY}: {' '.join(ids)}" if ids else ""
+    return closure_call(["render", *[n for n in node_ids]], None).strip()
 
 
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:
