@@ -3694,7 +3694,7 @@ mod tests {
             status["result"]["reply"]["result"]["entries_elided"],
             json!(true)
         );
-        let rows = graph_store::read_rows(&graph).unwrap();
+        let rows = graph_store::read_defaulted(&graph, false).unwrap();
         assert_eq!(rows[0]["id"], json!("x-written"));
     }
 

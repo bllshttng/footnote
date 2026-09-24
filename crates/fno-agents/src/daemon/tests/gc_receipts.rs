@@ -3472,12 +3472,6 @@ pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
     .unwrap();
 }
 
-/// The graph as the store serves it, in the staged file's shape. A settle
-/// writes graph.db, so the json file alone no longer shows what landed.
-pub(super) fn stored_graph(dir: &std::path::Path) -> Value {
-    json!({ "entries": crate::graph_store::read_rows(&dir.join("graph.json")).unwrap() })
-}
-
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
 pub(super) fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Vec<Value>) -> Value {
     json!({
@@ -3630,7 +3624,8 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
         )]
     );
     // THE assertion: the file still holds the row, now closed, never removed.
-    let raw: Value = stored_graph(dir.path());
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
     let entry = &raw["entries"][0];
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
@@ -3682,7 +3677,8 @@ fn a_done_but_unmerged_node_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-b".to_string(), "N2".to_string())]
     );
-    let raw: Value = stored_graph(dir.path());
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
     let row = &raw["entries"][0]["sessions"][0];
     assert!(row.get("ended_at").is_none(), "{row}");
     let rendered = crate::reap_render::render_reap(&summary, false, false);
@@ -3728,7 +3724,8 @@ fn an_open_additional_pr_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-c".to_string(), "N3".to_string())]
     );
-    let raw: Value = stored_graph(dir.path());
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
     assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
 }
 
@@ -3818,7 +3815,8 @@ fn the_live_eighteen_split_fifteen_and_three() {
     for node in ["Nu", "Np1", "Np2"] {
         assert!(held.contains(&&node.to_string()), "held: {held:?}");
     }
-    let raw: Value = stored_graph(dir.path());
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
     for entry in raw["entries"].as_array().unwrap() {
         let node = entry["id"].as_str().unwrap();
         for row in entry["sessions"].as_array().unwrap() {
@@ -3855,7 +3853,7 @@ fn a_dry_run_settles_nothing_on_disk() {
         spawn_row(r, "row-d", "sess-d");
     })
     .unwrap();
-    let before = stored_graph(dir.path());
+    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
 
     let summary = settle_then_run(
         &home,
@@ -3872,9 +3870,10 @@ fn a_dry_run_settles_nothing_on_disk() {
         vec![("N4".into(), "claude".into(), "sess-d".into())]
     );
     assert!(summary.kept_open_do_row.is_empty());
-    let after = stored_graph(dir.path());
+    let after = std::fs::read(dir.path().join("graph.json")).unwrap();
     assert_eq!(before, after, "a dry run wrote the graph");
-    assert!(after["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let raw: Value = serde_json::from_slice(&after).unwrap();
+    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
     assert!(
         !summary.dry_run_unverified.is_empty(),
         "the row stays on the retirement path, its remaining gate named: {summary:?}"
@@ -3948,7 +3947,7 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
             vec![open_do_row("claude", "sess-g")],
         )]),
     );
-    let before = stored_graph(dir.path());
+    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
 
     let summary = crate::gc::gc_sweep_dry_run(&home, 0);
 
@@ -3956,7 +3955,10 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
         summary.settled_do_rows,
         vec![("N7".into(), "claude".into(), "sess-g".into())]
     );
-    assert_eq!(before, stored_graph(dir.path()));
+    assert_eq!(
+        before,
+        std::fs::read(dir.path().join("graph.json")).unwrap()
+    );
 }
 
 /// x-5aef AC5, hard version (the codex P1 on PR 1637): an open do row that
