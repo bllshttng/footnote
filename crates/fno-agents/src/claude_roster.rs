@@ -1237,7 +1237,9 @@ id = "gamma"
 config_dir = "dir-c"
 "#;
         std::fs::write(global.join("config.toml"), toml_g).unwrap();
-        std::fs::write(home.join("config.toml"), toml_h).unwrap();
+        // The home source reads HOME/.fno/config.toml, not HOME/config.toml.
+        std::fs::create_dir_all(home.join(".fno")).unwrap();
+        std::fs::write(home.join(".fno").join("config.toml"), toml_h).unwrap();
         let previous_home = std::env::var_os("HOME");
         let previous_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
         std::env::set_var("HOME", &home);
