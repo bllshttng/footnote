@@ -36,9 +36,9 @@ fn ws(_graph: &std::path::Path, id: &str, body: &str) -> StateWriteInput {
 }
 
 fn read_graph(path: &PathBuf) -> Vec<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    v["entries"].as_array().unwrap().clone()
+    // graph.db is the only store; the json file is a frozen mirror under it.
+    // Every row a writer landed lives in the store, so the reads go there.
+    fno_agents::graph_store::read_rows(path).unwrap()
 }
 
 #[test]
