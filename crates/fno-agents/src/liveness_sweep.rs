@@ -62,29 +62,41 @@ impl BgRoster {
             return false;
         }
         match &self.roster {
-            Some(roster) => {
-                roster.find(&e.short_id).is_some()
-                    || e.harness_session_id
-                        .as_deref()
-                        .is_some_and(|sid| roster.find(sid).is_some())
-            }
+            // Presence via either key: the same two-key lookup find() runs.
+            Some(_) => self.find(e).is_some(),
             // An unreadable roster is unknown liveness: never declare death.
             None => true,
         }
     }
 
     /// A positive running marker off the roster: the exact recorded session
-    /// is listed and its worker pid still answers. A worker without a
+    /// is listed, its worker pid still answers, and - when both sides
+    /// recorded a start time - the times still match. A worker without a
     /// recorded pid cannot prove it is running; a stale pre-reboot row
-    /// carries a pid that answers ESRCH and reads as the absence it is.
+    /// carries a pid that answers ESRCH and reads as the absence it is, and
+    /// a RECYCLED pid answers kill(0) even though the worker is gone, so
+    /// presence plus not-gone alone must not pass.
     pub(crate) fn crown_running(&self, e: &RegistryEntry) -> bool {
         if e.harness_name() != "claude" {
             return false;
         }
-        self.find(e)
-            .and_then(|w| w.pid)
+        let Some(w) = self.find(e) else {
+            return false;
+        };
+        if !w
+            .pid
             .map(|pid| !crate::daemon::pid_is_gone(pid))
             .unwrap_or(false)
+        {
+            return false;
+        }
+        match (w.proc_start, e.pid_start_time) {
+            // The lenient parse degrades a date-string procStart to None; a
+            // None on either side leaves the pid answer standing - degraded
+            // evidence, not a refusal.
+            (Some(roster_start), Some(row_start)) => roster_start == row_start,
+            _ => true,
+        }
     }
 }
 
@@ -1104,6 +1116,40 @@ mod tests {
             e.crown_level = Some(2);
         }
         e
+    }
+
+    #[test]
+    fn crown_running_rejects_a_recycled_pid_on_start_time_mismatch() {
+        // The roster pid must be LIVE on this machine (the test process's
+        // own), so the ESRCH probe passes and the start-time compare is what
+        // the assertions exercise.
+        let roster_json = format!(
+            r#"{{"proto":1,"supervisorPid":4242,"updatedAt":1,"workers":{{"a1b2c3d4":{{"pid":{},"procStart":111,"sessionId":"a1b2c3d4-1111-2222-3333-444455556666"}}}}}}"#,
+            std::process::id()
+        );
+        let roster = crate::claude_roster::ClaudeRoster::parse(roster_json.as_bytes()).unwrap();
+        let witness = BgRoster {
+            roster: Some(roster),
+            readable: true,
+        };
+        let mut e = state::RegistryEntry::default();
+        e.name = "king".into();
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("a1b2c3d4-1111-2222-3333-444455556666".into());
+        // The recorded start time no longer matches the roster's: the pid
+        // was recycled, so the row is not a running witness.
+        e.pid_start_time = Some(222);
+        assert!(
+            !witness.crown_running(&e),
+            "a recycled pid fails the start-time compare"
+        );
+        e.pid_start_time = Some(111);
+        assert!(witness.crown_running(&e));
+        e.pid_start_time = None;
+        assert!(
+            witness.crown_running(&e),
+            "a missing row start time leaves the pid answer standing"
+        );
     }
 
     #[test]
