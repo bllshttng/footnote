@@ -816,9 +816,8 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     // reverted note write (clobbered by a stale whole-file publish) reads as
     // a revision below the count of ok answers.
     for (node, ok) in &note_out {
-        let row = final_graph["entries"]
-            .as_array()
-            .unwrap()
+        let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
+        let row = rows
             .iter()
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();

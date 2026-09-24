@@ -115,7 +115,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     let mutate = |entries: Vec<Value>, g: &Path| -> graph_store::MutateOutcome {
         // Single-writer probes: no interleaving, so the snapshot is current.
         // Backend-aware: under the sqlite store the version is graph_meta's.
-        let base = graph_store::base_version(g);
+        let base = graph_store::base_version(g).expect("rust base version");
         // The map is what the frozen Python leg's client computes: the
         // fixtures ship no plan documents, so ladder.plan_rung answers
         // "none" for every row.
