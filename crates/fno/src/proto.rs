@@ -315,6 +315,8 @@ fn default_true() -> bool {
 /// the client derives the age at render. Same decode both ways; floor 58.
 /// v78: `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
+/// v88: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
+/// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
 /// v87: `Layout.missions` removed (the band is gone); floor stays 58.
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
@@ -328,7 +330,7 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 87;
+pub const PROTO_VERSION: u32 = 88;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1011,6 +1013,7 @@ pub struct LayoutTreeChild {
     pub tree: LayoutTreeSpec,
 }
 
+pub use crate::proto_pane::PaneInfo;
 pub use crate::proto_slot::{LayoutBinding, LayoutSlot, PortalSlot};
 
 /// A versioned anchored layout (v44): a typed [`LayoutTreeSpec`] plus
@@ -1493,6 +1496,13 @@ pub enum Command {
     SplitH,
     SplitV,
     ClosePane,
+    /// (v88) Close ONLY the portal seat `seat` - the viewer pane - never the
+    /// row it shows: removing a row is not removing a pane, and closing a
+    /// portal is its own gesture. Fail-closed: a pane that is no live portal
+    /// seat, or the session's last pane, gets a notice and stays open.
+    ClosePortal {
+        seat: u64,
+    },
     FocusDir(Dir),
     ResizeDir(Dir),
     /// Move one seam under a mouse drag on a divider. The seam is
@@ -2461,67 +2471,6 @@ pub struct TabLayout {
     /// byte-shape unchanged for every existing consumer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<Vec<TabPaneOccupant>>,
-}
-
-/// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
-/// canonical root; `child_pid` is `None` only if the OS never reported one.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaneInfo {
-    pub pane_id: u64,
-    pub squad_id: u64,
-    /// The live workspace name, when this pane belongs to a named workspace.
-    /// Additive so workspace maintenance can apply `--include-named` to tabs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub squad_name: Option<String>,
-    pub tab_id: u64,
-    pub cwd: String,
-    pub child_pid: Option<u32>,
-    pub title: Option<String>,
-    /// Positive shell-integrated evidence that this pane is pristine and idle.
-    /// Missing/false is never treated as empty by a cleanup caller.
-    #[serde(default)]
-    pub pristine_idle_shell: bool,
-    /// (v65) The pane ran something and sits at a prompt NOW: shell
-    /// integration measured, no command running, a completed block. Narrower
-    /// than `!pristine_idle_shell` (which also covers running and unmeasured
-    /// panes): a cleanup caller may close on this, never the bare negation.
-    /// `#[serde(default)]` keeps a pre-v65 reader wire-tolerant.
-    #[serde(default)]
-    pub shell_idle: bool,
-    /// (v51) The pane's tab name and 1-based ordinal, so the human
-    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` mid-teardown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_ordinal: Option<usize>,
-    /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
-    /// server-side from the registry join the mux already caches. `None` for a
-    /// pane with no registry row (an ad-hoc shell). Powers `pane ls --fno-id`
-    /// and the reverse direction of `where` (Locked Decision 6).
-    #[serde(default)]
-    pub fno_id: Option<String>,
-    /// (v71) Hosts a stored member judged Dead; the default prune closes its
-    /// tab. `#[serde(default)]`: a v68 payload reads false.
-    #[serde(default)]
-    pub orphaned_worker: bool,
-    /// When the release tier fired, the evidence the release rode:
-    /// `reaped <harness> <session id> at <ts>: <basis>`. Additive like
-    /// `orphaned_worker`; absent on every other pane and every other tier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release: Option<String>,
-    /// The joined row's classified lineage: the CURRENT harness
-    /// session the row answers as, the succession chain it retired, and the
-    /// fork edge of a parallel branch. `fno_id` stays the stable thread join;
-    /// these print BESIDE it so a retired id never reads as current.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub predecessor_session_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from_session_id: Option<String>,
-    /// (v51) The pane's spawn-captured `FNO_AGENT_SELF` identity.
-    #[serde(default)]
-    pub name: Option<String>,
 }
 
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
@@ -4100,7 +4049,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 87);
+        assert_eq!(PROTO_VERSION, 88);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

@@ -42,6 +42,7 @@ pub mod popup;
 pub mod process_admission;
 pub mod product_boundary;
 pub mod proto;
+pub mod proto_pane;
 pub mod proto_slot;
 pub mod pty;
 pub mod ratatui_blit;
