@@ -98,12 +98,19 @@ pub(crate) fn emit_block(reason: &str) -> i32 {
 /// fire and cannot tell a king's own row from a neighbor's - the misread
 /// that once sent a drain-reserve fix chasing a driver=target
 /// misclassification for days.
+pub(crate) fn global_events_path(fallback: &Path) -> PathBuf {
+    std::env::var_os("GLOBAL_EVENTS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::paths::AgentsHome::from_env_opt()
+                .map(|home| crate::daemon::global_events_path(&home))
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
 pub(crate) fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
     let project_events = crate::paths::events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
+    let global_events = global_events_path(&project_events);
     // A missing space root must drop nothing: this row is the one record
     // that a fire ran, and the append below is best-effort, so the target
     // dirs are created here rather than trusted to exist.
