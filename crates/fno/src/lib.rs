@@ -29,6 +29,7 @@ pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
 pub mod link;
+pub mod live_store_fence;
 pub mod mouse;
 pub mod mux_cli;
 pub mod mux_rows;
