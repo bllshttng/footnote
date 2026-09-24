@@ -98,24 +98,6 @@ pub(crate) fn print_resume_command(
         );
         return 13;
     }
-    let mut argv = match contract.render_session_argv_raw(
-        harness,
-        "interactive_resume",
-        Some(form_session_id),
-    ) {
-        Ok(argv) => argv,
-        Err(_) => {
-            if let ResumeRoute::Refused(line) = route {
-                eprintln!("{line}");
-            } else {
-                eprintln!(
-                    "fno agents resume: harness {} resume contract is invalid.",
-                    crate::client_verbs::py_repr_str(harness)
-                );
-            }
-            return 13;
-        }
-    };
     let row_name = entry
         .get("name")
         .and_then(Value::as_str)
@@ -143,6 +125,29 @@ pub(crate) fn print_resume_command(
             recorded_cwd.to_string()
         }
     });
+    let argv = if harness == "codex" {
+        crate::pane_relaunch::build_resume_argv_tokens_split(
+            harness,
+            form_session_id,
+            Some(&cwd),
+            true,
+        )
+    } else {
+        contract
+            .render_session_argv_raw(harness, "interactive_resume", Some(form_session_id))
+            .ok()
+    };
+    let Some(mut argv) = argv else {
+        if let ResumeRoute::Refused(line) = route {
+            eprintln!("{line}");
+        } else {
+            eprintln!(
+                "fno agents resume: harness {} resume contract is invalid.",
+                crate::client_verbs::py_repr_str(harness)
+            );
+        }
+        return 13;
+    };
     let codex_route_outcome =
         crate::codex_route::resume_route(harness, entry, Path::new(&cwd), &mut argv);
     if let Some(code) = crate::codex_route::resume_verdict(&codex_route_outcome, entry, row_name) {

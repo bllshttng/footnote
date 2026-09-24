@@ -617,6 +617,19 @@ pub(crate) fn build_resume_argv_split(
     grant_cwd: Option<&str>,
     pin_cd: bool,
 ) -> Option<Vec<String>> {
+    let argv = build_resume_argv_tokens_split(provider, session_id, grant_cwd, pin_cd)?;
+    crate::harness_capabilities::compose_pre_exec(provider, "interactive_resume", argv).ok()
+}
+
+/// Raw resume command tokens before the lane's declared `pre_exec` wrapper.
+/// Print-command output uses these tokens because Python prints the paste-ready
+/// harness command and does not launch the pre-exec daemon itself.
+pub(crate) fn build_resume_argv_tokens_split(
+    provider: &str,
+    session_id: &str,
+    grant_cwd: Option<&str>,
+    pin_cd: bool,
+) -> Option<Vec<String>> {
     // The declared form is the whole identity: cursor-agent's interactive_resume
     // tokens already end in --trust, and a second one is a duplicated flag,
     // never a stronger one. Python's builder renders the same form with no
@@ -678,7 +691,7 @@ pub(crate) fn build_resume_argv_split(
             }
         }
     }
-    crate::harness_capabilities::compose_pre_exec(provider, "interactive_resume", argv).ok()
+    Some(argv)
 }
 
 /// The env(1) assignment tokens for one env pair set, prefixed ahead of the
