@@ -627,6 +627,9 @@ FIELD_META: dict[str, Meta] = {
     "sideline.colors.row": Meta(
         "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
     ),
+    "sideline.layout": Meta(
+        "advanced", "The sideline's row shape: \"card\" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); \"list\" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.",
+    ),
     # --- config.model_routing.* (role-based per-spawn model routing) ---
     "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.",

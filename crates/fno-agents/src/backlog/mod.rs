@@ -85,6 +85,7 @@ pub(crate) fn write_connection(graph: &Path) -> Result<Connection, String> {
 
 pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
