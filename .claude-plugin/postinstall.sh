@@ -285,7 +285,7 @@ if command -v uv >/dev/null 2>&1; then
 
   case "$CHANNEL" in
     rc)
-      log "channel rc: pinning the candidate from PyPI: uv tool install fno==$SRC_VERSION (a plain by-name install skips pre-releases)..."
+      log "channel rc: pinning the candidate from PyPI as fno==$SRC_VERSION (a plain by-name install skips pre-releases)..."
       try_channel_install "fno==$SRC_VERSION" "PyPI"
       ;;
     nightly)
