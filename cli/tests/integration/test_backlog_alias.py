@@ -156,7 +156,7 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "done", node_id)
+    r = _invoke("backlog", "done", node_id, "--note", "marks the node completed")
     assert r.exit_code == 0, r.output
 
     # Fetch and assert completed_at is set
