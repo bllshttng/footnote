@@ -56,11 +56,55 @@ fn parse_caller(value: Option<&Value>) -> Option<Caller> {
     }
 }
 
-/// Decide occupancy for one crowned spawn over `scope`. See the module doc
-/// for the caller/succession rules and the request/answer shapes.
+/// Decide occupancy for one crowned spawn over `scope`, then apply the
+/// crown-name effect (a succeeded succession carries the name with a
+/// regnal bump; a fresh grant forgets it). See the module doc for the
+/// caller/succession rules and the request/answer shapes.
 pub fn resolve(payload: &Value) -> Result<Value, String> {
+    if payload.get("plan").is_none() {
+        // The plan/preview path reads no store and no home env (existing
+        // unit tests run it with no declared agents home).
+        let projects = crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
+        return resolve_with_projects(payload, &projects);
+    }
+    let store = crate::paths::AgentsHome::from_env_opt().map(|h| h.crown_names_json());
     let projects = crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
-    resolve_with_projects(payload, &projects)
+    let answer = resolve_with_projects(payload, &projects)?;
+    // No declared home (a test) reads as no store, so the plan answer is
+    // unchanged; production always declares one.
+    if let Some(store) = store.as_ref() {
+        apply_name_effect(payload, &answer, store);
+    }
+    Ok(answer)
+}
+
+/// [`resolve`] with an explicit store path, so tests pass a tempdir store
+/// instead of setting the agents home env.
+pub fn resolve_at(payload: &Value, store: &std::path::Path) -> Result<Value, String> {
+    let projects = crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
+    let answer = resolve_with_projects(payload, &projects)?;
+    apply_name_effect(payload, &answer, store);
+    Ok(answer)
+}
+
+/// The registry commit is the authority: a store error prints one stderr
+/// line and never changes the answer.
+fn apply_name_effect(payload: &Value, answer: &Value, store: &std::path::Path) {
+    if payload.get("plan").is_none() {
+        return;
+    }
+    let Some(scope) = payload.get("scope").and_then(|s| s.as_str()) else {
+        return;
+    };
+    let outcome = answer.get("outcome").and_then(|o| o.as_str());
+    let effect = match outcome {
+        Some("succeeded") => crate::crown_names::carry_succession(store, scope),
+        Some("granted") => crate::crown_names::forget(store, scope),
+        _ => Ok(()),
+    };
+    if let Err(e) = effect {
+        eprintln!("crown-settle: crown names: {e}");
+    }
 }
 
 fn resolve_with_projects(
@@ -399,6 +443,46 @@ mod tests {
 
     fn row(name: &str, scope: &str, status: &str) -> Value {
         json!({"name": name, "crown_scope": scope, "status": status})
+    }
+
+    fn crown_registry(tmp: &std::path::Path, agents: Value) -> std::path::PathBuf {
+        let reg = tmp.join("registry.json");
+        let doc = json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": agents,
+        });
+        std::fs::write(&reg, doc.to_string()).unwrap();
+        reg
+    }
+
+    fn crown_store(tmp: &std::path::Path) -> std::path::PathBuf {
+        tmp.join("crown_names.json")
+    }
+
+    fn named_record_fixture(tmp: &std::path::Path) {
+        std::fs::write(
+            crown_store(tmp),
+            serde_json::to_string(&json!({
+                "version": 1,
+                "crowns": {"x-65a7": {
+                    "name": "barnaby", "regnal": 1,
+                    "holder_session": "sess-old",
+                    "nodes": [], "updated_at": "2026-09-23T20:00:00Z"}},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn agents_with_succession_rows() -> Value {
+        json!([
+            {"name": "king-old", "status": "live", "crown_scope": "x-65a7",
+             "crown_level": 2, "cwd": "/repo", "harness": "claude",
+             "harness_session_id": "sess-old"},
+            {"name": "king-heir", "status": "live", "crown_scope": "x-65a7",
+             "crown_level": 2, "cwd": "/repo", "harness": "claude",
+             "harness_session_id": "sess-new"}
+        ])
     }
 
     #[test]
@@ -803,5 +887,78 @@ mod tests {
             .unwrap_err();
             assert!(error.contains(key), "{error}");
         }
+    }
+
+    #[test]
+    fn a_succeeded_plan_carries_the_name_with_a_regnal_bump() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _reg = crown_registry(tmp.path(), agents_with_succession_rows());
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-65a7",
+                "plan": {
+                    "caller": {"kind": "agent", "name": "king-heir"},
+                    "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
+                    "outcome": "succeeded", "vacate": ["king-old"],
+                },
+                "rows": [],
+            }),
+            &crown_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "succeeded");
+        let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
+        let doc: Value = serde_json::from_str(&store).unwrap();
+        assert_eq!(doc["crowns"]["x-65a7"]["regnal"], json!(2));
+        assert_eq!(doc["crowns"]["x-65a7"]["holder_session"], json!(null));
+    }
+
+    #[test]
+    fn a_granted_plan_forgets_the_record_and_declined_keeps_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _reg = crown_registry(tmp.path(), json!([{"name": "w", "status": "exited"}]));
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-65a7",
+                "plan": {
+                    "caller": {"kind": "human"},
+                    "holder_ids": [],
+                    "outcome": "granted", "vacate": [],
+                },
+                "rows": [],
+            }),
+            &crown_store(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "granted");
+        let store = std::fs::read_to_string(crown_store(tmp.path())).unwrap();
+        let doc: Value = serde_json::from_str(&store).unwrap();
+        assert!(doc["crowns"].get("x-65a7").is_none(), "{store}");
+    }
+
+    #[test]
+    fn an_unwritable_store_never_changes_the_answer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // A file where the store's parent dir would be: the write fails.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let store = blocker.join("crown_names.json");
+        named_record_fixture(tmp.path());
+        let answer = resolve_at(
+            &json!({
+                "kind": "crown-settle", "scope": "x-65a7",
+                "plan": {
+                    "caller": {"kind": "agent", "name": "king-heir"},
+                    "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
+                    "outcome": "succeeded", "vacate": ["king-old"],
+                },
+                "rows": [],
+            }),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(answer["outcome"], "succeeded");
     }
 }

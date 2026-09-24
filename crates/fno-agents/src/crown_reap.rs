@@ -120,6 +120,11 @@ pub struct CrownReap {
     pub vacated: Vec<VacatedCrown>,
     pub kept: Vec<KeptCrown>,
     pub unread: Option<String>,
+    /// Crown-name records dropped (or would-drop, dry run) by the sweep's
+    /// prune of `crown_names.json`: scopes with no live crown or a mismatched
+    /// holder session.
+    #[serde(default)]
+    pub names_pruned: Vec<String>,
 }
 
 /// A crown this sweep vacated (or would vacate, under a dry run).
@@ -439,7 +444,7 @@ pub fn transcript_age_now(session: &str) -> Option<i64> {
 /// and events paths from `home`, the window from `cwd`'s config.
 pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool) -> CrownReap {
     let events = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
-    sweep(
+    let mut out = sweep(
         &crate::paths::spaces_root(),
         &home.registry_json(),
         cwd,
@@ -448,7 +453,21 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
         &crate::claude_roster::read_all_agents_union,
         &transcript_age_now,
         Utc::now(),
-    )
+    );
+    // The name prune reads the same live-crown truth the sweep judged with:
+    // a record whose scope has no live crown (a stale `fno agents crown` or
+    // `reclaim_crown` grant, a reaped king) is the machine sweep's to drop
+    // (laws d-b97b70eb, d-3e73d257), not a hand edit.
+    let pruned = if apply {
+        crate::crown_names::prune(&home.crown_names_json(), &home.registry_json())
+    } else {
+        crate::crown_names::prune_dry(&home.crown_names_json(), &home.registry_json())
+    };
+    out.names_pruned = pruned.unwrap_or_else(|e| {
+        eprintln!("crown-reap: crown names: {e}");
+        Vec::new()
+    });
+    out
 }
 
 #[cfg(test)]
