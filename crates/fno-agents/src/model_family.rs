@@ -637,8 +637,9 @@ mod tests {
         // The fingerprint hashes the payload as declared; a model release
         // changes the catalog on disk, never the fingerprint. Two CODEX_HOME
         // catalogs that resolve differently must still print one fingerprint.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("CODEX_HOME").ok();
         let write_catalog = |dir: &std::path::Path, slugs: &[&str]| {
             std::fs::create_dir_all(dir).unwrap();

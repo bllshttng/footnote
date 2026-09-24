@@ -69,8 +69,7 @@ pub fn inventory_leg(payload: &Value) -> Value {
             "harness": harness,
             "model": model_cell,
             "band": if band.is_empty() { json!("unbanded") } else { json!(band) },
-            // f64 Display is the shortest round-trip decimal, matching
-            // Python's `:g` for every value a percentile snapshot carries.
+            // f64 Display prints the shortest round-trip decimal, not `:g`.
             "percentile": percentile.map(|p| format!("{p}")).unwrap_or_default(),
             "effort": effort,
             "verdict": verdict,
