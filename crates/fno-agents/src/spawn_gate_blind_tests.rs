@@ -442,3 +442,84 @@ fn an_admit_resets_blind_samples_before_slot_wait() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A blind read breaks the consecutive under-ceiling samples needed to
+/// release a spawn that was held on CPU.
+#[test]
+fn a_blind_sample_breaks_the_held_under_threshold_streak() {
+    let _g = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fno-gate-streak-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = dir.join("claims-root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::env::set_var("FNO_CLAIMS_ROOT", &root);
+    let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+    std::env::remove_var("FNO_SPAWN_GATE");
+    let prior_config = std::env::var_os("FNO_CONFIG");
+    std::env::remove_var("FNO_CONFIG");
+    let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+    std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    let hold = fixture_payload("hold");
+    let admit = r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#;
+    let blind = fixture_payload("undecidable");
+    let seq = dir.join("payload-seq.txt");
+    std::fs::write(
+        &seq,
+        format!("{hold}\n{admit}\n{blind}\n{admit}\n{blind}\n{blind}\n{blind}"),
+    )
+    .unwrap();
+    std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+    let fnodir = dir.join(".fno");
+    std::fs::create_dir_all(&fnodir).unwrap();
+    std::fs::write(
+        fnodir.join("config.toml"),
+        "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+    )
+    .unwrap();
+    let reg = dir.join("registry.json");
+
+    let got = run_gate(
+        &dir,
+        &reg,
+        GateInput {
+            name: "w1".into(),
+            substrate: "bg".into(),
+            flags: GateFlags {
+                force: false,
+                no_wait: false,
+            },
+            ..Default::default()
+        },
+    );
+
+    std::env::remove_var("FNO_CLAIMS_ROOT");
+    std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
+    match prior_spawn_gate {
+        Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+        None => std::env::remove_var("FNO_SPAWN_GATE"),
+    }
+    match prior_config {
+        Some(value) => std::env::set_var("FNO_CONFIG", value),
+        None => std::env::remove_var("FNO_CONFIG"),
+    }
+    match prior_payload {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+    }
+
+    let refusal = got
+        .err()
+        .expect("a blind CPU sample must break the under-threshold streak");
+    assert_eq!(refusal.exit_code, EXIT_LOAD_REFUSED, "{refusal:?}");
+    let receipt = refusal.receipt.expect("refusal carries a receipt");
+    assert_eq!(receipt["reason"], "cpu_share_undecidable");
+    assert_eq!(receipt["samples"], 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}

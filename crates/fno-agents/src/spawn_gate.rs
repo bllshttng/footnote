@@ -1648,6 +1648,8 @@ fn decide_gate(
             let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
+                    // A blind read breaks both consecutive-sample runs.
+                    under_streak = 0;
                     // A blind read is not evidence the fleet is over: the
                     // instrument can be blind for one pass while the machine
                     // is fine (2026-09-19: a worker refused twice on
