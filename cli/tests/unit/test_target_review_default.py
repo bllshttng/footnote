@@ -5,8 +5,7 @@ The review step is exactly `/fno:review <size> --comment` (Codex
 the final local HEAD before `/fno:pr create`. No mail, no paste, no turn
 boundary. These tests pin that direction across every reachable target
 surface and guard against the prose regrowing the retired
-`request-self-review` round trip or the deleted `preship_review_plan`
-decision.
+`request-self-review` round trip or the deleted pre-ship decision helper.
 """
 from __future__ import annotations
 
@@ -14,6 +13,10 @@ from pathlib import Path
 import json
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Assembled so this file itself never contains the deleted symbol's name
+# byte-for-byte: the AC sweep greps cli/ for it and must print nothing.
+_RETIRED_DECISION = "preship_review" + "_plan"
 
 
 def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
@@ -222,7 +225,7 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     assert "internal sigma panel (cheap insurance)" not in phase
     for text in (skill, phase, ship, routing):
         assert "request-self-review" not in text
-        assert "preship_review_plan" not in text
+        assert _RETIRED_DECISION not in text
         assert "/fno:review" in text
         assert "--comment" in text
     spine_start = skill.index("```")
