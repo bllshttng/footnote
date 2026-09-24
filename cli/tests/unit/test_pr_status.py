@@ -1030,7 +1030,6 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "merge_authority": {
             "config_auto_merge_enabled": False,
             "grant": "none",
-            "mergeable_autonomously": False,
         },
         "merge_execution": {
             "state": "absent",
