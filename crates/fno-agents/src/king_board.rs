@@ -3026,12 +3026,8 @@ mod tests {
         std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
         std::env::set_var("HOME", dir.path());
         crate::paths::pin_test_claims_root(dir.path());
-        let script = dir.path().join("sleepy-fno-py");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script =
+            crate::write_exec_stub(dir.path(), "sleepy-fno-py", "#!/bin/sh\nexec sleep 5\n");
         let prev = std::env::var_os("FNO_PY");
         std::env::set_var("FNO_PY", &script);
         let start = std::time::Instant::now();

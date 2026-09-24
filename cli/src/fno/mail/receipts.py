@@ -13,7 +13,7 @@ from typing import Optional
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
-    """The transcript-age suffix a bare live-miss receipt carries (AC8).
+    """The transcript-age suffix a live-miss or transcript- reason carries (AC8).
 
     A bare live-miss reads the same for a transient miss to a genuinely live
     peer (re-send works) and for a session that stood down hours ago (nothing
@@ -102,7 +102,7 @@ def demotion_receipt(
     token = durable_leg_story(reason)
     if token is None:
         token = reason or "live-miss"
-        if token == "live-miss":
+        if token == "live-miss" or token.startswith("transcript-"):
             age_of = age_target if age_target is not None else target
             if age_of is not None:
                 token += _live_miss_age_suffix(age_of)

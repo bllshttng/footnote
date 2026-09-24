@@ -870,18 +870,15 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&fb_base).unwrap();
         // Fake cargo keyed on CARGO_BUILD_BUILD_DIR, like the sibling suite.
         std::fs::create_dir_all(root.join("bin")).unwrap();
-        let script = root.join("bin/cargo");
-        std::fs::write(
-            &script,
+        let script = crate::write_exec_stub(
+            &root.join("bin"),
+            "cargo",
             "#!/bin/sh\nif [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
              printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FNO\"\n\
              else\n\
              printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FB\"\n\
              fi\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         // One orphan: fingerprinted, quiet 7h, no tree resolves to it.
         let orphan = fb_base.join("00").join("cafefe12");

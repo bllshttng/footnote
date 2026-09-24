@@ -28,7 +28,7 @@ Every placement flag implies `--substrate pane`.
 
 `--model/-m` is forwarded as-is to the provider's own CLI. There is no fuzzy resolution. On the default pane substrate every provider honors it. On thread or headless it reaches claude, codex, and agy.
 
-`--agent` names an agent definition the launched session runs under. claude takes `fno:<name>` on every lane and also resolves a bare name. opencode takes it on the pane lane only. An unknown name exits 1 before launch. The launched main thread gets the agent body but not its `skills:` list, so a skills list in the body loads nothing. codex, agy and gemini refuse the flag, and the codex refusal names the `.codex/agents/<role>.toml` role and the `spawn_agent` `agent_type` that replaces it.
+`--agent` names an agent definition the launched session runs under. claude takes `fno:<name>` on every lane and also resolves a bare name. opencode takes it on the pane lane only. An unknown name exits 1 before launch. The launched main thread gets the agent body but not its `skills:` list, so footnote's agents carry no `skills:` list. An agent that needs a skill loads it from its body with the Skill tool. codex, agy and gemini refuse the flag, and the codex refusal names the `.codex/agents/<role>.toml` role and the `spawn_agent` `agent_type` that replaces it.
 
 ## Credentials
 
