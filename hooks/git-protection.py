@@ -795,7 +795,7 @@ def _stacked_base_refusal(command=""):
 # one PreToolUse hook with a 60s budget; the coverage veto's comment states the
 # pair arithmetic. Split literals can drift apart, and the drift test pins this
 # definition against the doc's per-invocation ceiling.
-_VETO_PROBE_TIMEOUT = 25
+_VETO_PROBE_TIMEOUT = 24
 _HOLD_PROBE_TIMEOUT = 5
 
 
@@ -897,8 +897,8 @@ def _coverage_refusal(command=""):
         # 15s of verify waits before the CLI's own coverage read starts (see
         # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout kills
         # exactly that probe mid-wait and fails open in the storm state, so
-        # this carries the shared 25s: over the shim's ceiling. The worst case
-        # counts the git probes ahead of the vetoes too (1s + 1s + 2s): 54s
+        # this carries the shared 24s: over the shim's ceiling. The worst case
+        # counts the git probes and PR lookup too (1s + 1s + 2s + 2s): 54s
         # plus process startup of the 60s hook budget, margin under 6s.
         timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
@@ -962,7 +962,7 @@ def _review_hold_refusal(command=""):
     produced none. ``fno do pr merge`` consults the precise per-branch predicate;
     this hook cannot.
 
-    NOT a third `fno` subprocess. The two vetoes above already spend 25s each
+    NOT a third `fno` subprocess. The two vetoes above already spend 24s each
     against a 60s harness budget with under 6s of margin; PR lookup is bounded
     to two more seconds so a hook that gets
     killed emits no verdict at all - so a third probe would let an unauthorized
@@ -1024,7 +1024,7 @@ def _live_merge_switch_armed(repo_root, fm):
     how the hook drifts from every other reader. In-process first (the hook
     interpreter often carries the package); the resolver CLI as the fallback
     when it does not, budgeted at 5s because the lineage and coverage probes
-    elsewhere in this hook can each approach 25s of the 60s PreToolUse
+    elsewhere in this hook can each approach 24s of the 60s PreToolUse
     budget - a fresh independent wait here can push the hook past it, and a
     hook killed mid-run emits NO verdict, letting the raw merge proceed.
     Either resolver unavailable, slow, or unreadable ->
