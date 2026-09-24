@@ -728,6 +728,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
         "account": None,
         "seed": "work",
         "session_phase": "",
+        "succession_scope": None,
     }]
 
 

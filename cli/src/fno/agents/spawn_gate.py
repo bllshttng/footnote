@@ -960,6 +960,7 @@ def run_gate(
     account: Optional[str] = None,
     seed: Optional[str] = None,
     session_phase: Optional[str] = None,
+    succession_scope: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate - by asking the ONE gate in the binary. Returns a
     :class:`GateGuard` to hold across dispatch on pass; raises
@@ -996,6 +997,7 @@ def run_gate(
         "account": account,
         "seed": seed,
         "session_phase": session_phase,
+        "succession_scope": succession_scope,
         "caller_session": caller_session,
         "holder_pid": os.getpid(),
     }

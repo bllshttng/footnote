@@ -574,6 +574,113 @@ fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
     base.intersection(&pr).map(|p| (*p).to_string()).collect()
 }
 
+/// Sorted intersection with no documentation filter: tests can read markdown
+/// files, so a shared documentation path can invalidate a run too.
+pub(crate) fn shared_paths(a: &[String], b: &[String]) -> Vec<String> {
+    let left: std::collections::BTreeSet<&str> = a.iter().map(String::as_str).collect();
+    let right: std::collections::BTreeSet<&str> = b.iter().map(String::as_str).collect();
+    left.intersection(&right)
+        .map(|path| (*path).to_string())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleOverlap {
+    pub(crate) ci_base_sha: String,
+    pub(crate) landed: usize,
+    pub(crate) shared: Vec<String>,
+}
+
+pub(crate) fn stale_overlap(
+    cwd: &Path,
+    base_rev: &str,
+    head_sha: &str,
+    since: &str,
+) -> Result<StaleOverlap, String> {
+    let head_object = format!("{head_sha}^{{commit}}");
+    let head_check = std::process::Command::new("git")
+        .args(["cat-file", "-e", &head_object])
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("PR head check failed: {error}"))?;
+    if !head_check.status.success() {
+        return Err(format!(
+            "PR head {} not present locally",
+            head_sha.chars().take(8).collect::<String>()
+        ));
+    }
+
+    let ci_base_sha = stale_git_read(
+        cwd,
+        &[
+            "rev-list".to_string(),
+            "-1".to_string(),
+            "--first-parent".to_string(),
+            format!("--before={since}"),
+            base_rev.to_string(),
+        ],
+        "CI base lookup",
+    )?;
+    if ci_base_sha.is_empty() {
+        return Err(format!("no {base_rev} commit at or before {since}"));
+    }
+
+    let landed_output = stale_git_read(
+        cwd,
+        &[
+            "diff".to_string(),
+            "--name-only".to_string(),
+            "--no-renames".to_string(),
+            ci_base_sha.clone(),
+            base_rev.to_string(),
+        ],
+        "landed file diff",
+    )?;
+    let pr_output = stale_git_read(
+        cwd,
+        &[
+            "diff".to_string(),
+            "--name-only".to_string(),
+            "--no-renames".to_string(),
+            format!("{base_rev}...{head_sha}"),
+        ],
+        "PR file diff",
+    )?;
+    let landed_paths = diff_paths(&landed_output);
+    let pr_paths = diff_paths(&pr_output);
+    Ok(StaleOverlap {
+        ci_base_sha,
+        landed: landed_paths.len(),
+        shared: shared_paths(&landed_paths, &pr_paths),
+    })
+}
+
+fn stale_git_read(cwd: &Path, args: &[String], step: &str) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("{step} failed: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        return Err(format!("{step} failed: {detail}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn diff_paths(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The `owner/name` pair a remote url names, normalized across the ssh
 /// (`git@host:owner/repo.git`), https (`https://host/owner/repo.git`), and
 /// trailing-slash spellings, so the ledger scoping test reads the same
@@ -597,6 +704,134 @@ fn repo_slug_from_origin(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit_at(repo: &Path, date: &str, message: &str) -> String {
+        git(repo, &["add", "-A"]);
+        let output = std::process::Command::new("git")
+            .args(["commit", "-q", "-m", message])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "--initial-branch=main"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        repo
+    }
+
+    #[test]
+    fn stale_overlap_uses_the_first_parent_ci_base_and_counts_landed_files() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        let base = commit_at(repo.path(), "2026-01-01T00:00:00Z", "base");
+
+        git(repo.path(), &["checkout", "-q", "-b", "topic"]);
+        std::fs::write(repo.path().join("landed.txt"), "landed\n").unwrap();
+        commit_at(repo.path(), "2026-01-02T00:00:00Z", "topic change");
+        git(repo.path(), &["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("main.txt"), "main\n").unwrap();
+        let ci_base = commit_at(repo.path(), "2026-01-01T12:00:00Z", "main change");
+        let merge = std::process::Command::new("git")
+            .args(["merge", "--no-ff", "--no-edit", "topic"])
+            .current_dir(repo.path())
+            .env("GIT_AUTHOR_DATE", "2026-01-04T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-04T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(
+            merge.status.success(),
+            "git merge failed: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
+
+        git(
+            repo.path(),
+            &["checkout", "-q", "-b", "pull-request", &base],
+        );
+        std::fs::write(repo.path().join("pr.txt"), "pr\n").unwrap();
+        let head = commit_at(repo.path(), "2026-01-02T12:00:00Z", "pr change");
+
+        let result = stale_overlap(repo.path(), "main", &head, "2026-01-03T00:00:00Z");
+        assert!(
+            result.is_ok(),
+            "stale overlap should be readable: {result:?}"
+        );
+        let result = result.unwrap();
+        assert_eq!(result.ci_base_sha, ci_base);
+        assert_eq!(result.landed, 1);
+        assert!(result.shared.is_empty());
+    }
+
+    #[test]
+    fn stale_overlap_keeps_both_rename_paths_for_shared_files() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("a.rs"), "base\n").unwrap();
+        commit_at(repo.path(), "2026-01-01T00:00:00Z", "base");
+
+        git(repo.path(), &["checkout", "-q", "-b", "pull-request"]);
+        git(repo.path(), &["mv", "a.rs", "b.rs"]);
+        let head = commit_at(repo.path(), "2026-01-02T00:00:00Z", "rename");
+        git(repo.path(), &["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("a.rs"), "main\n").unwrap();
+        commit_at(repo.path(), "2026-01-04T00:00:00Z", "main change");
+
+        let result = stale_overlap(repo.path(), "main", &head, "2026-01-03T00:00:00Z");
+        assert!(
+            result.is_ok(),
+            "stale overlap should be readable: {result:?}"
+        );
+        assert_eq!(result.unwrap().shared, vec!["a.rs".to_string()]);
+    }
+
+    #[test]
+    fn stale_overlap_fails_when_the_pr_head_is_missing() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        commit_at(repo.path(), "2026-01-01T00:00:00Z", "base");
+
+        let result = stale_overlap(repo.path(), "main", "deadbeef", "2026-01-03T00:00:00Z");
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("PR head deadbeef not present locally"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stale_overlap_reports_a_malformed_missing_head_without_panicking() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        commit_at(repo.path(), "2026-01-01T00:00:00Z", "base");
+
+        let result = stale_overlap(repo.path(), "main", "abcdefgé", "2026-01-03T00:00:00Z");
+        assert!(matches!(result, Err(error) if error == "PR head abcdefgé not present locally"));
+    }
 
     #[test]
     fn overlaps_drops_documentation_paths_from_both_sides() {

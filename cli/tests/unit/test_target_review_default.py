@@ -281,3 +281,30 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     # review phase to `fno:review` (sigma) unconditionally; it defers to the plan.
     assert "preship_review_plan" in routing
     assert "default: `fno:review`" not in routing and "default: fno:review" not in routing
+
+
+def test_ship_text_stops_at_the_round_cap():
+    retired = (
+        "the old attestation is stale",
+        "stales a pre-push attestation",
+        "stales the attestation",
+        "re-run the reviewer and re-emit",
+        "invalidated by any later fix or rebase",
+        "clean head-pinned",
+        "non-author GitHub approval",
+        "IMPOSSIBLE",
+    )
+    paths = (
+        Path("skills/target/SKILL.md"),
+        Path("skills/target/references/ship-and-promise.md"),
+        Path("skills/target/references/phase-bodies.md"),
+        Path("skills/target/references/pipeline-and-philosophy.md"),
+    )
+    contents = {path: (REPO_ROOT / path).read_text(encoding="utf-8") for path in paths}
+    for path, text in contents.items():
+        for phrase in retired:
+            assert phrase not in text, f"{path} contains retired phrase {phrase!r}"
+    for path in paths[:2]:
+        text = contents[path]
+        assert "rounds_exhausted" in text, f"{path} omits rounds_exhausted"
+        assert "review.max_rounds" in text, f"{path} omits review.max_rounds"

@@ -650,6 +650,7 @@ def test_cli_resume_gates_the_recorded_provider_before_dispatch(
         ("router", "bg", {
             "force": False, "no_wait": False, "route_provider": "zai",
             "account": None, "seed": "go", "session_phase": "",
+            "succession_scope": None,
         }),
     )
     assert events[1][0] == "dispatch"

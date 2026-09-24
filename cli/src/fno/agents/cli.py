@@ -2313,6 +2313,7 @@ def cmd_spawn(
                 account=account or dispatch_account,
                 seed=message,
                 session_phase=session_phase,
+                succession_scope=crown_scope if succeed else None,
             )
             break
         except GateRefused as exc:
