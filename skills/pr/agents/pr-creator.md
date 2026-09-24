@@ -1,6 +1,6 @@
 ---
 name: pr-creator
-description: 'Mechanical PR creation worker dispatched by /pr create. Pushes the branch, generates a PR description from the commits, opens the PR via gh. Spawned with minimal fresh context (not fork). Returns RESULT: SUCCESS with the PR number + URL, or RESULT: FAILED with the error.'
+description: 'Standalone PR creation agent for explicit dispatch. The /pr create workflow runs skills/pr/references/create.md inline and does not dispatch this agent.'
 tools:
 - Read
 - Write
@@ -12,7 +12,7 @@ tools:
 
 Create a PR using `gh` CLI.
 
-**Model routing:** This worker runs on the declared `pr-create` role, resolved through `config.model_routing` (`config.model_routing.roles.pr-create`). An explicit configured route wins; with no route configured it runs on the invoking harness's primary model - no tier or model literal is hardcoded. Declare the role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override so the resolved route selects the model). Do NOT use `context: fork` - forking passes the parent's full context into the worker; instead spawn a fresh agent with only the gathered context from Step 1 below.
+**Explicit model routing:** Manual dispatch can declare the `pr-create` role. The route comes from `config.model_routing.roles.pr-create`. The `/pr create` skill does not dispatch this agent or use that route.
 
 ## Process
 
@@ -386,7 +386,7 @@ gh pr view --json number,url
 ```
 
 **Flow:**
-1. `/pr create` runs as a fresh, role-routed `pr-create` worker with targeted context (branch, commits, plan summary)
+1. The `/pr create` skill runs `skills/pr/references/create.md` inline. This agent is a separate explicit-dispatch path.
 2. `/pr check` polls for external review and processes feedback
 3. Human reviewer merges
 

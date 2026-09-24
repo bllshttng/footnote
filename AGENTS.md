@@ -86,7 +86,7 @@ Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. F
 | `blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `execute` | Execute a plan: `flat` (default) or `waves` |
 | `think` \| `review` \| `fix` \| `tdd` \| `triage` \| `setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
-| `pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
+| `pr create` \| `check` \| `merged` | Open PR inline / poll+implement external review / post-merge ritual |
 | `growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
 Surface evolution: `blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)). An approved native Plan-Mode plan is picked up by the next bare `target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
