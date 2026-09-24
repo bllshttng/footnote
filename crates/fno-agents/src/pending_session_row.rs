@@ -349,8 +349,8 @@ mod tests {
         let answer = open(&open_payload(&registry, &graph, "sid-2")).unwrap();
         assert_eq!(answer["opened"], json!(true));
         assert_eq!(answer["cleared"], json!(true));
-        let rows = crate::graph_store::read_rows(&graph).unwrap();
-        let sessions = rows[0]["sessions"].as_array().unwrap();
+        let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
+        let sessions = body["entries"][0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1, "no duplicate row");
         assert_eq!(sessions[0]["started_at"], json!("2026-09-22T00:00:00Z"));
         let _ = fs::remove_dir_all(&dir);
