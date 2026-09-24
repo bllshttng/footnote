@@ -56,10 +56,6 @@ Use `BLOCKED` (with `reason`) when ddgs is unavailable and no enrichment path
 is configured; use `DONE_WITH_CONCERNS` when sources stored but several came
 back `verified=false`.
 
-## Source Skills
-
-- fno:tdd
-
 ## Disallowed Source Tools
 
 - Task

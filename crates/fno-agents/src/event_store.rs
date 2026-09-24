@@ -239,6 +239,7 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// an acknowledged ingest survives a crash. The schema is ensured (v2
 /// created, or v1 migrated) before the connection is handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
     let mut conn = Connection::open(store).map_err(|e| format!("{}: {e}", store.display()))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;

@@ -3,10 +3,8 @@ name: archer
 description: TDD-disciplined task executor. The worker agent that implements individual tasks with test-first methodology. Returns structured SUCCESS/FAILED/BLOCKED results.
 model: sonnet
 color: cyan
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]
 disallowedTools: ["Task", "WebSearch", "WebFetch", "NotebookEdit"]
-skills:
-  - fno:tdd
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
@@ -97,6 +95,8 @@ You are running in a **subagent context** with limited resources. Be efficient:
 6. If pre-flight fails → return BLOCKED immediately
 
 ## TDD Execution Flow (MANDATORY)
+
+Before the first task, load the `fno:tdd` skill with the Skill tool (on codex, `$fno:tdd`). No launch path preloads it: a spawned main thread ignores a `skills:` list.
 
 For EVERY task, follow this exact sequence:
 
