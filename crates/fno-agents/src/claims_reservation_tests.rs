@@ -168,6 +168,92 @@ fn an_unexpired_review_hold_with_a_dead_pid_still_protects() {
     assert_eq!((state, cause), (ClaimState::Suspect, basis::PID_ABSENT));
 }
 
+/// One `blueprint-session:`-shaped record: a native subagent planner's node
+/// claim, stamped by `session open` with the PARENT's pid (ambient
+/// provenance) and the parent's session id - the shape that read Live for
+/// the parent's whole life after a mid-flow TaskStop.
+fn blueprint_hold(pid: i32, acquired_at: i64, expires_at: Option<i64>) -> ClaimRecord {
+    ClaimRecord {
+        schema_version: 1,
+        key: "node:x-t".into(),
+        holder: "blueprint-session:s-parent".into(),
+        acquired_at,
+        pid: Some(pid),
+        host: hostname().into(),
+        pid_unavailable: false,
+        expires_at,
+        reason: None,
+        harness: Some("claude".into()),
+        session_id: Some("s-parent".into()),
+        pid_provenance: Some("ambient".into()),
+        machine_id: None,
+        metadata: serde_json::Map::new(),
+    }
+}
+
+#[test]
+fn a_blueprint_claim_past_its_lease_is_stale_while_the_parent_lives() {
+    // The lease is clock-only, and the parent's pid and transcript are
+    // exactly the evidence that outlives a stopped planner: the arm sits
+    // above both the hybrid and the witness, so the strongest live
+    // evidence still cannot heal a lapsed claim. The stub probe (created
+    // at epoch 0) is a deterministically live parent.
+    let me = std::process::id() as i32;
+    let now = now_ms();
+    let probe = |_pid: i32| PidProbe::Created(0);
+    let witness: SessionWitness = &|_| SessionLiveness::Live(basis::TRANSCRIPT_LIVE);
+
+    let lapsed = blueprint_hold(me, now - BLUEPRINT_LEASE_MS - 1, None);
+    let (state, cause) =
+        classify_with_basis_and_exclusivity(&lapsed, Some(now), &probe, None, Some(witness));
+    assert_eq!((state, cause), (ClaimState::Stale, basis::TTL_EXPIRED));
+    let (provably_dead, _) = classify_for_sweep(&lapsed, Some(now), &probe, None, Some(witness));
+    assert!(provably_dead);
+}
+
+#[test]
+fn a_blueprint_claim_inside_its_lease_stays_live() {
+    // A young claim with a live parent still excludes a second holder:
+    // the lease never steals a running planner's node.
+    let me = std::process::id() as i32;
+    let now = now_ms();
+    let probe = |_pid: i32| PidProbe::Created(0);
+
+    let young = blueprint_hold(me, now - 60_000, None);
+    let (state, cause) = classify_with_basis(&young, Some(now), &probe);
+    assert_eq!((state, cause), (ClaimState::Live, basis::LIVE));
+}
+
+#[test]
+fn an_explicit_blueprint_ttl_decides_over_the_default_lease() {
+    // A caller that stamped an explicit TTL owns the window; the default
+    // lease does not end it early.
+    let me = std::process::id() as i32;
+    let now = now_ms();
+    let probe = |_pid: i32| PidProbe::Created(0);
+
+    let extended = blueprint_hold(me, now - BLUEPRINT_LEASE_MS - 1, Some(now + 60_000));
+    let (state, _) = classify_with_basis(&extended, Some(now), &probe);
+    assert_eq!(state, ClaimState::Live);
+}
+
+#[test]
+fn the_lease_is_scoped_to_the_blueprint_holder() {
+    // The same stale-shaped record under any other holder keeps today's
+    // verdict - the pid alone answers Live - so no other claim class
+    // flips polarity.
+    let me = std::process::id() as i32;
+    let now = now_ms();
+    let probe = |_pid: i32| PidProbe::Created(0);
+    let witness: SessionWitness = &|_| SessionLiveness::Live(basis::TRANSCRIPT_LIVE);
+
+    let mut other = blueprint_hold(me, now - BLUEPRINT_LEASE_MS - 1, None);
+    other.holder = "target-session:s-parent".into();
+    let (state, _) =
+        classify_with_basis_and_exclusivity(&other, Some(now), &probe, None, Some(witness));
+    assert_eq!(state, ClaimState::Live);
+}
+
 #[test]
 fn pid_prober_control_alive_absent() {
     // AC8: the instrument itself, not a mock of it - the reservation

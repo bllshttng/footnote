@@ -558,6 +558,14 @@ pub mod basis {
     pub const TTL_EXPIRED_UNRESOLVED: &str = "ttl-expired-unresolved";
 }
 
+/// A blueprint planner runs inside its parent session: a native subagent has
+/// no pid or session id of its own, so the parent's pid and witness outlive a
+/// stopped planner. Its claim is a lease on the planning window.
+pub const BLUEPRINT_HOLDER_PREFIX: &str = "blueprint-session:";
+/// The planning-window lease length: 2.3x the slowest of the eight planner
+/// runs measured when the lease was designed.
+pub const BLUEPRINT_LEASE_MS: i64 = 3_600_000;
+
 /// The session-keyed liveness answer beside the pid probe. A pid
 /// dies on every harness resume while the session survives, so pid
 /// arithmetic alone cannot classify a resumed holder.
@@ -830,6 +838,19 @@ pub fn classify_with_basis_and_exclusivity(
         if let Some(verdict) = pid_verdict(rec, probe) {
             return verdict;
         }
+    }
+    // A blueprint-session claim is a lease on the PLANNING WINDOW, clock-only
+    // like a `review:branch:` hold: a native subagent planner shares its
+    // parent's pid and session id, so the hybrid arm and the witness would
+    // both heal the claim for the parent's whole life after a mid-flow
+    // TaskStop. The manual `claim release --holder` stays the fast path.
+    if rec.holder.starts_with(BLUEPRINT_HOLDER_PREFIX)
+        && now
+            >= rec
+                .expires_at
+                .unwrap_or(rec.acquired_at.saturating_add(BLUEPRINT_LEASE_MS))
+    {
+        return (ClaimState::Stale, basis::TTL_EXPIRED);
     }
     if is_expired(rec, now) {
         // A review hold is a lease on the review; the holder's session answers another question.
