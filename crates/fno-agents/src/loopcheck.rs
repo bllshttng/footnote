@@ -16965,13 +16965,12 @@ git_bounded();";
 
     #[test]
     fn store_findings_read_error_is_named_not_zero() {
-        // A graph path whose db is an unwritable directory: the read fails
-        // and the helper surfaces the error instead of an empty list.
+        // A store whose JSON leg is unparseable (and no db to answer
+        // instead): the read fails and the helper surfaces the error
+        // instead of an empty list.
         let tmp = tempfile::tempdir().unwrap();
         let graph = tmp.path().join("graph.json");
-        let db = tmp.path().join("graph.db");
-        std::fs::create_dir(&db).unwrap();
-        std::fs::write(&graph, serde_json::json!({"entries": []}).to_string()).unwrap();
+        std::fs::write(&graph, "{ not json at all").unwrap();
         let (open, error) = open_findings_from_store(&graph, "x-1");
         assert!(open.is_empty());
         assert!(error.is_some(), "could-not-read must not read as zero");

@@ -122,7 +122,11 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 `fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
-Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+Pass `--quiet` to note without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+
+### Blocking findings hold the gate
+
+`fno backlog note <id> "<finding>" --blocking` records the body as a review finding instead of a progress note. An open finding denies the session's terminal-allow until someone runs `fno backlog note --resolve <finding-id>`. With no live reader the finding still writes: the receipt says it gates the next worker. `fno backlog notes findings [<id>] [--open]` reads them back: one count line first, then one line per finding, and a store read error exits 1 instead of printing zero. `fno backlog annotate add|list|resolve` still works for one release as a forwarding shim.
 
 ## Moving cards
 

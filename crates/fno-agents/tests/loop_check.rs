@@ -7340,7 +7340,7 @@ fn coverage_legacy_no_attester_byte_identical_to_name_key() {
 /// the peer's fail touches only the peer's own `(name, peer)` slot, which never
 /// held a pass; the author's `(name, author)` pass still counts. Coverage counts
 /// reviews performed, not approvals granted - the hold on a bad peer review
-/// lives on `open_review_findings` and on `unattested_reviewers_scan`'s name key
+/// lives on the findings store gate and on `unattested_reviewers_scan`'s name key
 /// (unchanged), which is the deliberate divergence this design calls for.
 #[test]
 fn coverage_peer_fail_does_not_revoke_author_pass() {
