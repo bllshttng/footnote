@@ -789,13 +789,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // A create flow that died between `gh pr create` and its
         // publish-review step still owes the PR its pre-PR review comment.
         // Idempotent by marker inside publish_held; log-only, never fatal.
-        let held_payload = serde_json::json!({"cwd": cwd.to_string_lossy()});
-        let held_journals = [crate::paths::events_path(&cwd)];
-        let held = crate::publish_review::publish_held(
-            &held_payload,
-            &crate::publish_review::GhReal,
-            &held_journals,
-        );
+        // Reads the caller-pinned journal: events_path() migrates the
+        // checkout journal on read, and a backstop must not re-home the
+        // session's rows mid-finalize.
+        let held = held_findings_backstop(&cwd, &project_events);
         if held.status != "skipped" {
             eprintln!(
                 "finalize: held review findings: {} ({})",
@@ -3037,6 +3034,19 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
     }
 }
 
+/// The held-findings read for finalize: the caller-pinned journal only.
+/// `events_path` would migrate the checkout journal on read and re-home
+/// the session's rows mid-finalize; a finalize backstop scans for held
+/// attestations without mutating path state as a side effect.
+fn held_findings_backstop(cwd: &Path, journal: &Path) -> crate::publish_review::HeldAnswer {
+    let payload = serde_json::json!({ "cwd": cwd.to_string_lossy() });
+    crate::publish_review::publish_held(
+        &payload,
+        &crate::publish_review::GhReal,
+        &[journal.to_path_buf()],
+    )
+}
+
 // ── unit tests (process-free) ────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3046,6 +3056,37 @@ mod finalize_pointer_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_backstop_reads_the_pinned_journal_and_never_migrates_it() {
+        let base = std::env::temp_dir().join(format!("fno-held-backstop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let checkout_events = base.join("checkout").join(".fno").join("events.jsonl");
+        std::fs::create_dir_all(checkout_events.parent().unwrap()).unwrap();
+        std::fs::write(
+            &checkout_events,
+            "{\"ts\":\"t\",\"type\":\"delegated\",\"data\":{}}\n",
+        )
+        .unwrap();
+        let pinned = base.join("pinned-journal.jsonl");
+        std::fs::write(&pinned, "").unwrap();
+        let cwd = checkout_events
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let answer = held_findings_backstop(&cwd, &pinned);
+        assert_eq!(answer.status, "skipped");
+        // A read must not re-home the checkout journal into the space dir;
+        // the pre-backstop regression moved it as a side effect of resolving
+        // the path through events_path.
+        assert!(
+            checkout_events.exists(),
+            "checkout journal was migrated by a read"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parse_args_required_and_optional() {
