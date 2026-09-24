@@ -124,7 +124,6 @@ def init_cmd(
         )
         raise typer.Exit(2)
     scope = canonical_scope(list(_canonical_members(scope)))
-
     from fno.rust_binary import call_binary_json
     admit = ["readiness", "--scope", scope, "--session", harness_session_id, "--ensure-goal"]
     error, _ = call_binary_json("loop", admit)

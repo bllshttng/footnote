@@ -849,7 +849,6 @@ def check_loop_participation(harness: str, command: str) -> None:
     participation = caps["loop_participation"]
     if participation == "native":
         from fno.rust_binary import call_binary_json
-
         args = ["readiness", "--harness", harness, "--command", command]
         error, _ = call_binary_json("loop", args)
         if error:

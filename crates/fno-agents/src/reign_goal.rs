@@ -186,7 +186,13 @@ async fn apply_action(
                 ));
             }
             if current.status == GoalStatus::Paused {
-                return goal_receipt(session_id, &scope, &owner, &current);
+                return pause_reign_goal_receipt(
+                    session_id,
+                    &scope,
+                    &owner,
+                    &current.objective,
+                    &current.usage,
+                );
             }
             verify_goal(&current, &expected, GoalStatus::Active, "pause")?;
             let paused = thread
@@ -195,7 +201,13 @@ async fn apply_action(
                 .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
             verify_goal(&paused, &expected, GoalStatus::Paused, "pause")?;
             verify_usage_preserved(&current, &paused, "pause")?;
-            goal_receipt(session_id, &scope, &owner, &paused)
+            pause_reign_goal_receipt(
+                session_id,
+                &scope,
+                &owner,
+                &paused.objective,
+                &paused.usage,
+            )
         }
         GoalAction::Resume { scope, owner } => {
             let expected = crate::codex_thread::reign_objective(&scope);
@@ -306,24 +318,24 @@ async fn provider_action(
                     ));
                 }
                 Some(current) if current.status == GoalStatus::Active => {
-                    verify_goal(&current, objective, GoalStatus::Active, "goal-set")?;
+                    verify_goal(&current, &objective, GoalStatus::Active, "goal-set")?;
                     current
                 }
                 Some(current) => {
-                    verify_goal(&current, objective, GoalStatus::Paused, "goal-set")?;
+                    verify_goal(&current, &objective, GoalStatus::Paused, "goal-set")?;
                     let active = thread
-                        .goal_set_typed(objective, GoalStatus::Active)
+                        .goal_set_typed(&objective, GoalStatus::Active)
                         .await
                         .map_err(|error| format!("Codex provider goal set refused: {error}"))?;
                     verify_usage_preserved(&current, &active, "goal-set")?;
                     active
                 }
                 None => thread
-                    .goal_set_typed(objective, GoalStatus::Active)
+                    .goal_set_typed(&objective, GoalStatus::Active)
                     .await
                     .map_err(|error| format!("Codex provider goal set refused: {error}"))?,
             };
-            verify_goal(&goal, objective, GoalStatus::Active, "goal-set")?;
+            verify_goal(&goal, &objective, GoalStatus::Active, "goal-set")?;
             Ok(json!({
                 "verified": true,
                 "action": "goal_set",

@@ -1,4 +1,3 @@
-"""Python transport for the Rust-owned context-window reader."""
 from __future__ import annotations
 
 import json
@@ -13,8 +12,6 @@ from fno.agents.self_stamp import resolve_own_transcript, resolve_self_identity
 
 @dataclass(frozen=True)
 class ContextReading:
-    """One context-window reading returned by the native probe."""
-
     used_tokens: int
     window_tokens: int
     used_pct: int
@@ -44,8 +41,8 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
     if error or not isinstance(native, dict):
         return None
     try:
-        keys = ("used_tokens", "window_tokens", "used_pct")
-        return ContextReading(*(int(native[k]) for k in keys), model=str(native["model"]))
+        values = tuple(int(native[key]) for key in ("used_tokens", "window_tokens", "used_pct"))
+        return ContextReading(values[0], values[1], values[2], str(native["model"]))
     except (KeyError, TypeError, ValueError):
         return None
 

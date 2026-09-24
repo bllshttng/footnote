@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
@@ -247,7 +247,7 @@ pub fn read_last_usage(path: &Path) -> Result<Option<ContextUsage>, ContextWindo
         file.seek(SeekFrom::Start(start))
             .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
         let mut bytes = Vec::new();
-        file.by_ref()
+        Read::by_ref(&mut file)
             .take(size.saturating_sub(start))
             .read_to_end(&mut bytes)
             .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
@@ -320,8 +320,9 @@ mod tests {
     use super::{
         compaction_band, effective_window, used_percent, window_for_model, CompactionBand,
         ContextWindowError, ContextWindowReceipt, ASTRA_DEFAULT_CONTEXT_WINDOW,
-        ASTRA_EFFECTIVE_PERCENT, ASTRA_MAX_CONTEXT_WINDOW,
+        ASTRA_EFFECTIVE_PERCENT, ASTRA_MAX_CONTEXT_WINDOW, EXPANDED_TAIL_BYTES,
     };
+    use std::io::Write;
     use serde_json::Value;
 
     #[test]
@@ -484,7 +485,9 @@ mod tests {
             "effective_context_window_percent": 95
         });
         let explicit: serde_json::Map<String, Value> = serde_json::from_value(explicit).unwrap();
-        let request = super::ContextWindowRequest::from_config(Some(&explicit)).unwrap();
+        let request = super::ContextWindowRequest::from_config(Some(&explicit))
+            .unwrap()
+            .unwrap();
         let configured = request.model_context_window.unwrap();
         assert_eq!(
             super::effective_window(&ContextWindowReceipt {

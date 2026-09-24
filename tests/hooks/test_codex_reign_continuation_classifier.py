@@ -33,14 +33,17 @@ def verified_receipt() -> dict:
             "harness": "codex",
             "turn_ids": ["turn-0001", "turn-0002", "turn-0003"],
             "identity_constant": True,
+            "scope": "disposable",
         },
-        "correlation_id": "stop-correlation-0001",
-        "continuation_owner": "stop",
+        "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
+        "continuation_owner": "goal",
         "action_hash": "sha256:nonce-action-0001",
         "user_message_count": 1,
         "command_requests": [
-            {"command": "/compact", "status": "verified", "request_id": "compact-0001"},
-            {"command": "/goal", "status": "verified", "request_id": "goal-0001"},
+            {"method": "thread/goal/get", "status": "absent", "thread_id": "01a00000-0000-7000-8000-000000000001"},
+            {"method": "thread/goal/get", "status": "verified", "thread_id": "01a00000-0000-7000-8000-000000000001"},
+            {"method": "thread/compact/start", "status": "verified", "thread_id": "01a00000-0000-7000-8000-000000000001"},
+            {"method": "king_goal_resumed", "status": "verified", "thread_id": "01a00000-0000-7000-8000-000000000001"},
         ],
         "window": {
             "requested": 1_000_000,
@@ -53,7 +56,39 @@ def verified_receipt() -> dict:
             "cost_policy": "272K",
         },
         "goal": {
+            "scope": "disposable",
             "before": {"status": "absent", "objective": None, "usage": None},
+            "before_receipt": "Codex provider goal unreadable: no goal",
+            "init": {
+                "ensure_receipt": {
+                    "provider": "codex",
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                    "scope": "disposable",
+                    "objective": "$fno:reign disposable",
+                    "status": "active",
+                    "continuation_owner": "king:disposable",
+                    "usage": {
+                        "token_budget": 50_000,
+                        "tokens_used": 1,
+                        "time_used_seconds": 1,
+                    },
+                },
+                "ensure_completed_at_ns": 100,
+                "manifest_written_at_ns": 200,
+                "manifest": {
+                    "written": True,
+                    "scope": "disposable",
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                },
+                "refused_retry": {"status": "refused", "manifest_unchanged": True},
+                "refused_no_goal": {
+                    "status": "refused",
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                    "scope": "disposable-refusal",
+                    "provider_goal_readable": False,
+                    "manifest_written": False,
+                },
+            },
             "after": {
                 "status": "active",
                 "objective": "$fno:reign disposable",
@@ -67,6 +102,7 @@ def verified_receipt() -> dict:
             "paused": {
                 "status": "paused",
                 "objective": "$fno:reign disposable",
+                "thread_id": "01a00000-0000-7000-8000-000000000001",
                 "usage": {
                     "token_budget": 50_000,
                     "tokens_used": 1,
@@ -76,6 +112,7 @@ def verified_receipt() -> dict:
             "resumed": {
                 "status": "active",
                 "objective": "$fno:reign disposable",
+                "thread_id": "01a00000-0000-7000-8000-000000000001",
                 "usage": {
                     "token_budget": 50_000,
                     "tokens_used": 1,
@@ -85,19 +122,32 @@ def verified_receipt() -> dict:
         },
         "stop": {
             "independent": {
-                "decision": "block",
-                "class": "actionable-block",
-                "correlation_id": "stop-correlation-0001",
+                "decision": "allow",
+                "class": "visitor",
+                "continuation_owner": "none",
+                "session_id": "01a00000-0000-7000-8000-000000000001",
+                "turn_id": "turn-0001",
+                "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0001",
                 "goal_before": "absent",
-                "useful_action_after_block": True,
-                "action_order": ["stop-block", "nonce-write"],
+                "useful_action_after_stop": True,
+                "action_order": ["stop-visitor", "goal-init", "goal-useful-action"],
+                "first_step_at_ns": 25,
+                "visitor_at_ns": 50,
+                "goal_ensured_at_ns": 100,
+                "manifest_written_at_ns": 200,
+                "useful_action_at_ns": 300,
             },
             "delegated": {
                 "decision": "allow",
                 "class": "delegated-to-goal",
                 "continuation_owner": "goal",
+                "session_id": "01a00000-0000-7000-8000-000000000001",
+                "turn_id": "turn-0002",
+                "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0002",
                 "block_count": 0,
                 "useful_action": True,
+                "useful_action_at_ns": 300,
+                "stop_at_ns": 350,
             },
         },
         "proof": {
@@ -110,16 +160,88 @@ def verified_receipt() -> dict:
             "useful_nonce_action": True,
             "user_message_count": 1,
             "quiet_park": {
+                "session_id": "01a00000-0000-7000-8000-000000000001",
+                "scope": "disposable",
                 "park_count": 1,
                 "stop_samples_during_hold": 0,
+                "turns_during_hold": 0,
+                "goal_usage_stable": True,
+                "paused_goal_receipt": {
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                    "status": "paused",
+                    "usage": {"token_budget": 50_000, "tokens_used": 1, "time_used_seconds": 2},
+                },
+                "held_goal_receipt": {
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                    "status": "paused",
+                    "usage": {"token_budget": 50_000, "tokens_used": 1, "time_used_seconds": 2},
+                },
                 "park_interval_seconds": 0.25,
                 "wake_result": "resumed",
             },
+            "wake_receipt": {
+                "session_id": "01a00000-0000-7000-8000-000000000001",
+                "scope": "disposable",
+                "reason": "board",
+                "provider_receipt": {
+                    "thread_id": "01a00000-0000-7000-8000-000000000001",
+                    "status": "active",
+                    "objective": "$fno:reign disposable",
+                },
+            },
+            "compaction_receipt": {
+                "verified": True,
+                "provider": "codex",
+                "action": "compact",
+                "thread_id": "01a00000-0000-7000-8000-000000000001",
+            },
+            "private_daemon_replacement": {
+                "command": "codex app-server daemon restart",
+                "status": "verified",
+                "session_id": "01a00000-0000-7000-8000-000000000001",
+                "returncode": 0,
+                "code_home_is_private": True,
+            },
             "repeats": [
-                {"boundary": "compaction", "status": "verified", "same_session": True, "useful_action": True},
-                {"boundary": "resume", "status": "verified", "same_session": True, "useful_action": True},
-                {"boundary": "private-daemon-replacement", "status": "verified", "same_session": True, "useful_action": True},
+                {
+                    "boundary": "compaction",
+                    "status": "verified",
+                    "same_session": True,
+                    "useful_action": True,
+                    "session_id": "01a00000-0000-7000-8000-000000000001",
+                    "turn_id": "turn-0002",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0002",
+                    "action_hash": "sha256:nonce-action-0001",
+                },
+                {
+                    "boundary": "resume",
+                    "status": "verified",
+                    "same_session": True,
+                    "useful_action": True,
+                    "session_id": "01a00000-0000-7000-8000-000000000001",
+                    "turn_id": "turn-0003",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0003",
+                    "action_hash": "sha256:nonce-action-0001",
+                },
+                {
+                    "boundary": "private-daemon-replacement",
+                    "status": "verified",
+                    "same_session": True,
+                    "useful_action": True,
+                    "session_id": "01a00000-0000-7000-8000-000000000001",
+                    "turn_id": "turn-0003",
+                    "correlation_id": "stop:01a00000-0000-7000-8000-000000000001:turn-0003",
+                    "action_hash": "sha256:nonce-action-0001",
+                },
             ],
+            "provider_goal_refusal": {
+                "thread_id": "01a00000-0000-7000-8000-000000000001",
+                "scope": "disposable-refusal",
+                "provider_goal_readable": False,
+                "provider_error": "Codex app-server could not resume the exact thread",
+                "init_error": "provider_goal: thread unreadable",
+                "manifest_absent": True,
+            },
         },
         "status": "verified",
     }
@@ -132,6 +254,89 @@ def test_ac10_hp_and_ac11_hp_require_independent_stop_and_single_user_message():
     assert result["ok"] is True
     assert result["class"] == "verified-continuation"
     assert result["failed_reader"] is None
+
+
+def test_ac10_hp_accepts_visitor_stop_followed_by_goal_owned_continuation():
+    """Crown init may ensure the goal after a visitor Stop on the same thread."""
+    receipt = verified_receipt()
+    receipt["stop"]["independent"].update(
+        {
+            "decision": "allow",
+            "class": "visitor",
+            "useful_action_after_stop": True,
+            "action_order": ["stop-visitor", "goal-init", "goal-useful-action"],
+        }
+    )
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result["ok"] is True
+    assert result["class"] == "verified-continuation"
+
+
+def test_ac11_hp_rejects_a_manifest_written_before_provider_goal_ensure():
+    receipt = verified_receipt()
+    receipt["goal"]["init"]["manifest_written_at_ns"] = 99
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "malformed-output",
+        "failed_reader": "goal.init.order",
+    }
+
+
+def test_ac11_edge_rejects_a_retry_that_replaces_the_verified_crown():
+    receipt = verified_receipt()
+    receipt["goal"]["init"]["refused_retry"]["manifest_unchanged"] = False
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "identity-miss",
+        "failed_reader": "goal.init.refused_retry",
+    }
+
+
+def test_ac11_edge_rejects_unreadable_goal_init_that_writes_a_manifest():
+    receipt = verified_receipt()
+    receipt["goal"]["init"]["refused_no_goal"]["manifest_written"] = True
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "identity-miss",
+        "failed_reader": "goal.init.refused_no_goal",
+    }
+
+
+def test_ac10_edge_requires_the_exact_board_wake_and_private_daemon_receipts():
+    receipt = verified_receipt()
+    receipt["proof"]["wake_receipt"]["provider_receipt"]["thread_id"] = (
+        "01a00000-0000-7000-8000-000000000002"
+    )
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "wake-refused",
+        "failed_reader": "quiet_park.wake_receipt",
+    }
+
+    receipt = verified_receipt()
+    receipt["proof"]["private_daemon_replacement"]["code_home_is_private"] = False
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "resume-marker-stale",
+        "failed_reader": "daemon.private_replacement",
+    }
 
 
 def test_ac10_edge_requires_compaction_resume_and_daemon_replacement_repeats():
@@ -232,3 +437,28 @@ def test_previous_receipt_schema_is_not_accepted_as_current_live_evidence():
         "class": "malformed-output",
         "failed_reader": "receipt.schema_version",
     }
+
+
+def test_provider_receipt_requires_verified_action_and_exact_thread():
+    diagnostic = load_diagnostic()
+    require_receipt = getattr(diagnostic, "_require_provider_receipt", None)
+    assert callable(require_receipt), "smoke runner must validate native provider receipts"
+
+    session_id = "01a00000-0000-7000-8000-000000000001"
+    receipt = {
+        "verified": True,
+        "action": "goal_set",
+        "provider": "codex",
+        "thread_id": session_id,
+        "status": "active",
+        "objective": "$fno:reign disposable",
+        "continuation_owner": "king:disposable",
+        "usage": {"token_budget": 50000, "tokens_used": 1, "time_used_seconds": 1},
+    }
+
+    assert require_receipt(receipt, session_id=session_id, action="goal_set") == receipt
+
+    wrong_thread = deepcopy(receipt)
+    wrong_thread["thread_id"] = "01a00000-0000-7000-8000-000000000002"
+    with pytest.raises(RuntimeError, match="identity-miss"):
+        require_receipt(wrong_thread, session_id=session_id, action="goal_set")
