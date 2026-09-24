@@ -104,6 +104,14 @@ pub(crate) fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, 
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
         .unwrap_or_else(|| project_events.clone());
+    // A missing space root must drop nothing: this row is the one record
+    // that a fire ran, and the append below is best-effort, so the target
+    // dirs are created here rather than trusted to exist.
+    for events in [&project_events, &global_events] {
+        if let Some(parent) = events.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
     let mut detail = format!(
         "driver={driver} decision={decision} reason={}",
         if reason.is_empty() { "live" } else { reason }

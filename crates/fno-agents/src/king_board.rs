@@ -3159,16 +3159,11 @@ mod tests {
         // The truth batch shells to bare `fno` on PATH; stub it to sleep 30s.
         let stub_dir = dir.path().join("stub-bin");
         std::fs::create_dir_all(&stub_dir).unwrap();
-        let stub = stub_dir.join("fno");
-        std::fs::write(
-            &stub,
+        let stub = crate::write_exec_stub(
+            &stub_dir,
+            "fno",
             "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let prev_py = std::env::var_os("FNO_PY");
         let prev_path = std::env::var_os("PATH");
         std::env::set_var("FNO_PY", &stub); // non-truth fno-py reads answer at once

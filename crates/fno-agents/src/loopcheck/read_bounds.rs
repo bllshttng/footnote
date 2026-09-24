@@ -152,11 +152,13 @@ pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
                     .checked_add(STOPGATE_HARNESS_MARGIN)
                     .map(|hard| hard.saturating_duration_since(now))
                     .unwrap_or_default();
-                std::cmp::max(
-                    configured.min(remaining),
-                    STOPGATE_DRAIN_FLOOR.min(hard_remaining),
-                )
-                .max(STOPGATE_BOUND_FLOOR)
+                // The reserved read measures against the fire's FULL
+                // remaining budget: the reserve is what every other read
+                // held back for it, so the drain's bound is whatever of the
+                // fire is left, not the 30s per-read ceiling the unreserved
+                // reads clamp to.
+                std::cmp::max(remaining, STOPGATE_DRAIN_FLOOR.min(hard_remaining))
+                    .max(STOPGATE_BOUND_FLOOR)
             }
             None => configured,
         }

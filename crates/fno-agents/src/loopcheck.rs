@@ -13333,6 +13333,7 @@ mod tests {
         // hiding in a named-by-question child would dodge a loopcheck-only
         // scan.
         production.push_str(include_str!("loopcheck/range_tiling.rs"));
+        production.push_str(include_str!("loopcheck/bounded_read.rs"));
         // Positive control first, so an empty scan can never read as green:
         // the centralized runner must exist and carry real call sites.
         assert!(production.contains("fn run_bounded("));
