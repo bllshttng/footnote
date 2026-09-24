@@ -622,8 +622,7 @@ pub(crate) fn build_resume_argv_split(
 }
 
 /// Raw resume command tokens before the lane's declared `pre_exec` wrapper.
-/// Print-command output uses these tokens because Python prints the paste-ready
-/// harness command and does not launch the pre-exec daemon itself.
+/// Print-command output splices route and identity tokens before composing it.
 pub(crate) fn build_resume_argv_tokens_split(
     provider: &str,
     session_id: &str,

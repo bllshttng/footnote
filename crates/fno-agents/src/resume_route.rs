@@ -125,6 +125,9 @@ pub(crate) fn print_resume_command(
             recorded_cwd.to_string()
         }
     });
+    if cwd.is_empty() {
+        return crate::resume_gate::missing_cwd_refusal(name, form_session_id);
+    }
     let argv = if harness == "codex" {
         crate::pane_relaunch::build_resume_argv_tokens_split(
             harness,
@@ -207,6 +210,24 @@ pub(crate) fn print_resume_command(
     }
     printable.extend(identity);
     printable.extend(crate::pane_relaunch::env_prefixed(&print_env, &argv));
+    let printable = if harness == "codex" {
+        match crate::harness_capabilities::compose_pre_exec(
+            harness,
+            "interactive_resume",
+            printable,
+        ) {
+            Ok(argv) => argv,
+            Err(_) => {
+                eprintln!(
+                    "fno agents resume: harness {} resume contract is invalid.",
+                    crate::client_verbs::py_repr_str(harness)
+                );
+                return 13;
+            }
+        }
+    } else {
+        printable
+    };
     crate::pane_relaunch::print_relaunch_command(None, &cwd, &printable, &[], row_name);
     0
 }

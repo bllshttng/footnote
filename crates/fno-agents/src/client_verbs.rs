@@ -2150,7 +2150,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                     if crate::resume_receipt::maybe_hint_preserved_session(home, &name) {
                         return 13;
                     }
-                    let next_step = if is_session_shaped(&name) {
+                    let next_step = if is_uuid_shaped(&name.to_ascii_lowercase()) {
                         format!("or run `fno agents adopt {name}` to register it first")
                     } else {
                         "or pass a full session id to resume an orphaned session".to_string()
