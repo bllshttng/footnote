@@ -1124,6 +1124,12 @@ struct PaneEntry {
     /// This positive refusal marker is sweepable; it is not inferred from an
     /// absent registry row.
     refused_worker: Option<String>,
+    /// The held portal row this placeholder seat stands in for
+    /// (`FNO_PORTAL_HELD`), parsed once at spawn and re-parsed at keeper
+    /// re-adoption. A placeholder is held even though adoption gives its
+    /// bare shell `cmd: Some`; the portal doors read
+    /// [`Core::portal_seat_is_viewer`], never `cmd` alone.
+    portal_hold: Option<String>,
     /// True when this pane was adopted at a fresh id because the pane key its
     /// keeper socket carries could not be reused (zero, or already live). Set
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
@@ -2725,6 +2731,7 @@ impl Core {
             None,
             None,
             None,
+            None,
         )?;
         Ok(id)
     }
@@ -2860,6 +2867,7 @@ impl Core {
             account,
             resume_target,
             refused_worker_from_argv(argv),
+            portal_hold_from_argv(argv),
         )?;
         if let Some(keeper_err) = fell_back {
             if let Some(entry) = self.panes.get_mut(&id) {
@@ -2954,6 +2962,7 @@ impl Core {
         account: Option<String>,
         resume_target: Option<String>,
         refused_worker: Option<String>,
+        portal_hold: Option<String>,
     ) -> Result<(), String> {
         let Some(child_pid) = pty.child_pid() else {
             pty.kill();
@@ -2984,6 +2993,7 @@ impl Core {
                 account,
                 resume_target,
                 refused_worker,
+                portal_hold,
                 unreconciled: false,
                 unkept: false,
                 last_output: Instant::now(),
@@ -5639,11 +5649,11 @@ impl Core {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
         };
+        // Screen text only: the line is fed to the seat's VT and never
+        // typed as shell input - a typed printf echoed and executed on the
+        // placeholder, so the operator read the same message three times.
         let line = format!("{message}\r\n");
         entry.vt.feed(line.as_bytes());
-        let quoted = message.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s\\n' '{quoted}'\r");
-        let _ = entry.pty.write_input(command.as_bytes());
     }
 
     fn hold_worker_pane(
@@ -5661,24 +5671,13 @@ impl Core {
         // worker spawn path uses): every pane is keeper-hosted, so the
         // placeholder outlives this server, and the next one re-derives whose
         // seat it holds from the argv instead of minting a twin beside it.
-        let candidates: Vec<String> = self
-            .shells
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        let mut spawned = Err("no shell candidate for held placeholder".to_string());
-        for shell in &candidates {
-            let argv = vec![
-                "env".to_string(),
-                format!("FNO_AGENT_SELF={}", facts.name),
-                shell.clone(),
-            ];
-            spawned = self.spawn_pane_cmd(&argv, rows, cols, &cwd);
-            if spawned.is_ok() {
-                break;
-            }
-        }
-        let pid = spawned?;
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_AGENT_SELF={}", facts.name),
+            rows,
+            cols,
+            &cwd,
+            "held placeholder",
+        )?;
         self.write_restore_message(
             pid,
             &format!(
@@ -5705,24 +5704,13 @@ impl Core {
         // argv cannot. Each shell candidate takes its turn, so a broken
         // $SHELL falls through to /bin/sh the way the plain shell spawn
         // always did; the title carries the human-readable half.
-        let candidates: Vec<String> = self
-            .shells
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        let mut spawned = Err("no shell candidate for refused placeholder".to_string());
-        for shell in &candidates {
-            let argv = vec![
-                "env".to_string(),
-                format!("FNO_REFUSED_WORKER={name}"),
-                shell.clone(),
-            ];
-            spawned = self.spawn_pane_cmd(&argv, rows, cols, cwd);
-            if spawned.is_ok() {
-                break;
-            }
-        }
-        let pid = spawned?;
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_REFUSED_WORKER={name}"),
+            rows,
+            cols,
+            cwd,
+            "refused placeholder",
+        )?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
             entry.refused_worker = Some(name.to_string());
