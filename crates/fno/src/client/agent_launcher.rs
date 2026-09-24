@@ -465,11 +465,10 @@ pub(crate) fn open_with(
     // An empty draft always yields. Otherwise only a terminal `Launched`
     // attempt makes way: a refused or unknown one keeps its reason on
     // screen, and an in-flight one must never be replaced.
-    let replaceable = launcher.draft.message.is_empty()
-        || matches!(
-            view.launch_attempt.as_ref().map(|a| &a.state),
-            Some(AttemptState::Launched { .. })
-        );
+    let attempt = view.launch_attempt.as_ref().map(|a| &a.state);
+    let replaceable = !matches!(attempt, Some(AttemptState::Starting))
+        && (launcher.draft.message.is_empty()
+            || matches!(attempt, Some(AttemptState::Launched { .. })));
     if !replaceable {
         return Err("the launcher holds a draft; empty it and press t again".to_string());
     }

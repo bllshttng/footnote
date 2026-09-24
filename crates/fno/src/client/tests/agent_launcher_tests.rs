@@ -1286,6 +1286,32 @@ fn open_with_keeps_a_retained_nonempty_draft() {
 }
 
 #[test]
+fn open_with_keeps_the_draft_while_an_attempt_is_in_flight() {
+    // The in-flight guard: even an EMPTY draft does not yield while an
+    // owned attempt is Starting. A seedless launch's outcome must fold
+    // onto the dock it belongs to, never onto a fresh board prefill.
+    let mut v = plain_view();
+    open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+    }
+    apply_launch_update(
+        &mut v,
+        AgentLaunchUpdate {
+            request_id: 1,
+            state: LaunchState::Starting,
+        },
+    );
+    let err =
+        super::agent_launcher::open_with(&mut v, "/fno:target x-1".into(), None, "x-1".into())
+            .expect_err("an in-flight attempt holds the draft");
+    assert!(err.contains("holds a draft"), "err: {err}");
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.phase, Phase::Submitting { request_id: 1 });
+    assert_eq!(l.draft.node, None);
+}
+
+#[test]
 fn open_with_replaces_after_a_launched_attempt() {
     // AC8-EDGE: a terminal `Launched` attempt makes way for another node's
     // prefill; the phase is Editing again.
