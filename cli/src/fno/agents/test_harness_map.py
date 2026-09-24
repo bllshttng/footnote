@@ -595,7 +595,7 @@ def test_config_command_normalized_per_harness():
     ] == "/fno:target --no-merge x-1234"
 
 
-def test_explicit_command_normalized_per_harness():
+def test_explicit_command_normalized_per_harness(monkeypatch):
     """AC2-HP: the explicit `command=` rung normalizes too (x-0676 --reconcile
     passes an explicit template)."""
     # `_resolve`, not a bare `resolve_dispatch`: this was the one call in the
@@ -604,6 +604,7 @@ def test_explicit_command_normalized_per_harness():
     # ("bg is only supported by claude and codex") instead of testing the
     # normalization it names.
     # Green in CI, red on a configured developer machine.
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", lambda *a, **k: (None, {"ready": True}))
     out = _resolve(command="/target --no-merge {id}", harness="codex", node_id="x-1")
     assert out["command"] == "$fno:target --no-merge x-1"
 

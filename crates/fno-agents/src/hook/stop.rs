@@ -1613,6 +1613,25 @@ fn git_delivery_prefix(repo_root: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    struct EventsPathRestore(Option<std::ffi::OsString>);
+
+    impl EventsPathRestore {
+        fn clear() -> Self {
+            let saved = std::env::var_os("FNO_EVENTS_PATH");
+            std::env::remove_var("FNO_EVENTS_PATH");
+            Self(saved)
+        }
+    }
+
+    impl Drop for EventsPathRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_EVENTS_PATH", value),
+                None => std::env::remove_var("FNO_EVENTS_PATH"),
+            }
+        }
+    }
+
     #[test]
     fn uuid_suffix_takes_a_rollout_tail() {
         let tid = "0198abcd-1234-5678-9abc-def012345678";
@@ -1927,6 +1946,7 @@ mod tests {
         use crate::state::RegistryEntry;
 
         let _root = DeclaredRoot::declare("stop-king-row");
+        let _events_path = EventsPathRestore::clear();
         let repo = _root.path().join("repo");
         let elsewhere = _root.path().join("elsewhere");
         std::fs::create_dir_all(&repo).unwrap();
