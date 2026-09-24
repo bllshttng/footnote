@@ -11,6 +11,10 @@ One dock in the mux sideline launches a new harness session through the canonica
 5. The client receives `ServerMsg::AgentLaunch` progress: `Starting`, then one terminal state (`Launched` / `Refused` / `Unknown`).
 6. A verified pane birth focuses the new pane through the existing `FocusPane` command path. The seed is never sent again on attach.
 
+## Launching a backlog node
+
+`t` on a board card or in the drill-down opens the dock prefilled: message `/fno:target <id>`, the node's project preselected, and the launch bound to the node with `--node <id>` so the door's dispatch guard judges it and the worker joins its roster row and card. The operator picks harness, model and effort; nothing spawns before the Launch press. A card already being worked refuses before the dock opens. A kept draft is never overwritten.
+
 ## Dock geometry
 
 - The dock pins to the bottom of the sideline column, above the bottom chrome row. It reserves rows the way the court block does. While it is open the passive court block yields: an active editor outranks glance chrome.
@@ -34,12 +38,12 @@ One dock in the mux sideline launches a new harness session through the canonica
 
 ## Boundaries not crossed
 
-- The dock launches pane-hosted sessions only. bg threads and headless workers keep their existing surfaces (roster + row menu / CLI).
-- Full-screen takeover and a toggle shortcut are later work. They reuse the same state and render components (`client/agent_launcher.rs`), not a second composer.
+- The dock launches a thread by default, or a pane through the placement chip; headless workers keep the CLI. They reuse the same state and render components (`client/agent_launcher.rs`), not a second composer.
 - No raw CLI passthrough, crown granting, or permission escalation. No force flags ride the spawn argv. A refusal is the product.
 
 ## Tests
 
-- `src/client/tests/agent_launcher_tests.rs`: editor, focus order, draft retention, submit refusals, update correlation, render table, dock geometry (dynamic editor window, floor, paint clipping).
+- `src/client/tests/agent_launcher_tests.rs`: editor, focus order, draft retention, the board prefill (binds message, project and node; keeps a held draft; replaces after a launch; drops a stale node binding when the message moves), submit refusals, update correlation, render table, dock geometry.
+- `src/client/tests/backlog_board_tests.rs`: the `t` key (prefills from a card, refuses a card already being worked, works inside the drill-down, keeps a held draft).
 - `src/server/tests/agent_launcher_tests.rs`: pre-birth validation and desk dedup/replay at the Core.
 - `tests/agent_launcher_journey.rs`: real subprocess boundary with a recording fake door. Pins exact argv, verbatim stdin, refusal and unknown journeys, and no duplicate attempt.
