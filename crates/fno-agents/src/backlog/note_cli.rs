@@ -436,8 +436,7 @@ fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
         .stdin
         .take()
         .and_then(|mut stdin| stdin.write_all(pointer.as_bytes()).ok());
-    let _ = child.wait();
-    Some(format!("delivered to {}", record.holder))
+    Some(format!("pointer sent to {}", record.holder))
 }
 
 /// The excerpt source: `-` reads stdin, a path reads the file, absent is None.
@@ -463,10 +462,7 @@ fn read_excerpt(source: &Option<String>) -> Result<Option<String>, String> {
 fn emit_finding_event(event_type: &str, data: Value) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = crate::paths::events_path(&cwd);
-    let global = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cwd.clone())
-        .join(".fno/events.jsonl");
+    let global = crate::loopcheck::default_global_events_path();
     crate::loopcheck::emit_to_both(&project, &global, event_type, data);
 }
 

@@ -659,7 +659,7 @@ event_types:
     consumers: [fno-agents loop-check, fno do pr]
 
   - name: review_finding
-    description: "An operator recorded a blocking review finding (via `fno backlog note <node> --blocking` / `fno mux block annotate`). TELEMETRY ONLY since x-26bd: the durable record is the findings table in the store, and loop-check gates on that store, never on this event. The event keeps the scoreboard's review_observed count alive."
+    description: "An operator recorded a blocking review finding (via `fno backlog note <node> --blocking` / `fno mux block annotate`). TELEMETRY ONLY: the durable record is the findings table in the store, and loop-check gates on that store, never on this event. The event keeps the scoreboard's review_observed count alive."
     sources: [observer]
     data:
       required: [finding_id, node_id]
@@ -673,7 +673,7 @@ event_types:
     consumers: [fno-agents scoreboard]
 
   - name: review_finding_resolved
-    description: "A finding was explicitly resolved (via `fno backlog note --resolve <id>`). TELEMETRY ONLY since x-26bd: the store row carries resolved_at; this event keeps the scoreboard count alive."
+    description: "A finding was explicitly resolved (via `fno backlog note --resolve <id>`). TELEMETRY ONLY: the store row carries resolved_at; this event keeps the scoreboard count alive."
     sources: [observer]
     data:
       required: [finding_id]

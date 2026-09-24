@@ -54,7 +54,6 @@ def cmd_note(
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
-    # Finding flags ride ctx.args straight to the native action (d-b6cc1a2a).
     extra = list(ctx.args)
     graph_path = graph_cli._graph_path()
     if not task_id or "--blocking" in extra or "--resolve" in extra:
@@ -65,6 +64,10 @@ def cmd_note(
             typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
             raise typer.Exit(code=1)
         argv = [str(binary), "backlog-note", "--graph", str(graph_path)]
+        if json_output:
+            argv.append("--json")
+        if body_file:
+            argv += ["--body-file", str(body_file)]
         argv += [a for a in (task_id, text) if a]
         argv += extra
         proc = subprocess.run(argv, check=False)

@@ -1,6 +1,3 @@
-"""`fno backlog annotate` - retired (x-26bd): every spelling refuses, naming
-its `note` replacement.
-"""
 from __future__ import annotations
 
 import typer
