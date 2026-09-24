@@ -9,10 +9,15 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$REPO_ROOT/scripts/lib/graph-resolve.sh"
+CLI_DIR="$REPO_ROOT/cli"
 
 if [[ ! -f "$LIB" ]]; then
     echo "test_graph_resolve: cannot find $LIB" >&2
     exit 2
+fi
+
+if [[ "${FNO_GRAPH_RESOLVE_UV:-0}" != "1" ]]; then
+    FNO_GRAPH_RESOLVE_UV=1 exec uv run --project "$CLI_DIR" bash "$0"
 fi
 
 TMP=$(mktemp -d -t graph-resolve.XXXXXX)
@@ -52,6 +57,7 @@ run_test() {
     local want_stderr_pattern="$1"; shift
     local got_stdout got_stderr got_rc
     local tmpstderr
+    export GRAPH_JSON
     tmpstderr=$(mktemp)
     got_stdout=$("$@" 2>"$tmpstderr")
     got_rc=$?
@@ -95,8 +101,8 @@ else
     fail "strict mode: unknown ID exits nonzero" "rc=$rc5 stdout=$got5 stderr=$err5"
 fi
 
-# 6. missing graph file soft-fails (echoes arg + stderr warning)
-GRAPH_JSON="$TMP/does-not-exist.json" run_test "missing graph soft-fails" 0 "ab-12345678" "missing" resolve_arg "ab-12345678"
+# 6. missing graph store soft-fails (echoes arg + stderr warning)
+GRAPH_JSON="$TMP/does-not-exist.json" run_test "missing graph store soft-fails" 0 "ab-12345678" "no match for" resolve_arg "ab-12345678"
 
 # 7. pattern not-quite-right passes through unchanged (too short / non-hex)
 GRAPH_JSON="$TMP/graph.json" run_test "bad pattern: too-short" 0 "ab-notvalid" "" resolve_arg "ab-notvalid"
