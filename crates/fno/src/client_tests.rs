@@ -5,7 +5,6 @@ mod chrome_hit_helpers;
 use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
-use settings_modal::{build_prefix_settings_rows, PREFIX_PICKS};
 
 // (x-0719) The nav filter/overlay test run lives in its own module; this
 // file is shrink-only under the file-budget gate.
@@ -7668,7 +7667,7 @@ fn settings_theme_tab_lists_the_shipped_palettes() {
 
 #[test]
 fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
-    let (rows, actions) = build_prefix_settings_rows("C-b");
+    let (rows, actions) = settings_modal::build_prefix_settings_rows("C-b");
     assert!(matches!(
         rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-b"
@@ -7680,13 +7679,13 @@ fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(specs, PREFIX_PICKS.map(String::from));
+    assert_eq!(specs, settings_modal::PREFIX_PICKS.map(String::from));
     assert!(rows.iter().any(|row| matches!(
         row,
         PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
     )));
 
-    let (custom_rows, _) = build_prefix_settings_rows("C-q");
+    let (custom_rows, _) = settings_modal::build_prefix_settings_rows("C-q");
     assert!(matches!(
         custom_rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-q"
