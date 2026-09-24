@@ -2097,7 +2097,7 @@ mod tests {
         );
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
-        let mut after = raw_rows(&graph);
+        let mut after = raw.clone();
         after[0]
             .as_object_mut()
             .unwrap()
