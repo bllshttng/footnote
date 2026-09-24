@@ -4,7 +4,7 @@
 //! file-budget gate names this module the answer to "how does the sideline
 //! column paint".
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::*;
 
@@ -718,8 +718,28 @@ impl View {
             text.push_str(&segments.join(" \u{b7} "));
         }
         let age = row_age(a, now);
-        let head_w = text.width().min(text_w.saturating_sub(age.width()));
-        format!("{}{}", pad_to(&text, head_w), age)
+        let head_w = text_w.saturating_sub(age.width());
+        let head = if text.width() <= head_w {
+            text
+        } else {
+            let limit = head_w.saturating_sub(1);
+            let mut fitted = String::new();
+            let mut width = 0;
+            for ch in text.chars() {
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + char_width > limit {
+                    break;
+                }
+                fitted.push(ch);
+                width += char_width;
+            }
+            if head_w > 0 {
+                fitted.push('…');
+            }
+            fitted
+        };
+        let padding = " ".repeat(head_w.saturating_sub(head.width()));
+        format!("{head}{padding}{age}")
     }
 
     /// The card-mode highlight pairing: a card's lower half inverts when
