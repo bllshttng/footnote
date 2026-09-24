@@ -859,22 +859,37 @@ pub(super) async fn toggle_composer(
     if view.launcher.is_some() {
         agent_launcher::close(view);
     } else {
-        let was_on = view.panel_on;
-        view.panel_on = true;
-        if view.panel_w() == 0 {
-            view.panel_on = was_on;
-            view.set_notice("terminal too narrow for the composer".into());
-        } else {
-            if !was_on {
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            agent_launcher::open(view);
-        }
+        show_composer(view, sock_w).await?;
     }
     Ok(())
+}
+
+/// The show half of [`toggle_composer`], shared with the board's `t` key:
+/// turn the sideline on, refuse a too-narrow terminal (notice + `false`),
+/// send the Resize when the sideline was hidden, then open the dock.
+/// `true` when the dock is open.
+pub(super) async fn show_composer(
+    show: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<bool, String> {
+    let was_on = show.panel_on;
+    show.panel_on = true;
+    if show.panel_w() == 0 {
+        show.panel_on = was_on;
+        show.set_notice("terminal too narrow for the composer".into());
+        return Ok(false);
+    }
+    if !was_on {
+        let (r, c) = show.content_dims();
+        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+            .await
+            .map_err(|e| format!("resize send failed: {e}"))?;
+    }
+    // An already-open dock keeps its held draft; open() replaces it.
+    if show.launcher.is_none() {
+        agent_launcher::open(show);
+    }
+    Ok(true)
 }
 
 /// The agent-view pattern: entering full-screen opens the composer (a list
