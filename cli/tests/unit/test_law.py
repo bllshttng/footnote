@@ -188,6 +188,22 @@ def test_missing_rationale_is_refused_with_exit_3(
     assert _rows(index) == []
 
 
+def test_a_placeholder_statement_is_refused_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard against the 2026-08-29 junk law: a smoke call of this verb
+    with x/y/z reached the live index and only the operator could clear it.
+    The placeholder shape now fails wherever the verb is invoked from."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(["set", "x", "y", "--rationale", "z"])
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "more than one character" in result.output
+    assert _rows(index) == []
+
+
 def test_durable_law_probe_records_where_the_refused_shapes_did_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

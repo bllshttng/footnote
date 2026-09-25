@@ -230,8 +230,11 @@ jobs:
         # gate is the POSITIVE summary line, naming the trial count this job
         # exists to run. It reads STRESS_TRIALS, and 20 is already its default;
         # naming it here is what makes the contract greppable.
+        # The deterministic lifecycle waits run once in the regular crate
+        # integration jobs; this repeated sample excludes those two waits.
         env:
           STRESS_TRIALS: "20"
+          STRESS_SKIP_SLOW: "1"
         run: |
           cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
           cargo clean -p fno --manifest-path crates/fno/Cargo.toml

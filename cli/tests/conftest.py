@@ -170,6 +170,10 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "tests/agents/test_codex_signal_handling.py::"
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
+        (
+            "tests/agents/test_spawn_pane.py::"
+            "test_late_codex_identity_composes_across_every_peer_surface"
+        ),
     }
 )
 
