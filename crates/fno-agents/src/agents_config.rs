@@ -1192,6 +1192,17 @@ pub fn active_backlog_enabled(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.
+pub fn slot_cutover_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("slot_cutover")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
 /// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
 /// safe repairs (dead flight holds, the launchd refresh, the install from
 /// main) before it pages. Off, the rows still name the repair verb.
@@ -1380,6 +1391,25 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
         assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    #[test]
+    fn slot_cutover_is_opt_in_and_rejects_non_booleans() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("slot-cutover-default", "schema_version = 1\n");
+        assert!(!slot_cutover_enabled(&cwd));
+
+        let cwd =
+            write_project_settings("slot-cutover-enabled", "[slot_cutover]\nenabled = true\n");
+        assert!(slot_cutover_enabled(&cwd));
+
+        let cwd = write_project_settings(
+            "slot-cutover-invalid",
+            "[slot_cutover]\nenabled = \"yes\"\n",
+        );
+        assert!(!slot_cutover_enabled(&cwd));
         clear_config_env();
     }
 
