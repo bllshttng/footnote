@@ -14,7 +14,9 @@
 //! `fields` is the read-only capability probe; `rubric` is the executable
 //! support journey. Every pass and fail carries a positive marker, UNKNOWN
 //! never acts, and the live tier runs inside an isolated state root it
-//! removes after itself.
+//! removes after itself. The probe measures the PACKAGED table: the shipped
+//! claim is the object a reader qualifies, and a local config override is a
+//! dispatch concern, not a measurement input.
 
 use crate::bounded_cmd::output_with_timeout_result;
 use crate::harness_capabilities::{HarnessContract, ProbeDecl};
@@ -600,28 +602,38 @@ fn registry_row_name_in(root: &IsolatedRoot, name: &str) -> bool {
     if code != Some(0) {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(&output)
-        .ok()
-        .and_then(|rows| {
-            rows.as_array().map(|rows| {
-                rows.iter()
-                    .any(|row| row.get("name").and_then(|n| n.as_str()) == Some(name))
-            })
+    let Some(rows) = rows_array(&output) else {
+        return false;
+    };
+    rows.iter()
+        .any(|row| row.get("name").and_then(|n| n.as_str()) == Some(name))
+}
+
+/// The rows array out of a roster read, tolerant of the two shapes the list
+/// door has shipped: a bare array and an object wrapping one. `None` reads
+/// unknown (the read failed or the shape moved), never an empty fleet.
+fn rows_array(rows_json: &str) -> Option<Vec<serde_json::Value>> {
+    let value = serde_json::from_str::<serde_json::Value>(rows_json).ok()?;
+    value
+        .as_array()
+        .cloned()
+        .or_else(|| value.get("rows").and_then(|rows| rows.as_array()).cloned())
+        .or_else(|| {
+            value
+                .get("agents")
+                .and_then(|rows| rows.as_array())
+                .cloned()
         })
-        .unwrap_or(false)
 }
 
 fn row_field(rows_json: &str, name: &str, field: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(rows_json)
-        .ok()
-        .and_then(|rows| {
-            rows.as_array().and_then(|rows| {
-                rows.iter()
-                    .find(|row| row.get("name").and_then(|n| n.as_str()) == Some(name))
-                    .and_then(|row| row.get(field).and_then(|v| v.as_str()))
-                    .map(str::to_string)
-            })
-        })
+    let Some(rows) = rows_array(rows_json) else {
+        return String::new();
+    };
+    rows.iter()
+        .find(|row| row.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|row| row.get(field).and_then(|v| v.as_str()))
+        .map(str::to_string)
         .unwrap_or_default()
 }
 
@@ -713,10 +725,9 @@ pub(crate) fn wait_for_ci_cell(harness: &str) -> (&'static str, String) {
 /// The live rubric against one harness, inside `root`. Every subprocess runs
 /// with the isolated env; nothing the run mints can reach the real fleet.
 fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, IsolationFacts) {
-    let probe_id = format!(
-        "{:08x}",
-        root.nonce[..8].parse::<u32>().unwrap_or(0).swap_bytes()
-    );
+    // The row name is a label minted from the run nonce's head, so two runs
+    // of the same harness can never collide on one registry.
+    let probe_id = root.nonce[..8].to_string();
     let name = format!("harness-probe-{harness}-{probe_id}");
     let claim_key = format!("probe:{harness}:{probe_id}");
     let nonce = root.nonce.clone();
@@ -738,6 +749,21 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
             "60",
         ],
         LIVE_SPAWN_TIMEOUT_S,
+    );
+
+    // SPAWN probes with the same retry the Python rubric used: registration
+    // is asynchronous, and a single read would race the row into existence.
+    let spawn_read = retry_marker(
+        "SPAWN",
+        "registry row",
+        || {
+            if registry_row_name_in(root, &name) {
+                "row".to_string()
+            } else {
+                String::new()
+            }
+        },
+        Duration::from_millis(500),
     );
 
     // ISOLATION first: the nonce must read back from inside the root, and its
@@ -779,14 +805,14 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         },
     );
 
-    let (list_code, list_output) = root.fno(&["agents", "list", "--json"]);
-    let row_found = list_code == Some(0) && registry_row_name_in(root, &name);
+    let row_found = spawn_read.status == "pass";
+    let attempts = spawn_read.attempts;
     if !row_found {
         lines.push(LineVerdict::new(
             "SPAWN",
             "fail",
             "registry row",
-            3,
+            attempts,
             format!(
                 "registry row was not found; receipt was not used as proof ({})",
                 {
@@ -799,7 +825,6 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         lines.push(row_matches_line(harness));
         lines.push(manifest_pinned_line(
             harness,
-            root,
             (spawn_code, spawn_output),
             None,
         ));
@@ -810,10 +835,11 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         "SPAWN",
         "pass",
         "registry row",
-        1,
+        attempts,
         "row read back".to_string(),
     ));
 
+    let list_output = root.fno(&["agents", "list", "--json"]).1;
     let session_id = row_field(&list_output, &name, "harness_session_id");
     let mux_session = row_field(&list_output, &name, "mux_session");
     let mux_pane = row_field(&list_output, &name, "mux_pane_id");
@@ -977,8 +1003,18 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
     }
 
     lines.push(row_matches_line(harness));
-    let capture = root.fno(&["doctor", "harness", "readiness-capture", harness]);
-    lines.push(manifest_pinned_line(harness, root, capture, None));
+    // The readiness capture is the repo's own smoke script, run through the
+    // isolated env so its pane lands in the isolated mux state too.
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut capture_cmd = Command::new("bash");
+    capture_cmd
+        .arg("cli/scripts/smoke/capture-readiness-grid.sh")
+        .arg(harness)
+        .current_dir(&repo_root);
+    root.child_env(&mut capture_cmd);
+    capture_cmd.env("READINESS_SMOKE", "1");
+    let capture = run_command_bounded(capture_cmd, INSTRUMENT_TIMEOUT_S);
+    lines.push(manifest_pinned_line(harness, capture, None));
     lines.push(cleanup_line(root, &name));
     (lines, isolation)
 }
@@ -1108,7 +1144,6 @@ fn sweep_has_no_finding(output: &[u8], harness: &str) -> bool {
 /// manifest matched it by rule id.
 fn manifest_pinned_line(
     harness: &str,
-    root: &IsolatedRoot,
     capture: (Option<i32>, String),
     readiness_marker: Option<String>,
 ) -> LineVerdict {
@@ -1129,9 +1164,15 @@ fn manifest_pinned_line(
             "live capture was not requested".to_string(),
         ),
         (Some(0), None) => {
-            let fixture = root.home.join(format!("readiness-grid-{harness}.txt"));
-            let marker = readiness_marker_from_fixture(harness, &fixture);
-            match marker {
+            // The fixture the capture wrote, read back from the repo's own
+            // fixtures directory and evaluated by the manifest gate.
+            let fixture = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(format!(
+                    "cli/tests/agents/fixtures/readiness-grid-{harness}.txt"
+                ));
+            let evaluated = readiness_marker_from_fixture(harness, &fixture);
+            match evaluated {
                 Some(marker) => LineVerdict::new(
                     "MANIFEST PINNED",
                     "pass",
