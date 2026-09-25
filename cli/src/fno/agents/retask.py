@@ -102,7 +102,7 @@ def resolve_thread_viewport(
     # no --portal the server serves portal 0, and the reach would repoint the
     # operator's own seat and leave the view under their keys.
     door = invoke(
-        ["mux", "thread", "--server", session, entry.name, "--portal", "new", "--tab", "new"],
+        ["mux", "thread", entry.name, "--server", session, "--portal", "new", "--tab", "new"],
         30,
     )
     if door.returncode:

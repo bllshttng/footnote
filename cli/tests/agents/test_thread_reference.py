@@ -90,7 +90,7 @@ def test_thread_viewport_resolver_uses_thread_identity_not_pane_zero(monkeypatch
     # fno_id rides the join below. A machine reach asks for a portal of its
     # own (x-3ea6) so it never repoints the operator's seat.
     assert calls[0] == [
-        "fno", "mux", "thread", "--server", "main", "thread-worker",
+        "fno", "mux", "thread", "thread-worker", "--server", "main",
         "--portal", "new", "--tab", "new",
     ]
     assert calls[1][:5] == ["fno", "mux", "pane", "ls", "--server"]
