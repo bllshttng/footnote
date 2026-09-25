@@ -187,6 +187,7 @@ pub mod king_checkin;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
+pub mod king_mail;
 pub mod king_settle;
 pub mod king_term;
 pub mod king_termination;
