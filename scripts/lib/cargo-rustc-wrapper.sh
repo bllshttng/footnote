@@ -113,12 +113,19 @@ name_fallback_writer() {
     fi
     # Same once-per-cargo shape as the unadmitted marker above: fresh under
     # 60 minutes, so a marker from an earlier cargo with this pid goes stale.
+    # The noclobber create is the once-per-cargo gate: cargo runs rustc calls
+    # in parallel, so the exists-then-create test alone would let two of them
+    # both log.
     local marker="${TMPDIR:-/tmp}/fno-build-fallback.$PPID"
-    if [[ -e "$marker" && -n "$(find "$marker" -mmin -60 2>/dev/null)" ]]; then
+    if [[ -e "$marker" ]]; then
+        if [[ -n "$(find "$marker" -mmin -60 2>/dev/null)" ]]; then
+            return 0
+        fi
+        rm -f "$marker" 2>/dev/null || true
+    fi
+    if ! ( set -o noclobber; : >"$marker" ) 2>/dev/null; then
         return 0
     fi
-    : >"$marker" 2>/dev/null || true
-    local logged=1
     {
         local log="$HOME/.fno/logs/cargo-fallback-writers.log"
         mkdir -p "$(dirname "$log")"
@@ -132,11 +139,8 @@ name_fallback_writer() {
         if [[ "$(wc -l <"$log")" -gt 1000 ]]; then
             tail -n 500 "$log" >"$log.tmp" && mv "$log.tmp" "$log"
         fi
-        logged=0
     } 2>/dev/null || true
-    if [[ "$logged" -eq 0 ]]; then
-        echo "cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. Run: fno config plugin install" >&2
-    fi
+    echo "cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. Run: fno config plugin install" >&2
 }
 
 case " $* " in
