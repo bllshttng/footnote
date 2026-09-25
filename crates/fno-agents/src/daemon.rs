@@ -1662,6 +1662,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let fleet_page = crate::fleet_page::Arm::new(ctx.opts.agents_config_cwd.clone());
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
+    let slot_cutover = crate::slot_cutover::Arm::new(ctx.opts.agents_config_cwd.clone());
     let attention = crate::attention_arm::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
@@ -1827,11 +1828,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::reclaim::maybe_run_daily(&home);
                     });
                 }
-                // Orphaned-test-binary reap: the waitpid sweep above only ever
-                // sees the daemon's OWN children; a wedged deps/ test binary at
-                // ppid 1 holding zombie corpses is invisible to waitpid(-1), and
-                // this arm is what reaches that shape. The whole arm - cadence,
-                // gate, kill, events - lives in crate::orphan_reap.
                 crate::orphan_reap::maybe_sweep(
                     &mut last_orphan_sweep,
                     &orphan_sweep_in_flight,
@@ -1843,6 +1839,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 crate::fleet_page::maybe_tick(&fleet_page, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
+                crate::slot_cutover::maybe_tick(&slot_cutover, ctx.home.clone());
                 crate::attention_arm::maybe_tick(&attention, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
                 // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.

@@ -199,7 +199,7 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
     },
     ArmSpec {
         arm: "slot_cutover",
-        default_interval_s: 120,
+        default_interval_s: crate::slot_cutover::SLOT_CUTOVER_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: Some("slot_cutover.enabled"),
