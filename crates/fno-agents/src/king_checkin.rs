@@ -2549,6 +2549,11 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         .as_deref()
         .filter(|session| !session.is_empty())
         .ok_or_else(|| format!("{} has no harness session id", row.name))?;
+    let harness = row
+        .harness
+        .as_deref()
+        .filter(|harness| !harness.is_empty())
+        .ok_or_else(|| format!("{} has no harness", row.name))?;
     if crate::claims::resolve_identity().0.as_deref() != Some(session) {
         return Err("the live crown holder is not this session".into());
     }
@@ -2564,7 +2569,7 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
             "--session",
             session,
             "--harness",
-            &row.harness,
+            harness,
             "--self-send",
         ])
         .stdin(std::process::Stdio::piped())

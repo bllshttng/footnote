@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
 
@@ -77,7 +77,9 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let to_row = registry
         .as_ref()
         .and_then(|rows| live_entry_for_address(rows, to_identity));
-    let harness = from_row.map(|row| row.harness.as_str()).or(harness_hint);
+    let harness = from_row
+        .and_then(|row| row.harness.as_deref())
+        .or(harness_hint);
     let from = from_session
         .or_else(|| from_row.and_then(|row| row.harness_session_id.as_deref()))
         .unwrap_or(from_input);
@@ -217,6 +219,7 @@ pub fn run(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn registry(path: &Path) {
         std::fs::write(
