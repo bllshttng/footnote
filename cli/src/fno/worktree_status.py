@@ -18,9 +18,16 @@ from typing import Optional
 
 # Non-terminal AgentStatus vocabulary, one definition: importing the
 # canonical set (crates/fno-agents `AgentStatus` mirror) keeps the display
-# leg and the stranded classifier agreeing when the vocabulary grows.
-from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES as _ALIVE_STATUSES
-from fno.agents.registry import registry_rows_by_cwd
+# leg and the stranded classifier agreeing when the vocabulary grows. The
+# registry join needs the CLI's own deps (pydantic), which an ambient
+# interpreter shelling this module in a foreign project may lack; degrade to
+# an unreadable registry rather than crash the whole status read.
+try:
+    from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES as _ALIVE_STATUSES
+    from fno.agents.registry import registry_rows_by_cwd
+except ImportError:
+    _ALIVE_STATUSES = frozenset()
+    registry_rows_by_cwd = None  # type: ignore[assignment]
 
 
 def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
@@ -29,7 +36,15 @@ def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
     Builds on the ONE shared occupancy join (task 0.2); the best-row
     selection below (live row outranks, then freshest timestamp) stays here
     because only the display leg needs it."""
-    rows, ok = registry_rows_by_cwd()
+    if registry_rows_by_cwd is None:
+        return {}, False
+    try:
+        rows, ok = registry_rows_by_cwd()
+    except ImportError:
+        # The registry read pulls the CLI's own deps (pydantic); an ambient
+        # interpreter shelling this module in a foreign project may lack
+        # them, and the join is a display nicety, not the status read.
+        return {}, False
     if not ok:
         return {}, False
     best: dict[str, tuple[int, str, str, str]] = {}
