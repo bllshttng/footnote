@@ -322,6 +322,16 @@ mod tests {
     }
 
     #[test]
+    fn a_project_only_proven_source_cannot_trigger_global_cutover() {
+        let mut rows = records();
+        rows[0]["global"] = json!(false);
+        assert_eq!(
+            super::decide(&capacity("window", "mismatch"), &rows, None, 1000),
+            super::Decision::Skip("slot_unproven")
+        );
+    }
+
+    #[test]
     fn a_stale_or_unusable_target_is_never_selected() {
         for source in ["stale", "refresh:unauthorized"] {
             assert_eq!(
