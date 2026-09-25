@@ -340,7 +340,7 @@ event_types:
                 type: string
               summary:
                 type: string
-                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it requires text the schema never stored, and `declined` (which needs corroboration a solo author cannot mint) becomes the only reachable disposition. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
+                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it means knowing what the finding says. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
         findings_truncated:
           type: boolean
           description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."
@@ -349,7 +349,7 @@ event_types:
           description: "The declared round this verdict is, as a running max across the PR's life. A round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds. A row carrying this field bypasses the head collapse, because the declared number is already the round's identity. The round budget (config.review.max_rounds) counts these. OPTIONAL."
         dispositions:
           type: array
-          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined BLOCKING finding is terminal only with corroboration the author cannot mint alone - see docs/architecture/review-coverage-termination.md. OPTIONAL."
+          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined finding with a non-empty reason is terminal whoever declined it, and `nonblocking` over a finding the gate re-derives as blocking stays non-terminal - see docs/architecture/review-coverage-termination.md. OPTIONAL."
           items:
             type: object
             properties:
