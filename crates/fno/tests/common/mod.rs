@@ -308,6 +308,19 @@ impl ClientHarness {
         Self::spawn_sized_full(scratch, 24, 60, &[], &["--session", session])
     }
 
+    /// A sized spawn with extra client env - the composer e2e tests pin the
+    /// agent list against scratch-local fake harness bins (a clean CI home
+    /// has none on PATH), which need both the size and the PATH override.
+    #[allow(dead_code)]
+    pub fn spawn_sized_with(
+        scratch: &Scratch,
+        rows: u16,
+        cols: u16,
+        envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_sized_full(scratch, rows, cols, envs, &[])
+    }
+
     fn spawn_sized_full(
         scratch: &Scratch,
         rows: u16,
