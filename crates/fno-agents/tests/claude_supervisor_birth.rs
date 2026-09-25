@@ -41,6 +41,9 @@ if [ "$1" = "daemon" ] && [ "$2" = "run" ]; then
   sleep 30
   exit 0
 fi
+if [ -n "$FAKE_CLIENT_ARGV_DUMP" ]; then
+  printf '%s\n' "$@" > "$FAKE_CLIENT_ARGV_DUMP"
+fi
 exit 0
 "#;
     let path = bin_dir.join("claude");
@@ -148,4 +151,103 @@ fn no_second_birth_when_a_supervisor_serves_the_dir() {
         "guard_birth started a second supervisor beside a running one"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn birth_exec_fences_the_client_argv_and_cleans_the_supervisor_env() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let bin = tmpdir("birth-exec-bin");
+    install_fake_claude(&bin);
+    let dir = tmpdir("birth-exec-dir");
+    let state = dir.join("state");
+    let birth_dump = dir.join("birth-env.txt");
+    let argv_dump = dir.join("client-argv.txt");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
+        .args([
+            "claude-birth-exec",
+            "--",
+            "claude",
+            "--bg",
+            "--name",
+            "w1",
+            "hi",
+        ])
+        .env("PATH", path_with(&bin))
+        .env_remove("FNO_CLAUDE_DAEMON_DIR")
+        .env("CLAUDE_CONFIG_DIR", &dir)
+        .env("FNO_TEST_HERMETIC", "1")
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .env("FNO_ROUTE_PROVIDER", "zai")
+        .env("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+        .env("FAKE_STATE", &state)
+        .env("FAKE_BIRTH_ENV_DUMP", &birth_dump)
+        .env("FAKE_CLIENT_ARGV_DUMP", &argv_dump)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "birth exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let birth_env = fs::read_to_string(birth_dump).unwrap();
+    for key in [
+        "FNO_AGENTS_RUNTIME",
+        "FNO_ROUTE_PROVIDER",
+        "ANTHROPIC_BASE_URL",
+    ] {
+        assert!(
+            !birth_env
+                .lines()
+                .any(|line| line.starts_with(&format!("{key}="))),
+            "birth env carried {key}: {birth_env}"
+        );
+    }
+    let client_argv: Vec<_> = fs::read_to_string(argv_dump)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(client_argv, ["--bg", "--name", "w1", "hi"]);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn birth_exec_requires_a_fence_and_a_client_argv() {
+    for args in [
+        vec!["claude-birth-exec", "--"],
+        vec!["claude-birth-exec", "claude", "--bg"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+            .envs(fno_agents::test_run::self_owner_env())
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+}
+
+#[test]
+fn birth_exec_maps_a_missing_claude_cli_to_127() {
+    let empty_bin = tmpdir("birth-exec-empty-bin");
+    let config_dir = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(".fno-birth-exec-missing-claude")
+        .join(".claude");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
+        .args(["claude-birth-exec", "--", "claude", "--bg", "hi"])
+        .env("PATH", &empty_bin)
+        .env("CLAUDE_CONFIG_DIR", config_dir)
+        .env_remove("FNO_CLAUDE_DAEMON_DIR")
+        .env_remove("FNO_TEST_HERMETIC")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(127));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("claude CLI not found")));
+    let _ = fs::remove_dir_all(&empty_bin);
 }

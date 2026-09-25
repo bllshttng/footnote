@@ -105,8 +105,8 @@ pub(crate) fn claims_dir(key: &str, root: Option<&Path>) -> Result<PathBuf, Stri
 /// root) resolves like Python `fno.claims.io.claims_dir(None)`: the
 /// `$FNO_CLAIMS_ROOT` override first (set-and-nonempty only; the
 /// empty-is-unset rule), else the repo's space. The resume-attach
-/// single-writer lock rides this: the Python wake and the Rust resume route
-/// must mint the SAME lockfile or the guard guards nothing.
+/// single-writer lock rides this: the live and parked Rust resume arms must
+/// mint the same lockfile or the guard guards nothing.
 ///
 /// `cwd` is a PROVIDER, not a path, and only the space branch calls it. An
 /// explicit root and a machine-wide key such as `session:<uuid>` resolved
@@ -233,10 +233,10 @@ mod tests {
 
     #[test]
     fn the_resume_attach_fallback_lands_where_python_lands() {
-        // The resume-attach single-writer key is repo-local: the Python wake
-        // holds it through `fno.claims.io.claims_dir(None)`, so the Rust
-        // fallback must resolve the SAME file for one session or the guard
-        // guards nothing. The expectation is built from Python's rule (the
+        // The resume-attach single-writer key is repo-local: the live and
+        // parked Rust resume arms must resolve the same file for one session
+        // or the guard guards nothing. The expectation is built from the
+        // repo-local rule (the
         // set-and-nonempty `$FNO_CLAIMS_ROOT` override, else the repo's
         // space keyed on the canonical root's slug), never by calling the
         // resolver under test on the global default. The spaces root is
