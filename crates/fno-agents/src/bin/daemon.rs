@@ -46,6 +46,12 @@ fn main() {
         std::env::remove_var("FNO_AGENTS_RUNTIME");
     }
 
+    // Same single-threaded rule: fill the build-dir env before the runtime
+    // below spawns threads, so the heal lane's `fno doctor update` and every
+    // other child inherits it even when the daemon's parent passed no value.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    fno_agents::cargo_build_dirs::fill_build_dir_env(&cwd);
+
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).
     let rt = match tokio::runtime::Builder::new_multi_thread()
