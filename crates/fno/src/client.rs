@@ -6467,7 +6467,7 @@ impl View {
             };
             // The brand mark's `[no]` drops to the dim amber wordmark tone for
             // just those four chars; every other span paints uniform.
-            let is_mark = span.role == SpanRole::Squad && span.text.contains("[no]");
+            let is_mark = span.role == SpanRole::Squad && span.text.trim() == "f[no]";
             let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Wordmark, &self.theme);
             let mut in_no = false;
             for ch in span.text.chars() {
