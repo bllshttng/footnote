@@ -1099,7 +1099,7 @@ def test_adopt_stamps_the_newest_entry_not_the_mtime(tmp_path):
     assert entry.last_message_at == "2023-11-14T22:13:20Z"
 
 
-def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch):
+def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch, tmp_path):
     """A failing fno.inbox.store import degrades to pid=None; the verb completes.
 
     The lazy import sat inside the try, so a raising import (module or dep
@@ -1109,4 +1109,10 @@ def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch):
     monkeypatch.setitem(sys.modules, "fno.inbox.store", None)
 
     assert store_fallback._project_identity("/tmp") == (None, None)
-    assert store_fallback.heal_from_harness_store("deadbeef") is None
+
+    # Through the public path: an unresolvable scope identity skips
+    # confinement, so the store hit still heals instead of crashing.
+    _write_claude_session(tmp_path, CLAUDE_UUID)
+    entry = store_fallback.heal_from_harness_store("c655c326", scope_cwd=str(tmp_path))
+    assert entry is not None
+    assert entry.harness_session_id == CLAUDE_UUID
