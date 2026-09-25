@@ -108,7 +108,7 @@ def _patch_rename_call(monkeypatch, sink, receipt):
     makes its own verb_call rounds that must reach the real binary."""
     from fno.rust_binary import verb_call as real_verb_call
 
-    def fake(verb, payload, unavailable, *, timeout):
+    def fake(verb, payload, unavailable, *, timeout=30):
         if verb == "rename":
             sink.append(payload)
             return receipt
