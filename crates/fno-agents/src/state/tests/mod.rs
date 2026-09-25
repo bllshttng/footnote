@@ -565,7 +565,7 @@ fn rename_agent_renames_and_carries_the_old_label_as_alias() {
     })
     .unwrap();
 
-    let (old, new) = rename_agent(&path, "worker-a", "worker-b").unwrap();
+    let (old, new) = rename_agent(&path, "worker-a", "worker-b", None).unwrap();
     assert_eq!(old, "worker-a");
     assert_eq!(new, "worker-b");
 
@@ -592,10 +592,16 @@ fn rename_agent_resolves_by_short_id_and_full_session_id() {
         registry.entries.push(e);
     })
     .unwrap();
-    rename_agent(&path, "abcd1234", "worker-b").unwrap();
+    rename_agent(&path, "abcd1234", "worker-b", None).unwrap();
     assert!(load_registry(&path).unwrap().find("worker-b").is_some());
 
-    rename_agent(&path, "aaaaaaaa-0000-0000-0000-111111111111", "worker-c").unwrap();
+    rename_agent(
+        &path,
+        "aaaaaaaa-0000-0000-0000-111111111111",
+        "worker-c",
+        None,
+    )
+    .unwrap();
     let reg = load_registry(&path).unwrap();
     let row = reg.find("worker-c").unwrap();
     assert_eq!(
@@ -609,9 +615,15 @@ fn rename_agent_resolves_by_short_id_and_full_session_id() {
     forked.harness_session_id = Some("bbbbbbbb-0000-0000-0000-222222222222".into());
     forked.related_session_id = Some("cccccccc-0000-0000-0000-333333333333".into());
     update_registry(&path, |registry| registry.entries.push(forked)).unwrap();
-    rename_agent(&path, "bbbbbbbb", "worker-g").unwrap();
+    rename_agent(&path, "bbbbbbbb", "worker-g", None).unwrap();
     assert!(load_registry(&path).unwrap().find("worker-g").is_some());
-    rename_agent(&path, "cccccccc-0000-0000-0000-333333333333", "worker-h").unwrap();
+    rename_agent(
+        &path,
+        "cccccccc-0000-0000-0000-333333333333",
+        "worker-h",
+        None,
+    )
+    .unwrap();
     assert!(load_registry(&path).unwrap().find("worker-h").is_some());
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -628,19 +640,19 @@ fn rename_agent_refuses_duplicate_and_unknown_and_grammar() {
     })
     .unwrap();
 
-    let dup = rename_agent(&path, "worker-a", "worker-b").unwrap_err();
+    let dup = rename_agent(&path, "worker-a", "worker-b", None).unwrap_err();
     assert!(dup.contains("already names another worker"), "{dup}");
     // Renaming onto a label another row ANSWERS to (its alias) refuses the
     // same way: that label must not be made ambiguous at resolve time.
-    rename_agent(&path, "worker-b", "worker-x").unwrap();
-    let alias_dup = rename_agent(&path, "worker-b", "worker-a").unwrap_err();
+    rename_agent(&path, "worker-b", "worker-x", None).unwrap();
+    let alias_dup = rename_agent(&path, "worker-b", "worker-a", None).unwrap_err();
     assert!(
         alias_dup.contains("already names another worker"),
         "{alias_dup}"
     );
-    let unknown = rename_agent(&path, "no-such-row", "worker-c").unwrap_err();
+    let unknown = rename_agent(&path, "no-such-row", "worker-c", None).unwrap_err();
     assert!(unknown.contains("no such agent"), "{unknown}");
-    let grammar = rename_agent(&path, "worker-a", "bad label!").unwrap_err();
+    let grammar = rename_agent(&path, "worker-a", "bad label!", None).unwrap_err();
     assert!(grammar.contains("1-64 letters"), "{grammar}");
     // Nothing was written by any refused call (the b->x rename above DID
     // land: worker-x holds it, and "worker-b" answers only as that row's
@@ -668,8 +680,8 @@ fn rename_agent_by_old_label_after_rename_still_lands_on_the_row() {
         registry.entries.push(e);
     })
     .unwrap();
-    rename_agent(&path, "worker-a", "worker-b").unwrap();
-    rename_agent(&path, "worker-a", "worker-c").unwrap();
+    rename_agent(&path, "worker-a", "worker-b", None).unwrap();
+    rename_agent(&path, "worker-a", "worker-c", None).unwrap();
     let reg = load_registry(&path).unwrap();
     let row = reg
         .find("worker-c")
@@ -689,7 +701,7 @@ fn rename_agent_same_label_is_a_noop() {
         registry.entries.push(sample_entry("worker-a"));
     })
     .unwrap();
-    let (old, new) = rename_agent(&path, "worker-a", "worker-a").unwrap();
+    let (old, new) = rename_agent(&path, "worker-a", "worker-a", None).unwrap();
     assert_eq!((old, new), ("worker-a".to_string(), "worker-a".to_string()));
     let reg = load_registry(&path).unwrap();
     let row = reg.find("worker-a").unwrap();
@@ -727,7 +739,7 @@ fn rename_agent_id_less_row_leaves_no_false_removal_accounting() {
     // validate_resolvable_handle (its old name left the before map), and an
     // id-less row has no handle - so this verb cannot mint the unresolvable
     // row the accounting fear began with. Fail-closed refusal, row intact.
-    let refused = rename_agent(&path, "worker-a", "worker-b").unwrap_err();
+    let refused = rename_agent(&path, "worker-a", "worker-b", None).unwrap_err();
     assert!(refused.contains("no resolvable handle"), "{refused}");
     assert!(load_registry(&path).unwrap().find("worker-a").is_some());
     assert!(load_registry(&path).unwrap().find("worker-b").is_none());
