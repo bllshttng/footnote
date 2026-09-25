@@ -96,7 +96,7 @@ You are running in a **subagent context** with limited resources. Be efficient:
 
 ## TDD Execution Flow (MANDATORY)
 
-Before the first task, load `fno:tdd` and `fno:test-audit` authoring mode with the Skill tool (on codex, `$fno:tdd` and `$fno:test-audit`). No launch path preloads them: a spawned main thread ignores a `skills:` list. For every new or changed test, record the four authoring-gate answers in the task result; do not add a test until each answer is complete.
+Before the first task, load `fno:tdd` and `fno:test-audit` authoring mode with the Skill tool (on codex, `$fno:tdd` and `$fno:test-audit`). No launch path preloads them: a spawned main thread ignores a `skills:` list. For every new or changed test, record the four authoring-gate answers in the task result. Do not add a test until each answer is complete.
 
 For EVERY task, follow this exact sequence:
 
