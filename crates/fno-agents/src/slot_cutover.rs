@@ -28,7 +28,10 @@ pub fn decide(
                 .get("config_dir")
                 .and_then(Value::as_str)
                 .map_or(true, |dir| dir == "~/.claude");
-            claude && record.get("auth").and_then(Value::as_str) == Some("managed") && shared_dir
+            claude
+                && record.get("auth").and_then(Value::as_str) == Some("managed")
+                && record.get("global").and_then(Value::as_bool) == Some(true)
+                && shared_dir
         })
         .collect();
     let evidence = claude_cap.get("evidence").and_then(Value::as_object);
@@ -154,11 +157,30 @@ fn tick_once(
         );
         let capacity =
             crate::route_capacity::capacity(&json!({}), config_cwd, now as f64, refreshed.as_ref());
+        let global_ids = crate::agents_config::config_lookup_global(&["accounts", "records"])
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|record| {
+                record
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
         let records = crate::agents_config::config_lookup(config_cwd, &["accounts", "records"])
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default()
             .iter()
-            .filter_map(|record| serde_json::to_value(record).ok())
+            .filter_map(|record| {
+                let mut record = serde_json::to_value(record).ok()?;
+                let id = record.get("id").and_then(Value::as_str)?.to_string();
+                record.as_object_mut()?.insert(
+                    "global".to_string(),
+                    json!(global_ids.iter().any(|global| global == &id)),
+                );
+                Some(record)
+            })
             .collect::<Vec<_>>();
         match decide(
             &capacity["claude"],
@@ -251,8 +273,8 @@ mod tests {
 
     fn records() -> Vec<Value> {
         vec![
-            json!({"id": "readyrule", "harness": "claude", "auth": "managed"}),
-            json!({"id": "makers", "harness": "claude", "auth": "managed"}),
+            json!({"id": "readyrule", "harness": "claude", "auth": "managed", "global": true}),
+            json!({"id": "makers", "harness": "claude", "auth": "managed", "global": true}),
         ]
     }
 
@@ -269,10 +291,29 @@ mod tests {
         let mut rows = records();
         rows.insert(
             1,
-            json!({"id": "other", "harness": "claude", "auth": "managed", "config_dir": "~/.claude-alt"}),
+            json!({"id": "other", "harness": "claude", "auth": "managed", "global": true, "config_dir": "~/.claude-alt"}),
         );
         assert_eq!(
             super::decide(&capacity("window", "mismatch"), &rows, None, 1000),
+            super::Decision::Cutover {
+                from: "readyrule".into(),
+                to: "makers".into()
+            }
+        );
+    }
+
+    #[test]
+    fn project_only_accounts_are_not_global_cutover_targets() {
+        let mut rows = records();
+        rows.insert(
+            1,
+            json!({"id": "local", "harness": "claude", "auth": "managed", "global": false}),
+        );
+        let mut cap = capacity("window", "mismatch");
+        cap["accounts"]["local"] = json!("ok");
+        cap["sources"]["local"] = json!("window");
+        assert_eq!(
+            super::decide(&cap, &rows, None, 1000),
             super::Decision::Cutover {
                 from: "readyrule".into(),
                 to: "makers".into()
@@ -313,6 +354,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
         let config = dir.path().join("config.toml");
+        let global_dir = dir.path().join("global");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            "[[accounts.records]]\nid = \"readyrule\"\nharness = \"claude\"\nauth = \"managed\"\n[[accounts.records]]\nid = \"makers\"\nharness = \"claude\"\nauth = \"managed\"\n",
+        )
+        .unwrap();
         std::fs::write(
             &config,
             format!(
@@ -332,7 +380,7 @@ mod tests {
             "fno-stub.sh",
             "#!/bin/sh\nif [ \"$3\" = usage ]; then printf '%s\\n' '{\"readyrule\":{\"probed_at\":1000,\"partial\":false,\"windows\":[{\"label\":\"session\",\"used_pct\":95.0,\"resets_at\":null}]},\"makers\":{\"probed_at\":1000,\"partial\":false,\"windows\":[{\"label\":\"session\",\"used_pct\":10.0,\"resets_at\":null}]}}'; exit 0; fi\nexit 1\n",
         );
-        let _env = SavedEnv::set(&config, &usage, &stub);
+        let _env = SavedEnv::set(&config, &usage, &stub, &global_dir.join("settings.json"));
         let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
         super::tick_once(&home, dir.path(), 1000, |_, _| {});
         let event = std::fs::read_to_string(home.events_jsonl()).unwrap();
@@ -351,10 +399,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
         std::fs::write(&config, "schema_version = 1\n").unwrap();
+        let global = dir.path().join("global/settings.json");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(global.with_file_name("config.toml"), "schema_version = 1\n").unwrap();
         let usage = dir.path().join("usage.json");
         std::fs::write(&usage, "{}").unwrap();
         let stub = crate::write_exec_stub(dir.path(), "fno-stub.sh", "#!/bin/sh\nexit 1\n");
-        let _env = SavedEnv::set(&config, &usage, &stub);
+        let _env = SavedEnv::set(&config, &usage, &stub, &global);
         let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
         super::tick_once(&home, dir.path(), 1000, |_, _| {});
         let event = std::fs::read_to_string(home.events_jsonl()).unwrap();
@@ -368,18 +419,21 @@ mod tests {
         config: Option<OsString>,
         state: Option<OsString>,
         bin: Option<OsString>,
+        global: Option<OsString>,
     }
 
     impl SavedEnv {
-        fn set(config: &Path, state: &Path, bin: &Path) -> Self {
+        fn set(config: &Path, state: &Path, bin: &Path, global: &Path) -> Self {
             let saved = Self {
                 config: std::env::var_os("FNO_CONFIG"),
                 state: std::env::var_os("FNO_RUNTIME_STATE_PATH"),
                 bin: std::env::var_os("FNO_BIN"),
+                global: std::env::var_os("FNO_GLOBAL_SETTINGS_PATH"),
             };
             std::env::set_var("FNO_CONFIG", config);
             std::env::set_var("FNO_RUNTIME_STATE_PATH", state);
             std::env::set_var("FNO_BIN", bin);
+            std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", global);
             saved
         }
     }
@@ -390,6 +444,7 @@ mod tests {
                 ("FNO_CONFIG", self.config.take()),
                 ("FNO_RUNTIME_STATE_PATH", self.state.take()),
                 ("FNO_BIN", self.bin.take()),
+                ("FNO_GLOBAL_SETTINGS_PATH", self.global.take()),
             ] {
                 if let Some(value) = value {
                     std::env::set_var(key, value);
