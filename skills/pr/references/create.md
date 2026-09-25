@@ -46,6 +46,7 @@ else
   COMMITS=$(git log --oneline | tail -5)
   BASE=$(git rev-list --max-parents=0 HEAD)
 fi
+BODY_BASE="${BASE#origin/}"
 
 # Check for any related plan files
 ls -la .fno/*.md 2>/dev/null || echo "No plan files"
@@ -327,7 +328,7 @@ printf '%s\n' "$BODY" > .fno/pr-body.md
 # The body-only CI guards are pure functions of the body, title and branch,
 # so run them here, before the PR exists: a body failure found in CI costs a
 # full workflow round and is indistinguishable from a code failure.
-fno-agents pr-body-check --body-file .fno/pr-body.md --title "$TITLE" --base "${BASE:-main}"; RC=$?
+fno-agents pr-body-check --body-file .fno/pr-body.md --title "$TITLE" --base "$BODY_BASE"; RC=$?
 if [[ $RC -eq 1 ]]; then
   echo "fail: PR body: a CI guard refuses this PR; follow the guard's own fix text above, then rerun the check" >&2
   exit 1
@@ -421,7 +422,7 @@ Derive from commits:
 # The body must carry the exact closure trailer when the branch names a node,
 # or check-pr-node-closure reds the PR. Compose it into a file (see the
 # create step above) rather than passing a bare --body.
-fno-agents pr-body-check --body-file .fno/pr-body.md --title "title" --base "${BASE:-main}"
+fno-agents pr-body-check --body-file .fno/pr-body.md --title "title" --base "$BODY_BASE"
 gh pr create --title "title" --body-file .fno/pr-body.md
 ```
 
