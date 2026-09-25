@@ -186,9 +186,12 @@ pub fn run(argv: &[String]) -> i32 {
     let base_sha = match git(git_bin, &a.cwd, &["merge-base", &base_ref, "HEAD"]) {
         Ok(sha) if !sha.is_empty() => sha,
         _ => {
-            eprintln!(
-                "pr-body-check: could not resolve git merge-base {base_ref} HEAD; verify the base ref exists and is fetched"
-            );
+            let remedy = if let Some(branch) = base_ref.strip_prefix("origin/") {
+                format!("run git fetch origin {branch} and retry")
+            } else {
+                "verify that the base ref exists and is fetched".to_string()
+            };
+            eprintln!("pr-body-check: could not resolve git merge-base {base_ref} HEAD; {remedy}");
             return 2;
         }
     };
