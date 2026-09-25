@@ -2438,8 +2438,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // An exited keeper-lane thread row revives on a fresh keeper: the route
-    // already proved the contract carries a same-id revival, and the
+    // An exited keeper-lane thread row revives on a fresh keeper; the
     // second-writer claim above is held before anything launches.
     if matches!(&route, ResumeRoute::KeeperRevive) {
         return crate::keeper_revival::revive(
