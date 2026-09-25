@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn a_temp_fixture_binary_still_births() {
         let temp = tempfile::tempdir().unwrap();
-        let config_dir = temp.path().join(".claude");
+        let config_dir = temp.path().join("config");
         let claude_bin = temp.path().join("bin/claude");
         std::fs::create_dir_all(claude_bin.parent().unwrap()).unwrap();
         std::fs::write(&claude_bin, "fixture").unwrap();

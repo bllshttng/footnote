@@ -2453,6 +2453,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             &row_name,
             cwd,
             message.as_deref(),
+            message_already_queued,
             reentry_plan.as_ref(),
             cross_project,
             home,
