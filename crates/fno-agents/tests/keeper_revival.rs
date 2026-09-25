@@ -97,7 +97,9 @@ impl Fixture {
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", &self.home)
             .env("HOME", self.root.0.path())
-            .env("PATH", &self.bins)
+            // The fake's own helpers (dd, stty) live on the std paths; the
+            // fixture's bins come first, so `agy` still resolves to the fake.
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bins.display()))
             .env("FNO_AGENTS_WORKER_BIN", env!("CARGO_BIN_EXE_fno-agents-worker"))
             .env("FNO_SPAWN_GATE", "0")
             .env("FAKE_AGY_LOG", self.log())
