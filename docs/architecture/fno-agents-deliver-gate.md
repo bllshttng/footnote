@@ -152,8 +152,10 @@ On the Python side, `dispatch_send` emits two events around the delivery attempt
 **`agent_send_done`** - delivery attempt complete:
 
 ```json
-{"name": "<agent>", "provider": "<p>", "msg_id": "msg-<8hex>", "delivery": "hosted|durable"}
+{"name": "<agent>", "provider": "<p>", "msg_id": "msg-<8hex>", "delivery": "hosted|durable", "reason": "<live-miss tokens>|null"}
 ```
+
+`reason` names why the live leg did not deliver: the lane's joined tokens (for example `not-confirmed;waited-32s`), a `transcript-<state>` liveness verdict, or the bus-only or lock-timeout cause. Null on a hosted send.
 
 Both Python events carry the dispatch context envelope (request_id, caller attribution, transport) set by `build_context` before the delivery attempt, matching the pattern established by `dispatch_ask`.
 

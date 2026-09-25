@@ -7,6 +7,7 @@ use std::time::Instant;
 pub enum Kind {
     Next,
     Undispatched,
+    Held,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -28,6 +29,7 @@ fn kind_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Next => "next",
         Kind::Undispatched => "undispatched",
+        Kind::Held => "held",
     }
 }
 
@@ -135,6 +137,8 @@ pub fn select_read(kind: Kind, args: &[String], fno_py: &OsStr, bound_s: u64) ->
         Kind::Undispatched => {
             cmd.args(["backlog", "undispatched", "--json"]);
         }
+        // Held never spawns: run() answers it from the journals directly.
+        Kind::Held => {}
     }
     cmd.args(args);
     let output = match crate::bounded_cmd::output_with_timeout_result(cmd, bound_s) {
@@ -255,19 +259,65 @@ pub fn select_read(kind: Kind, args: &[String], fno_py: &OsStr, bound_s: u64) ->
                 )
             }
         },
-        Kind::Undispatched => parsed,
+        Kind::Undispatched | Kind::Held => parsed,
     };
     receipt("ok", Some(answer), bound_s, elapsed_ms, None, None)
 }
 
+/// The `held` kind answers from the question journals directly - no fno-py
+/// cold start, no bound to ride out. The fno dir is the one holding
+/// `graph_json_path(cwd)` (king_board/scope.rs), so the map the Python guard
+/// reads is the same fold `needs::held_map` gives the keeper.
+fn run_held(bound_s: u64) -> i32 {
+    let started = Instant::now();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let fno_dir = crate::king_board::graph_json_path(&cwd)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let answer = crate::needs::held_map(&fno_dir, &cwd);
+    match serde_json::to_value(&answer) {
+        Ok(answer) => {
+            let receipt = receipt(
+                "ok",
+                Some(answer),
+                bound_s,
+                started.elapsed().as_millis(),
+                None,
+                None,
+            );
+            match serde_json::to_string(&receipt) {
+                Ok(json) => {
+                    println!("{json}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("select-read: failed to encode receipt: {error}");
+                    1
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("select-read held: failed to encode answer: {error}");
+            1
+        }
+    }
+}
+
 fn usage() {
-    eprintln!("usage: fno-agents select-read <next|undispatched> [--project P] [--mission M]");
+    eprintln!("usage: fno-agents select-read <next|undispatched|held> [--project P] [--mission M]");
 }
 
 pub fn run(args: &[String]) -> i32 {
     let kind = match args.first().map(String::as_str) {
         Some("next") => Kind::Next,
         Some("undispatched") => Kind::Undispatched,
+        Some("held") => {
+            let bound_s = crate::agents_config::auto_continue_select_timeout_s(
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            );
+            return run_held(bound_s);
+        }
         _ => {
             usage();
             return 2;

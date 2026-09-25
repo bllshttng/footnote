@@ -143,6 +143,7 @@ fn armed() -> crate::loops_pause::DispatchPause {
     crate::loops_pause::DispatchPause::FleetIncident {
         generation: 9,
         reason: "rustc storm".to_string(),
+        holds: vec!["spawns".to_string(), "tests".to_string()],
     }
 }
 

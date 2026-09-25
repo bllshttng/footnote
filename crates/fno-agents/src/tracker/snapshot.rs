@@ -60,6 +60,7 @@ pub fn door_snapshot(t: &dyn Tracker, backend: &str, stale_ok: bool) -> Value {
 fn scope_for(backend: &str) -> String {
     match backend {
         "github" => std::env::var("FNO_TRACKER_GITHUB_REPO").unwrap_or_default(),
+        "linear" => std::env::var("FNO_TRACKER_LINEAR_TEAM").unwrap_or_default(),
         _ => String::new(),
     }
 }

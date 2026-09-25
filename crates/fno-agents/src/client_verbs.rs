@@ -1556,20 +1556,6 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
     persist_manifest_identity(&id, home).map(Some)
 }
 
-fn interactive_resume_supported(provider: &str) -> bool {
-    crate::harness_capabilities::HarnessContract::packaged()
-        .ok()
-        .and_then(|contract| {
-            contract.capabilities(provider).ok().and_then(|caps| {
-                caps.resume_strategy
-                    .forms
-                    .get("interactive_resume")
-                    .map(|form| form.kind != "unsupported")
-            })
-        })
-        .unwrap_or(false)
-}
-
 /// The shared liveness reader's answer. One stable vocabulary for
 /// every caller that has to know whether a registry row's WORKER is running,
 /// replacing per-caller liveness derivations that each read a different
@@ -2289,7 +2275,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             Err(code) => return code,
         }
     } else {
-        if !interactive_resume_supported(harness) {
+        if !crate::resume_route::interactive_resume_supported(harness) {
             eprintln!(
                 "fno agents resume: harness {} resume not supported by this fno version.",
                 py_repr_str(harness)
@@ -2401,7 +2387,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     if matches!(
         &route,
-        ResumeRoute::ClientResume | ResumeRoute::TerminalExec
+        ResumeRoute::ClientResume | ResumeRoute::TerminalExec | ResumeRoute::KeeperRevive
     ) && !which_on_path(&argv[0])
     {
         eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
@@ -2450,6 +2436,20 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(code) = crate::resume_gate::gate_and_reserve(home, &name, gate_id) {
             return code;
         }
+    }
+
+    // An exited keeper-lane thread row revives on a fresh keeper; the
+    // second-writer claim above is held before anything launches.
+    if matches!(&route, ResumeRoute::KeeperRevive) {
+        return crate::keeper_revival::revive(
+            home,
+            &row_name,
+            harness,
+            session_id,
+            cwd,
+            &argv,
+            message.as_deref(),
+        );
     }
 
     // Live claude row (short_id, no mux ref): delegate to the Python wake
@@ -4040,7 +4040,7 @@ mod tests {
         let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
         let mut checked = 0usize;
         for harness in contract.harness.keys() {
-            if !interactive_resume_supported(harness) {
+            if !crate::resume_route::interactive_resume_supported(harness) {
                 continue;
             }
             let row = serde_json::json!({

@@ -1450,6 +1450,31 @@ def _fold_candidates(
     return out, source
 
 
+def _file_wave(ctx, json_output, receipt, target_id, title, body, difficulty, source_node):
+    from fno.graph.store import append_wave_note
+
+    note = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": "wave",
+        "title": title,
+        "details": body,
+        "difficulty": difficulty,
+        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+        "text": body or title,
+    }
+    found, error = append_wave_note(_graph_path(), target_id, note)
+    if not found:
+        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+        raise typer.Exit(code=2)
+    receipt.update(outcome="wave", node_id=target_id, note=note, minted_id=None)
+    if json_output or (ctx.obj and ctx.obj.get("json")):
+        typer.echo(json.dumps(receipt, indent=2))
+    else:
+        typer.echo(
+            f"wave note appended to {target_id} progress_notes ({len(note['text'])} chars); "
+            f"no node minted. Read it: fno backlog get {target_id}"
+        )
+
 @cli.command(
     "idea",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
@@ -1531,6 +1556,7 @@ def cmd_idea(
     from fno.text_or_file import read_text_arg
 
     details = read_text_arg(details, details_file, what="the details")
+    wave_body = details if details is not None else description
 
     if wave_of:
         if evidence is not None:
@@ -1580,37 +1606,13 @@ def cmd_idea(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=2)
 
-        from fno.graph.store import append_wave_note
-
         entries = wire_rows(path=_graph_path())
         try:
             target_id = _resolve_asserted_id(wave_of, entries, flag="--wave-of")
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=2)
-        note = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "kind": "wave",
-            "title": title,
-            "details": details if details is not None else description,
-            "difficulty": difficulty,
-            "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
-            "text": (details if details is not None else description) or title,
-        }
-        found, error = append_wave_note(_graph_path(), target_id, note)
-        if not found:
-            typer.echo(f"Error: {error or 'wave append refused'}", err=True)
-            raise typer.Exit(code=2)
-        receipt = {
-            "outcome": "wave",
-            "node_id": target_id,
-            "note": note,
-            "minted_id": None,
-        }
-        if json_output or (ctx.obj and ctx.obj.get("json")):
-            typer.echo(json.dumps(receipt, indent=2))
-        else:
-            typer.echo(f"folded as wave into {target_id}; minted_id: null")
+        _file_wave(ctx, json_output, {}, target_id, title, wave_body, difficulty, source_node)
         return
 
     if difficulty is None and not separate and _stdin_is_interactive():
@@ -1635,7 +1637,7 @@ def cmd_idea(
             try:
                 candidates, candidate_source = _fold_candidates(
                     title=title,
-                    details=details if details is not None else description,
+                    details=wave_body,
                     difficulty=normalized_difficulty,
                     entries=entries,
                 )
@@ -1677,28 +1679,8 @@ def cmd_idea(
                         typer.echo(f"separate: {choice_receipt['separate_command']}")
                     return
                 if typer.confirm(f"{marker}. Fold into {top['id']}?", default=False):
-                    from fno.graph.store import append_wave_note
-
-                    note = {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "kind": "wave",
-                        "title": title,
-                        "details": details if details is not None else description,
-                        "difficulty": normalized_difficulty,
-                        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
-                        "text": (details if details is not None else description) or title,
-                    }
-                    found, error = append_wave_note(_graph_path(), top["id"], note)
-                    if not found:
-                        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
-                        raise typer.Exit(code=2)
-                    choice_receipt["outcome"] = "wave"
-                    choice_receipt["node_id"] = top["id"]
-                    choice_receipt["note"] = note
-                    if json_output or (ctx.obj and ctx.obj.get("json")):
-                        typer.echo(json.dumps(choice_receipt, indent=2))
-                    else:
-                        typer.echo(f"folded as wave into {top['id']}; minted_id: null")
+                    _file_wave(
+                        ctx, json_output, choice_receipt, top["id"], title, wave_body, normalized_difficulty, source_node)
                     return
 
     _create_node_impl(

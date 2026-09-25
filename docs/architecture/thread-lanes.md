@@ -111,11 +111,19 @@ Ordering is the safety argument on every strategy. Every refusal is raised befor
 
 A hand-off can land while its row flip fails. Re-run the same command. It reclassifies from what is true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
 
-The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`. That starts a second writer over a child that never stopped.
+The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`, which probes the row's keeper before anything launches: a keeper already holding the session answers Identify and nothing relaunches.
 
 Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process. `fno mux thread reseat` is that operation. Here the server stops hosting anything. Open a view on the converted thread with `fno mux thread <name>`.
 
 Thread-to-pane is not built. `--substrate` takes only `thread`, and any other value refuses by name.
+
+## Reviving an exited thread
+
+A keeper thread whose keeper died (a reboot, a crash, a kill) reads `exited` and keeps its session id. `fno agents resume <name>` brings the same conversation back on a fresh keeper. The contract decides which harnesses revive, never a name list: only a `[harness.<name>.keeper]` row that carries `resume_session_id` revives. Today that is agy and cursor-agent. pi and grok keep a refusal that names their keeper row and the hand form until each passes its restart journey. Flipping one later is a one-line data change made with its journey, under the gate rule below.
+
+The revival (`crates/fno-agents/src/keeper_revival.rs`) asks the spawn gate first. The charge goes to the row's own parent, exactly as a fresh spawn is charged, and the revival waits at the slot cap like one. It probes the row's thread socket: a keeper already answering the same session id is already live, and nothing launches. A keeper that stays silent under the probe also refuses the launch, because silence never proves death. Then it starts `fno-agents-worker --keeper` on the row's own `interactive_resume` form with the recorded session id. The keeper's Identify must name BOTH that id and that keeper pid. The revival holds the proof window before it flips the SAME registry row live through a compare-and-set. If the row carries a recorded permission mode, the revival replays it. With no recorded mode, it uses the lane default. The receipt prints the posture. Every refusal lands before the first mutation, so a failed revival leaves the row as it was and names keeper.log for the autopsy. `--message <text>` rides the keeper mail lane once the row is live.
+
+The revival is the second launcher of a thread keeper. The first is the Python spawn lane (`_lane_b_thread_spawn`). They share the worker binary, the socket path and the Identify contract, so they cannot disagree on where a keeper lives. Revival skips folder trust because the row's cwd was trusted at spawn. When the keeper spawn lane ports to Rust, port it through this module's launch step and delete the Python leg.
 
 ## The gate rule
 

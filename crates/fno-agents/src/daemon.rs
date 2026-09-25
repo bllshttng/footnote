@@ -125,7 +125,7 @@ impl Default for DaemonOptions {
     }
 }
 
-fn resolve_worker_bin() -> PathBuf {
+pub(crate) fn resolve_worker_bin() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
         return PathBuf::from(v);
     }
@@ -6295,7 +6295,7 @@ const KEEPER_SWEEP_BUDGET: Duration = Duration::from_secs(10);
 /// leftover to unlink, a live keeper is its socket's only address and is
 /// NEVER unlinked, and silence is named rather than interpreted.
 #[derive(Debug, PartialEq)]
-enum KeeperProbe {
+pub(crate) enum KeeperProbe {
     /// The socket file exists but nothing accepts behind it: a dead keeper's
     /// leftover (the keeper unlinks on exit, so this is a kill -9 remainder).
     NoListener,
@@ -6310,7 +6310,7 @@ enum KeeperProbe {
 /// `Identify` via [`crate::pane_keeper::encode`], read the reply via
 /// [`crate::pane_keeper::decode`]. Ring `Output` frames that share the burst
 /// are skipped (this probe never takes the pty; it is not the subscriber).
-fn probe_keeper_socket(sock: &Path, reply_timeout: Duration) -> KeeperProbe {
+pub(crate) fn probe_keeper_socket(sock: &Path, reply_timeout: Duration) -> KeeperProbe {
     use crate::pane_keeper::{decode, encode, Decode, Frame};
     use std::io::{Read, Write};
     let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
