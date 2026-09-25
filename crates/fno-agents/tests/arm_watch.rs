@@ -37,6 +37,7 @@ fn row(arm: &str) -> ArmStatus {
         arm_value: None,
         reader: None,
         starved: false,
+        retries: Vec::new(),
     }
 }
 
@@ -646,5 +647,97 @@ fn a_crown_read_failure_notes_crown_unread() {
         "{}",
         out.detail
     );
+    std::fs::remove_file(&store).ok();
+}
+
+/// The x-e58f repro, end to end: alpha's select read times out at t1, a
+/// healthy auto_continue tick lands at t2 > t1, and the heal lane still
+/// retries alpha once through the daemon tick. Under the shared
+/// newest-row-per-arm fold the healthy tick masked the attempt, so this
+/// repro fails on the old shape.
+#[test]
+fn the_masked_unmeasured_attempt_is_still_retried_end_to_end() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let journal = dir.path().join("events.jsonl");
+    let row = |ts: &str, skip: serde_json::Value, acted: u64, detail: serde_json::Value| {
+        serde_json::json!({
+            "ts": ts,
+            "type": "control_plane_tick",
+            "source": "loop",
+            "data": {
+                "arm": "auto_continue",
+                "scheduler": "session",
+                "acted": acted,
+                "skip_reason": skip,
+                "detail": detail,
+                "interval_s": 1800,
+            }
+        })
+        .to_string()
+    };
+    let masked = row(
+        "2026-09-04T11:58:20Z",
+        serde_json::json!("select-unmeasured"),
+        0,
+        serde_json::json!(
+            "project=alpha bound=120s: fno backlog next did not answer inside its 120s budget; the arm_watch heal lane retries it"
+        ),
+    );
+    let healthy = row(
+        "2026-09-04T11:59:20Z",
+        serde_json::json!(null),
+        1,
+        serde_json::json!(null),
+    );
+
+    // The masked journal: alpha's timeout, then the healthy tick that would
+    // have erased it under the single newest-row fold.
+    std::fs::write(&journal, format!("{masked}\n{healthy}\n")).unwrap();
+    let mut rows = fno_agents::tick_ledger::read_arms(&[journal.clone()], TS_UNIX);
+    let store = temp_store("masked-retry");
+    let mut runs: Vec<String> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
+        &mut |action| {
+            runs.push(action.to_string());
+            true
+        },
+        |_, _| true,
+    );
+    assert_eq!(runs, ["advance:alpha"]);
+    assert!(
+        out.detail.starts_with("heal=advance:alpha:spawned"),
+        "{}",
+        out.detail
+    );
+
+    // The clean journal: no unmeasured row, so no advance action runs.
+    std::fs::write(&journal, format!("{healthy}\n")).unwrap();
+    let mut rows = fno_agents::tick_ledger::read_arms(&[journal], TS_UNIX);
+    let mut clean_runs: Vec<String> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
+        &mut |action| {
+            clean_runs.push(action.to_string());
+            true
+        },
+        |_, _| true,
+    );
+    assert_eq!(clean_runs, Vec::<String>::new());
+    assert!(!out.detail.contains("advance:"), "{}", out.detail);
     std::fs::remove_file(&store).ok();
 }
