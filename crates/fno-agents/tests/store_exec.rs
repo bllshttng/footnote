@@ -38,6 +38,50 @@ fn exec_request(graph: &std::path::Path, body: &str) -> (i32, Option<Value>) {
     (out.status.code().unwrap_or(-1), reply)
 }
 
+/// `exec_request` with FNO_HOME pinned on the worker child, or removed when
+/// `None`, so the write-fence tests decide the sandbox posture per exec.
+fn exec_request_with_home(
+    graph: &std::path::Path,
+    body: &str,
+    fno_home: Option<&std::path::Path>,
+) -> (i32, Option<Value>) {
+    let mut cmd = Command::new(WORKER_BIN);
+    cmd.args([
+        "--store-exec",
+        "--graph",
+        &graph.to_string_lossy(),
+        "--lock-timeout-secs",
+        "2",
+    ]);
+    match fno_home {
+        Some(home) => {
+            cmd.env("FNO_HOME", home);
+        }
+        None => {
+            cmd.env_remove("FNO_HOME");
+        }
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let reply = if out.stdout.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_slice(&out.stdout).unwrap())
+    };
+    (out.status.code().unwrap_or(-1), reply)
+}
+
 #[test]
 fn store_exec_serves_read_begin_commit_across_processes() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,4 +154,93 @@ fn store_exec_refuses_without_a_graph() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("missing --graph"), "{stderr}");
+}
+
+#[test]
+fn store_exec_refuses_a_write_outside_fno_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let before = serde_json::to_string(&json!({
+        "entries": [{"id": "x-hm1", "slug": "hm-write", "title": "t", "status": "ready"}]
+    }))
+    .unwrap();
+    std::fs::write(&graph, &before).unwrap();
+    let home = dir.path().join("sand");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let (code, reply) = exec_request_with_home(
+        &graph,
+        r#"{"id":7,"method":"commit_rows","params":{}}"#,
+        Some(&home),
+    );
+    assert_eq!(code, 1, "{reply:?}");
+    let reply = reply.expect("the refusal carries a reply");
+    assert_eq!(reply["ok"], json!(false));
+    assert_eq!(reply["error"]["kind"], json!("invalid"));
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(message.contains("FNO_HOME"), "{message}");
+    assert!(message.contains("FNO_CONFIG"), "{message}");
+    assert_eq!(
+        std::fs::read_to_string(&graph).unwrap(),
+        before,
+        "the graph file is unchanged"
+    );
+}
+
+#[test]
+fn store_exec_serves_a_read_under_an_outside_fno_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&json!({
+            "entries": [{"id": "x-hm2", "slug": "hm-read", "title": "t", "status": "ready"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let home = dir.path().join("sand");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let (code, reply) = exec_request_with_home(
+        &graph,
+        r#"{"id":1,"method":"begin","params":{}}"#,
+        Some(&home),
+    );
+    assert_eq!(code, 0, "{reply:?}");
+    let reply = reply.expect("begin answers under FNO_HOME");
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+}
+
+#[test]
+fn store_exec_serves_a_write_inside_fno_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&json!({
+            "entries": [{"id": "x-hm3", "slug": "hm-inside", "title": "t", "status": "ready"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // FNO_HOME names the graph's own directory (raw form; canonicalize makes
+    // the /var vs /private/var forms agree), so the write is served.
+    let (_code, begin) = exec_request_with_home(
+        &graph,
+        r#"{"id":1,"method":"begin","params":{}}"#,
+        Some(dir.path()),
+    );
+    let begin = begin.expect("begin answers");
+    assert_eq!(begin["ok"], json!(true), "{begin}");
+    let version = begin["result"]["version"].as_str().unwrap().to_string();
+    let rows = begin["result"]["entries"].as_array().unwrap().clone();
+    let body = format!(
+        r#"{{"id":1,"method":"commit","params":{{"version":"{version}","entries":{},"plan_rungs":{{}},"attempt":1}}}}"#,
+        serde_json::to_string(&rows).unwrap()
+    );
+    let (code, commit) = exec_request_with_home(&graph, &body, Some(dir.path()));
+    assert_eq!(code, 0, "{commit:?}");
+    assert_eq!(commit.unwrap()["ok"], json!(true));
 }

@@ -6,7 +6,8 @@
 //! build this argv; humans never type it.
 
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::graph_keeper::{err_reply, handle_request, StoreState, MAX_FRAME_BYTES};
@@ -163,6 +164,9 @@ fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
             format!("request of {} bytes exceeds the cap", payload.len()),
         );
     }
+    if let Some(reply) = fno_home_write_fence(payload, &cfg.graph) {
+        return reply;
+    }
     let state = fresh_store_state(
         cfg.graph.clone(),
         cfg.canonical,
@@ -172,6 +176,59 @@ fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
         None,
     );
     handle_request(&state, payload)
+}
+
+/// The FNO_HOME write fence. FNO_HOME relocates fno's sidecars; it never
+/// moves the backlog (config `state_dir` does), so a write whose graph lies
+/// outside a set FNO_HOME is the sandbox leak this lane refuses. Reads stay
+/// allowed. A payload that does not parse returns None here and falls through
+/// to `handle_request`, which answers `malformed_frame`.
+fn fno_home_write_fence(payload: &[u8], graph: &Path) -> Option<Value> {
+    let req: Value = serde_json::from_slice(payload).ok()?;
+    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    if !crate::graph_keeper::is_write_method(method) {
+        return None;
+    }
+    let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
+    fno_home_escape(graph, std::env::var_os("FNO_HOME"))
+        .map(|message| err_reply(id, "invalid", message))
+}
+
+/// The escape verdict: Some carries the one-line refusal naming FNO_CONFIG as
+/// the sandbox lever. None means no fence fires: FNO_HOME unset or empty, or
+/// the graph's parent under FNO_HOME in raw or canonical form (so /tmp and
+/// /private/tmp agree on macOS). The four-way compare mirrors
+/// `fence_declared_root`.
+fn fno_home_escape(graph: &Path, fno_home: Option<OsString>) -> Option<String> {
+    let home = fno_home?;
+    if home.is_empty() {
+        return None;
+    }
+    let home_path = PathBuf::from(&home);
+    let parent = graph.parent()?;
+    let home_forms = [
+        std::fs::canonicalize(&home_path).unwrap_or_else(|_| home_path.clone()),
+        home_path,
+    ];
+    let parent_forms = [
+        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+        parent.to_path_buf(),
+    ];
+    if parent_forms
+        .iter()
+        .any(|p| home_forms.iter().any(|h| p.starts_with(h)))
+    {
+        return None;
+    }
+    Some(format!(
+        "refused a graph write: FNO_HOME={} is set, but this write targets {}, outside it. \
+         FNO_HOME does not move the backlog; config state_dir does. To sandbox the backlog, \
+         set FNO_CONFIG to a config.toml that holds state_dir = \"<dir>\" \
+         (docs/path-config.md, \"Sandbox a shell reproduction\"). To write the live graph, \
+         unset FNO_HOME.",
+        home.to_string_lossy(),
+        graph.display()
+    ))
 }
 
 /// `--store-exec` lifecycle: read ONE request JSON (the same
