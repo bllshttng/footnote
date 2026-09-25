@@ -19,7 +19,7 @@ Tab and Shift-Tab move between fields. Enter on a field opens its list. Enter in
 
 ## Two paints, one width rule
 
-`form_mode` is a function of the state the paint can check. When the full-screen sideline is on AND one chip row of chosen values fits untruncated in the width it has, the bottom form paints. Everywhere else - the regular 28-column sidebar, the menu, prefix+i with the panel hidden - the composer paints as the centered sheet (width `min(cols - 8, 96)`, shared `Chrome`, title `new agent`). The sheet is an overlay: opening it sends no Resize, so no pane changes width. The in-sidebar 28-column dock reservation is gone. The bottom form keeps its reservation only in full-screen mode.
+`form_mode` is a function of the state the paint can check. When the full-screen sideline is on AND one chip row of chosen values fits untruncated in the width it has, the bottom form paints. Everywhere else the composer paints as the centered sheet: the regular 28-column sidebar, the menu, prefix+i with the panel hidden. Its width is `min(cols - 8, 96)`, it wears the shared `Chrome` under the title `new agent`. The sheet is an overlay: opening it sends no Resize, so no pane changes width. The in-sidebar 28-column dock reservation is gone. The bottom form keeps its reservation only in full-screen mode.
 
 ## The agent chip and its list
 
