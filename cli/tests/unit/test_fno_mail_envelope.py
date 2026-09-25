@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from fno.mail.envelope import (
     fno_mail_open,
     harness_for_provider,

@@ -509,7 +509,6 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
 
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.harnesses import claude as claude_mod
-
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
     # The control.sock inject (mail-inject verb) is the socket-path successor; it
@@ -578,8 +577,6 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
             status="live",
         ),
     ])
-
-    from fno.agents.harnesses import claude as claude_mod
 
     rpc_calls: list = []
     from fno.agents import dispatch as dispatch_mod
@@ -1960,7 +1957,6 @@ def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
     # AC4-ERR (x-3dcc): a peer whose session id never resolved gets a raw
     # envelope, never "none right now" -- that line is a positive claim about a
     # reader whose address nobody measured.
-    from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _wrap_relay_body
 
     ctx = _MailCtx(

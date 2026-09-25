@@ -185,10 +185,10 @@ fn launcher_one_esc_closes_the_dock() {
         "client input never became ready\n{}",
         h.diagnostics()
     );
-    // prefix+i opens the composer. The dock-open marker is its footer:
-    // `tab: next field` exists only while the dock is painted, and the chip
+    // prefix+i opens the composer. The open marker is its hint row:
+    // `tab next` exists only while the composer is painted, and the chip
     // row's own labels ellipsize (`La…`) on the 27-column panel.
-    let dock_open = |s: &str| s.contains("tab: next field");
+    let dock_open = |s: &str| s.contains("tab next");
     h.type_bytes(b"\x02i");
     h.wait_screen(15, |s| dock_open(s));
     let before = h.screen();

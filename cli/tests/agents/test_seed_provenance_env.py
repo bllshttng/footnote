@@ -13,8 +13,6 @@ payload is untouched, and the provenance is carried and cleared as a whole group
 """
 from __future__ import annotations
 
-import pytest
-
 from types import SimpleNamespace
 
 from fno.agents.mux_spawn import SEED_PROVENANCE_KEYS, _mesh_env_wrapper
