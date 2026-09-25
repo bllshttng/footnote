@@ -290,7 +290,7 @@ uv run --project cli fno-py agents list --json | jq -e --arg sid "$sid" '.agents
 
 ## Dispatch command surface
 
-This table shows how autonomous dispatch renders a footnote `/verb` for each harness. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. `fno.agents.harness_map` loads the generated cli copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback.
+This table shows how autonomous dispatch renders a footnote `/verb` for each harness. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. `fno.agents.harness_map` loads the generated cli copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback. The `fno agents retask` transaction runs inside fno-agents behind the `fno agents retask` leaf, which renders the target command through this same table.
 
 | Harness | Rendered invocation | Notes |
 |---|---|---|

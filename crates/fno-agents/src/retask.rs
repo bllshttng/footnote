@@ -13,13 +13,13 @@
 //! {
 //!   "op": "retask",
 //!   "worker": "bp-x0e67-planner",
-//!   "node": "x-1312",
+//!   "node": "x-bbbb",
 //!   "target": {
 //!     "harness": "codex", "provider": null, "model": "gpt-5.6-sol",
 //!     "effort": "high", "substrate": null, "permission_mode": null,
 //!     "route": null, "account": null, "verb": "target"
 //!   },
-//!   "target_command": "$fno:target --no-merge x-1312",
+//!   "target_command": "$fno:target --no-merge x-bbbb",
 //!   "mux": {"session": "main", "pane_id": 12}
 //! }
 //! ```
@@ -682,6 +682,8 @@ fn settled_read<S: RetaskSeams>(seams: &mut S) -> Result<String, TransportFailur
     seams.settle()?;
     seams.read_frame()
 }
+
+pub mod transport;
 
 #[cfg(test)]
 mod tests;

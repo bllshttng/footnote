@@ -86,7 +86,7 @@ fn seams_with(
     LiveSeams {
         session: "main".to_string(),
         pane: "12".to_string(),
-        node: "x-bdb9".to_string(),
+        node: "x-bbbb".to_string(),
         registry_path: dir.path().join("registry.json"),
         graph_path,
         clear_sent: false,
@@ -434,8 +434,8 @@ fn run_transaction(row: &RetaskRow, target: &RetaskTarget, seams: &mut LiveSeams
     execute_retask(
         row,
         target,
-        "x-bdb9",
-        "$fno:target --no-merge x-bdb9",
+        "x-bbbb",
+        "$fno:target --no-merge x-bbbb",
         seams,
         None,
     )
@@ -459,7 +459,7 @@ fn codex_target() -> RetaskTarget {
 #[test]
 fn test_run_retask_parses_codex_clear_receipt_before_accepting_successor() {
     let row = codex_row();
-    let mut transit = full_transit(row.clone(), "$fno:target --no-merge x-bdb9");
+    let mut transit = full_transit(row.clone(), "$fno:target --no-merge x-bbbb");
     let receipt = run_transaction(&row, &codex_target(), &mut transit.seams);
 
     assert_eq!(receipt["status"], json!("retasked"));
@@ -474,7 +474,7 @@ fn test_run_retask_parses_codex_clear_receipt_before_accepting_successor() {
         .iter()
         .find(|entry| entry.harness_session_id.as_deref() == Some("new-session"))
         .expect("restamped row survives");
-    assert_eq!(renamed.node.as_deref(), Some("x-bdb9"));
+    assert_eq!(renamed.node.as_deref(), Some("x-bbbb"));
     assert!(renamed
         .aliases
         .iter()
@@ -626,7 +626,7 @@ fn test_run_retask_exit_23_after_clear_keeps_the_partial_state_truthful() {
     assert_eq!(receipt["reason"], json!("view_left_worker"));
     assert_eq!(receipt["cleared"], json!(true));
     assert_eq!(receipt["session_restamped"], json!(true));
-    assert_eq!(receipt["registry_name"], json!("t-bdb9"));
+    assert_eq!(receipt["registry_name"], json!("t-bbbb"));
 }
 
 #[test]

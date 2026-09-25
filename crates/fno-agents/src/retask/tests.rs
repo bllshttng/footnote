@@ -27,7 +27,7 @@ impl Default for Fake {
             sends: Vec::new(),
             tiers: Vec::new(),
             restamp: json!("new-session"),
-            renamed: Some("target-x-bdb9".to_string()),
+            renamed: Some("target-x-bbbb".to_string()),
             rename_calls: 0,
             ready: Some(json!({"matched": true, "rule_id": "idle_prompt", "state": "idle"})),
             ready_calls: 0,
@@ -102,11 +102,11 @@ fn status_frame(model: &str, effort: &str) -> String {
 }
 
 const CODEX_PROMPT: &str = "› Ask Codex to do anything\n";
-const TARGET_COMMAND: &str = "$fno:target --no-merge x-bdb9";
+const TARGET_COMMAND: &str = "$fno:target --no-merge x-bbbb";
 
 fn run(row: &RetaskRow, target: &RetaskTarget, seams: &mut Fake) -> Value {
     let live_mode = None;
-    execute_retask(row, target, "x-bdb9", TARGET_COMMAND, seams, live_mode)
+    execute_retask(row, target, "x-bbbb", TARGET_COMMAND, seams, live_mode)
         .expect("no transport death in fake")
 }
 
@@ -377,7 +377,7 @@ fn test_execute_retask_same_tier_orders_clear_rename_status_then_target() {
             "switch": "skipped_same_tier",
             "switch_verified": true,
             "target_submit_confirmed": true,
-            "registry_name": "target-x-bdb9",
+            "registry_name": "target-x-bbbb",
             "source_session_id": "old-session",
             "current_session_id": "new-session",
             "transition": "succession",

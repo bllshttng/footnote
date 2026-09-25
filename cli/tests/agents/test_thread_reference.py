@@ -59,46 +59,12 @@ def _settings(provider: str = "codex") -> SimpleNamespace:
     )
 
 
-def test_detect_retask_reads_thread_identity_without_a_mux_pane():
-    from fno.agents.retask import detect_retask, resolve_target_coordinate
-
-    target = resolve_target_coordinate("x-bdb9", settings=_settings(), env={})
-    receipt = detect_retask(_thread_row(), target, node="x-bdb9")
-
-    assert receipt["outcome"] == "retask_ready"
-    assert receipt["payload"]["mux"] is None
-    assert receipt["payload"]["thread_id"] == "thread-session"
-    assert receipt["payload"]["target"]["substrate"] == "thread"
-
-
 def test_resolve_target_coordinate_leaves_substrate_unspecified_until_worker_read():
     from fno.agents.retask import resolve_target_coordinate
 
     target = resolve_target_coordinate("x-bdb9", settings=_settings(), env={})
 
     assert target.substrate is None
-
-
-def test_thread_identity_missing_refuses_by_name():
-    from fno.agents.retask import detect_retask, resolve_target_coordinate
-
-    target = resolve_target_coordinate("x-bdb9", settings=_settings(), env={})
-    receipt = detect_retask(_thread_row(fno_id=None), target, node="x-bdb9")
-
-    assert receipt == {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
-
-
-def test_zero_mux_sentinel_is_not_a_thread_reference():
-    from fno.agents.retask import detect_retask, resolve_target_coordinate
-
-    target = resolve_target_coordinate("x-bdb9", settings=_settings(), env={})
-    receipt = detect_retask(
-        _thread_row(mux={"session": "main", "pane_id": 0}),
-        target,
-        node="x-bdb9",
-    )
-
-    assert receipt == {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
 
 
 def test_thread_viewport_resolver_uses_thread_identity_not_pane_zero(monkeypatch):
