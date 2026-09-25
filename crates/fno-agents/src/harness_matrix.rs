@@ -340,42 +340,26 @@ fn frontmatter(text: &str) -> Option<&str> {
 /// The `metadata.requires.harness` list from a skill's frontmatter.
 fn frontmatter_harness_needs(text: &str) -> Result<Vec<String>, String> {
     let fm = frontmatter(text).ok_or_else(|| "no frontmatter".to_string())?;
-    let mut in_metadata = false;
-    let mut in_requires = false;
-    let mut in_harness = false;
     let mut needs = Vec::new();
+    // Indent-aware, shape-tolerant: `metadata.requires.harness` is the
+    // documented key, but skills indent `requires:` and `harness:` at
+    // differing depths, so the parser follows the `harness:` key and its
+    // list items by indentation rather than fixed columns.
+    let mut in_harness = false;
+    let mut harness_indent = 0usize;
     for line in fm.lines() {
-        if line.starts_with("metadata:") {
-            in_metadata = true;
-            continue;
-        }
-        if line.starts_with("requires:") && in_metadata {
-            in_requires = true;
-            continue;
-        }
-        if line.trim_start().starts_with("harness:") && in_metadata && in_requires {
-            in_harness = true;
-            continue;
-        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim_start();
         if in_harness {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("- ") {
+            if trimmed.starts_with("- ") && indent > harness_indent {
                 needs.push(trimmed[2..].trim().to_string());
                 continue;
             }
-            in_metadata = false;
-            in_requires = false;
             in_harness = false;
-            // A blank or lesser-indented line ends the list; fall through.
-            if line.trim().is_empty() {
-                continue;
-            }
         }
-        // A non-list line resets the nesting state cleanly.
-        if !line.starts_with(' ') && !line.trim().is_empty() {
-            in_metadata = false;
-            in_requires = false;
-            in_harness = false;
+        if trimmed.starts_with("harness:") {
+            in_harness = true;
+            harness_indent = indent;
         }
     }
     Ok(needs)
@@ -600,7 +584,11 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 
 /// The verb-matrix row builder's state flattening helper, split out so the
 /// closure stays readable. A features cell carries its reason text in
-/// parentheses; the projection needs the bare state word.
+/// parentheses; the projection needs the bare state word. A cell that is
+/// already a bare word (`native`, `absent`) reads as itself.
 fn cell_state_word(cell: &str) -> String {
-    cell.split('`').nth(1).unwrap_or("unmeasured").to_string()
+    match cell.split('`').nth(1) {
+        Some(word) => word.to_string(),
+        None => cell.to_string(),
+    }
 }
