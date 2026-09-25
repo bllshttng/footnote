@@ -869,6 +869,9 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # through resolve_binary, never `fno agents intel` routing; the
             # arm stays unregistered for the same shrink law.
             "intel",
+            # `fno backlog session backfill` shells the binary through
+            # resolve_binary, never `fno agents` routing.
+            "session-backfill",
         }
     )
 

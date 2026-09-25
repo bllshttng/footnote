@@ -257,6 +257,12 @@ impl AgentsHome {
         self.root.join("registry.json")
     }
 
+    /// The crown name store (`crown_names.json`), beside `registry.json`.
+    /// The mux reads this file as a contract - see [`crate::crown_names`].
+    pub fn crown_names_json(&self) -> PathBuf {
+        self.root.join("crown_names.json")
+    }
+
     /// Per-provider injection gate record (`injection-gate.json`), stored next
     /// to `registry.json` in the agents root.
     pub fn injection_gate_json(&self) -> PathBuf {

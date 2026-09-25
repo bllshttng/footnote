@@ -583,7 +583,11 @@ def cmd_session_close(
         claim.get("state") != "free" and claim.get("holder") == blueprint_holder
     )
     acquired_at = claim.get("acquired_at")
-    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+    # A planner that joined its spawn's handover claim started at that claim.
+    own_claim = blueprint_held or (
+        claim.get("state") != "free" and claim.get("holder") == _own_handover_holder(eff_session)
+    )
+    if own_claim and started_at is None and isinstance(acquired_at, int):
         started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -664,6 +668,27 @@ def cmd_session_close(
         typer.echo(f"blueprint closed {node_id} ({eff_harness}:{eff_session})")
         typer.echo(f"summary: {summary}")
         typer.echo(f"launch: {launch}")
+
+
+@session_app.command(
+    "backfill",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def cmd_session_backfill(ctx: typer.Context) -> None:
+    """Fill missing session starts and ends from transcripts and merge commits. Never overwrites a stamp.
+
+    A dry run by default. --apply writes the fills; --json (-J) prints the per-phase counts as JSON.
+    """
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("session backfill: the fno-agents binary was not found.", err=True)
+        raise typer.Exit(code=2)
+    argv = [str(binary), "session-backfill", "--graph", str(_graph_path()), *ctx.args]
+    raise typer.Exit(code=subprocess.run(argv, check=False).returncode)
 
 
 @session_app.command("reap-open")
