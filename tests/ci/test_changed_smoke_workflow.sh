@@ -59,13 +59,29 @@ if fails:
     sys.exit(1)
 
 changed, smoke = jobs["changed-smoke"], jobs["smoke"]
+affected = jobs.get("pr-affected")
+check(affected is not None,
+      "the PR affected-job selector exists",
+      "no pr-affected selector gates the full lanes")
+if affected is not None:
+    selector_needs = affected.get("needs")
+    selector_needs = [selector_needs] if isinstance(selector_needs, str) else list(selector_needs or [])
+    check(selector_needs == ["changed-packet-size"],
+          "the selector reads the packet-fit result and no test job",
+          f"pr-affected needs {selector_needs!r}; only changed-packet-size belongs ahead of it")
+    check(re.sub(r"[${}\s]", "", str(affected.get("if", ""))) == "!cancelled()",
+          "the selector runs when changed-packet-size is skipped",
+          f"pr-affected has if: {affected.get('if')!r}; push and schedule would skip")
+    selector_run = "\n".join(step.get("run", "") for step in affected.get("steps", []))
+    check("crates/fno-agents/src/bin/pr-affected.rs" in selector_run,
+          "the selector decision logic lives in the Rust crate",
+          "pr-affected does not compile the crate-owned selector")
+    check("GITHUB_OUTPUT" in selector_run,
+          "the selector publishes its lane outputs to GitHub Actions",
+          "pr-affected does not export its lane outputs")
 
-# Main coverage and PR-only changed coverage are separate contracts. The full
-# matrix jobs have no event guard, so they run on main; changed-smoke has the
-# explicit pull-request guard and is never a main-branch coverage shard.
-for name in ("smoke-pytest", "smoke-rest"):
-    check("if" not in jobs[name], f"{name} runs on main and pull requests",
-          f"{name} has an event guard and may not cover main")
+# Changed-subset feedback remains PR-only; main and schedule use the full
+# selector output asserted below.
 check(changed.get("if") == "github.event_name == 'pull_request'",
       "changed-smoke is PR-only",
       f"changed-smoke event guard is {changed.get('if')!r}, not pull_request")
@@ -161,6 +177,26 @@ check(changed.get("steps", [{}])[0].get("with", {}).get("fetch-depth") == 0,
       "changed-smoke fetches full history (the base must resolve)",
       "changed-smoke uses a shallow checkout - the base cannot resolve")
 
+# Full test lanes follow the crate-owned affected selector. The existing
+# integration job is already sharded; this change only routes its eligibility.
+for name in ("smoke-pytest", "smoke-rest"):
+    check(jobs[name].get("if") == "needs.pr-affected.outputs.python_full == 'true'",
+          f"{name} follows the Python full-suite selector",
+          f"{name} has if: {jobs[name].get('if')!r}")
+for name in ("hook-latency", "test-agents", "test-agents-integration", "test-mux"):
+    job = jobs[name]
+    needs = job.get("needs")
+    needs = [needs] if isinstance(needs, str) else list(needs or [])
+    check(job.get("if") == "needs.pr-affected.outputs.cargo == 'true'"
+          and "pr-affected" in needs,
+          f"{name} follows the Cargo affected selector",
+          f"{name} has if: {job.get('if')!r} and needs {needs!r}")
+needs_agents = jobs["test-agents"].get("needs")
+needs_agents = [needs_agents] if isinstance(needs_agents, str) else list(needs_agents or [])
+check("smoke-pytest" not in needs_agents,
+      "test-agents starts independently of pytest",
+      "test-agents still waits behind smoke-pytest")
+
 # --- the changed job may not produce FULL evidence --------------------------
 for forbidden, why in (
     ("preflight-last-failures", "write the full runner's failure record"),
@@ -183,12 +219,14 @@ check(not bare_full, "changed-smoke never runs an unlabelled full smoke",
 # aggregates the jobs that do. Resolve which, then assert against THOSE jobs -
 # the old checks read smoke's own run block, and once the work moved to the
 # shards they kept printing ok while asserting nothing about what CI ran.
-gate_shards = _needs(smoke)
-if gate_shards:
-    runner_jobs = {n: jobs[n] for n in gate_shards if n in jobs}
-    check(len(runner_jobs) == len(gate_shards),
+gate_dependencies = _needs(smoke)
+gate_shards = [name for name in gate_dependencies if name != "pr-affected"]
+if gate_dependencies:
+    all_gate_jobs = {n: jobs[n] for n in gate_dependencies if n in jobs}
+    check(len(all_gate_jobs) == len(gate_dependencies),
           "every job the gate needs exists",
-          f"smoke needs {sorted(set(gate_shards) - set(runner_jobs))}, which do not exist")
+          f"smoke needs {sorted(set(gate_dependencies) - set(all_gate_jobs))}, which do not exist")
+    runner_jobs = {n: jobs[n] for n in gate_shards if n in jobs}
 else:
     runner_jobs = {"smoke": smoke}
 
@@ -217,6 +255,10 @@ for name, job in sorted(runner_jobs.items()):
 # that checks all three.
 if gate_shards:
     gate_run = "\n".join(st.get("run", "") for st in smoke.get("steps", []))
+    check("needs.pr-affected.outputs.python_full" in gate_run
+          and "pull_request" in gate_run and "skipped" in gate_run,
+          "smoke accepts skipped shards only for selector-skipped PR lanes",
+          "smoke does not tie a skipped result to the PR selector")
     for name in sorted(gate_shards):
         marker = "needs." + name + ".result"
         # Both on the SAME line. The gate echoes every shard result for the
@@ -239,6 +281,18 @@ if gate_shards:
           f"smoke has if: {smoke.get('if')!r} - it must be !cancelled(): omitted, "
           "GitHub skips it when a shard fails and a skipped required check does "
           "not block; always(), it publishes a red check for a cancelled run")
+
+test_job = jobs.get("test") or {}
+test_run = "\n".join(step.get("run", "") for step in test_job.get("steps", []))
+check("needs.pr-affected.outputs.cargo" in test_run
+      and "pull_request" in test_run and "skipped" in test_run,
+      "the Cargo aggregator accepts selector-skipped PR jobs only",
+      "the Cargo aggregator does not bind skipped results to a PR selector")
+
+events = wf.get("on", wf.get(True, {})) or {}
+check("schedule" in events,
+      "cli-ci has a nightly full-suite trigger",
+      "cli-ci has no scheduled full-suite trigger")
 
 sys.exit(1 if fails else 0)
 PY
