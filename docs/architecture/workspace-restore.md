@@ -73,9 +73,14 @@ Restore printed `never bound`. Is that session gone?
 
 Not necessarily. The label means fno holds no session id for the member. The spawn journal positively records the registry row's removal with an empty session field (`crates/fno/src/restore_liveness.rs:73`, `crates/fno/src/spawn_journal.rs:334`). It describes fno's reach, not the harness transcript's existence. fno cannot resume a session it holds no id for. The harness itself can, given the session id.
 
+## At the worker cap
+
+Before its apply half, a real restore asks the spawn gate once, in `probe` mode. It resumes members in stored order up to the headroom (`max_live - slots`) and refuses the rest by name: `spawn gate: <slots> of max_live <cap> live; rerun fno mux workspace restore when a worker finishes`. A rerun is safe: members already back read `focused`, so only the tail is retried. A probe refusal on another axis (a RAM floor breach) refuses the whole restore with the gate's own message. A dry run never probes.
+
 ## Files
 
-- `crates/fno/src/server.rs` - `declared_resume_form` (the thin view), `resume_one` (the shared gate walk), `workspace_restore_start` / `workspace_restore_apply` (the bulk driver), `restore_candidates`
+- `crates/fno/src/server/workspace_restore.rs` - the bulk driver (`workspace_restore_start` / `workspace_restore_apply`) and the headroom spend; `crates/fno/src/server/revival_gate.rs` owns the gate ask itself
+- `crates/fno/src/server.rs` - `declared_resume_form` (the thin view), `resume_one` (the shared gate walk), `restore_candidates`
 - `crates/fno/src/agents_view.rs` - `declared_form` (the one reader), `FormLane`, `resume_form`, `attach_form`
 - `crates/fno/src/mux_cli.rs` - `workspace` / `workspace_restore` CLI parsing and output
 - `crates/fno/src/proto.rs` - `ControlVerb::WorkspaceRestore`, `ServerMsg::WorkspaceRestored`, `RestoreRow`, the `RESTORE_NOT_RUN` error class

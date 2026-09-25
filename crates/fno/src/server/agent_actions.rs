@@ -13,7 +13,7 @@ const REENTRY_REFUSED_EXIT: i32 = 3;
 
 /// Stamp the child command only; the server's environment also reaches pane
 /// shells, so it must not inherit the mux caller marker.
-fn mux_command(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+pub(super) fn mux_command(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
     let mut command = crate::process_admission::tokio_command(bin);
     command.env("FNO_CALLER_KIND", "mux");
     command

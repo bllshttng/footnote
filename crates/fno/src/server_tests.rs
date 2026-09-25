@@ -1445,7 +1445,7 @@ fn rename_tab_sanitizes_hostile_wire_names() {
 
 // -- x-96e8 squad management verbs ----------------------------------
 
-fn leaf_tab(id: TabId, pane: u64) -> Tab {
+pub(super) fn leaf_tab(id: TabId, pane: u64) -> Tab {
     Tab {
         name: None,
         id,
@@ -4103,9 +4103,7 @@ fn attach_agent_refuses_unknown_or_malformed_jobid() {
     }
 }
 
-// -- x-76ea agent-row lifecycle (server-side validation) ------------
-
-fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
+pub(super) fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
     let (tx, rx) = mpsc::channel::<ServerMsg>(8);
     let mut c = client(id, 5, (24, 80), false);
     c.reliable_tx = tx;
@@ -4143,7 +4141,7 @@ fn stop_agent_unknown_name_refused() {
 
 /// A helper for the respawn refusal tests: an EXITED registry row with an
 /// optional recorded claude session uuid.
-fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
+pub(super) fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
     RegistryAgent {
         model: None,
         route: None,
@@ -5374,7 +5372,7 @@ fn fresh_attach_unknown_target_fails_closed_before_spawn() {
 // -- x-9f75 open-here (PanePlacement.here) ---------------------------
 
 /// Collect every notice text still queued on `rx`.
-fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
+pub(super) fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(msg) = rx.try_recv() {
         if let ServerMsg::Notice { text } = msg {
@@ -8702,6 +8700,7 @@ pub(super) fn empty_core() -> Core {
         last_topology_flush: None,
         reentry_verdict: None,
         staged_resume_argv: None,
+        revival_admission: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
