@@ -8628,9 +8628,8 @@ impl Core {
                 },
             );
             let focus = tab.focus;
-            // Rect-driven pane sizing: only geometry that actually changed
-            // hits the PTY (AC1-FR). A framed pane's pty is its CONTENT
-            // rect: the border ring is cells the program never sees.
+            // Rect-driven pane sizing: only real geometry changes hit the
+            // PTY (AC1-FR). A framed pane's pty is its CONTENT rect.
             for (pid, r) in &rects {
                 if let Some(entry) = self.panes.get_mut(pid) {
                     let content = crate::pane_border::content_rect(*r);
