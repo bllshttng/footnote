@@ -742,11 +742,16 @@ where
         // outranks the new process until reconcile re-adopts), while a
         // roster row with a hosted process behind it IS the session's own
         // account of being back under the same id. A stale pre-death row
-        // (`blocked`, no pid) must not confirm a relaunch.
+        // (`blocked`, no pid) must not confirm a relaunch. A `working` row
+        // with no pid yet still confirms: the job state file was already
+        // re-created above (the relaunch's own mechanical proof), and a
+        // fresh roster row publishes its pid a beat after its state.
         if plan.mechanism == "bg-resume" {
             let roster = crate::claude_roster::read_all_agents();
             if let Some(row) = roster.find(&plan.short_id) {
-                if row.has_live_process(roster.carries_pids()) {
+                if row.has_live_process(roster.carries_pids())
+                    || row.state.as_deref() == Some("working")
+                {
                     live = true;
                     last_state = format!("roster:{}", row.state.as_deref().unwrap_or("present"));
                     break;
@@ -2062,6 +2067,81 @@ mod tests {
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
         let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
         assert_eq!(row.status, crate::AgentStatus::Exited);
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_accepts_a_working_row_whose_pid_has_not_published_yet() {
+        // The relaunch window: the fresh roster row carries its state but
+        // the pid has not published. `working` confirms here because the
+        // job-state leg above ALREADY proved the relaunch mechanically
+        // (state.json re-created), which rules out the frozen pre-death
+        // row; the pid simply publishes a beat later than the state.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
+             echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"working\"},\
+             {\"id\":\"peer0001\",\"sessionId\":\"peer-uuid\",\"pid\":5001,\"state\":\"idle\"}]'; fi\n",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            // The stale fno view: never live, never terminal.
+            |_| Some("unreachable".to_string()),
+            |_| {},
+            || Ok(crate::spawn_gate::GateGuard::default()),
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 0);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Live);
         std::fs::remove_dir_all(temp.path()).ok();
     }
 
