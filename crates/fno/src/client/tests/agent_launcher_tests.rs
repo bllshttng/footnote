@@ -12,6 +12,27 @@ use ratatui_core::buffer::Buffer as RtBuffer;
 use ratatui_core::layout::Rect as RtRect;
 use ratatui_core::style::Modifier;
 
+struct WireVersionFixture(std::path::PathBuf);
+
+impl Drop for WireVersionFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn current_wire_fixture() -> (String, WireVersionFixture) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let session = format!("x50ed-wire-fixture-{}-{nonce}", std::process::id());
+    let socket = crate::proto::socket_path(&session).unwrap();
+    let sidecar = crate::proto::version_sidecar_path(&socket);
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::write(&sidecar, "91\n").unwrap();
+    (session, WireVersionFixture(sidecar))
+}
+
 fn plain_view() -> View {
     let mut v = two_pane_view();
     v.term = (24, 80);
@@ -1355,6 +1376,8 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
 #[test]
 fn extra_flags_chip_parses_argv_without_shell_expansion() {
     let mut v = view_with_launcher();
+    let (session, _wire_fixture) = current_wire_fixture();
+    v.session = session;
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     v.launcher.as_mut().unwrap().focus = Focus::ExtraFlags;
@@ -1396,6 +1419,16 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
         request.extra_flags,
         vec!["--agent", "abc", "--name", "two words", "--label", "$HOME"]
     );
+}
+
+#[test]
+fn launch_extra_axes_require_a_stamped_compatible_server() {
+    assert!(!super::agent_launcher::launch_extra_axes_supported(None));
+    assert!(!super::agent_launcher::launch_extra_axes_supported(Some(
+        90
+    )));
+    assert!(super::agent_launcher::launch_extra_axes_supported(Some(91)));
+    assert!(super::agent_launcher::launch_extra_axes_supported(Some(92)));
 }
 
 #[test]

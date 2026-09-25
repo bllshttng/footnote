@@ -27,6 +27,7 @@ use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchSt
 /// paste from growing the carry forever.
 const MAX_PASTE_CARRY: usize = 16 * 1024;
 const MAX_LAUNCH_FLAGS_CHARS: usize = 1024;
+const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
 
 /// The editor's prompt gutter: the marker glyph and one space, before the
 /// first message row. The message wraps inside what remains.
@@ -755,6 +756,15 @@ async fn submit(
     }
     let mut request = l.draft.request(request_id);
     request.extra_flags = extra_flags;
+    if (request.provider.is_some() || !request.extra_flags.is_empty())
+        && !supports_launch_extra_axes(&view.session)
+    {
+        l.phase = Phase::Refused {
+            request_id,
+            reason: "the connected mux server does not support provider pins or extra launch flags; reconnect to a server running current fno".to_string(),
+        };
+        return Ok(());
+    }
     l.armed = Some(request_id);
     l.phase = Phase::Submitting { request_id };
     write_msg(sock_w, &ClientMsg::AgentLaunch(request))
@@ -772,6 +782,17 @@ async fn submit(
             }
             format!("launch send failed: {e}")
         })
+}
+
+fn supports_launch_extra_axes(session: &str) -> bool {
+    let version = crate::proto::socket_path(session)
+        .ok()
+        .and_then(|socket| crate::mux_rows::read_wire_version(&socket));
+    launch_extra_axes_supported(version)
+}
+
+pub(crate) fn launch_extra_axes_supported(version: Option<u32>) -> bool {
+    version.is_some_and(|version| version >= LAUNCH_EXTRA_AXES_PROTO)
 }
 
 // -- input folding -----------------------------------------------------------
