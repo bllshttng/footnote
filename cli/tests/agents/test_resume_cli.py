@@ -55,7 +55,6 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         execvp=_no_exec,
     )
@@ -292,7 +291,7 @@ def test_print_command_emits_one_liner() -> None:
     assert "cd " in res.output
     assert "exec codex " in res.output
     assert " resume sess-abc" in res.output
-    assert "writable_roots=" in res.output
+    assert " --cd '/path/with space' resume " in res.output
     # The space-containing path must be quoted.
     assert "'/path/with space'" in res.output
     # No banner / no leading prose.
