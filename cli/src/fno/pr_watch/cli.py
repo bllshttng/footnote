@@ -1265,8 +1265,6 @@ def tick() -> None:
                     elif woke_n:
                         skip = None
                     elif wake_summary.get("budget_spent"):
-                        # The watchdog's own token: a pass that ran out of
-                        # slice before it could act is not a failure.
                         skip = "budget_spent"
                     else:
                         skip = "no_trigger"
