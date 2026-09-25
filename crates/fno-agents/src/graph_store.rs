@@ -1556,27 +1556,7 @@ pub fn recompute_statuses_with_plan_rungs(
         }
     }
 
-    // One-shot defer-vocabulary backfill: `completed_at: "deferred:<ts>"`.
-    for e in entries.iter_mut() {
-        if !is_dict(e) {
-            continue;
-        }
-        let obj = e.as_object_mut().unwrap();
-        let legacy = obj
-            .get("completed_at")
-            .and_then(Value::as_str)
-            .filter(|c| c.starts_with(LEGACY_DEFER_PREFIX))
-            .map(str::to_string);
-        if let Some(completed) = legacy {
-            obj.insert(
-                "deferred_at".to_string(),
-                Value::String(completed[LEGACY_DEFER_PREFIX.len()..].to_string()),
-            );
-            obj.insert("completed_at".to_string(), Value::Null);
-            obj.entry("deferred_reason".to_string())
-                .or_insert(Value::String(String::new()));
-        }
-    }
+    normalize_legacy_deferred(entries);
 
     for e in entries.iter_mut() {
         if entry_id(e).is_none() {
@@ -1813,6 +1793,31 @@ pub fn recompute_statuses_with_plan_rungs(
                 .as_object_mut()
                 .unwrap()
                 .insert("status".to_string(), Value::String("in_progress".into()));
+        }
+    }
+}
+
+/// Move the pre-migration defer sentinel out of the terminal completion field
+/// before rows are materialized into the schema-constrained store.
+pub(crate) fn normalize_legacy_deferred(entries: &mut [Value]) {
+    for e in entries {
+        if !is_dict(e) {
+            continue;
+        }
+        let obj = e.as_object_mut().unwrap();
+        let legacy = obj
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .filter(|c| c.starts_with(LEGACY_DEFER_PREFIX))
+            .map(str::to_string);
+        if let Some(completed) = legacy {
+            obj.insert(
+                "deferred_at".to_string(),
+                Value::String(completed[LEGACY_DEFER_PREFIX.len()..].to_string()),
+            );
+            obj.insert("completed_at".to_string(), Value::Null);
+            obj.entry("deferred_reason".to_string())
+                .or_insert(Value::String(String::new()));
         }
     }
 }

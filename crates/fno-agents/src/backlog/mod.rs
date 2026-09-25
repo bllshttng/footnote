@@ -185,6 +185,21 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
 
 fn open_connection(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
+    let size = match path.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.to_string()),
+    };
+    if size > 0 {
+        let mut header = [0; 16];
+        let mut file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+        use std::io::Read;
+        file.read_exact(&mut header)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if &header != b"SQLite format 3\0" {
+            return Err(format!("{}: file is not a database", path.display()));
+        }
+    }
     let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -462,6 +477,7 @@ fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
             obj.insert("locked_at".to_string(), Value::String(s.to_string()));
         }
     }
+    crate::graph_store::normalize_legacy_deferred(&mut rows);
     // IMMEDIATE, not deferred: a writer committing between this fold's first
     // read and its write trips SQLITE_BUSY_SNAPSHOT, which busy_timeout never
     // retries - the fold dies as "import: database is locked" under exactly
@@ -519,24 +535,23 @@ fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String
         )
         .map_err(|error| error.to_string())?;
     if stored_rows == 0 {
-        let rows = match crate::graph_store::read_archive_raw(graph)
-            .map_err(|error| error.to_string())?
-        {
-            crate::graph_store::RawRead::Empty => Vec::new(),
-            crate::graph_store::RawRead::Entries(rows) => rows,
-            crate::graph_store::RawRead::MalformedRoot => {
-                return Err(format!(
-                    "{} has no entries array and was never imported; refusing to retire it",
-                    graph.display()
-                ));
-            }
-            crate::graph_store::RawRead::Corrupt(reason) => {
-                return Err(format!(
+        let rows =
+            match crate::graph_store::read_archive_raw(graph).map_err(|error| error.to_string())? {
+                crate::graph_store::RawRead::Empty => Vec::new(),
+                crate::graph_store::RawRead::Entries(rows) => rows,
+                crate::graph_store::RawRead::MalformedRoot => {
+                    return Err(format!(
+                        "{} has no entries array and was never imported; refusing to retire it",
+                        graph.display()
+                    ));
+                }
+                crate::graph_store::RawRead::Corrupt(reason) => {
+                    return Err(format!(
                     "{} was never imported and cannot be read ({reason}); refusing to retire it",
                     graph.display()
                 ));
-            }
-        };
+                }
+            };
         if !rows.is_empty() {
             return Err(format!(
                 "{} contains rows that were never imported; refusing to retire it",
@@ -1354,7 +1369,8 @@ mod tests {
 
     fn two_node_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
-        let rows: Value = serde_json::from_str(r#"{"entries": [
+        let rows: Value = serde_json::from_str(
+            r#"{"entries": [
                 {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
                  "status": "idea", "priority": "p2", "domain": "code",
                  "created_at": "2026-09-11T00:00:00+00:00", "tags": [],
@@ -1368,7 +1384,9 @@ mod tests {
                 {"id": "ab-two", "slug": "two", "title": "Two", "type": "bug",
                  "status": "ready", "priority": "p1", "domain": "code",
                  "created_at": "2026-09-11T00:00:00+00:00"}
-            ]}"#).unwrap();
+            ]}"#,
+        )
+        .unwrap();
         crate::graph_store::seed_rows(&graph, rows["entries"].as_array().unwrap()).unwrap();
         graph
     }
@@ -1797,12 +1815,15 @@ mod tests {
 
     fn seeded_sqlite_fixture() -> (TempDir, PathBuf) {
         let (dir, graph) = fixture("graph.json");
-        let rows: Value = serde_json::from_str(r#"{"entries": [
+        let rows: Value = serde_json::from_str(
+            r#"{"entries": [
                 {"id": "ab-one", "slug": "ab-one", "title": "One", "type": "feature",
                  "status": "idea", "priority": "p2", "domain": "code"},
                 {"id": "ab-two", "slug": "ab-two", "title": "Two", "type": "feature",
                  "status": "ready", "priority": "p2", "domain": "code"}
-            ]}"#).unwrap();
+            ]}"#,
+        )
+        .unwrap();
         crate::graph_store::seed_rows(&graph, rows["entries"].as_array().unwrap()).unwrap();
         (dir, graph)
     }

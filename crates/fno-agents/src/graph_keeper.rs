@@ -3639,7 +3639,10 @@ mod tests {
         // only after release), never on a timeout absence.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_rows(&graph, "{\"entries\": [{\"id\": \"x-1\", \"title\": \"before\"}]}");
+        seed_rows(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"before\"}]}",
+        );
         let state = Arc::new(read_state(&graph));
         let gate = Arc::clone(&state);
         let writer = std::thread::spawn(move || {
@@ -3787,7 +3790,10 @@ mod tests {
         // across two identical reads.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        seed_rows(&graph, "{\"entries\": [{\"id\": \"x-1\", \"title\": \"t\"}]}");
+        seed_rows(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"t\"}]}",
+        );
         let state = read_state(&graph);
         let r1 = handle_read(&state, &json!({})).unwrap();
         let r2 = handle_read(&state, &json!({})).unwrap();
