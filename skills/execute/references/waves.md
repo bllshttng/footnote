@@ -526,7 +526,7 @@ Before reporting completion:
 3. Wait for verification result
 4. Only report "done" if verification PASSES
 
-Each task's own verification runs only the tests covering the files it changed (`fno doctor test <test files>`); never the whole suite locally - CI runs every suite on every PR. A whole-suite local run, when genuinely needed, starts as a background task: it queues on `test:suite` and the turn never blocks.
+Each task's verification runs only the tests covering the files it changed (`fno doctor test <test files>`), never the whole suite locally. CI runs every suite on every PR. When a whole-suite local run is truly needed, start it as a background task: it queues on `test:suite` and the turn never blocks.
 
 If verification FAILS, report issues and do not claim done.
 
