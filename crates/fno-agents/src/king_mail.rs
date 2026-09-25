@@ -11,7 +11,7 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The sender stamp `fno agents mail send --from-name` used to carry on this
 /// lane; the settle arm's rows stay attributable after the shell-out goes.
@@ -113,18 +113,6 @@ pub fn send(sender: &str, scope: &str, text: &str) -> Result<Vec<String>, String
         scope,
         text,
     )
-}
-
-/// The bus path `send_at` is pointed at in production, for tests that want
-/// to seed and then read the real location.
-pub fn bus_live_path() -> Option<PathBuf> {
-    let home = crate::paths::AgentsHome::from_env_opt()?;
-    let dot_fno = home
-        .root()
-        .parent()
-        .unwrap_or_else(|| home.root())
-        .to_path_buf();
-    Some(dot_fno.join("bus").join("messages.jsonl"))
 }
 
 #[cfg(test)]
