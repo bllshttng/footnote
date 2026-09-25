@@ -15,7 +15,6 @@ use crate::backlog_model::{unavailable_features, Board, Lane};
 use crate::backlog_view::graph_path;
 use crate::store_client;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// Right-pad one cell segment so side-by-side columns align.
@@ -64,13 +63,12 @@ pub(crate) struct QueryState {
 impl QueryState {
     /// The model's parsed query for this state.
     pub(crate) fn to_query(&self) -> Result<backlog_model::Query, String> {
-        let mut p: HashMap<String, String> = HashMap::new();
         let lanes = match self.lanes {
             backlog_model::LanesBy::Project => "project",
             backlog_model::LanesBy::Epic => "epic",
             backlog_model::LanesBy::None => "none",
         };
-        p.insert("lanes".into(), lanes.into());
+        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes.into())];
         for (k, v) in [
             ("project", &self.project),
             ("epic", &self.epic),
@@ -81,7 +79,7 @@ impl QueryState {
             ("q", &self.q),
         ] {
             if let Some(v) = v {
-                p.insert(k.to_string(), v.clone());
+                p.push((k.to_string(), v.clone()));
             }
         }
         backlog_model::Query::from_pairs(&p)

@@ -61,8 +61,8 @@ Backends answer through `fno-agents graph-get`'s stdin door, the same stdin-JSON
 The payload is `{"tracker": "read" | "list-open" | "snapshot" | "close", "backend": <name or null>, "id": <id or null>, "stale_ok": <bool>}`.
 The door prints one JSON object and exits 0 whenever the op ran; refusals ride in the payload as `{"not_found": true}` or `{"error": "..."}`.
 
-The `snapshot` op builds the joined view once per backend and caches the last good read at `<state_dir>/sidecar/.snapshot/<backend>-<encoded-scope>.json`.
-The scope is what selects the item set besides the backend name: `FNO_TRACKER_GITHUB_REPO` for github, empty for graph, the Linear team or the Jira project later.
+The `snapshot` op builds the joined view once per backend and caches the last good read at `<state_dir>/sidecar/.snapshot/<backend>-<encoded-scope>.json`. The scope is what selects the item set besides the backend name: `FNO_TRACKER_GITHUB_REPO` for github, `FNO_TRACKER_LINEAR_TEAM` for linear, empty for graph.
+
 Only the board passes `stale_ok`; on a failed build it answers the cached snapshot plus `stale_since` and the failure as an errors line, so a backend outage degrades to the last good read instead of blanking the board.
 Selection never passes `stale_ok`, so dispatch never picks from stale data.
 
@@ -105,8 +105,20 @@ A stock install with no account works offline.
 `graph.json` is the default forever, never a migration target.
 
 The second backend is GitHub Issues, the first external one.
-Linear is third and has the cleanest data model of the three.
+
+Linear is third and ships in `crates/fno-agents/src/tracker/linear.rs`.
+
 Jira is last and ships on demand.
+
+The Linear backend reads over Linear's GraphQL API, one `curl` POST per op under the same 30 s subprocess bound the github backend uses.
+
+Auth rides the `FNO_TRACKER_LINEAR_API_KEY` env var, named in the backend and in no config key. `FNO_TRACKER_LINEAR_TEAM` (the team key, e.g. `ENG`) scopes the listings the way `FNO_TRACKER_GITHUB_REPO` scopes github.
+
+The id shape is the Linear identifier, `TEAM-123`, which never carries the `:` claim-key partition character.
+
+Linear parent, blockers, priority, estimate, description and url all read real. State types `completed`/`canceled` read closed. Priority 1-4 maps to p0-p3, with no-priority defaulting to p2. Estimate points map to S (<3), M (<8), L (>=8).
+
+Linear has no footnote rank, so card moves stay disabled: `rank` is always `None` and the trait carries no move operation.
 
 The default `GraphTracker` is a thin projection over `read_graph`.
 It preserves today's behaviour exactly and ships as proof the seam is honored.
