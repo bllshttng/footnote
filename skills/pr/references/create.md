@@ -44,7 +44,7 @@ if [ -n "${BASE:-}" ]; then
   COMMITS=$(git log "$BASE"..HEAD --oneline)
 else
   COMMITS=$(git log --oneline | tail -5)
-  BASE="<root commit; no base ref resolved>"
+  BASE=$(git rev-list --max-parents=0 HEAD)
 fi
 
 # Check for any related plan files
