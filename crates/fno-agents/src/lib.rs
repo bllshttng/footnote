@@ -182,6 +182,7 @@ pub mod intel_insights;
 pub mod interrupt_classify;
 pub mod json_output;
 pub mod kill_criteria;
+pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_escalation;

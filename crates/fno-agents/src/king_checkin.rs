@@ -63,9 +63,9 @@ fn missing_diff_keys(prev_data: Option<&Value>) -> Vec<&'static str> {
 
 /// Render cap for the per-node rows a court line prints (the count in the
 /// payload stays whole, only the rendered rows are cut, as the board does).
-const MAX_COURT_ROWS: usize = 25;
+pub(crate) const MAX_COURT_ROWS: usize = 25;
 
-fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
 
@@ -167,7 +167,7 @@ fn gh_error_cause(error: &str) -> String {
     )
 }
 
-fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
+pub(crate) fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
     let mut argv = vec![fno_bin()];
     argv.extend(args.iter().map(std::ffi::OsString::from));
     run_capture(&argv)
@@ -791,10 +791,16 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
     }))
 }
 
-fn r_workers() -> Result<Value, String> {
+fn fetch_workers_payload() -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["agents", "top", "--json"])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("top payload did not parse: {e}: {}", err.trim()))?;
+    Ok(payload)
+}
+
+/// The summary the beat journals, folded from the shared top payload, so
+/// the workers and quiet readings cost one `top` call between them.
+fn workers_summary(payload: &Value) -> Result<Value, String> {
     let predicate = payload
         .get("predicate")
         .and_then(|p| p.as_str())
@@ -1326,7 +1332,32 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("court", r_court(&beat.folded));
     take("territory", r_territory(ctx));
     take("capacity", r_capacity());
-    take("workers", r_workers());
+    let workers_payload = fetch_workers_payload();
+    take(
+        "workers",
+        workers_payload
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(workers_summary),
+    );
+    // The scope-answer readings share one scope compile and one top call.
+    let scope_ids =
+        crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
+    take(
+        "answered",
+        scope_ids
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|ids| crate::king_answers::answered_reading(&ctx.cwd, ids)),
+    );
+    take("quiet_workers", {
+        let top = workers_payload.as_ref().ok();
+        match (top, scope_ids.as_ref()) {
+            (Some(top), Ok(ids)) => crate::king_answers::quiet_reading(Some(top), ids),
+            (None, _) => Err("the workers reading failed; quiet workers are unreadable".into()),
+            (_, Err(e)) => Err(e.clone()),
+        }
+    });
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
     take("wake_meter", r_wake_meter(since));
@@ -1749,6 +1780,35 @@ fn render_lines(
         }
     }
 
+    match failed("answered") {
+        Some(r) => lines.push(format!("READER FAILED answered: {}", r.error)),
+        None => {
+            let rows = by_name("answered")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null)
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("answered: none in scope".into());
+            } else {
+                lines.push(format!(
+                    "answered: {} user decision(s) in scope",
+                    rows.len()
+                ));
+                for row in rows.iter().take(MAX_COURT_ROWS) {
+                    lines.push(format!(
+                        "  {} ({}): {}",
+                        dash(row.get("node")),
+                        dash(row.get("question_id")),
+                        dash(row.get("answer"))
+                    ));
+                }
+            }
+        }
+    }
+
     match failed("held") {
         Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
         None => {
@@ -1828,6 +1888,33 @@ fn render_lines(
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
             if hidden > 0 {
                 lines.push(format!("  ... {hidden} more rows cut"));
+            }
+        }
+    }
+
+    match failed("quiet_workers") {
+        Some(r) => lines.push(format!("READER FAILED quiet_workers: {}", r.error)),
+        None => {
+            let quiet = by_name("quiet_workers")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let rows = quiet
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("quiet: none in scope".into());
+            } else {
+                lines.push(format!("quiet: {} worker(s) in scope", rows.len()));
+                for row in rows.iter().take(MAX_COURT_ROWS) {
+                    lines.push(format!(
+                        "  {} ({}): {}",
+                        dash(row.get("worker")),
+                        dash(row.get("node")),
+                        dash(row.get("line"))
+                    ));
+                }
             }
         }
     }
@@ -3196,6 +3283,8 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("answered", json!({"rows": []})),
+            Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
             Reading::took("parked", json!({"open": 0, "rows": []})),
@@ -3742,7 +3831,7 @@ mod tests {
         assert!(workers_line.contains("live 3"));
         assert_eq!(data.get("coverage"), Some(&json!(17)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 17 of 17 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3924,7 +4013,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
+            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -4053,7 +4142,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 16 of 16 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 18 of 18 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4191,7 +4280,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
+            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
