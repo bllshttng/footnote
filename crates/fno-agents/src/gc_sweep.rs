@@ -2000,8 +2000,10 @@ pub(crate) fn run_with_release(
             let snapshot = memo.get_or_insert_with(&agents_read);
             let carries = snapshot.carries_pids();
             let known_clean = match snapshot {
-                ClaudeAgentsSnapshot::Known { warnings, .. } => warnings.is_empty(),
-                ClaudeAgentsSnapshot::Unknown { .. } => false,
+                crate::claude_roster::ClaudeAgentsSnapshot::Known { warnings, .. } => {
+                    warnings.is_empty()
+                }
+                crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => false,
             };
             let row = crate::daemon::claude_row_id(e).and_then(|rid| snapshot.find(&rid).cloned());
             (row, carries, known_clean)

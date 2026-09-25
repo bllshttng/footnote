@@ -4446,6 +4446,7 @@ fn format_success(
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
                     result.get("codex_loaded"),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             } else {
                 Some(render_list_table(
@@ -4453,6 +4454,7 @@ fn format_success(
                     &discovered,
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             }
         }
@@ -4524,6 +4526,7 @@ fn render_list_json(
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
     codex_loaded: Option<&Value>,
+    retired: &Value,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     // `codex_loaded` is additive and present only when the caller probed the
@@ -4542,6 +4545,11 @@ fn render_list_json(
     if let Some(block) = codex_loaded {
         payload["codex_loaded"] = block.clone();
     }
+    // The --all provenance lane: reaped and retired sessions. Always present
+    // so a consumer can tell "no retired rows" from an older shape; empty
+    // unless the caller passed --all.
+    payload["retired_sessions"] = retired.clone();
+    payload["retired_count"] = json!(retired.as_array().map(|a| a.len()).unwrap_or(0));
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
@@ -4722,6 +4730,7 @@ fn render_list_table(
     discovered: &[Value],
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
+    retired: &Value,
 ) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
@@ -4836,6 +4845,30 @@ fn render_list_table(
     let mut out = lines.join("\n") + "\n";
     if !discovered.is_empty() {
         out.push_str(&render_discovered_section(discovered));
+    }
+    if let Some(retired) = retired.as_array() {
+        if !retired.is_empty() {
+            out.push_str(&render_retired_section(retired));
+        }
+    }
+    out
+}
+
+/// Render the `--all` provenance lane below the table: the reaped and
+/// retired sessions the registry no longer holds, newest first, each with
+/// when it left, the recorded cause, and the resume command.
+fn render_retired_section(retired: &[Value]) -> String {
+    let mut out = String::from("\nREAPED / RETIRED (from reap receipts; --all)\n");
+    for r in retired {
+        let name = r["name"].as_str().unwrap_or("-");
+        let reaped = r["reaped_at"].as_str().unwrap_or("-");
+        let cause = r["cause"].as_str().unwrap_or("-");
+        let basis = r["basis"].as_str().unwrap_or("-");
+        let node = r["node"].as_str().unwrap_or("-");
+        let resume = r["resume"].as_str().unwrap_or("-");
+        out.push_str(&format!(
+            "- {name}  reaped {reaped}  cause {cause}  basis {basis}  node {node}\n  resume: {resume}\n"
+        ));
     }
     out
 }

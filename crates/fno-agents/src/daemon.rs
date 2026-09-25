@@ -4677,6 +4677,15 @@ where
         "status": filter_status,
         "progress": filter_progress,
     });
+    // `--all` is the provenance lane: the reaped and retired sessions the
+    // registry no longer holds. Always present in the payload so a consumer
+    // can tell "no retired rows" from an older shape, the same way the
+    // discovered lane is always present.
+    let retired_sessions = if all {
+        list_rows::retired_rows(&ctx.home)
+    } else {
+        Vec::new()
+    };
     Response::ok(
         req.id,
         json!({
@@ -4685,6 +4694,8 @@ where
             "fields_omitted": LIST_PROJECTION_OMISSIONS,
             "truth_probe_asked": truth_probe_asked,
             "truth_probe_answered": truth_probe_answered,
+            "retired_sessions": retired_sessions,
+            "retired_count": retired_sessions.len(),
         }),
     )
 }
