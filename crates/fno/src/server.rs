@@ -977,20 +977,14 @@ pub(crate) enum CoreMsg {
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
     /// (4a-G2). Sent only when the set changed; the core stores it and
-    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`
-    /// (US4) is the reader's off-loop cwd -> git-branch resolution for
-    /// the row cwds, joined into each row's `subline` at layout time; a cwd
-    /// with no resolvable branch is simply absent (the subline degrades to the
-    /// cwd tail).
-    /// `tails` is the same shape one level over: the reader's off-loop
-    /// session-uuid -> most-recent-assistant-line map, joined into each row's
-    /// `tail` at layout time. A uuid with no readable transcript is absent, so
-    /// the extended table's cell renders empty rather than fabricated.
+    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`,
+    /// `tails` and `ctx` are the reader's off-loop maps, joined into each
+    /// row's subline/tail and each pane's `PaneMeta` at layout time; an
+    /// absent reading degrades to an absent cell, never a fabrication.
     AgentRows {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
-        /// (v91) The context reading per transcript key, off the same pass.
         ctx: HashMap<String, String>,
         /// The reader's registry+roster read succeeded (parsed bytes,
         /// last-good, or a confirmed-vanished file; a present-but-unreadable
@@ -998,13 +992,11 @@ pub(crate) enum CoreMsg {
         /// rule, which must stay inert while the read state is unknown.
         read_ok: bool,
     },
-    /// A fresh session-uuid -> message-tail map with no row change
-    /// behind it. Transcripts grow independently of the registry, so the tail
-    /// pass runs every tick; when only it moved, this pushes the map alone
-    /// rather than forcing an unchanged row set through.
+    /// Tails (and ctx, v91) moved with no row change behind them:
+    /// transcripts grow independently of the registry, so when only this
+    /// pass moved, it pushes alone rather than forcing a row set through.
     AgentTails {
         tails: HashMap<String, String>,
-        /// (v91) The context reading per transcript key, off the same pass.
         ctx: HashMap<String, String>,
     },
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
@@ -1591,8 +1583,7 @@ pub(crate) struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
-    /// (v91) The context reading per transcript key, off the same reader
-    /// pass; joined into each pane's `PaneMeta`.
+    /// (v91) The context reading per transcript key, beside `tails`.
     ctx_by_session: HashMap<String, String>,
     /// (v48) Latest reachability-evidence map from the off-loop truth probe,
     /// joined into each agent row's `basis` / `last_activity_age_s` at layout
@@ -8863,7 +8854,6 @@ impl Core {
                         // (v22) Every leaf pane of the tab, labelled from
                         // its own entry, so the navigator can goto a pane in any
                         // tab/squad - not just the active view the client tiles.
-                        // (v91) The frame's bottom-edge facts ride along.
                         panes: tree::leaves(&t.root)
                             .iter()
                             .map(|pid| {
