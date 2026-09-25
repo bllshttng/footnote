@@ -443,6 +443,17 @@ pub enum Event {
     /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
+    /// Open the settings modal (prefix+S). The same surface the sideline
+    /// menu's `settings` row opens, reached from the keyboard. Case pair
+    /// with `s` (toggle-status), the h/H focus/resize convention.
+    OpenSettings,
+    /// Open the connections modal (prefix+A): provider accounts and combo
+    /// routing. Case pair with `a` (answers).
+    OpenConnections,
+    /// Open the thread-sweep counts modal (prefix+T): the sideline menu's
+    /// `sweep threads` row, on the keyboard. The modal still asks before
+    /// anything is reaped.
+    OpenSweepThreads,
     /// Open the rename-tab name overlay for the active tab (prefix+,, tmux
     /// `rename-window` convention). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
@@ -1137,6 +1148,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sideline row selector",
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(
+            b'A',
+            "connections",
+            OpenConnections,
+            Global,
+            "connections (accounts, combos)",
+        ),
         b(b'e', "feed", OpenFeed, Global, "activity feed"),
         b(
             b'E',
@@ -1195,6 +1213,20 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sort table columns",
         ),
         b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
+        b(
+            b'S',
+            "settings",
+            OpenSettings,
+            Global,
+            "settings (theme, toggles, prefix)",
+        ),
+        b(
+            b'T',
+            "sweep-threads",
+            OpenSweepThreads,
+            Global,
+            "sweep threads (close, reap)",
+        ),
         b(
             b'\\',
             "show-pane-ids",
@@ -1760,6 +1792,18 @@ mod tests {
     }
 
     #[test]
+    fn sideline_menu_rows_open_from_the_keyboard() {
+        // The menu-only surfaces got chords: S settings, A connections,
+        // T sweep threads - case pairs with s/a, per the h/H convention.
+        assert_eq!(scan_all(&[b"\x02S"]), vec![Event::OpenSettings]);
+        assert_eq!(scan_all(&[b"\x02A"]), vec![Event::OpenConnections]);
+        assert_eq!(scan_all(&[b"\x02T"]), vec![Event::OpenSweepThreads]);
+        // ... and the lowercase halves still mean what they meant.
+        assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
+        assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
+    }
+
+    #[test]
     fn sort_shortcut_and_z_section_shortcut_do_not_overlap() {
         assert_eq!(resolve_chord(b'o'), Event::ToggleAgentSort);
         assert_eq!(resolve_chord(b'z'), Event::CycleSection);
@@ -2194,6 +2238,32 @@ mod tests {
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c == '-'),
                 "action id {:?} is not kebab-case",
+                kb.action
+            );
+        }
+    }
+
+    #[test]
+    fn default_keys_never_collide_or_land_on_a_special() {
+        // Two defaults on one byte would fail SILENTLY: `chord_for` keeps the
+        // first row and `resolve_keymap`'s no-proposal branch breaks out of the
+        // duplicate loop without a warning, so one action would dispatch while
+        // the modal still advertised both. The prefix byte and every digit are
+        // structural specials that route before the table (the literal-prefix
+        // forward and the tab-ordinal buffer), so a binding parked there is
+        // unreachable while the help still shows it.
+        let mut seen = std::collections::HashSet::new();
+        for kb in default_bindings() {
+            assert!(
+                seen.insert(kb.key),
+                "key {} bound twice (second: {:?})",
+                kb.disp,
+                kb.action
+            );
+            assert_ne!(kb.key, DEFAULT_PREFIX, "{} sits on the prefix", kb.action);
+            assert!(
+                !kb.key.is_ascii_digit(),
+                "{} sits on the tab-ordinal digits",
                 kb.action
             );
         }

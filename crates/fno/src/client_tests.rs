@@ -4148,6 +4148,37 @@ fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
 }
 
 #[tokio::test]
+async fn menu_only_surfaces_open_from_their_new_chords() {
+    // prefix+S / prefix+A / prefix+T reach the same surfaces the sideline
+    // menu rows open, through the one mutation point (`execute_aux_action`),
+    // so chord and menu can never disagree on what they open. All three are
+    // client-local: nothing reaches the wire.
+    let mut v = two_pane_view();
+    v.term = (40, 80);
+    let mut buf: Vec<u8> = Vec::new();
+    dispatch_event(&mut v, crate::keys::Event::OpenSettings, &mut buf)
+        .await
+        .unwrap();
+    assert!(v.aux.is_some(), "prefix+S opens the settings modal");
+    v.aux = None;
+    dispatch_event(&mut v, crate::keys::Event::OpenConnections, &mut buf)
+        .await
+        .unwrap();
+    assert!(
+        v.connections.is_some(),
+        "prefix+A opens connections in its loading state"
+    );
+    dispatch_event(&mut v, crate::keys::Event::OpenSweepThreads, &mut buf)
+        .await
+        .unwrap();
+    assert!(
+        matches!(v.sweep_action, Some(SweepAction::Counts)),
+        "prefix+T arms the sweep counts probe"
+    );
+    assert!(buf.is_empty(), "nothing to the wire");
+}
+
+#[tokio::test]
 async fn keys_modal_which_key_executes_a_bound_key_to_the_wire() {
     // AC2-HP: tapping a bound key in the modal runs it immediately through
     // the SAME dispatch a direct chord uses, and the modal closes.

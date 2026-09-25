@@ -11382,6 +11382,15 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenSettings => {
+            execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
+        }
+        Event::OpenConnections => {
+            execute_aux_action(view, AuxAction::OpenConnections, sock_w).await?;
+        }
+        Event::OpenSweepThreads => {
+            execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
