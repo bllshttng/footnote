@@ -387,3 +387,93 @@ fn a_multibyte_head_is_cut_by_characters() {
     let expected = format!("{}...", "\u{1f30a}".repeat(80));
     assert_eq!(second["replaced"]["head"], json!(expected));
 }
+
+/// A repeat note by the same session names `fno backlog encounter` in its
+/// receipt until one encounter from that session exists on the node.
+#[test]
+fn a_repeat_note_names_encounter_once_until_one_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("t-1", "ready")]);
+    let g = graph_arg(&graph);
+
+    // First note over an empty state: nothing replaced, no hint.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "first",
+            "--self-session",
+            "sess-aaaa1111",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
+
+    // Second note: the session replaced its own state, so the hint fires.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "second",
+            "--self-session",
+            "sess-aaaa1111",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("fno backlog encounter t-1 --evidence"),
+        "{stdout}"
+    );
+
+    // Give t-1 an encounter from sess-aaaa1111 through the store API: the
+    // binary may have flipped the store to sqlite, and the frozen json
+    // keeper would not see the flip. The hint goes quiet for that session.
+    let payload = fno_agents::backlog::api::encounter_create(
+        &fno_agents::backlog::api::Store::new(&graph),
+        "t-1",
+        fno_agents::backlog::api::EncounterInput {
+            evidence: "x".into(),
+            session_id: Some("sess-aaaa1111".into()),
+        },
+    )
+    .unwrap();
+    assert!(payload.success);
+
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "third",
+            "--self-session",
+            "sess-aaaa1111",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
+
+    // A different session never gets the hint, whatever the prior author.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "fourth",
+            "--self-session",
+            "sess-bbbb2222",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.contains("fno backlog encounter"), "{stdout}");
+}

@@ -37,6 +37,7 @@ from fno.graph._reconcile import (
     _merge_postdates_reopen,
     _reopen_outranks_child_closes,
     _reopen_outranks_merge,
+    reopen_held_reason,
 )
 from fno.graph.cli import (
     _cascade_close_contained,
@@ -348,7 +349,7 @@ def routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return g
 
 
-def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at) -> str:
+def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at, reopened_reason=None) -> str:
     plan = tmp_path / "p.md"
     plan.write_text(
         "---\nnode: ab-reopen1\nstatus: ready\ncreated: 2026-08-09T00:00:00+00:00\n---\n\n# Plan\n",
@@ -368,6 +369,8 @@ def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at) -> str:
     }
     if reopened_at is not None:
         node["reopened_at"] = reopened_at
+    if reopened_reason is not None:
+        node["reopened_reason"] = reopened_reason
     seed_graph(g, json.dumps({"entries": [node]}, indent=2) + "\n")
     return str(plan)
 
@@ -500,3 +503,70 @@ def test_locked_mutation_rechecks_the_reopen(routed, tmp_path, monkeypatch):
     assert any(h["node_id"] == "ab-reopen1" for h in payload["reopen_held"]), r.output
     entry = next(e for e in read_graph_strict(routed) if e["id"] == "ab-reopen1")
     assert entry.get("completed_at") is None
+
+
+def test_reopen_held_reason_prefers_the_reopener_words():
+    node = {"reopened_reason": "closed by mistake"}
+    assert reopen_held_reason(node, 42) == "reopened after PR #42 merged: closed by mistake"
+
+
+def test_reopen_held_reason_falls_back_when_no_reason_recorded():
+    missing = reopen_held_reason({}, 42)
+    blank = reopen_held_reason({"reopened_reason": "   "}, 42)
+    non_string = reopen_held_reason({"reopened_reason": 7}, 42)
+    assert missing == "reopened after PR #42 merged: no reopen reason recorded"
+    assert blank == "reopened after PR #42 merged: no reopen reason recorded"
+    assert non_string == "reopened after PR #42 merged: no reopen reason recorded"
+
+
+def test_reconcile_json_hold_row_carries_the_reopener_reason(routed, tmp_path, monkeypatch):
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(
+        routed, tmp_path, reopened_at=AFTER_MERGE, reopened_reason="closed by mistake"
+    )
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    held = next(h for h in payload["reopen_held"] if h["node_id"] == "ab-reopen1")
+    assert held["reason"] == "reopened after PR #42 merged: closed by mistake", r.output
+
+
+def test_locked_recheck_hold_row_carries_the_reopener_reason(routed, tmp_path, monkeypatch):
+    """The locked-mutation hold site feeds the same helper, so the reason the
+    reopener wrote survives the second (locked) pass too."""
+    import fno.graph._reconcile as rec
+
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(
+        routed, tmp_path, reopened_at=AFTER_MERGE, reopened_reason="closed by mistake"
+    )
+    _stub_scan(monkeypatch, plan)
+
+    calls = []
+
+    def scripted(node, merged_at):
+        calls.append(1)
+        return len(calls) == 2
+
+    monkeypatch.setattr(rec, "_reopen_outranks_merge", scripted)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert len(calls) == 2, r.output
+    held = next(h for h in payload["reopen_held"] if h["node_id"] == "ab-reopen1")
+    assert held["reason"] == "reopened after PR #42 merged: closed by mistake", r.output
+
+
+def test_reconcile_dry_run_hold_roll_carries_the_reopener_reason(routed, tmp_path, monkeypatch):
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(
+        routed, tmp_path, reopened_at=AFTER_MERGE, reopened_reason="closed by mistake"
+    )
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--dry-run"])
+    assert "closed by mistake" in r.output, r.output
