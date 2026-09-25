@@ -455,7 +455,53 @@ fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>,
     Ok(claims)
 }
 
+/// The claims map cached across read replies, busted on a write to the
+/// claims tree: every acquire, release, and import bumps a watched mtime
+/// (a file create or remove bumps the directory, an import bumps the db or
+/// its WAL), so a serving-hit holder is never stale, and the per-reply
+/// read_dir plus sqlite open collapses to three stats.
+struct ClaimsCache {
+    key: (
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+    ),
+    map: std::collections::HashMap<String, NodeClaim>,
+}
+
+type CacheKey = (
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+);
+
+fn claims_cache_key() -> CacheKey {
+    let dir = claims_directory().ok();
+    let stat = |p: std::path::PathBuf| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
+    let dir_mtime = dir.as_deref().and_then(|d| stat(d.to_path_buf()));
+    let db_mtime = dir.as_deref().map(|d| stat(d.join("graph.db")));
+    let wal_mtime = dir.as_deref().map(|d| stat(d.join("graph.db-wal")));
+    (
+        dir_mtime,
+        db_mtime.unwrap_or(None),
+        wal_mtime.unwrap_or(None),
+    )
+}
+
 pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<ClaimsCache>>> =
+        std::sync::OnceLock::new();
+    let key = claims_cache_key();
+    let cached = CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cached.as_ref() {
+        if hit.key == key {
+            return Ok(hit.map.clone());
+        }
+    }
+    drop(cached);
     // Union of the claims db and the lockfile scan: the db is the holder
     // source of truth for claims it holds, and the lockfiles cover legacy
     // writers (the Python acquire path) plus readers that cannot open the
@@ -474,6 +520,13 @@ pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, No
             }
         }
     }
+    *CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(ClaimsCache {
+        key,
+        map: claims.clone(),
+    });
     Ok(claims)
 }
 

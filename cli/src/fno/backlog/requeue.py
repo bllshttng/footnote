@@ -94,6 +94,23 @@ def _wedge_refusal(verb: str, node_id: str, open_do: int) -> None:
     raise typer.Exit(code=3)
 
 
+def _settle_status_after_release(node_id: str) -> None:
+    """The retired claim mirror stamped a released node back to its queue
+    state; the port keeps the transition a write. The commit pipeline
+    re-derives the final word (the ladder's ready/idea), so the mutator
+    only has to move the stuck row."""
+    from fno.graph.store import commit_rows_via_store
+
+    def mutator(entries):
+        for entry in entries:
+            if entry.get("id") == node_id and entry.get("status") == "in_progress":
+                entry["status"] = "ready"
+                break
+        return entries
+
+    commit_rows_via_store(_graph_path(), mutator)
+
+
 def _unclaim_node(task_id: str) -> None:
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.statuses import is_open_do_row
@@ -108,6 +125,8 @@ def _unclaim_node(task_id: str) -> None:
     lock_note = _release_node_lockfile(node_id)
     if lock_note.startswith("lockfile"):
         raise typer.BadParameter(f"unclaim refused: {lock_note}")
+
+    _settle_status_after_release(node_id)
 
     after = _read_node(node_id, _graph_path())
     if (after or {}).get("persisted_status") == "in_progress":
@@ -196,6 +215,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
 
     _release_node_lockfile(node_id)
+    _settle_status_after_release(node_id)
 
     after = _read_node(node_id, _graph_path())
     status_after = (after or {}).get("persisted_status")

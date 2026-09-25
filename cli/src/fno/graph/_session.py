@@ -663,25 +663,15 @@ def cmd_session_close(
         else:
             receipt["claim_released"] = False
     if receipt.get("claim_released"):
-        # The retired claim mirror stamped the plan-bound node ready when
-        # this close released its own claim; the store-era port keeps the
-        # transition at the write path, so no read has to guess it back.
+        # The retired claim mirror stamped a released node back to its queue
+        # state; the port keeps the transition a write. The commit pipeline
+        # re-derives the final word (done, in_review, deferred, the ladder's
+        # ready/idea), so the mutator only has to move the stuck row.
         def _settle_ready(entries):
             for entry in entries:
-                if entry.get("id") != node_id:
-                    continue
-                open_do = any(
-                    row.get("phase") == "do" and not row.get("ended_at")
-                    for row in entry.get("sessions") or []
-                    if isinstance(row, dict)
-                )
-                terminal = any(
-                    entry.get(field)
-                    for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
-                )
-                if entry.get("status") == "in_progress" and not open_do and not terminal:
+                if entry.get("id") == node_id and entry.get("status") == "in_progress":
                     entry["status"] = "ready"
-                break
+                    break
             return entries
 
         commit_rows_via_store(_graph_path(), _settle_ready)

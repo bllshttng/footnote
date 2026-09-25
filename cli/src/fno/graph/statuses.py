@@ -187,7 +187,7 @@ def is_stale_lock(task: dict) -> bool:
     # Preserve the historical malformed-value result for this compatibility
     # helper. Missing data remains false here; recompute_statuses uses the
     # diagnostic quality directly so both unreadable shapes preserve owners.
-    legacy_or_canonical = task.get("locked_at", task.get("claimed_at"))
+    legacy_or_canonical = task.get("locked_at") or task.get("claimed_at")
     return quality == "old" or (quality == "unreadable" and bool(legacy_or_canonical))
 
 
