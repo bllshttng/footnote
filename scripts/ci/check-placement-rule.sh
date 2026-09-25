@@ -65,6 +65,10 @@
 #      Claude Code's own file store, so the memory carveout must name that
 #      root to allow exactly it and nothing wider. Comparison only; no
 #      footnote state lands there.
+#      scripts/metrics/port-order.sh reads the same transcripts: a 30-day
+#      scan counts `fno <verb-group>` occurrences for the port-order
+#      table's use column. Read-only; footnote stores nothing there, and a
+#      missing root leaves use at zero rather than creating anything.
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
 #      The inherited-model-env remedy strings (model_routing.py,
@@ -337,6 +341,7 @@ scripts/lib/worktree-lifecycle.sh
 scripts/lib/worktree-manager.sh
 scripts/lib/worktree_occupancy.py
 scripts/lint/no-invalid-events.sh
+scripts/metrics/port-order.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
 scripts/diagnostics/token-diagnose.py
