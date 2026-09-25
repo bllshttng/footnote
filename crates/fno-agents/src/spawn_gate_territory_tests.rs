@@ -2,6 +2,7 @@
 //! cap without registry node fields, and an unreadable claim store refuses
 //! as unknown. Split from spawn_gate.rs to keep the over-budget file shrinking.
 
+use super::tests::EnvPin;
 use super::*;
 
 #[test]

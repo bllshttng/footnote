@@ -4517,10 +4517,10 @@ MemAvailable:    8000000 kB\n";
     /// Snapshot-and-restore scope for the env vars a fixture pins: the
     /// original value (or its absence) is put back on drop, panic included,
     /// so a fixture cannot permanently discard an ambient pin.
-    struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    pub(super) struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvPin {
-        fn take(vars: &[&'static str]) -> Self {
+        pub(super) fn take(vars: &[&'static str]) -> Self {
             Self(
                 vars.iter()
                     .map(|var| (*var, std::env::var_os(var)))
