@@ -2804,6 +2804,28 @@ mod tests {
         );
         assert!(deliveries.borrow().is_empty());
 
+        let code = call_live_claude_route_with_mail(
+            &home,
+            &entry,
+            Some("working"),
+            Some("hello"),
+            false,
+            None,
+            claims.path(),
+            &roots,
+            &deliveries,
+            |argv| {
+                assert_eq!(argv.last().map(String::as_str), Some("hello"));
+                (
+                    0,
+                    "msg-2 queued (durable) [live-miss]\n".to_string(),
+                    String::new(),
+                )
+            },
+        );
+        assert_eq!(code, 16, "durable queueing is not live delivery");
+        assert!(deliveries.borrow().is_empty());
+
         let duplicate_calls = std::cell::Cell::new(0);
         let code = call_live_claude_route_with_mail(
             &home,
