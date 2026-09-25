@@ -65,6 +65,18 @@ fn build_argv(
                 "grok headless owns session identity; remove {token:?} from harness arguments"
             ));
         }
+        if matches!(flag, "--model" | "-m" | "--reasoning-effort" | "--effort")
+            || token.starts_with("-m") && token.len() > 2
+        {
+            return Err(format!(
+                "grok headless owns model and effort; remove {token:?} from harness arguments"
+            ));
+        }
+        if matches!(flag, "--permission-mode" | "--always-approve") {
+            return Err(format!(
+                "grok headless owns permission posture; remove {token:?} from harness arguments"
+            ));
+        }
     }
 
     let mut argv = crate::harness_capabilities::HarnessContract::packaged()
@@ -136,6 +148,32 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.contains("session identity"), "{flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn fenced_args_cannot_replace_grok_model_effort_or_permission_posture() {
+        for flag in [
+            "--model=other",
+            "-m",
+            "-mother",
+            "--reasoning-effort=low",
+            "--effort",
+            "--permission-mode=acceptEdits",
+            "--always-approve",
+        ] {
+            let error = build_argv(
+                "12345678-1234-4234-8234-123456789abc",
+                "hello",
+                "fno",
+                None,
+                None,
+                false,
+                None,
+                &[flag.into()],
+            )
+            .unwrap_err();
+            assert!(error.contains("grok headless owns"), "{flag}: {error}");
         }
     }
 }
