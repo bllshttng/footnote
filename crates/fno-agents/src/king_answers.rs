@@ -505,7 +505,15 @@ pub(crate) fn quiet_lines(readings: &[crate::king_checkin::Reading]) -> Vec<Stri
         .get("quiet")
         .and_then(Value::as_u64)
         .unwrap_or(rows.len() as u64);
-    lines.push(format!("quiet: {total} worker(s) in scope"));
+    let read = value
+        .get("read")
+        .and_then(Value::as_u64)
+        .unwrap_or(rows.len() as u64);
+    if read < total {
+        lines.push(format!("quiet: {total} worker(s) in scope, {read} read"));
+    } else {
+        lines.push(format!("quiet: {total} worker(s) in scope"));
+    }
     for row in rows.iter().take(crate::king_checkin::MAX_COURT_ROWS) {
         lines.push(format!(
             "  {} ({}): {}",
