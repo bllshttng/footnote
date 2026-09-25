@@ -6313,6 +6313,7 @@ def _delivery_policy_refusal(target) -> Optional[str]:
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
     """Run one ``mail-inject`` probe and classify its stdout verdict."""
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             argv,
@@ -6328,6 +6329,8 @@ def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> boo
         out = json.loads(proc.stdout.strip())
         delivered = bool(out.get("delivered"))
         _record(str(out.get("reason") or "unknown"))
+        if not delivered:
+            _record(f"waited-{round(time.monotonic() - started)}s")
         return delivered
     except (ValueError, AttributeError):
         _record("unreadable")
@@ -8022,11 +8025,8 @@ def dispatch_send(
                     )
 
                 _emit_ev(
-                    "agent_send_done",
-                    name=name,
-                    provider=existing.harness,
-                    msg_id=msg_id,
-                    delivery=delivery,
+                    "agent_send_done", name=name, provider=existing.harness,
+                    msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 )
             finally:
                 _DISPATCH_CTX.reset(ctx_token)

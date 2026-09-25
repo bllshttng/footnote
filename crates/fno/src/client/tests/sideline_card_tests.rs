@@ -235,6 +235,68 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
 }
 
 #[test]
+fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
+    // Per-cell background, not text: every cell of both lines carries the
+    // same band, the column gaps included.
+    let mut v = card_view(king_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    v.hover_row = Some(agent_i);
+    let frame = v.compose();
+    for cell in card_pair_cells(&v, &frame, agent_i, detail_i) {
+        assert_eq!(cell.bg, Color::Default, "one background everywhere");
+        assert_eq!(
+            cell.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the band is one uniform inverse"
+        );
+    }
+}
+
+#[test]
+fn chosen_card_paints_accent_across_both_lines() {
+    let mut v = card_view(king_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    v.layout.focus = 5;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    let frame = v.compose();
+    let accent = v.theme.accent;
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    for display_i in [agent_i, detail_i] {
+        let row = display_i - offset;
+        for cell in &frame.cells[row * cols..row * cols + text_w] {
+            assert_eq!(cell.bg, accent, "the chosen color fills the card line");
+            assert_eq!(cell.flags, 0, "one readable text color, no inversion");
+        }
+    }
+}
+
+#[test]
+fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
+    let mut v = card_view(king_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    v.layout.focus = 5;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    v.hover_row = Some(detail_i);
+    let frame = v.compose();
+    let accent = v.theme.accent;
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    for display_i in [agent_i, detail_i] {
+        let row = display_i - offset;
+        for cell in &frame.cells[row * cols..row * cols + text_w] {
+            assert_eq!(cell.bg, accent, "the chosen color wins on hover");
+        }
+    }
+}
+
+#[test]
 fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
     let mut agents = king_and_worker();
     agents[1].last_activity_age_s = Some(42);

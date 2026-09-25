@@ -1618,6 +1618,81 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
         pytest.fail("agent_send_done event not found in events")
 
 
+# ---------------------------------------------------------------------------
+# Live-miss reason: waited token + done-event reason field (x-7345)
+# ---------------------------------------------------------------------------
+
+def test_run_mail_inject_records_waited_token_on_miss(monkeypatch) -> None:
+    """A parsed not-delivered outcome also records how long the probe waited.
+
+    The waited token rides the same reason list, so the done event and the
+    demotion receipt can name the spend without a second channel (x-7345).
+    """
+    from fno.agents import dispatch as dispatch_mod
+
+    class _Proc:
+        stdout = json.dumps({"delivered": False, "reason": "not-confirmed"})
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *_a, **_k: _Proc())
+    records: list[str] = []
+    delivered = dispatch_mod._run_mail_inject(["bin", "mail-inject"], "hi", 5.0, records.append)
+    assert delivered is False
+    assert "not-confirmed" in records
+    waited = [tok for tok in records if tok.startswith("waited-")]
+    assert len(waited) == 1 and waited[0].endswith("s"), records
+
+    class _Delivered:
+        stdout = json.dumps({"delivered": True, "reason": "ok"})
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *_a, **_k: _Delivered())
+    records.clear()
+    assert dispatch_mod._run_mail_inject(["bin", "mail-inject"], "hi", 5.0, records.append) is True
+    assert records == ["ok"], records
+
+
+def test_dispatch_send_done_event_carries_live_miss_reason(tmp_path: Path, monkeypatch) -> None:
+    """AC1/AC2 (x-7345): the done event keeps the live-lane cause.
+
+    A durable demotion carries the joined tokens (the raw cause and the wait);
+    a hosted delivery carries no reason at all.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+
+    def _miss(*_args, reason_out=None, **_kwargs):
+        if reason_out is not None:
+            reason_out.extend(["not-confirmed", "waited-32s"])
+        return False
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", _miss)
+    monkeypatch.setattr(
+        dispatch_mod.events, "emit", lambda kind, **data: captured.append((kind, data))
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="hello", provider=None, cwd=tmp_path
+    )
+    assert result.delivery == "durable"
+    done = [data for kind, data in captured if kind == "agent_send_done"]
+    assert done, "agent_send_done not emitted"
+    assert done[-1]["delivery"] == "durable"
+    reason = done[-1].get("reason")
+    assert reason is not None and "not-confirmed" in reason and "waited-32s" in reason, done[-1]
+
+    captured.clear()
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_a, **_k: True)
+    result = dispatch_mod.dispatch_send(
+        name="red", message="hello again", provider=None, cwd=tmp_path
+    )
+    assert result.delivery == "hosted"
+    done = [data for kind, data in captured if kind == "agent_send_done"]
+    assert done and done[-1]["delivery"] == "hosted"
+    assert not done[-1].get("reason"), done[-1]
+
+
 def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
     tmp_path: Path,
     monkeypatch,

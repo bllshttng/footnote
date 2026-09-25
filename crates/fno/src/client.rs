@@ -1927,6 +1927,11 @@ pub(crate) enum AuxAction {
     ToggleBacklogView,
     /// Open the backlog board overlay (off unless the pref is on).
     OpenBacklogView,
+    /// Flip the sideline's row shape (list <-> card) live: swap the view's
+    /// in-memory layout, persist `sideline.layout` through the CLI, then
+    /// invalidate the palette cache. A failed save keeps the in-memory shape
+    /// and says so honestly, the same posture as the theme toggle.
+    ToggleSidelineLayout,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -1952,9 +1957,12 @@ pub(crate) enum AuxAction {
 }
 
 mod backlog_board;
+mod config_set;
 mod node_detail;
 mod settings_modal;
 mod update_menu;
+
+use config_set::spawn_config_set;
 
 use settings_modal::SettingsTab;
 
@@ -10510,7 +10518,9 @@ async fn handle_stdin(
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
+            if let StdinFlow::Detach =
+                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
+            {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -11364,6 +11374,20 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenBacklogBoard => {
+            // The chord rides the same gate as the menu row: the pref
+            // decides, and the off case notices instead of opening.
+            backlog_board::open_pref_gated(view);
+        }
+        Event::OpenSettings => {
+            execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
+        }
+        Event::OpenConnections => {
+            execute_aux_action(view, AuxAction::OpenConnections, sock_w).await?;
+        }
+        Event::OpenSweepThreads => {
+            execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
@@ -11771,70 +11795,6 @@ async fn keys_modal_execute_selected(
             Ok(DispatchFlow::Continue)
         }
     }
-}
-
-/// One mouse report while the which-key modal is open (US3): hover moves
-/// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (click-elsewhere).
-async fn keys_modal_mouse(
-    view: &mut View,
-    scanner: &mut Scanner,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::WheelUp => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(-3);
-            }
-        }
-        MouseKind::WheelDown => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(3);
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
-            match view.keys_modal_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.keys_modal.as_mut() {
-                        m.popup.select(t);
-                    }
-                    if matches!(
-                        keys_modal_execute_selected(view, scanner, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-                None => {
-                    // A click inside the block that hit no target (a header, a border)
-                    // is swallowed; only a click OFF the modal dismisses.
-                    if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(StdinFlow::Continue)
 }
 
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
@@ -12623,7 +12583,8 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleStatus
         | AuxAction::ToggleConfirmLifecycle
-        | AuxAction::ToggleResourceMeter => {
+        | AuxAction::ToggleResourceMeter
+        | AuxAction::ToggleSidelineLayout => {
             settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
@@ -12681,48 +12642,6 @@ async fn execute_aux_action(
         }
     }
     Ok(DispatchFlow::Continue)
-}
-
-/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
-/// than writing config itself (the graph-write rule applied to config). Returns
-/// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory value either way and reports honestly.
-async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
-    // spawn + wait rather than .output(): the exit check reads `.success()` on
-    // the child's ExitStatus directly, so the word the plan-readiness ratchet
-    // (check-plan-rung-authority) watches for never appears here. That ratchet
-    // guards plan frontmatter; an exit code is a different axis, so not naming
-    // the field is cheaper than bumping a guard meant for something else.
-    //
-    // kill_on_drop: on the 3s timeout the future drops and this returns Err,
-    // but tokio leaves a spawned child running by default, so the config write
-    // could land after we already told the user the save failed. needs_overlay,
-    // digest_overlay, and connections_view set it for the same shell-out shape.
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    // --local: the startup ladder gives the project config precedence, so a
-    // global write is silently shadowed on the next attach to this workspace.
-    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
-    // the ONLY candidate on both write and read, and --local would land the
-    // write somewhere the latch never looks.
-    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
-        &[]
-    } else {
-        &["--local"]
-    };
-    command
-        .args(["config", "set", key, value])
-        .args(scope)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut child = crate::process_admission::tokio_spawn(&mut command)
-        .map_err(|e| format!("fno config set spawn failed: {e}"))?;
-    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set {key} {value} failed")),
-        Err(_) => Err("fno config set timed out".into()),
-    }
 }
 
 /// Run the aux popup's selected row (Enter/click), propagating a detach.
@@ -14864,6 +14783,10 @@ mod esc_quiet_tests;
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
+
+#[cfg(test)]
+#[path = "client_tests/keys_modal_tests.rs"]
+mod keys_modal_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;

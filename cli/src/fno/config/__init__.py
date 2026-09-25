@@ -2030,18 +2030,19 @@ class SidelineBlock(BaseModel):
 
     colors: SidelineColorsBlock = Field(default_factory=SidelineColorsBlock)
     # The row-shape switch the Rust sideline reads. Mirrors the Rust reader's
-    # tolerance: an unknown value reads as list (crates/fno sideline_color).
-    layout: Literal["card", "list"] = "list"
+    # tolerance: the card is the default, and an unknown value reads as the
+    # card default (crates/fno sideline_color).
+    layout: Literal["card", "list"] = "card"
 
     @field_validator("layout", mode="before")
     @classmethod
     def _coerce_layout(cls, v: object) -> object:
-        """Unknown or wrong-shaped values degrade to list, never error."""
+        """Unknown or wrong-shaped values degrade to the card default, never error."""
         if v is None:
-            return "list"
-        if isinstance(v, str) and v.strip().lower() == "card":
             return "card"
-        return "list"
+        if isinstance(v, str) and v.strip().lower() == "list":
+            return "list"
+        return "card"
 
 
 class DispatchBlock(BaseModel):

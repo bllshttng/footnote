@@ -89,7 +89,7 @@ impl AnnouncePaths {
 // Small shared helpers
 // ---------------------------------------------------------------------------
 
-fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
 }
 
@@ -103,12 +103,12 @@ fn row_session_id(row: &Value) -> Option<String> {
     (!sid.is_empty()).then(|| sid.to_string())
 }
 
-fn row_terminal(row: &Value) -> bool {
+pub(crate) fn row_terminal(row: &Value) -> bool {
     let status = row_str(row, "status").unwrap_or("live");
     TERMINAL_STATUSES.contains(&status)
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -216,7 +216,7 @@ impl BusLock {
 /// appender.
 // ponytail: Rust never rotates; the next Python append rotates an over-size
 // live segment.
-fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
@@ -237,7 +237,7 @@ fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 /// answers false. `project:<p>` rides the same rule. An unreadable project
 /// map answers equality only: without it a portfolio reads as an epic set
 /// and would answer for each of its projects.
-fn crown_answers(
+pub(crate) fn crown_answers(
     held: Option<&str>,
     requested: &str,
     projects: Option<&HashMap<String, String>>,
@@ -604,7 +604,7 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
     }
 }
 
-fn new_msg_id() -> String {
+pub(crate) fn new_msg_id() -> String {
     // 'msg-XXXXXX', matching bus/log.py::new_msg_id (6 hex chars).
     let mut buf = [0u8; 3];
     if getrandom::fill(&mut buf).is_err() {
