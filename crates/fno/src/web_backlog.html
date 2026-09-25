@@ -189,6 +189,9 @@ function sessionCommand(s) {
     status: initial.getAll("status"), priority: initial.getAll("priority"),
     size: initial.getAll("size"), king: initial.getAll("king"),
     q: initial.get("q") || "", all: initial.get("all") === "1", };
+  // Collapse state survives the 10 s poll's rebuild: the lane keys whose
+  // list section is closed.
+  const closedLanes = new Set();
   let board = null;
   let seenVersion;
   let pollTimer = 0;
@@ -494,6 +497,7 @@ function sessionCommand(s) {
   function listSection(lane) {
     const sec = document.createElement("section");
     sec.className = "lsec";
+    if (closedLanes.has(lane.key)) sec.classList.add("closed");
     const head = document.createElement("button");
     head.type = "button";
     head.className = "lhead";
@@ -516,6 +520,8 @@ function sessionCommand(s) {
     }
     head.addEventListener("click", () => {
       sec.classList.toggle("closed");
+      if (sec.classList.contains("closed")) closedLanes.add(lane.key);
+      else closedLanes.delete(lane.key);
     });
     const rows = document.createElement("div");
     rows.className = "lrows";
@@ -559,7 +565,6 @@ function sessionCommand(s) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "tile" + (state.status.includes(t.status) ? " active" : "");
-      b.textContent = t.status + " " + t.total;
       b.textContent = t.status + " " + t.total;
       b.addEventListener("click", () => {
         toggleStatus(t.status);
