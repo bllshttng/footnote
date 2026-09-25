@@ -121,8 +121,8 @@ def main(argv: list[str]) -> int:
     registry, registry_ok = _load_registry()
     if not registry_ok:
         print(
-            "worktree-status: registry.json exists but could not be parsed; "
-            "every session reads as none until it is fixed",
+            "worktree-status: registry read unavailable (unreadable file or "
+            "missing deps); every session reads as none",
             file=sys.stderr,
         )
     rows = []
