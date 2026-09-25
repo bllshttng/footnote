@@ -2086,7 +2086,7 @@ fn picker_rows(
                     &provider,
                     "",
                     true,
-                    Some(PickerAction::SetProvider(provider)),
+                    Some(PickerAction::SetProvider(provider.clone())),
                 );
             }
             if rows.len() == 1 {
