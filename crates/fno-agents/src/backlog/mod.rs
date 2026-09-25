@@ -229,22 +229,14 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
         .map_err(|error| error.to_string())?;
     // First opens of a new file race to switch it to WAL. Each upgrades a
     // read lock, and SQLite answers the loser busy at once, with no busy
-    // handler, since waiting could deadlock. By the retry the winner has
-    // switched the file, and the pragma is a no-op.
-    let mut tries = 0;
-    loop {
-        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::DatabaseBusy && tries < 50 =>
-            {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            outcome => {
-                outcome.map_err(|error| error.to_string())?;
-                break;
-            }
-        }
+    // handler, since waiting could deadlock. The loser goes on without
+    // waiting: another open switches the file, and a connection that meets
+    // a WAL file reads its header and uses WAL. A retry here waited out a
+    // reader in this same process that could not finish until the open did.
+    match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy => {}
+        outcome => outcome.map_err(|error| error.to_string())?,
     }
     connection
         .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
