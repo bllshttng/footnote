@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Baseline SHA: `bcb46735f595e0d85f817b64739d9a8b57037ef5`. It was `origin/main` before the follow-up fast-forwards. Those fast-forwards changed no test files listed below.
+Baseline SHA: `bcb46735f595e0d85f817b64739d9a8b57037ef5`. It was `origin/main` before later fast-forwards. Those merges moved workspace-restore and retask code and updated the `cli-ci` path filter. They did not alter the audited process test declarations.
 
 The three trial baseline passed with `STRESS_TRIALS=3`: `daemon_e2e=pass`, `persistence=pass`, `workspace_persistence_e2e=pass`, and `daemons_left=0` on all three trials.
 
