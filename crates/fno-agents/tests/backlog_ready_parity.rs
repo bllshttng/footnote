@@ -699,10 +699,7 @@ fn materialize(case: &Case) -> (Materialized, Ctx) {
     }
     std::fs::write(
         dir.path().join("config.toml"),
-        format!(
-            "[paths]\ngraph_json = \"{}\"\n",
-            dir.path().join("graph.json").display()
-        ),
+        format!("state_dir = \"{}\"\n", dir.path().display()),
     )
     .unwrap();
     (Materialized { dir }, ctx)

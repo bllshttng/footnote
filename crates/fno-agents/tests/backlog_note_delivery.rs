@@ -86,7 +86,7 @@ fn note_captured(args: &[&str], body: &str) -> (i32, String, String) {
 fn corrupt_graph_names_the_read_failure_never_absence() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(&graph, "{").unwrap();
+    std::fs::write(fno_agents::backlog::database_path(&graph), "{").unwrap();
     let g = graph_arg(&graph);
     let (code, stdout, stderr) = note_captured(&["t-1", "body", "--quiet", &g[0], &g[1]], "");
     assert_eq!(code, 5, "stdout: {stdout} stderr: {stderr}");

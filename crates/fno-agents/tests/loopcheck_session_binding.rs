@@ -342,8 +342,8 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph.to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            graph_home.path().to_string_lossy()
         ),
     )
     .unwrap();

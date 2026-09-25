@@ -69,8 +69,8 @@ fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 6], Vec<String>) {
     std::fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph.to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            home.to_string_lossy()
         ),
     )
     .unwrap();

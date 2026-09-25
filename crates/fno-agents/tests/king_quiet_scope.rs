@@ -59,8 +59,8 @@ fn a_quiet_board_with_undelivered_scope_stops_while_waiting() {
     std::fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph.to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            home.to_string_lossy()
         ),
     )
     .unwrap();

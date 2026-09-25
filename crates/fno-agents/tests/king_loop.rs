@@ -135,7 +135,7 @@ fn king_drain_reply(spec: &str) -> String {
 fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     let fno_dir = cwd.join(".fno");
     fs::create_dir_all(&fno_dir).unwrap();
-    let graph = cwd.join("graph.json");
+    let graph = home.join("graph.json");
     let spec = fs::read_to_string(board_spec).unwrap_or_default();
     let ids = king_spec_rows(&spec);
     if ids.is_none() {
@@ -182,11 +182,11 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     fs::write(
         fno_dir.join("config.toml"),
         format!(
-            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n\
+            "state_dir = \"{}\"\n[paths]\noperator_lane = \"{}\"\n\n\
              # The scope queue's project map reads work.workspaces; a machine \
              # with no global config.toml must see the fixture as complete.\n\
              [work.workspaces]\n",
-            graph.display(),
+            home.display(),
             home.join("lane.md").display()
         ),
     )

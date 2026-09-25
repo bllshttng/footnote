@@ -1,6 +1,6 @@
 //! x-926c idle CPU budget: a server with one attached, silent client must not
 //! burn CPU re-deriving unchanged inputs. Seeds a registry (20 rows), a
-//! two-segment journal (~16 MB) and a graph (~15 MB), attaches, waits for the
+//! two-segment journal (~16 MB) and a graph store, attaches, waits for the
 //! positive markers that prove both sideline readers ran, then measures the
 //! server's CPU seconds across a 20 s idle window. Budget: 1.0 s (5 percent
 //! of one core).
@@ -118,24 +118,31 @@ fn seed_journal_segment(path: &std::path::Path, first: usize) -> u64 {
 /// idea/done do not), each carrying a long details string, all project fno.
 fn seed_graph(path: &std::path::Path) -> u64 {
     let details = "d".repeat(DETAILS_BYTES);
-    let mut body = String::with_capacity(16 << 20);
-    body.push_str(r#"{"schema_version": 1, "entries": ["#);
+    let mut rows = Vec::with_capacity(GRAPH_NODES);
     for i in 0..GRAPH_NODES {
-        if i > 0 {
-            body.push(',');
-        }
         let status = match i % 3 {
             0 => "ready",
             1 => "idea",
             _ => "done",
         };
-        body.push_str(&format!(
-            r#"{{"id":"x-t{i:04}","slug":"node-{i:04}","status":"{status}","project":"fno","priority":"p2","created_at":"2026-09-01T00:00:00Z","details":"{details}"}}"#
-        ));
+        rows.push(serde_json::json!({
+            "id": format!("x-t{i:04}"),
+            "slug": format!("node-{i:04}"),
+            "title": format!("Node {i}"),
+            "type": "feature",
+            "status": status,
+            "project": "fno",
+            "priority": "p2",
+            "created_at": "2026-09-01T00:00:00Z",
+            "completed_at": (status == "done").then_some("2026-09-01T00:00:00Z"),
+            "details": details.clone(),
+        }));
     }
-    body.push_str("]}");
-    std::fs::write(path, &body).unwrap();
-    body.len() as u64
+    fno_agents::graph_store::seed_rows(path, &rows).unwrap();
+    fno_agents::backlog::database_path(path)
+        .metadata()
+        .unwrap()
+        .len()
 }
 
 #[test]
@@ -149,7 +156,7 @@ fn attached_idle_server_stays_under_the_cpu_budget() {
     let graph = seed_graph(&scratch.0.join("iso-graph.json"));
 
     // spawn_server already points FNO_AGENTS_HOME at iso-agents and
-    // FNO_GRAPH_JSON at iso-graph.json under the socket dir. No
+    // FNO_GRAPH_JSON anchors the store at iso-graph.json under the socket dir. No
     // FNO_BOARD_SCOPE is set, so board_scope_from_spawn_env answers All and
     // every seeded project-fno card stays on the board.
     let sock = scratch.0.join("work.sock");
