@@ -739,7 +739,8 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// action failed, has not skipped - it has failed. `budget_spent` fails
 /// because the arm stopped before it covered every unit it enumerated (the
 /// king wake's `budget spent after k of N crowns`, the watchdog's skipped
-/// leg); its detail carries the count. `select-unmeasured` is a
+/// leg, a merge queue whose grant budget spent with nothing merged); its
+/// detail carries the count. `select-unmeasured` is a
 /// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
