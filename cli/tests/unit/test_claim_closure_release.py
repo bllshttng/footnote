@@ -107,7 +107,8 @@ class TestClosureReleaseHook:
 
     def test_scratch_graph_closure_does_not_release(self, tmp_path, monkeypatch):
         """A non-configured graph (tests, capture flows) owns no global claim:
-        its closure clears only its own mirror."""
+        its closure leaves the global claim held, and the read projects that
+        live holder instead of a cleared mirror."""
         graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
         monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "the-configured-one.json")
 
@@ -119,7 +120,7 @@ class TestClosureReleaseHook:
 
         commit_rows_via_store(graph, _close)
         assert read_graph_strict(graph)[0]["status"] == "done"
-        assert read_graph_strict(graph)[0]["locked_by"] is None
+        assert read_graph_strict(graph)[0]["locked_by"] == HOLDER
         assert claim_path("node:x-doen", root=global_root).exists()
 
 
@@ -540,8 +541,12 @@ class TestReapClaimProjection:
         assert out["locked_by"] is None
 
     def test_dry_run_never_touches_the_graph(self, tmp_path, monkeypatch):
-        graph, _root = self._dead_claim_and_graph(tmp_path, monkeypatch)
+        graph, claims_root = self._dead_claim_and_graph(tmp_path, monkeypatch)
         summary = reap_dead_claims(apply=False)
         assert summary["would_reap"] == 1
+        # The dry run never archives the claim, and the lapsed claim projects
+        # no holder: the graph read shows the node unheld while the claim
+        # file waits for the applied sweep.
         out = read_graph_strict(graph)[0]
-        assert out["locked_by"] == HOLDER
+        assert out["locked_by"] is None
+        assert claim_path("node:x-gone", root=claims_root).exists()

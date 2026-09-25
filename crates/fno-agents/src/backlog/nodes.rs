@@ -502,23 +502,31 @@ pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, No
         }
     }
     drop(cached);
-    // Union of the claims db and the lockfile scan: the db is the holder
-    // source of truth for claims it holds, and the lockfiles cover legacy
-    // writers (the Python acquire path) plus readers that cannot open the
-    // db (a fenced worktree build). Shared keys answer from the db. Either
-    // source failing degrades to what the other saw: this map feeds the
-    // read projection, and a claims outage must not take the board read
-    // with it - the selection and territory gates re-check liveness on
-    // their own and refuse closed there (list_strict, never this map).
+    // The lockfile scan is the liveness authority; the claims db enriches
+    // shared keys and covers readers that cannot scan (a fenced worktree
+    // build). A db row whose lockfile is gone was released or reaped out
+    // from under the import fold - the fold has no delete path - so the
+    // scan's key set bounds what projects. Either source failing degrades
+    // to what the other saw: this map feeds the read projection, and a
+    // claims outage must not take the board read with it - the selection
+    // and territory gates re-check liveness on their own and refuse closed
+    // there (list_strict, never this map).
     let mut claims = node_claims_from_db().unwrap_or_default();
-    if let Ok(records) = list_node_claims(Some("node:")) {
-        for record in records {
-            if let Some(node_id) = record.key.strip_prefix("node:") {
-                claims
-                    .entry(node_id.to_string())
-                    .or_insert_with(|| project_claim(&record).unwrap_or_default());
+    match list_node_claims(Some("node:")) {
+        Ok(records) => {
+            let mut live: std::collections::HashMap<String, NodeClaim> = Default::default();
+            for record in records {
+                if let Some(node_id) = record.key.strip_prefix("node:") {
+                    live.entry(node_id.to_string())
+                        .or_insert_with(|| project_claim(&record).unwrap_or_default());
+                }
+            }
+            claims.retain(|node_id, _| live.contains_key(node_id));
+            for (node_id, claim) in live {
+                claims.entry(node_id).or_insert(claim);
             }
         }
+        Err(_) => {}
     }
     *CACHE
         .get_or_init(|| std::sync::Mutex::new(None))
@@ -1831,5 +1839,57 @@ mod tests {
         let loaded = load(&connection, "x-a").unwrap().unwrap();
         assert_eq!(loaded.sessions.unwrap().len(), 1);
         assert_eq!(loaded.relations.blocked_by, Some(vec!["x-a".to_string()]));
+    }
+
+    /// The forward drop: a store born at v4 carries the node_claims mirror,
+    /// and this module's open path (ensure_table) retires it while the
+    /// claims db keeps serving the holder records.
+    #[test]
+    fn ensure_table_drops_a_v4_store_node_claims_mirror() {
+        let connection = Connection::open_in_memory().unwrap();
+        for statement in [
+            crate::backlog::graph_meta_ddl(),
+            crate::backlog::entities::ddl(),
+            ddl(),
+            crate::backlog::schema_v4::v4_node_claims_ddl(),
+        ] {
+            connection.execute_batch(&statement).unwrap();
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO nodes (id, ordinal, slug, title, kind, status, priority,
+                        created_at, updated_at)
+                 VALUES ('x-1', 1, 'x1', 'one', 'feature', 'idea', 'p2',
+                         '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z');
+                 INSERT INTO node_claims (node_id, locked_by, created_at, updated_at)
+                 VALUES ('x-1', 'target-session:holder',
+                         '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z');",
+            )
+            .unwrap();
+        let before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 1, "fixture must carry the v4 mirror table");
+
+        ensure_table(&connection).unwrap();
+
+        let after: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 0, "the mirror table must drop on open");
+        let node: i64 = connection
+            .query_row("SELECT COUNT(*) FROM nodes WHERE id = 'x-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(node, 1, "the node itself stays untouched");
     }
 }

@@ -1196,16 +1196,10 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
             obj.entry(k.to_string()).or_insert_with(|| v.clone());
         }
         if !obj.contains_key("locked_at") {
-            let legacy = obj.get("claimed_at").and_then(Value::as_str);
-            let stamped = match legacy {
-                Some(s) if !s.trim().is_empty() => {
-                    chrono::DateTime::parse_from_rfc3339(&s.replace('Z', "+00:00"))
-                        .map(|_| Value::String(s.to_string()))
-                        .unwrap_or(Value::Null)
-                }
-                _ => Value::Null,
-            };
-            obj.insert("locked_at".to_string(), stamped);
+            // The legacy claimed_at stamp never becomes locked_at: the lock
+            // fields are projection-owned, and the two readers that want the
+            // legacy stamp fall back to claimed_at themselves.
+            obj.insert("locked_at".to_string(), Value::Null);
         }
         for (k, v) in [
             ("completed_at", Value::Null),
