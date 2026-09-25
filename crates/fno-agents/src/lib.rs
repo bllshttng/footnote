@@ -276,6 +276,7 @@ pub mod reentry;
 pub mod refusal_rate;
 pub mod registry_json;
 pub mod reign_goal;
+pub mod reign_hygiene;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
@@ -344,6 +345,7 @@ pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod wake_meter;
 pub mod worktree_reapable;
 pub mod write_queue;
 
