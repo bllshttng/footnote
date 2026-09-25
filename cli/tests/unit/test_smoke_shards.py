@@ -307,6 +307,17 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
     )
     assert stress_env_step is not None
     assert stress_env_step["env"]["STRESS_SKIP_SLOW"] == "1"
+    cli_workflow = yaml.safe_load(_WORKFLOW.read_text())
+    changed_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["changed-smoke"]["steps"]
+            if step.get("name") == "Changed packet (CHANGED SUBSET)"
+        ),
+        None,
+    )
+    assert changed_step is not None
+    assert changed_step["env"]["STRESS_SKIP_SLOW"] == "1"
     run = "\n".join(step.get("run", "") for step in steps)
     lines = _command_lines(run)
     stress = lines.index("bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?")
@@ -317,7 +328,6 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
         )
         assert clean < stress, f"stress can execute a stale cached {package} harness"
 
-    cli_workflow = yaml.safe_load(_WORKFLOW.read_text())
     smoke_env_step = next(
         (
             step

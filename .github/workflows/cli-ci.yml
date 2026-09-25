@@ -202,6 +202,7 @@ jobs:
           # trial proves the shell harness and the full rust-ci job owns the
           # denominator.
           STRESS_TRIALS: "1"
+          STRESS_SKIP_SLOW: "1"
         run: |
           date +%s > "$RUNNER_TEMP/changed-start"
           start=$SECONDS
