@@ -1710,15 +1710,15 @@ def config_file() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Plugin-script resolution with a self-healing persisted pointer (#2)
+# Plugin-script resolution with a persisted pointer (#2)
 # ---------------------------------------------------------------------------
 # `fno do target init` / `fno gate set` need scripts that ship with the PLUGIN
 # (hooks/, scripts/lib/), not the active project. From a foreign project with
 # no env hint those were unreachable (the uv-tool wheel carries no hooks/, and
 # CLAUDE_PLUGIN_ROOT is not propagated to `fno` subprocesses), forcing a
-# hand-set FNO_REPO_ROOT. resolve_plugin_script() adds a persisted
-# ~/.fno/plugin-root pointer, primed by the session-start hook and
-# self-healed on any env/pkg resolve, as the env-less fallback.
+# hand-set FNO_REPO_ROOT. resolve_plugin_script() falls back to the persisted
+# ~/.fno/plugin-root pointer, written by the session-start hook from an
+# installed or canonical root, as the env-less fallback.
 
 _PLUGIN_ROOT_POINTER_NAME = "plugin-root"
 _PLUGIN_MARKER_RELPATH = "hooks/helpers/init-target-state.sh"
@@ -1769,9 +1769,10 @@ def _read_persisted_plugin_root() -> "Path | None":
     """Read ~/.fno/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
     None so resolution falls through rather than handing back a dead path. The
-    session-start hook writes the CURRENT (often a linked-worktree) checkout, so
-    the pointer is canonicalized to the main checkout here - the sole read point
-    - rather than shelling out in the subprocess-sensitive persist/env path."""
+    session-start hook writes installed and canonical roots only, but pointers
+    written before that guard may still name a linked worktree, so the pointer
+    is canonicalized to the main checkout here - the sole read point - rather
+    than shelling out on the env/pkg resolve path."""
     try:
         pointer = _plugin_root_pointer()
         if not pointer.is_file():
@@ -1782,45 +1783,20 @@ def _read_persisted_plugin_root() -> "Path | None":
     return cand if _is_plugin_root(cand) else None
 
 
-def _persist_plugin_root(root: Path) -> None:
-    """Best-effort cache of *root* to ~/.fno/plugin-root. Only writes a
-    root carrying the plugin manifest (.claude-plugin/plugin.json), so an
-    env/test fake with just a stub hook can never poison the pointer. A
-    worktree root is canonicalized at READ time (_read_persisted_plugin_root),
-    not here, so this stays subprocess-free. Never raises - priming is an
-    optimization, not a contract."""
-    try:
-        if not (root / ".claude-plugin" / "plugin.json").is_file():
-            return
-        pointer = _plugin_root_pointer()
-        new = str(root)
-        if pointer.is_file() and pointer.read_text().strip() == new:
-            return
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        tmp = pointer.with_name(pointer.name + ".tmp")
-        tmp.write_text(new + "\n")
-        tmp.replace(pointer)
-    except OSError:
-        pass
-
-
 def resolve_plugin_script(relpath: str) -> Path:
     """Resolve a script that ships with the fno PLUGIN (not the active
     project), e.g. ``hooks/helpers/init-target-state.sh`` or
     ``scripts/setup/setup-worktree.sh``.
 
     Order: env hint (CLAUDE_PLUGIN_ROOT / CODEX_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
-    package-relative -> persisted ~/.fno/plugin-root pointer -> repo.
-    Self-heals the pointer on any env/pkg resolve (manifest-gated)."""
+    package-relative -> persisted ~/.fno/plugin-root pointer -> repo."""
     for env_name in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"):
         root = os.environ.get(env_name)
         if root:
             base = Path(root).expanduser()
-            _persist_plugin_root(base)
             return base / relpath
     pkg_root = Path(__file__).resolve().parents[3]
     if _is_plugin_root(pkg_root):
-        _persist_plugin_root(pkg_root)
         return pkg_root / relpath
     persisted = _read_persisted_plugin_root()
     if persisted is not None and (persisted / relpath).exists():
