@@ -228,7 +228,7 @@ The helper writes a minimal `config.toml` and sets `FNO_CONFIG`. The settings ca
 
 ### Sandbox a shell reproduction
 
-`FNO_HOME` does not sandbox the backlog. Config `state_dir` decides where the graph lives, and a store write under `FNO_HOME` that targets a graph outside it is refused. To sandbox a shell reproduction, write a `config.toml` that holds `schema_version = 1` and `state_dir = "<tmp dir>"`, then export `FNO_CONFIG=<that file>`.
+`FNO_HOME` does not sandbox the backlog. Config `state_dir` decides where the graph lives. A store write under `FNO_HOME` that targets the default store (`~/.fno`) is refused. Writes to explicit graph paths and to the FNO_CONFIG store are served. To sandbox a shell reproduction, write a `config.toml` that holds `schema_version = 1` and `state_dir = "<tmp dir>"`, then export `FNO_CONFIG=<that file>`.
 
 Confirm with a read before the first write: `fno backlog get <live node id>` must answer "No node matching". A read that returns the live node means the sandbox is not on. Do not write.
 

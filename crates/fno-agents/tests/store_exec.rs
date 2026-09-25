@@ -38,12 +38,14 @@ fn exec_request(graph: &std::path::Path, body: &str) -> (i32, Option<Value>) {
     (out.status.code().unwrap_or(-1), reply)
 }
 
-/// `exec_request` with FNO_HOME pinned on the worker child, or removed when
-/// `None`, so the write-fence tests decide the sandbox posture per exec.
+/// `exec_request` with FNO_HOME and HOME pinned on the worker child, or
+/// removed when `None`, so the write-fence tests decide the sandbox posture
+/// per exec.
 fn exec_request_with_home(
     graph: &std::path::Path,
     body: &str,
     fno_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
 ) -> (i32, Option<Value>) {
     let mut cmd = Command::new(WORKER_BIN);
     cmd.args([
@@ -54,12 +56,15 @@ fn exec_request_with_home(
         "2",
     ]);
     match fno_home {
-        Some(home) => {
-            cmd.env("FNO_HOME", home);
+        Some(fno_home) => {
+            cmd.env("FNO_HOME", fno_home);
         }
         None => {
             cmd.env_remove("FNO_HOME");
         }
+    }
+    if let Some(home) = home {
+        cmd.env("HOME", home);
     }
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -157,20 +162,24 @@ fn store_exec_refuses_without_a_graph() {
 }
 
 #[test]
-fn store_exec_refuses_a_write_outside_fno_home() {
+fn store_exec_refuses_a_write_at_the_default_store_under_fno_home() {
     let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
+    let home = dir.path().join("home");
+    let store = home.join(".fno");
+    std::fs::create_dir_all(&store).unwrap();
+    let graph = store.join("graph.json");
     let before = serde_json::to_string(&json!({
         "entries": [{"id": "x-hm1", "slug": "hm-write", "title": "t", "status": "ready"}]
     }))
     .unwrap();
     std::fs::write(&graph, &before).unwrap();
-    let home = dir.path().join("sand");
-    std::fs::create_dir_all(&home).unwrap();
+    let sand = dir.path().join("sand");
+    std::fs::create_dir_all(&sand).unwrap();
 
     let (code, reply) = exec_request_with_home(
         &graph,
         r#"{"id":7,"method":"commit_rows","params":{}}"#,
+        Some(&sand),
         Some(&home),
     );
     assert_eq!(code, 1, "{reply:?}");
@@ -188,9 +197,12 @@ fn store_exec_refuses_a_write_outside_fno_home() {
 }
 
 #[test]
-fn store_exec_serves_a_read_under_an_outside_fno_home() {
+fn store_exec_serves_a_read_at_the_default_store_under_fno_home() {
     let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
+    let home = dir.path().join("home");
+    let store = home.join(".fno");
+    std::fs::create_dir_all(&store).unwrap();
+    let graph = store.join("graph.json");
     std::fs::write(
         &graph,
         serde_json::to_string(&json!({
@@ -199,12 +211,13 @@ fn store_exec_serves_a_read_under_an_outside_fno_home() {
         .unwrap(),
     )
     .unwrap();
-    let home = dir.path().join("sand");
-    std::fs::create_dir_all(&home).unwrap();
+    let sand = dir.path().join("sand");
+    std::fs::create_dir_all(&sand).unwrap();
 
     let (code, reply) = exec_request_with_home(
         &graph,
         r#"{"id":1,"method":"begin","params":{}}"#,
+        Some(&sand),
         Some(&home),
     );
     assert_eq!(code, 0, "{reply:?}");
@@ -215,6 +228,8 @@ fn store_exec_serves_a_read_under_an_outside_fno_home() {
 #[test]
 fn store_exec_serves_a_write_inside_fno_home() {
     let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let graph = dir.path().join("graph.json");
     std::fs::write(
         &graph,
@@ -226,11 +241,13 @@ fn store_exec_serves_a_write_inside_fno_home() {
     .unwrap();
 
     // FNO_HOME names the graph's own directory (raw form; canonicalize makes
-    // the /var vs /private/var forms agree), so the write is served.
+    // the /var vs /private/var forms agree), so the write is served: the
+    // sandbox covers the store it was given.
     let (_code, begin) = exec_request_with_home(
         &graph,
         r#"{"id":1,"method":"begin","params":{}}"#,
         Some(dir.path()),
+        Some(&home),
     );
     let begin = begin.expect("begin answers");
     assert_eq!(begin["ok"], json!(true), "{begin}");
@@ -240,7 +257,35 @@ fn store_exec_serves_a_write_inside_fno_home() {
         r#"{{"id":1,"method":"commit","params":{{"version":"{version}","entries":{},"plan_rungs":{{}},"attempt":1}}}}"#,
         serde_json::to_string(&rows).unwrap()
     );
-    let (code, commit) = exec_request_with_home(&graph, &body, Some(dir.path()));
+    let (code, commit) = exec_request_with_home(&graph, &body, Some(dir.path()), Some(&home));
     assert_eq!(code, 0, "{commit:?}");
     assert_eq!(commit.unwrap()["ok"], json!(true));
+}
+
+#[test]
+fn store_exec_serves_a_default_store_write_without_fno_home() {
+    // The leak shape with FNO_HOME unset: the default store writes as today.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let store = home.join(".fno");
+    std::fs::create_dir_all(&store).unwrap();
+    let graph = store.join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&json!({
+            "entries": [{"id": "x-hm4", "slug": "hm-nofence", "title": "t", "status": "ready"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (code, reply) = exec_request_with_home(
+        &graph,
+        r#"{"id":1,"method":"begin","params":{}}"#,
+        None,
+        Some(&home),
+    );
+    assert_eq!(code, 0, "{reply:?}");
+    let reply = reply.expect("begin answers with no FNO_HOME");
+    assert_eq!(reply["ok"], json!(true), "{reply}");
 }
