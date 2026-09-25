@@ -1,5 +1,11 @@
 # Managed Claude slot cutover
 
+## Is this page for you?
+
+If you operate a machine with managed Claude accounts, use this page to arm or diagnose automatic changes to the shared slot.
+
+Not for: registering or refreshing managed credentials. See [provider rotation](../provider-rotation.md).
+
 `slot_cutover` is an opt-in daemon arm that moves the shared `~/.claude` account before its usage window is exhausted. It runs every 120 seconds and defaults to off.
 
 The arm reads managed Claude records that use the shared slot. When the current account identity is proven and usage is low or exhausted, it acts. It chooses the first other globally declared shared-slot record with a fresh usage window below the low threshold. Project-only records are skipped because the switch updates the global active pointer. A five-minute cooldown limits repeated switches.

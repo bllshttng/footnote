@@ -270,6 +270,7 @@ fn read_last_cutover(root: &Path) -> Option<i64> {
 mod tests {
     use serde_json::{json, Value};
     use std::ffi::OsString;
+    use std::path::Path;
 
     fn records() -> Vec<Value> {
         vec![
