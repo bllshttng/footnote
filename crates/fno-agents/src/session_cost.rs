@@ -217,9 +217,15 @@ pub fn footprint_mb(pids: &[u32]) -> (Option<f64>, u64) {
         let mut unread = 0u64;
         for pid in pids {
             let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
-            let mut buffer: libc::rusage_info_t = (&mut info as *mut libc::rusage_info_v4).cast();
+            // The prototype says `rusage_info_t *`, but the kernel copies the
+            // whole struct to that address. Pass the struct itself: the address
+            // of a pointer local lets 296 bytes overwrite the saved registers.
             let result = unsafe {
-                libc::proc_pid_rusage(*pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut buffer)
+                libc::proc_pid_rusage(
+                    *pid as libc::c_int,
+                    libc::RUSAGE_INFO_V4,
+                    (&mut info as *mut libc::rusage_info_v4).cast(),
+                )
             };
             if result == 0 {
                 total_bytes = total_bytes.saturating_add(info.ri_phys_footprint);
