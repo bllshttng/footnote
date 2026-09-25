@@ -638,7 +638,8 @@ mod tests {
             {"name": "review-2269", "handle": "jkl", "status": "quiet", "node": null},
             {"name": "x-3-worker", "handle": "mno", "status": "quiet", "node": "x-3"},
         ]});
-        let rows = quiet_scope_workers(&payload, &ids(&["x-9999", "x-3"]));
+        let workers = payload.get("workers").and_then(Value::as_array).unwrap();
+        let rows = quiet_scope_workers(workers, &ids(&["x-9999", "x-3"]));
         assert_eq!(
             rows,
             vec![
