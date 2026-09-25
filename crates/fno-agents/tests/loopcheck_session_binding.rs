@@ -5,7 +5,7 @@
 //! the engine degrades without network when an owner case reaches it.
 
 use fno_agents::loopcheck::run_loop_check_capture;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
