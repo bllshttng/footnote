@@ -122,7 +122,9 @@ Cutover leaves 48 process-backed declarations. Baseline had 53 (30 daemon, 14 pe
 
 The three process test files shrink from 4,423 to 4,387 lines. That is 36 fewer lines. The stress harness grows from 225 to 240 lines. The new spec router has 9 lines. Rust production changes add 0 lines. The Python runner change only updates comments.
 
-Recent stress samples cost 545s for the three-trial step and 1,238s for the 20-trial report-only job. Their combined cost was 29.72 runner-minutes. Three daemon waits cost about 13s per baseline trial. Consolidation and stress-only skips remove those waits. The new route adds about 15s to smoke. Projected affected-step cost is 1,499s (24.98 runner-minutes). That saves 4.73m. This is an estimate because we will not wait for PR CI.
+Recent stress samples cost 545s for the three-trial step and 1,238s for the 20-trial report-only job. The two stress jobs cost 1,783s (29.72 runner-minutes). The 13s saved across 23 trials reduces them to 1,484s (24.73m). One full-smoke router run adds about 15s, for 1,499s (24.98m) total. That saves 4.73m in this scope. This estimate excludes the changed-smoke packet and regular Cargo integration. We will not wait for PR CI.
+
+The changed-smoke dry run selected 7 steps (2 pytest and 5 shell). Its selector estimated 26m. The packet includes the one-trial stress self-test and new spec router. It is partial feedback, separate from the repeated-stress comparison.
 
 The stress loop executed 1,265 cases across 23 baseline trials. Cutover will execute 1,104. That is 161 fewer repeated cases. CI gains three Bash specs and 16 Python cases. They were not routed before. `scripts/tests/test-spec-suite.sh` passed the smoke registry. Claims passed 12/12. Executor passed 17/17. Blueprint phase-close passed. Pytest passed 16/16. The smoke shard wiring test passed 1/1. The post-merge full run passed one trial: 27 daemon, 15 persistence, and 8 workspace cases, with no daemon leaks.
 
