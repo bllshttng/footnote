@@ -3034,10 +3034,7 @@ def cmd_list(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
     all_rows: bool = typer.Option(
-        False,
-        "--all",
-        help="Also show reaped and retired sessions from the reap-receipt store "
-        "(served by the native runtime; the pure-Python fallback notes it and continues).",
+        False, "--all", help="Also show reaped and retired sessions (native runtime)."
     ),
     discovered: bool = typer.Option(
         True,
@@ -3066,14 +3063,10 @@ def cmd_list(
     refuse_retired_provider(_provider_tombstone)
 
     # The native runtime intercepts `list` before this body runs, so --all
-    # reaches the daemon's retired-rows lane there. This fallback path has no
-    # receipts lane; the flag is honored honestly by naming that, never by
-    # pretending the answer includes every row that ever existed.
+    # reaches the daemon's retired-rows lane there; this fallback path has
+    # no receipts lane and names that instead of pretending.
     if all_rows:
-        sys.stderr.write(
-            "WARN: --all retired-row provenance is served by the native runtime; "
-            "this pure-Python fallback lists live registry rows only\n"
-        )
+        sys.stderr.write("WARN: --all retired rows need the native runtime\n")
 
     status_value: str | None = status.value if status is not None else None
     progress_value: str | None = progress.value if progress is not None else None

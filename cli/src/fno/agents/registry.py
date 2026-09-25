@@ -2239,10 +2239,9 @@ def register_existing_session(
             # win over the full UUID that setattr just wrote there.
             fresh.short_id = short_id
         elif harness == "claude":
-            # No caller transport key: derive the 8-hex jobId the harness's
-            # own attach form addresses, the same derivation a restamp and a
-            # branch row take. Writing the full UUID here is what made a
-            # registered operator row unattachable from the mux tap.
+            # No caller transport key: derive the 8-hex jobId the harness's own
+            # attach form addresses, as a restamp and a branch row do. Writing
+            # the full UUID here left a registered row unattachable.
             derived = claude_transport_short_id(session_id)
             if _DERIVED_SHORT_RE.match(derived):
                 fresh.short_id = derived

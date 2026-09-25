@@ -12,6 +12,18 @@ pub(super) fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
+/// The `--all` provenance lane: the reaped and retired sessions the
+/// registry no longer holds. Empty unless `all`; the payload key is always
+/// present so a consumer can tell "no retired rows" from an older shape,
+/// the way the discovered lane is.
+pub(super) fn retired_lane(all: bool, home: &AgentsHome) -> Vec<Value> {
+    if all {
+        retired_rows(home)
+    } else {
+        Vec::new()
+    }
+}
+
 /// The reaped and retired sessions `--all` shows: every receipt in the
 /// reap-receipt store, newest first, with the newest recorded cause from the
 /// event store joined by session id. A reaped row leaves the registry, so a

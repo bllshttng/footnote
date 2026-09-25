@@ -1433,11 +1433,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // silently emptied roster (the false "0 registered agents" outage: a stale
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
-
-    // One migration pass, fail-open: claude rows whose short_id is a
-    // byte-copy of the session uuid get the uuid's own 8-hex lead, the
-    // transport key `claude attach` addresses. A row left unhealed keeps a
-    // full uuid the attach verb refuses, so the heal runs before serving.
     let _ = state::heal_full_uuid_short_ids(&home.registry_json());
 
     // State: cold_start.
@@ -4684,14 +4679,9 @@ where
         "progress": filter_progress,
     });
     // `--all` is the provenance lane: the reaped and retired sessions the
-    // registry no longer holds. Always present in the payload so a consumer
-    // can tell "no retired rows" from an older shape, the same way the
-    // discovered lane is always present.
-    let retired_sessions = if all {
-        list_rows::retired_rows(&ctx.home)
-    } else {
-        Vec::new()
-    };
+    // registry no longer holds. Always present so a consumer can tell "no
+    // retired rows" from an older shape, the way the discovered lane is.
+    let retired_sessions = list_rows::retired_lane(all, &ctx.home);
     Response::ok(
         req.id,
         json!({
