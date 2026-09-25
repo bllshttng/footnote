@@ -879,16 +879,20 @@ const FLEET_HOLD_REPRINT_POLLS: u32 = 12;
 /// its state is unreadable, fail closed), a door waits instead of admitting,
 /// printing a holding line on entry and about every minute after. A running
 /// cargo pauses at its next compile or test binary and resumes when the
-/// hold lifts.
-fn wait_for_tests_admission() {
+/// hold lifts. A recorded SIGINT/SIGTERM ends the wait with that signal as
+/// the code, so a killed cargo unwinds instead of parking forever.
+fn wait_for_tests_admission() -> i32 {
     let mut lines: u32 = 0;
     loop {
+        if let Some(sig) = received_signal() {
+            return sig;
+        }
         let verdict = crate::fleet_incident::verdict_for("tests");
         if !verdict.holds("tests") {
             if lines > 0 {
                 eprintln!("test-run: fleet stop lifted; cargo admission resumes");
             }
-            return;
+            return 0;
         }
         if lines == 0 || lines % FLEET_HOLD_REPRINT_POLLS == 0 {
             match &verdict {
@@ -923,8 +927,12 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     // running cargo pauses at its next compile or test binary and resumes
     // when the hold lifts (the operator records demos against a quiet
     // machine). The own-holder early return below stays behind the wait, so
-    // a cargo already mid-run pauses at its next admission ask too.
-    wait_for_tests_admission();
+    // a cargo already mid-run pauses at its next admission ask too. A
+    // recorded signal ends the wait nonzero, unwinding the cargo.
+    let held_code = wait_for_tests_admission();
+    if held_code != 0 {
+        return Err(held_code);
+    }
     let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
     let cap = crate::agents_config::max_cargo_runs(&worktree) as usize;

@@ -416,6 +416,43 @@ fn parse_read_flags(rest: &[String]) -> Result<bool, i32> {
     Ok(as_json)
 }
 
+/// Strict flag parse for `check`: `--json`/`-J` and one `--scope` word,
+/// default `spawns`. The scope's value is consumed here, so `--scope tests`
+/// cannot leave `tests` behind as a stray positional.
+fn parse_check_flags(rest: &[String]) -> Result<(bool, &str), i32> {
+    let mut as_json = false;
+    let mut scope: &str = "spawns";
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--json" | "-J" => as_json = true,
+            "--scope" => match rest.get(i + 1) {
+                Some(v) if SCOPES.contains(&v.as_str()) => {
+                    scope = v.as_str();
+                    i += 1;
+                }
+                Some(other) => {
+                    eprintln!(
+                        "fleet-incident: unknown check scope {other:?} (valid: {})",
+                        SCOPES.join(", ")
+                    );
+                    return Err(2);
+                }
+                None => {
+                    eprintln!("fleet-incident: --scope needs a value");
+                    return Err(2);
+                }
+            },
+            other => {
+                eprintln!("fleet-incident: unrecognized argument {other:?}");
+                return Err(2);
+            }
+        }
+        i += 1;
+    }
+    Ok((as_json, scope))
+}
+
 /// Binary entry: `fleet-incident stop|clear|status|check`.
 pub fn run_fleet_incident(args: &[String]) -> i32 {
     let Some(action) = args.first() else {
@@ -565,33 +602,10 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             // reads as clear here. Exit 0 clear, 90 stopped, 91 unavailable
             // - and the JSON names which, so an exit code read alone can
             // never confuse "stopped" with "cannot tell".
-            let mut as_json = false;
-            let mut scope: &str = "spawns";
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--json" | "-J" => as_json = true,
-                    "--scope" => match rest.get(i + 1) {
-                        Some(v) if SCOPES.contains(&v.as_str()) => scope = v.as_str(),
-                        Some(other) => {
-                            eprintln!(
-                                "fleet-incident: unknown check scope {other:?} (valid: {})",
-                                SCOPES.join(", ")
-                            );
-                            return 2;
-                        }
-                        None => {
-                            eprintln!("fleet-incident: --scope needs a value");
-                            return 2;
-                        }
-                    },
-                    other => {
-                        eprintln!("fleet-incident: unrecognized argument {other:?}");
-                        return 2;
-                    }
-                }
-                i += 1;
-            }
+            let (as_json, scope) = match parse_check_flags(rest) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
             let v = verdict_for(scope);
             if as_json {
                 let (state, generation, reason) = match &v {
@@ -653,6 +667,28 @@ mod tests {
             Err(2),
             "a mistyped flag still refuses with usage"
         );
+    }
+
+    #[test]
+    fn check_flags_consume_the_scope_value_and_default_to_spawns() {
+        let args =
+            |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+        assert_eq!(super::parse_check_flags(&[]), Ok((false, "spawns")));
+        assert_eq!(
+            super::parse_check_flags(&args(&["--scope", "tests"])),
+            Ok((false, "tests")),
+            "the scope value is consumed, never left as a stray positional"
+        );
+        assert_eq!(
+            super::parse_check_flags(&args(&["--json", "--scope", "merges"])),
+            Ok((true, "merges"))
+        );
+        assert_eq!(
+            super::parse_check_flags(&args(&["--scope", "bogus"])),
+            Err(2),
+            "an unknown scope refuses with usage"
+        );
+        assert_eq!(super::parse_check_flags(&args(&["--scope"])), Err(2));
     }
 
     use super::*;
