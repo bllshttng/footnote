@@ -1431,7 +1431,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             },
             unplanned_rows,
             true,
-            "batch: up to 3 blueprints per session; merge same-shape nodes into one waved plan".to_string(),
+            "one blueprint per king at a time, and only while plans ready are fewer than the king's worker slots; merge same-shape nodes into one waved plan".to_string(),
             "/fno:blueprint",
             None,
         ),
