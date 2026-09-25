@@ -238,6 +238,32 @@ pub fn node_decisions(connection: &Connection, node_id: &str) -> Result<Vec<Valu
     flatten_rows(rows)
 }
 
+/// The newest unretracted ruling that answers a question: its time, source
+/// and data.
+pub fn live_answer(
+    connection: &Connection,
+    question_id: &str,
+) -> Result<Option<(String, Option<String>, String)>, String> {
+    connection
+        .query_row(
+            "SELECT d.created_at, d.source, d.data
+             FROM decisions d
+             WHERE d.event_type = ?1
+               AND json_extract(d.data, '$.question_id') = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM decisions r
+                   WHERE r.event_type = ?3
+                     AND json_extract(r.data, '$.target_decision_id') =
+                         json_extract(d.data, '$.decision_id')
+               )
+             ORDER BY d.seq DESC LIMIT 1",
+            params![DECISION_EVENT, question_id, RETRACTION_EVENT],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn flatten_rows<I>(rows: I) -> Result<Vec<Value>, String>
 where
     I: Iterator<Item = Result<(String, String, String), rusqlite::Error>>,
