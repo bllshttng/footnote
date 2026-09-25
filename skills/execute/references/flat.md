@@ -89,6 +89,7 @@ Work sequentially through the numbered changes. If a change depends on a previou
 Run every step listed under `## Verification`:
 - Commands → execute and check output
 - Behavioral checks → verify manually or describe result
+- Run only the tests that cover the files you changed (`fno doctor test <test files>`); never the whole suite locally - CI runs every suite on every PR. A whole-suite local run, when genuinely needed, starts as a background task: it queues on `test:suite` and the turn never blocks.
 - A failed verification in the plan's scope gets REPAIRED, and the failed step re-runs - a fix-verify round per the change that broke it - while the plan's explicit iteration bound remains. At a spent bound, or on a failure genuinely outside this plan's scope, stop and name the real blocker. A green CI run never substitutes for a failed local verification, and neither substitutes for the configured review count.
 
 ## 3b. Status-breakpoint emit (best-effort)
