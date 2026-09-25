@@ -112,3 +112,7 @@ Report:
 - production versus test LOC.
 - PR and merge state.
 - named follow-ups.
+
+## Known Limitations and Deferred Work
+
+- The gate reads. Proving a deleted contract lost its only proof stays with the campaign's preservation review. See [LIMITATIONS.md](LIMITATIONS.md).
