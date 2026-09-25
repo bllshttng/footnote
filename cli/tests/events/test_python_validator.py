@@ -626,7 +626,7 @@ def test_worktree_overlap_observed_rejects_observer_as_its_own_peer() -> None:
 
 # -- the review_attestation disposition obligation -----------------------------
 #
-# A findings-free pass attests nothing about EARLIER findings; emitting one
+# A pass disposes nothing by itself about EARLIER findings. Emitting one
 # over a branch holding non-terminal blocking findings is the silent producer
 # half of the impossible-merge deadlock. The chokepoint enforces it, so every
 # writer (script, hook, manual emit) is covered with no new flags. Every chain
@@ -829,8 +829,8 @@ def test_a_nonblocking_disposition_does_not_clear_the_key(
     tmp_path, monkeypatch
 ) -> None:
     """`nonblocking` never disposes: the producer claimed harmless where the
-    gate re-derives blocking. A reasoned `declined` disposes here; recording
-    it mints no pass, because corroboration stays the merge gate's call."""
+    gate re-derives blocking. A reasoned `declined` disposes here, and a
+    decline with a reason is terminal whoever declined it."""
     _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValidationError) as exc:
