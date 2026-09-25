@@ -101,6 +101,18 @@ pub fn transcript_title(session_id: &str) -> Option<String> {
     transcript_title_in(&crate::claude_drive::claude_projects_dir(), session_id)
 }
 
+/// The synthesized registry row's display name: the thread title when the
+/// transcript carries one (capped, so a long title still fits the sideline
+/// cell), else the linked node id, else the derivable `t-<short>` form
+/// (`t-` is the bridge's manual form: no provenance). A bare short id reads
+/// as a phantom row, never as work.
+pub fn synthesized_entry_name(session: &str, fno_id: &str, short: &str) -> String {
+    transcript_title(session)
+        .map(|t| t.chars().take(48).collect::<String>())
+        .or_else(|| (!fno_id.is_empty()).then(|| fno_id.to_string()))
+        .unwrap_or_else(|| format!("t-{short}"))
+}
+
 /// [`transcript_title`] under an explicit projects base, so the read is
 /// unit-testable without touching the ambient `~/.claude`.
 pub fn transcript_title_in(base: &Path, session_id: &str) -> Option<String> {
@@ -378,6 +390,28 @@ mod tests {
     fn holder_and_name_formats() {
         assert_eq!(pty_claim_holder("a1b2c3d4"), "pty:a1b2c3d4");
         assert_eq!(adopted_name("a1b2c3d4"), "cc-a1b2c3d4");
+    }
+
+    #[test]
+    fn synthesized_entry_name_prefers_title_then_node_then_short_form() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        // The transcript title wins, capped at 48 chars.
+        let long = "x".repeat(80);
+        seed_transcript(
+            "entry-name",
+            uuid,
+            &[format!(r#"{{"type":"summary","summary":"{long}"}}"#)],
+        );
+        let named = synthesized_entry_name(uuid, "x-e4b0", "a1b2c3d4");
+        assert_eq!(named.chars().count(), 48, "the title is capped");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        // No title: the linked node id names the row.
+        assert_eq!(synthesized_entry_name(uuid, "x-e4b0", "a1b2c3d4"), "x-e4b0");
+        // Neither: the derivable t- form (the bridge's manual form).
+        assert_eq!(synthesized_entry_name(uuid, "", "a1b2c3d4"), "t-a1b2c3d4");
     }
 
     #[test]

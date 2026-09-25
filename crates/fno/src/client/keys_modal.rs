@@ -5,9 +5,9 @@
 //! advertise an action the chord path cannot run.
 //!
 //! The modal grows one row per binding, and a test pins its trailing notes
-//! above the 64-row fold. That is a real budget. A new binding spends it, and
+//! above the 72-row fold. That is a real budget. A new binding spends it, and
 //! the next one that overflows should reclaim a line here rather than move the
-//! pin.
+//! pin. (The global (no prefix) section spent five and moved the pin from 64.)
 
 use super::*;
 
@@ -23,7 +23,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         events.push(ev);
     };
     // The tail's scroll hint rides the title line: the modal grows one row
-    // per binding, and the x7683 pin holds the notes above the 64-row fold,
+    // per binding, and the x7683 pin holds the notes above the 72-row fold,
     // so every row here is paid for. (The composer bindings spent this one.)
     add(
         PopupRow::Header("keybinds · esc close · wheel/pgup/pgdn scroll · ⏎ runs".into()),
@@ -39,7 +39,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         KeySection::SidelineRows,
     ] {
         // The Global header is reclaimed, not moved: the modal grows one row
-        // per binding and the x7683 pin holds the notes above the 64-row
+        // per binding and the x7683 pin holds the notes above the 72-row
         // fold, and the title line already says what this list is. The
         // composer bindings spent the budget that removed it.
         if section != KeySection::Global {
@@ -80,7 +80,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     // or reaches for the no-config paths, instead of reading a dead feature.
     //
     // No Rule above this note. The pin below holds the whole block over the
-    // 64-row fold, and the modal grows one row per binding, so a separator
+    // 72-row fold, and the modal grows one row per binding, so a separator
     // here costs the same line a real key does. The header band already
     // separates it. Every new binding spends this budget; the next one that
     // overflows should reclaim a line rather than move the pin.
@@ -106,7 +106,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         None,
     );
     // The glyph legend rides the modal tail, after the notes: the
-    // x7683 pin holds the notes above the 64-row fold, and the legend is
+    // x7683 pin holds the notes above the 72-row fold, and the legend is
     // reference material the same scroll reaches. Generated from the same
     // lattice table the rows and the header band render - one source, so
     // the modal cannot drift from what the screen draws. Inert rows.
