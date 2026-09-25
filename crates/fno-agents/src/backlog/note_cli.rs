@@ -594,11 +594,27 @@ fn write_human(
         }
     };
     let (replaced, replaced_line) = replaced_parts(&receipt.node_id, receipt.replaced.as_ref());
+    let hint = encounter_hint(
+        &receipt.node_id,
+        entry,
+        parsed.self_session.as_deref(),
+        receipt.replaced.as_ref(),
+    );
+    let line = match hint {
+        Some(h) => format!(
+            "noted {}: revision {}, {chars} chars\n{replaced_line}\n{h}",
+            receipt.node_id, receipt.revision
+        ),
+        None => format!(
+            "noted {}: revision {}, {chars} chars\n{replaced_line}",
+            receipt.node_id, receipt.revision
+        ),
+    };
     let out = json!({
         "status": "ok", "routed": "state", "node_id": receipt.node_id, "id": receipt.node_id,
         "text": text, "revision": receipt.revision, "journaled": receipt.journaled,
         "total_prose": receipt.total_prose, "replaced": replaced,
-        "line": format!("noted {}: revision {}, {chars} chars\n{replaced_line}", receipt.node_id, receipt.revision),
+        "line": line,
     });
     emit_human(parsed.json_out, &out);
     0
@@ -634,6 +650,38 @@ fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -
         p.revision
     );
     (json, line)
+}
+
+/// The repeat-note nudge: when the session writing this note also wrote the
+/// state it replaces, and that session has no encounter on the node yet, name
+/// the verb that feeds `fno backlog demand`. Teaching at the point of use,
+/// never a gate.
+fn encounter_hint(
+    node_id: &str,
+    entry: &Value,
+    self_session: Option<&str>,
+    prior: Option<&node_state::CurrentStateView>,
+) -> Option<String> {
+    let s = self_session.filter(|s| !s.is_empty())?;
+    let p = prior?;
+    if p.source_session_id.as_deref() != Some(s) {
+        return None;
+    }
+    let already = entry["encounters"]
+        .as_array()
+        .map(|items| {
+            items.iter().any(|e| {
+                e.get("session_id").and_then(Value::as_str) == Some(s)
+                    || e.get("voter_key").and_then(Value::as_str) == Some(s)
+            })
+        })
+        .unwrap_or(false);
+    if already {
+        return None;
+    }
+    Some(format!(
+        "this session noted {node_id} before and has no encounter on it. If it cost you, record that: fno backlog encounter {node_id} --evidence \"<what it cost>\""
+    ))
 }
 
 /// Print one human receipt: the object under --json, else its `line`.
@@ -677,5 +725,70 @@ mod tests {
     fn an_unknown_flag_still_refuses() {
         assert!(parse_args(&args(&["x-1", "-j"])).is_err());
         assert!(parse_args(&args(&["x-1", "--JSON"])).is_err());
+    }
+
+    fn view(rev: u64, session: Option<&str>) -> node_state::CurrentStateView {
+        node_state::CurrentStateView {
+            revision: rev,
+            body: "prior state".into(),
+            updated_at: Some("2026-09-22T00:00:00+00:00".into()),
+            source_session_id: session.map(|s| s.to_string()),
+            source_harness: None,
+        }
+    }
+
+    #[test]
+    fn same_author_and_no_encounter_hints_encounter() {
+        let entry = json!({"id": "t-1"});
+        let hint = encounter_hint(
+            "t-1",
+            &entry,
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a"))),
+        );
+        let hint = hint.expect("same author, no encounter: hint fires");
+        assert!(hint.contains("fno backlog encounter t-1 --evidence"));
+    }
+
+    #[test]
+    fn a_matching_encounter_silences_the_hint() {
+        let by_session = json!({"id": "t-1", "encounters": [
+            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "session_id": "sess-a"}
+        ]});
+        assert!(encounter_hint(
+            "t-1",
+            &by_session,
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+        let by_voter = json!({"id": "t-1", "encounters": [
+            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "voter_key": "sess-a"}
+        ]});
+        assert!(encounter_hint(
+            "t-1",
+            &by_voter,
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_different_prior_author_gets_no_hint() {
+        let entry = json!({"id": "t-1"});
+        assert!(encounter_hint(
+            "t-1",
+            &entry,
+            Some("sess-b"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn no_self_session_gets_no_hint() {
+        let entry = json!({"id": "t-1"});
+        assert!(encounter_hint("t-1", &entry, None, Some(&view(3, Some("sess-a")))).is_none());
     }
 }
