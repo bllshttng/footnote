@@ -231,8 +231,7 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     """A fresh send resolves the sender row through its mailbox address.
 
     The CLI passes the sender's canonical handle, not its registry label.
-    Codex keeps the full UUIDv7 reply address; Claude uses its short UUIDv4
-    handle.
+    The envelope uses the full session id for every harness.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -288,10 +287,7 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    expected_from = (
-        sender_session if sender_harness == "codex" else canonical_handle(sender_session)
-    )
-    assert f'from="{expected_from}"' in envelope
+    assert f'from="{sender_session}"' in envelope
 
 
 def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(

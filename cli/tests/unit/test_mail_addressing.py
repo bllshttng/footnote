@@ -1,16 +1,10 @@
-"""Addressing: full sender provenance, and the codex short-address refusal.
+"""Addressing: full sender provenance and collision-safe reply addresses.
 
-Node x-3a64, absorbing x-05ae. `from` in an envelope is a compact DISPLAY
-handle: the first eight characters of the session id. Under UUIDv4 that is 32
-random bits and safe. Under UUIDv7 the first 48 bits are a truncated millisecond
-timestamp, so head-8 is a ~65.536-second clock bucket and every codex session
-started inside one shares it. Measured: three landed on `01a025f8` in a night,
-and `mail reply` then refused as ambiguous with no disambiguator and no route
-back to the thread.
+The envelope carries the full session id as its reply address, so concurrent
+sessions do not collide regardless of harness id format.
 
 Kept in one module rather than split across the three legacy mail-test files,
-because these four behaviors are one contract and a reader chasing "how do I
-address a codex worker" should find the answer in one place.
+because these behaviors form one contract.
 """
 from __future__ import annotations
 
@@ -52,7 +46,7 @@ def test_an_envelope_without_it_is_byte_unchanged():
 
 
 def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
-    """Codex keeps the full reply address because its short ids can collide."""
+    """The full reply address survives transcript parsing."""
     text = wrap_fno_mail(
         "hi",
         from_="01a025f8",

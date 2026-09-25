@@ -1210,13 +1210,13 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    # Claude uses its 8-hex reply handle; model remains only in the bus record.
-    assert f'from="{sender_sid[:8]}"' in body
+    # Full sender identity travels with the message; model remains in bus record.
+    assert f'from="{sender_sid}"' in body
     assert 'model=' not in body
     assert 'harness="claude-code"' in body
     from fno.bus.log import iter_messages
 
-    row = next(m for m in iter_messages() if f'from="{sender_sid[:8]}"' in m.body)
+    row = next(m for m in iter_messages() if f'from="{sender_sid}"' in m.body)
     assert row.from_model == "claude-opus-4-8"
 
 

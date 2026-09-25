@@ -1881,7 +1881,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
     framed = inject_calls[0]["text"]
-    # Claude uses the fleet's 8-hex handle; the separate from_name is its label.
+    # Unknown senders retain their supplied address and label.
     assert framed.startswith('<fno_mail from="sender"'), framed
     assert 'from_name="sender"' in framed
     assert framed.rstrip().endswith("</fno_mail>"), framed

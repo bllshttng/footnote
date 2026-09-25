@@ -262,7 +262,7 @@ pub fn ensure_named_crown(
     if rec.holder_session.is_some() && rec.holder_session != crown.holder_session {
         return Ok(false);
     }
-    let label = format!("king-{}", rec.name.to_ascii_lowercase());
+    let label = rec.name.to_ascii_lowercase();
     crate::state::rename_agent(registry_path, &crown.holder, &label, None)
         .map_err(|e| format!("rename crowned holder: {e}"))?;
     Ok(true)
@@ -458,7 +458,11 @@ mod tests {
         let names = live_names(&store_path(tmp.path()), &registry_path(tmp.path())).unwrap();
         assert_eq!(names.get("fno").unwrap(), "Barnaby");
         let registry = crate::state::load_registry(&registry_path(tmp.path())).unwrap();
-        assert_eq!(registry.entries[0].name, "king-barnaby");
+        assert_eq!(registry.entries[0].name, "barnaby");
+        assert!(registry.entries[0]
+            .aliases
+            .iter()
+            .any(|alias| alias == "king-a"));
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["fno"]["regnal"], json!(1));
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-a"));
@@ -471,7 +475,7 @@ mod tests {
             tmp.path(),
             json!([
                 crown_row("king-a", "fno", 1, "sess-a"),
-                crown_row("king-barnaby", "x-aaaa", 2, "sess-b")
+                crown_row("barnaby", "x-aaaa", 2, "sess-b")
             ]),
         );
         let store = store_path(tmp.path());
@@ -488,7 +492,7 @@ mod tests {
             "Barnaby"
         );
         let registry = crate::state::load_registry(&registry).unwrap();
-        assert_eq!(registry.entries[0].name, "king-barnaby");
+        assert_eq!(registry.entries[0].name, "barnaby");
     }
 
     #[test]
@@ -515,7 +519,7 @@ mod tests {
             "BARNABY",
         )
         .unwrap_err();
-        assert!(err.contains("king-barnaby"), "{err}");
+        assert!(err.contains("barnaby"), "{err}");
         assert!(err.contains("x-aaaa"), "{err}");
     }
 
@@ -560,7 +564,7 @@ mod tests {
         )
         .is_ok());
         let registry = crate::state::load_registry(&registry_path(tmp.path())).unwrap();
-        assert_eq!(registry.entries[0].name, "king-o'brien-x");
+        assert_eq!(registry.entries[0].name, "o'brien-x");
     }
 
     #[test]
@@ -682,7 +686,7 @@ mod tests {
         assert_eq!(dump["crowns"]["new-scope"]["name"], json!("barnaby"));
         assert_eq!(dump["crowns"]["new-scope"]["regnal"], json!(2));
         let registry = crate::state::load_registry(&registry_path(tmp.path())).unwrap();
-        assert_eq!(registry.entries[0].name, "king-barnaby");
+        assert_eq!(registry.entries[0].name, "barnaby");
 
         // A different holder is refused and names the holder.
         let store = Store {

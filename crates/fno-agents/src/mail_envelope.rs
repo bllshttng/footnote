@@ -2,11 +2,11 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::Path;
 
-fn live_entry_for_session<'a>(
+fn live_entry_for_address<'a>(
     registry: &'a crate::state::Registry,
-    session: Option<&str>,
+    address: Option<&str>,
 ) -> Option<&'a crate::state::RegistryEntry> {
-    let session = session.filter(|s| !s.is_empty())?;
+    let address = address.filter(|s| !s.is_empty())?;
     let mut matches = registry.entries.iter().filter(|entry| {
         !matches!(
             entry.status,
@@ -14,8 +14,11 @@ fn live_entry_for_session<'a>(
                 | crate::AgentStatus::Orphaned
                 | crate::AgentStatus::Failed
                 | crate::AgentStatus::PermanentDead
-        ) && (entry.harness_session_id.as_deref() == Some(session)
-            || entry.related_session_id.as_deref() == Some(session))
+        ) && (entry.harness_session_id.as_deref() == Some(address)
+            || entry.related_session_id.as_deref() == Some(address)
+            || entry.name == address
+            || entry.short_id == address
+            || entry.aliases.iter().any(|alias| alias == address))
     });
     let row = matches.next()?;
     if matches.next().is_some() {
@@ -65,23 +68,20 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let harness_hint = attr(input, "harness");
     let from_session = attr(input, "from_session");
     let to_session = attr(input, "to_session");
-    let registry = if mode == "wrap" {
-        crate::state::load_registry(registry_path).ok()
-    } else {
-        None
-    };
+    let registry = crate::state::load_registry(registry_path).ok();
+    let from_identity = Some(from_session.unwrap_or(from_short));
+    let to_identity = to_session.or_else(|| attr(input, "to"));
     let from_row = registry
         .as_ref()
-        .and_then(|rows| live_entry_for_session(rows, from_session));
+        .and_then(|rows| live_entry_for_address(rows, from_identity));
     let to_row = registry
         .as_ref()
-        .and_then(|rows| live_entry_for_session(rows, to_session));
+        .and_then(|rows| live_entry_for_address(rows, to_identity));
     let harness = from_row.map(|row| row.harness.as_str()).or(harness_hint);
     let from = if mode == "wrap" {
-        match (from_session, harness) {
-            (Some(session), Some("codex")) => session,
-            _ => from_short,
-        }
+        from_session
+            .or_else(|| from_row.and_then(|row| row.harness_session_id.as_deref()))
+            .unwrap_or(from_short)
     } else {
         from_short
     };
@@ -94,18 +94,17 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     } else {
         attr(input, "from_rank").map(str::to_string)
     };
-    let from_name = if mode == "wrap" {
-        from_row.map(|row| row.name.as_str())
-    } else {
-        attr(input, "from_name")
-    };
-    let to_name = if mode == "wrap" {
-        to_row.map(|row| row.name.as_str())
-    } else {
-        attr(input, "to_name")
-    };
+    let from_name = from_row
+        .map(|row| row.name.as_str())
+        .or_else(|| attr(input, "from_name"));
+    let to_name = to_row
+        .map(|row| row.name.as_str())
+        .or_else(|| attr(input, "to_name"));
     let to_rank = if mode == "wrap" {
-        if let (Some(session), Some(registry)) = (to_session, registry.as_ref()) {
+        if let (Some(_session), Some(registry)) = (
+            to_session.or_else(|| to_row.and_then(|row| row.harness_session_id.as_deref())),
+            registry.as_ref(),
+        ) {
             let fleet_is_crowned = registry.entries.iter().any(|row| {
                 row.crown_level.is_some()
                     && !matches!(
@@ -123,7 +122,6 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
                         .unwrap_or_else(|| "none".to_string()),
                 )
             } else {
-                let _ = session;
                 None
             }
         } else {
@@ -230,10 +228,10 @@ mod tests {
             json!({
                 "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                 "agents": [
-                    {"name":"folio", "status":"live", "harness":"claude", "cwd":"/repo",
+                    {"name":"folio", "short_id":"folio-short", "status":"live", "harness":"claude", "cwd":"/repo",
                      "harness_session_id":"claude-session", "created_at":"2026-09-23T20:00:00Z",
                      "crown_level":1,"crown_scope":"fno"},
-                    {"name":"quill", "status":"busy", "harness":"codex", "cwd":"/repo",
+                    {"name":"quill", "short_id":"quill-short", "status":"busy", "harness":"codex", "cwd":"/repo",
                      "harness_session_id":"codex-session", "created_at":"2026-09-23T20:00:00Z"}
                 ]
             })
@@ -243,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn render_uses_current_labels_ranks_and_harness_specific_reply_addresses() {
+    fn render_uses_current_labels_ranks_and_full_reply_addresses() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("registry.json");
         registry(&path);
@@ -258,7 +256,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             claude,
-            "<fno_mail from=\"folio-short\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
+            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
         );
         let codex = render_at(
             &json!({
@@ -289,5 +287,46 @@ mod tests {
         assert!(render_at(&json!({"mode":"unknown", "from":"a"}), &path)
             .unwrap_err()
             .contains("unknown render mode"));
+    }
+
+    #[test]
+    fn open_tag_renders_current_sender_and_recipient_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        registry(&path);
+
+        let tag = render_at(
+            &json!({
+                "mode":"tag", "from":"claude-session", "to":"codex-session",
+                "harness":"claude"
+            }),
+            &path,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tag,
+            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_name=\"folio\" to=\"codex-session\" to_name=\"quill\">"
+        );
+    }
+
+    #[test]
+    fn wrapped_mail_resolves_full_sessions_and_names_from_registered_handles() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        registry(&path);
+
+        let wrapped = render_at(
+            &json!({
+                "mode":"wrap", "body":"hello", "from":"folio-short",
+                "to":"quill-short", "harness":"claude"
+            }),
+            &path,
+        )
+        .unwrap();
+
+        assert!(wrapped.starts_with(
+            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\">"
+        ));
     }
 }

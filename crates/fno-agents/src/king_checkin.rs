@@ -2653,7 +2653,7 @@ mod tests {
         apply_crown_naming(None, None, &home, "x-aaaa").unwrap();
 
         let registry = crate::state::load_registry(&home.registry_json()).unwrap();
-        assert_eq!(registry.entries[0].name, "king-barnaby");
+        assert_eq!(registry.entries[0].name, "barnaby");
     }
 
     #[test]
@@ -2678,7 +2678,7 @@ mod tests {
         std::fs::write(&reg, doc.to_string()).unwrap();
         apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
         let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("king-barnaby"), "{err}");
+        assert!(err.contains("barnaby"), "{err}");
     }
 
     #[test]

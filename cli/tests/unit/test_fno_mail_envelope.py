@@ -77,7 +77,7 @@ def test_open_tag_renders_ranks_after_their_side():
 
 
 def test_open_tag_holds_one_full_id_address():
-    # A caller can pass the already-selected full Codex reply address.
+    # A caller can pass the already-selected full reply address.
     full = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
     tag = fno_mail_open(from_=full, id="msg-fea270", to="08e8c104", origin="peer")
     assert tag == f'<fno_mail from="{full}" to="08e8c104" id="msg-fea270">'
@@ -161,7 +161,7 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
         harness="claude",
     )
     assert wrapped == (
-        '<fno_mail from="647b3a9c" harness="claude-code" '
+        '<fno_mail from="sender-session" harness="claude-code" '
         'from_rank="L2 epic-scope" from_name="folio" to="278c9a89" '
         'to_name="quill" to_rank="L1 fno" id="msg-5a760f">'
         "hi"
@@ -170,10 +170,10 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
     assert not any(line.startswith("-- ") for line in wrapped.splitlines())
 
 
-def test_wrap_uses_the_short_handle_for_claude_but_reads_rank_by_session(
+def test_wrap_uses_the_full_session_for_claude_and_reads_rank_by_session(
     monkeypatch, tmp_path
 ):
-    # Claude's UUIDv4 is not collision-prone; the short handle is its reply address.
+    # Every harness uses the full session id as its reply address.
     import fno.mail.envelope as envelope
     registry = tmp_path / "claude.json"
     _write_registry(
@@ -186,7 +186,9 @@ def test_wrap_uses_the_short_handle_for_claude_but_reads_rank_by_session(
     wrapped = envelope.wrap_fno_mail(
         "hi", from_="king", from_session="session-king"
     )
-    assert wrapped.startswith('<fno_mail from="king" from_rank="L1 fno">')
+    assert wrapped.startswith(
+        '<fno_mail from="session-king" from_rank="L1 fno" from_name="king">'
+    )
     # from_rank with NO resolvable session renders nothing.
     plain = envelope.wrap_fno_mail("hi", from_="king")
     assert plain.startswith('<fno_mail from="king">')
