@@ -435,6 +435,34 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
     Ok(read_board(&opts))
 }
 
+/// Apply `--name` / `--keep-name-from` before the beat runs. A refusal
+/// (duplicate live name, already-named crown, wrong holder) names the
+/// holder; the caller prints it and exits 2 with no beat journalled.
+fn apply_crown_naming(
+    name: Option<&str>,
+    keep_from: Option<&str>,
+    home: &crate::paths::AgentsHome,
+    scope: &str,
+) -> Result<(), String> {
+    let store = home.crown_names_json();
+    let registry = home.registry_json();
+    match (name, keep_from) {
+        (Some(_), Some(_)) => Err("use one of --name or --keep-name-from, not both".into()),
+        (Some(n), None) => crate::crown_names::name_crown(&store, &registry, scope, n).map(|_| ()),
+        (None, Some(old)) => crate::crown_names::keep_from(&store, &registry, old, scope),
+        (None, None) => Ok(()),
+    }
+}
+
+/// The first line of every beat: the crown's identity, then the facts.
+/// Unnamed crowns get the once-only instruction instead of a name.
+fn crown_line_text(name: Option<&str>, level_txt: &str, scope: &str) -> String {
+    match name {
+        Some(name) => format!("crown: {name} ({level_txt} {scope})"),
+        None => "crown: unnamed - name it once: fno agents king checkin --name <name>".to_string(),
+    }
+}
+
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     let crowns = vec![json!({"scope": ctx.scope, "level": ctx.level})];
     let payload = court_fold(
@@ -1265,11 +1293,7 @@ struct Beat {
     folded: Result<Value, String>,
 }
 
-fn collect_readings(ctx: &Ctx, since: Option<&str>) -> Vec<Reading> {
-    let beat = Beat {
-        board: fetch_board(ctx),
-        folded: fetch_fold(ctx),
-    };
+fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading> {
     let mut readings: Vec<Reading> = Vec::new();
     let mut take = |name: &'static str, result: Result<Value, String>| {
         match result {
@@ -2358,6 +2382,8 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     };
     let mut as_json = false;
     let mut model_change: Option<String> = None;
+    let mut crown_name: Option<String> = None;
+    let mut keep_name_from: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = |name: &str| args[i] == name && i + 1 < args.len();
@@ -2366,6 +2392,12 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             i += 2;
         } else if flag("--change") {
             model_change = Some(args[i + 1].clone());
+            i += 2;
+        } else if flag("--name") {
+            crown_name = Some(args[i + 1].clone());
+            i += 2;
+        } else if flag("--keep-name-from") {
+            keep_name_from = Some(args[i + 1].clone());
             i += 2;
         } else if flag("--events-path") {
             ctx.events_paths.push(PathBuf::from(&args[i + 1]));
@@ -2403,7 +2435,8 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
                 "fno-agents king-checkin: --scope SCOPE --events-path PATH \
                  [--events-path ...] --graph PATH --handoffs-dir PATH \
                  [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] \
-                 [--change TEXT] [--no-emit] [--json]"
+                 [--change TEXT] [--name NAME] [--keep-name-from OLD-SCOPE] \
+                 [--no-emit] [--json]"
             );
             return 2;
         }
@@ -2429,12 +2462,25 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let ts = iso_now();
+    if let Err(e) = apply_crown_naming(
+        crown_name.as_deref(),
+        keep_name_from.as_deref(),
+        &crate::paths::AgentsHome::from_env(),
+        &ctx.scope,
+    ) {
+        eprintln!("fno-agents king-checkin: {e}");
+        return 2;
+    }
     let (previous, previous_error) = previous_row(&ctx);
     let since = previous
         .as_ref()
         .and_then(|p| p.get("ts"))
         .and_then(Value::as_str);
-    let readings = collect_readings(&ctx, since);
+    let beat = Beat {
+        board: fetch_board(&ctx),
+        folded: fetch_fold(&ctx),
+    };
+    let readings = collect_readings(&ctx, &beat, since);
     let mut data = build_data(&readings, &ctx.scope);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
     let second_previous = second_previous_loop_row(&ctx);
@@ -2450,6 +2496,50 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         &previous_error,
         &change,
     );
+    // The crown line leads: identity first, then the beat's facts. The name
+    // comes from the fold's own stamp (court_fold reads the store), so an
+    // heir's first beat already shows the carried name.
+    let fold_name: Option<String> = beat.folded.as_ref().ok().and_then(|f| {
+        f.get("fold")
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let level_txt = ctx
+        .level
+        .map(|l| format!("L{l}"))
+        .unwrap_or_else(|| "L?".to_string());
+    lines.insert(
+        0,
+        crown_line_text(fold_name.as_deref(), &level_txt, &ctx.scope),
+    );
+    // Bind an unbound record to the live holder's session and refresh the
+    // node list from this beat's fold. A store write failure is a stated
+    // line in the beat, never a failed beat.
+    let owned_ids: Vec<String> = beat
+        .folded
+        .as_ref()
+        .ok()
+        .and_then(|f| {
+            f.get("fold")
+                .and_then(|f| f.get("nodes"))
+                .and_then(|n| n.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|n| n.get("owned") != Some(&Value::Bool(false)))
+                        .filter_map(|n| n.get("id").and_then(|v| v.as_str()).map(String::from))
+                        .collect::<Vec<String>>()
+                })
+        })
+        .unwrap_or_default();
+    if let Err(e) = crate::crown_names::bind_and_refresh(
+        &crate::paths::AgentsHome::from_env().crown_names_json(),
+        &crate::paths::AgentsHome::from_env().registry_json(),
+        &ctx.scope,
+        owned_ids,
+    ) {
+        lines.push(format!("crown name: {e}"));
+    }
     if model_change.as_deref().map(|t| !t.trim().is_empty()) == Some(true) {
         lines.push(format!("diff: {derived}"));
     }
@@ -2490,6 +2580,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         let payload = json!({
             "scope": ctx.scope,
             "ts": ts,
+            "name": fold_name,
             "coverage": data.get("coverage").cloned().unwrap_or(json!(0)),
             "readers_failed": readers_failed,
             "change": change,
@@ -2537,6 +2628,74 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        let reg = home.registry_json();
+        let agents = serde_json::json!([
+            {"name": "king-a", "status": "live", "crown_scope": "x-aaaa",
+             "crown_level": 2, "cwd": "/repo", "harness": "claude",
+             "harness_session_id": "sess-a",
+             "created_at": "2026-09-23T20:00:00Z"},
+            {"name": "king-b", "status": "live", "crown_scope": "fno",
+             "crown_level": 1, "cwd": "/repo", "harness": "claude",
+             "harness_session_id": "sess-b",
+             "created_at": "2026-09-23T20:00:00Z"}
+        ]);
+        let doc = serde_json::json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": agents,
+        });
+        std::fs::write(&reg, doc.to_string()).unwrap();
+        apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
+        let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
+        assert!(err.contains("king-a"), "{err}");
+    }
+
+    #[test]
+    fn naming_an_already_named_crown_refuses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        let reg = home.registry_json();
+        let doc = serde_json::json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": [
+                {"name": "king-b", "status": "live", "crown_scope": "fno",
+                 "crown_level": 1, "cwd": "/repo", "harness": "claude",
+                 "harness_session_id": "sess-b",
+                 "created_at": "2026-09-23T20:00:00Z"}
+            ]
+        });
+        std::fs::write(&reg, doc.to_string()).unwrap();
+        apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap();
+        let err = apply_crown_naming(Some("ernest"), None, &home, "fno").unwrap_err();
+        assert!(err.contains("already named"), "{err}");
+    }
+
+    #[test]
+    fn combining_the_two_naming_flags_refuses() {
+        assert!(apply_crown_naming(
+            Some("a"),
+            Some("old"),
+            &crate::paths::AgentsHome::at("/tmp"),
+            "fno"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_crown_line_leads_and_the_unnamed_line_teaches_the_flag() {
+        assert_eq!(
+            crown_line_text(Some("Barnaby II"), "L1", "fno"),
+            "crown: Barnaby II (L1 fno)"
+        );
+        assert_eq!(
+            crown_line_text(None, "L1", "fno"),
+            "crown: unnamed - name it once: fno agents king checkin --name <name>"
+        );
+    }
 
     #[test]
     fn stderr_cause_skips_config_warnings_and_keeps_the_last_line() {

@@ -68,6 +68,7 @@ join
 # write moves to the sidecar seam)
 cost
 session add
+session backfill
 session close
 session open
 session reap-open

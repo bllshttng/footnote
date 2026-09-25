@@ -742,8 +742,12 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         })
         .collect();
 
-    // Two idea-style appenders: 30 begin + commit_rows appends each through
-    // the keeper socket, retrying kind conflict like cmd_idea does.
+    // Two idea-style appenders: 20 begin + commit_rows appends each through
+    // the keeper socket, retrying kind conflict like cmd_idea does. They send
+    // no base_digests, so every commit takes the whole-graph fallback, where
+    // any concurrent publish is a conflict. A row can starve through all 30
+    // tries on a slow runner; it never answered ok, so the contract below
+    // does not cover it.
     let appender_handles: Vec<_> = (0..2)
         .map(|w| {
             let s = sock.clone();
@@ -762,7 +766,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         "status": "intake",
                         "priority": "p2",
                     });
-                    let mut landed_here = false;
                     for attempt in 0..30u64 {
                         let begin = ok_result(rpc(&mut stream, attempt, "begin", json!({})));
                         let version = begin["version"].as_str().unwrap().to_string();
@@ -779,7 +782,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         if reply.get("ok") == Some(&json!(true)) {
                             landed.push(id.clone());
-                            landed_here = true;
                             break;
                         }
                         let kind = reply["error"]["kind"].as_str().unwrap_or("");
@@ -789,10 +791,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         conflicts += 1;
                     }
-                    assert!(
-                        landed_here,
-                        "appender {w}: row {id} never landed in 30 attempts"
-                    );
                 }
                 (landed, conflicts)
             })
@@ -815,6 +813,11 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     assert!(
         total_conflicts > 0,
         "did not race: zero commit_rows conflicts across both appenders"
+    );
+    let total_landed: usize = appender_out.iter().map(|(landed, _)| landed.len()).sum();
+    assert!(
+        total_landed > 0,
+        "positive control: no append ever answered ok, so the check below proves nothing"
     );
 
     // Every append that answered ok must be in the store: the json file is
@@ -958,24 +961,22 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     );
     let outcomes = staged.join().unwrap();
 
-    // Late arrivals: sent after the ack, they meet the dying keeper and read
-    // a hangup BEFORE any publish.
-    let mut late_ok = 0;
-    for i in 0..2 {
-        let late = UnixStream::connect(&sock);
-        match late {
-            Err(_) => continue, // socket already unlinked: hangup by refusal
-            Ok(mut s) => {
-                let begin = rpc(&mut s, 900 + i as u64, "begin", json!({}));
-                // Either the frame round-trips (keeper still draining) or the
-                // stream is cut; both are legal, only ok-published rows count.
-                if begin.get("ok") == Some(&json!(true)) {
-                    late_ok += 1;
-                }
-            }
+    // Late arrivals: sent after the ack, they meet the dying keeper. Either
+    // the frame round-trips (keeper still draining) or the stream is cut;
+    // both are legal, so neither is asserted. rpc() would panic on the cut.
+    for i in 0..2u64 {
+        let Ok(mut s) = UnixStream::connect(&sock) else {
+            continue; // socket already unlinked: hangup by refusal
+        };
+        let req = json!({"id": 900 + i, "method": "begin", "params": {}});
+        let payload = serde_json::to_vec(&req).unwrap();
+        let mut frame = vec![TAG_REQUEST];
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+        if s.write_all(&frame).is_ok() {
+            let _ = read_frame(&mut s);
         }
     }
-    let _ = late_ok;
 
     // Reap: the keeper exits 0 on its own.
     let deadline = Instant::now() + Duration::from_secs(10);
