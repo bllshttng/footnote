@@ -214,11 +214,11 @@ bare_full = any(
 check(not bare_full, "changed-smoke never runs an unlabelled full smoke",
       "changed-smoke runs a full smoke under the partial job's name")
 
-# --- the merge gate still covers the whole suite ----------------------------
-# `smoke` is the required check. It either runs the suite itself, or it
-# aggregates the jobs that do. Resolve which, then assert against THOSE jobs -
-# the old checks read smoke's own run block, and once the work moved to the
-# shards they kept printing ok while asserting nothing about what CI ran.
+# --- the selected full lane still covers the whole suite --------------------
+# `smoke` is the required check. When the selector requires full coverage, it
+# either runs the suite itself or aggregates the jobs that do. Resolve which,
+# then assert against THOSE jobs; the old checks read smoke's own run block,
+# and once the work moved to shards they asserted nothing about CI's coverage.
 gate_dependencies = _needs(smoke)
 gate_shards = [name for name in gate_dependencies if name != "pr-affected"]
 if gate_dependencies:

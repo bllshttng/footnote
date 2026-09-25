@@ -91,10 +91,9 @@ jobs:
   # packet scales with the diff, so a fixed cap either starves a large rebase
   # (killed at the cap, reported as an unattributable `cancelled`) or idles
   # over a small one. Selection only: `--list` maps and prints, it runs
-  # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
-  # the raw estimate (the run job's fit assertion compares against it) and the
-  # ceiling actually applied, the estimate scaled by headroom and clamped
-  # at 75.
+  # nothing, so this job needs no smoke-setup and costs seconds. Three outputs:
+  # the raw estimate, the ceiling applied, and whether the packet fits that
+  # ceiling. The estimate and fit output are read by the full-suite selector.
   changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -192,8 +191,9 @@ jobs:
   # never in front of it: only `smoke` satisfies the merge gate - a green here
   # means the selected packet passed and nothing more. Its one needs edge is
   # the sizer above, which runs no tests; nothing can make this job delay the
-  # gate. Coverage boundary: `smoke-pytest` and `smoke-rest` are the full-gate
-  # shards on main and pull requests. `changed-smoke` is PR-only and is
+  # gate. Coverage boundary: `smoke-pytest` and `smoke-rest` run as the
+  # full-gate shards on main, nightly, and PRs whose selector requires them.
+  # `changed-smoke` is PR-only and is
   # skipped on main; its changed-subset selector never supplies main-branch
   # coverage.
   changed-smoke:
@@ -513,7 +513,8 @@ jobs:
     needs: [pr-affected, smoke-pytest, smoke-rest]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # Two string compares. A cap this tight is a real alarm on a job that can
+    # These result checks stay in a short aggregator. A cap this tight is a
+    # real alarm on a job that can
     # only ever hang, and this whole change exists because a job outran its
     # cap unnoticed; the required check itself must not be the one job with no
     # cap at all.
