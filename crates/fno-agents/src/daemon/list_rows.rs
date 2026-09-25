@@ -12,16 +12,32 @@ pub(super) fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// The `--all` provenance lane: the reaped and retired sessions the
-/// registry no longer holds. Empty unless `all`; the payload key is always
-/// present so a consumer can tell "no retired rows" from an older shape,
-/// the way the discovered lane is.
-pub(super) fn retired_lane(all: bool, home: &AgentsHome) -> Vec<Value> {
-    if all {
-        retired_rows(home)
-    } else {
-        Vec::new()
-    }
+/// The `agent.list` response tail: the sorted entries, the echoed filters,
+/// the truth-probe counters, and the `--all` provenance lane. The payload
+/// key is always present so a consumer can tell "no retired rows" from an
+/// older shape, the way the discovered lane is.
+pub(super) fn list_response(
+    req: &Request,
+    entries: Vec<Value>,
+    filters_applied: Value,
+    truth_probe_asked: usize,
+    truth_probe_answered: usize,
+    all: bool,
+    home: &AgentsHome,
+) -> Response {
+    let retired_sessions = if all { retired_rows(home) } else { Vec::new() };
+    Response::ok(
+        req.id,
+        json!({
+            "agents": entries,
+            "filters_applied": filters_applied,
+            "fields_omitted": LIST_PROJECTION_OMISSIONS,
+            "truth_probe_asked": truth_probe_asked,
+            "truth_probe_answered": truth_probe_answered,
+            "retired_sessions": retired_sessions,
+            "retired_count": retired_sessions.len(),
+        }),
+    )
 }
 
 /// The reaped and retired sessions `--all` shows: every receipt in the

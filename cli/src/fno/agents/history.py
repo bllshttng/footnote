@@ -171,10 +171,9 @@ def history_command(arg: str) -> None:
             # The same three handles a receipt answers to. Matching only the
             # session id here left `live_sids` empty for a name query, so the
             # receipt of a resumed session was reported as its present state.
-            # The join also runs through the receipts: a revived session's
-            # live row can answer to a name the argument never used, so the
-            # argument resolves a receipt whose session id joins the live
-            # row, and the live row outranks its stale receipt below.
+            # The join also runs through the receipts: the argument resolves
+            # a receipt whose session id joins the live row, and the live
+            # row outranks its stale receipt below.
             receipt_sids = {
                 r.get("harness_session_id") for _, r in all_receipts if _receipt_answers(r, needle)
             }

@@ -4545,11 +4545,7 @@ fn render_list_json(
     if let Some(block) = codex_loaded {
         payload["codex_loaded"] = block.clone();
     }
-    // The --all provenance lane: reaped and retired sessions. Always present
-    // so a consumer can tell "no retired rows" from an older shape; empty
-    // unless the caller passed --all.
-    payload["retired_sessions"] = retired.clone();
-    payload["retired_count"] = json!(retired.as_array().map(|a| a.len()).unwrap_or(0));
+    fno_agents::reap_render::attach_retired(&mut payload, retired);
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
@@ -4846,30 +4842,7 @@ fn render_list_table(
     if !discovered.is_empty() {
         out.push_str(&render_discovered_section(discovered));
     }
-    if let Some(retired) = retired.as_array() {
-        if !retired.is_empty() {
-            out.push_str(&render_retired_section(retired));
-        }
-    }
-    out
-}
-
-/// Render the `--all` provenance lane below the table: the reaped and
-/// retired sessions the registry no longer holds, newest first, each with
-/// when it left, the recorded cause, and the resume command.
-fn render_retired_section(retired: &[Value]) -> String {
-    let mut out = String::from("\nREAPED / RETIRED (from reap receipts; --all)\n");
-    for r in retired {
-        let name = r["name"].as_str().unwrap_or("-");
-        let reaped = r["reaped_at"].as_str().unwrap_or("-");
-        let cause = r["cause"].as_str().unwrap_or("-");
-        let basis = r["basis"].as_str().unwrap_or("-");
-        let node = r["node"].as_str().unwrap_or("-");
-        let resume = r["resume"].as_str().unwrap_or("-");
-        out.push_str(&format!(
-            "- {name}  reaped {reaped}  cause {cause}  basis {basis}  node {node}\n  resume: {resume}\n"
-        ));
-    }
+    out.push_str(&fno_agents::reap_render::retired_section(retired));
     out
 }
 
