@@ -381,10 +381,10 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
         assert claim_status(key, root=claims_root_for(key)).get("holder") is None, key
 
 
-def _medium_row(monkeypatch) -> None:
-    """Re-stub the graph row so the seam derives /blueprint, matching the
-    blueprint seed this test types."""
-    row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "medium"}
+def _blueprint_row(monkeypatch) -> None:
+    """Re-stub the graph row so the seam derives /blueprint (difficulty high
+    earns it under the lean floor), matching the blueprint seed this types."""
+    row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "high"}
 
     def _load_graph():
         return [dict(row)]
@@ -399,7 +399,7 @@ def test_spawn_bare_blueprint_spelling_stamps_blueprint(
     autonomous dispatch render - stamps the blueprint row at dispatch time."""
     from fno.agents.cli import agents_app
 
-    _medium_row(monkeypatch)
+    _blueprint_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,
@@ -461,7 +461,7 @@ def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid, 
     planning phase instead of skipping."""
     from fno.agents.cli import agents_app
 
-    _medium_row(monkeypatch)
+    _blueprint_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,
@@ -484,7 +484,7 @@ def test_spawn_codex_blueprint_spelling_stamps_blueprint(
     stamps the same planning row the slash spelling does."""
     from fno.agents.cli import agents_app
 
-    _medium_row(monkeypatch)
+    _blueprint_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,

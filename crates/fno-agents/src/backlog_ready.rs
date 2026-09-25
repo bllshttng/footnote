@@ -542,13 +542,57 @@ pub fn is_blueprint_doc(entry: &Value) -> bool {
     }
 }
 
+/// The lean-dispatch blueprint floor's default: a plan-less node routes to
+/// /blueprint only when its difficulty is high, its size is L, or an open
+/// premise question blocks it. Every other plan-less node goes straight to
+/// /target, which states its own scope (it derives its deliverables count
+/// from the node's details at init). Difficulty picks the VERB; the separate
+/// ruling on which model runs a /blueprint only applies once blueprint IS the
+/// verb, so a node routed straight to target owes no blueprint lane. The
+/// `config.dispatch.blueprint_floor` knob carries "high" (this default) or
+/// "medium" (blueprint for medium and up, the pre-lean table); anything else
+/// degrades to the default on both the Python and the Rust side.
+pub const DEFAULT_BLUEPRINT_FLOOR: &str = "high";
+
+/// The node tag that marks an open premise question blocking dispatch - the
+/// third blueprint clause. Set with `fno backlog update <id> --tag
+/// premise-question` when the node's premise itself is what is in doubt.
+pub const PREMISE_QUESTION_TAG: &str = "premise-question";
+
+/// Whether the row carries the open-premise-question tag.
+fn has_premise_question(entry: &Value) -> bool {
+    entry
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .any(|t| t.as_str().map(str::trim) == Some(PREMISE_QUESTION_TAG))
+        })
+        .unwrap_or(false)
+}
+
 /// The ported lifecycle table (`harness_map.resolve_effective_verb`):
 /// `(verb, note)` per node row, or a refusal string. Order: refusals fire
 /// BEFORE the declared verb; a declared target-family verb WINS and is
-/// returned as declared (d-834b6ff1); an out-of-family verb abstains
-/// (`None`) to declared precedence, so the command still routes through the
-/// allowlist-checked `verb` rung. The word "reconciled" never appears.
+/// returned as declared; an out-of-family verb abstains (`None`) to declared
+/// precedence, so the command still routes through the allowlist-checked
+/// `verb` rung. The word "reconciled" never appears.
 pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String> {
+    effective_verb_with_floor(entry, DEFAULT_BLUEPRINT_FLOOR)
+}
+
+/// [`effective_verb`] with the operator's blueprint floor. `floor` reads
+/// "high" (lean default) or "medium" (pre-lean: blueprint for medium and up);
+/// any other value degrades to the default.
+pub fn effective_verb_with_floor(
+    entry: &Value,
+    floor: &str,
+) -> Result<(Option<String>, String), String> {
+    let floor = if floor.trim().eq_ignore_ascii_case("medium") {
+        "medium"
+    } else {
+        DEFAULT_BLUEPRINT_FLOOR
+    };
     let node_id = get_str(entry, "id").unwrap_or("unknown");
     let raw = get_str(entry, "dispatch_verb")
         .map(str::trim)
@@ -578,12 +622,34 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
         .map(|d| d.trim().to_lowercase())
         .unwrap_or_default();
     let answer = match rung {
-        "none" => match difficulty.as_str() {
-            "low" => ("/target", format!("intake difficulty=low")),
-            "medium" => ("/blueprint", format!("intake difficulty=medium")),
-            "high" => ("/blueprint", format!("intake difficulty=high")),
-            _ => return Err(refusal(rung, &difficulty)),
-        },
+        "none" => {
+            // A row whose difficulty answers no band still refuses (fail
+            // closed): the verb is derivable only from a stated intake.
+            if !matches!(difficulty.as_str(), "low" | "medium" | "high") {
+                return Err(refusal(rung, &difficulty));
+            }
+            let size = get_str(entry, "size")
+                .map(|s| s.trim().to_ascii_uppercase())
+                .unwrap_or_default();
+            let premise = has_premise_question(entry);
+            let wants_blueprint = if floor == "medium" {
+                matches!(difficulty.as_str(), "medium" | "high")
+            } else {
+                difficulty == "high" || size == "L" || premise
+            };
+            if wants_blueprint {
+                ("/blueprint", format!("intake difficulty={difficulty}"))
+            } else {
+                (
+                    "/target",
+                    format!(
+                        "lean dispatch: planless {difficulty} node plans inline \
+                         at target; blueprint waits for high difficulty, size L, \
+                         or an open premise question, so no blueprint lane is owed"
+                    ),
+                )
+            }
+        }
         "idea" | "design" => ("/blueprint", format!("plan {rung}")),
         "ready" | "in_progress" | "in_review" => {
             if is_blueprint_doc(entry) {
@@ -615,14 +681,19 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
 /// verb decision out (`{"verb", "note"}`), the refusal as the error so the
 /// Python client raises without an unwrapping layer. Pure over the shipped
 /// row and its linked plan doc. Kept beside the table so the decision and
-/// its serving live in one file.
+/// its serving live in one file. `blueprint_floor` rides in params from the
+/// dispatch doors; its absence answers the lean default.
 pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
     let entry = params
         .get("entries")
         .and_then(Value::as_array)
         .and_then(|entries| entries.first())
         .ok_or_else(|| "effective_verb needs entries[0]".to_string())?;
-    let (verb, note) = effective_verb(entry)?;
+    let floor = params
+        .get("blueprint_floor")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_BLUEPRINT_FLOOR);
+    let (verb, note) = effective_verb_with_floor(entry, floor)?;
     Ok(json!({ "verb": verb, "note": note }))
 }
 
@@ -2080,6 +2151,79 @@ mod tests {
             "{refusal}"
         );
         assert!(!refusal.contains("(x-"), "{refusal}");
+    }
+
+    #[test]
+    fn planless_medium_derives_target_under_the_lean_floor() {
+        let row = json!({"id": "x-lean", "difficulty": "medium"});
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert_eq!(verb.as_deref(), Some("/target"));
+        assert!(note.contains("lean dispatch"), "{note}");
+        assert!(note.contains("plans inline"), "{note}");
+    }
+
+    #[test]
+    fn planless_low_keeps_deriving_target() {
+        let row = json!({"id": "x-lo", "difficulty": "low"});
+        assert_eq!(effective_verb(&row).unwrap().0.as_deref(), Some("/target"));
+    }
+
+    #[test]
+    fn planless_high_still_derives_blueprint() {
+        let row = json!({"id": "x-hard", "difficulty": "high"});
+        assert_eq!(
+            effective_verb(&row).unwrap().0.as_deref(),
+            Some("/blueprint")
+        );
+    }
+
+    #[test]
+    fn planless_large_size_derives_blueprint_even_at_medium() {
+        for size in ["L", "l"] {
+            let row = json!({"id": "x-big", "difficulty": "medium", "size": size});
+            assert_eq!(
+                effective_verb(&row).unwrap().0.as_deref(),
+                Some("/blueprint"),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn planless_premise_question_tag_derives_blueprint() {
+        let row = json!({"id": "x-q", "difficulty": "low", "tags": ["premise-question"]});
+        assert_eq!(
+            effective_verb(&row).unwrap().0.as_deref(),
+            Some("/blueprint")
+        );
+        // A row with no tags array, or an unrelated tag, stays on target.
+        let plain = json!({"id": "x-q", "difficulty": "low"});
+        assert_eq!(
+            effective_verb(&plain).unwrap().0.as_deref(),
+            Some("/target")
+        );
+        let other = json!({"id": "x-q", "difficulty": "low", "tags": ["infra"]});
+        assert_eq!(
+            effective_verb(&other).unwrap().0.as_deref(),
+            Some("/target")
+        );
+    }
+
+    #[test]
+    fn medium_floor_restores_blueprint_for_medium_and_degrades_on_typo() {
+        let row = json!({"id": "x-med", "difficulty": "medium"});
+        let (verb, _) = effective_verb_with_floor(&row, "medium").unwrap();
+        assert_eq!(verb.as_deref(), Some("/blueprint"));
+        let (verb, _) = effective_verb_with_floor(&row, "spicy").unwrap();
+        assert_eq!(verb.as_deref(), Some("/target"));
+    }
+
+    #[test]
+    fn serve_effective_verb_honors_the_floor_param() {
+        let row = json!({"id": "x-med", "difficulty": "medium"});
+        let reply =
+            serve_effective_verb(&json!({"entries": [row], "blueprint_floor": "medium"})).unwrap();
+        assert_eq!(reply["verb"], json!("/blueprint"));
     }
 
     #[test]

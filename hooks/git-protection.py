@@ -9,7 +9,7 @@ Blocks:
 
 Allowed without gate:
 - gh pr create, EXCEPT from a node-bearing branch with no sign the exact
-  `Backlog-Closure:` trailer was composed (see _closure_trailer_refusal).
+  `Fixes` closure line was composed (see _closure_trailer_refusal).
   Ad-hoc development stays legitimate: `FNO_PR_CLOSURE_OK=1` clears it, and a
   branch naming no node is never gated.
 
@@ -1694,7 +1694,12 @@ def _find_pr_create_segments(segments):
 # branch_node_ids so the three cannot drift apart in silence.
 _HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
 _HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
-_CLOSURE_MARKER_RE = re.compile(r"CLOSURE_TRAILER|Backlog-Closure", re.IGNORECASE)
+_CLOSURE_MARKER_RE = re.compile(
+    # Composition evidence in the command itself: the generator variable, the
+    # retired `Backlog-Closure:` spelling, or the new `Fixes <id>` line.
+    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}",
+    re.IGNORECASE,
+)
 _BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large
 
 
@@ -1817,7 +1822,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
     if body_files and not judged:
         return None
     detail = "" if not judged else (f"the body file {judged[0]} exists and carries "
-        f"no Backlog-Closure line; or open the whole-path door /fno:pr create.\n")
+        f"no Fixes line; or open the whole-path door /fno:pr create.\n")
     # This message NAMES candidates and never prescribes a trailer to paste.
     # A refusal is the highest-trust text a blocked agent reads, so advice here
     # is a PRODUCER of claims, and this producer has no graph to check against.
@@ -1834,7 +1839,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
         f"claims at least one REAL node.\n{detail}"
         f"Generate the ONE line (graph-checked, with contained_in descendants) "
         f"via `fno do pr closure-trailer <node-id> --extra <id> [...]` and "
-        f"paste its output; the gate reads only the last Backlog-Closure "
+        f"paste its output; the gate reads only the last closure "
         f"line, so replace every line in the body with this one.\n"
         f"Do NOT paste a candidate from this message: a segment can match the "
         f"grammar without being a node, and one unknown id voids the whole "

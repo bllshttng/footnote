@@ -3535,7 +3535,7 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint", node=_node_row(node_id, difficulty="medium"))
+    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint", node=_node_row(node_id, difficulty="high"))
 
     assert sid == "abc12345"
     assert len(calls) == 1  # exactly one worker launch requested
@@ -3913,9 +3913,16 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
             {"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
             "/target --no-merge x-low", "t", "/target", "none-declared",
         ),
+        # Lean floor: a planless medium node goes straight to target; only
+        # high difficulty, size L, or an open premise question earns
+        # blueprint.
         (
             {"difficulty": "medium", "priority": "p1", "dispatch_verb": ""},
-            "/blueprint x-med", "bp", "/blueprint", "none-declared",
+            "/target --no-merge x-med", "t", "/target", "none-declared",
+        ),
+        (
+            {"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
+            "/blueprint x-high", "bp", "/blueprint", "none-declared",
         ),
         (
             {
