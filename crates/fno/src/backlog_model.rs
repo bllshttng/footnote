@@ -1082,6 +1082,25 @@ fn external_backend_name() -> String {
         .unwrap_or_else(|| "graph".to_string())
 }
 
+/// The snapshot document's rows and its error surface, split out so tests
+/// drive the same parse `gather_blocking` runs. `stale_since` becomes the
+/// leading error line; every `errors` line rides after it.
+fn parse_snapshot_doc(v: &Value) -> (Vec<Value>, Vec<String>) {
+    let mut errors = Vec::new();
+    if let Some(ts) = v.get("stale_since").and_then(Value::as_str) {
+        errors.push(format!("tracker snapshot stale since {ts}"));
+    }
+    if let Some(lines) = v.get("errors").and_then(Value::as_array) {
+        errors.extend(lines.iter().filter_map(|l| l.as_str()).map(str::to_string));
+    }
+    let rows = v
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    (rows, errors)
+}
+
 fn gather_blocking(
     graph: &Path,
     agents: Vec<AgentRow>,
@@ -1092,26 +1111,28 @@ fn gather_blocking(
     let backend_name = external_backend_name();
     let external = external_backend_selected();
     // (2) The source: the external snapshot, or the store's rows.
-    let (rows, rows_error): (Vec<Value>, Option<String>) = if external {
+    let (rows, rows_error, snapshot_errors): (Vec<Value>, Option<String>, Vec<String>) = if external
+    {
         match read_snapshot().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
-            Some(v) => (
-                v.get("entries")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-                None,
-            ),
+            Some(v) => {
+                let (rows, snapshot_errors) = parse_snapshot_doc(&v);
+                (rows, None, snapshot_errors)
+            }
             None => (
                 Vec::new(),
                 Some("the tracker snapshot read failed".to_string()),
+                Vec::new(),
             ),
         }
     } else {
         match store_client::rows(graph) {
-            Ok(r) => (r, None),
-            Err(e) => (Vec::new(), Some(e)),
+            Ok(r) => (r, None, Vec::new()),
+            Err(e) => (Vec::new(), Some(e), Vec::new()),
         }
     };
+    // Snapshot errors (staleness stamp first) lead Inputs.errors, so a board
+    // consumer sees why the read is degraded.
+    errors.splice(..0, snapshot_errors);
     if rows_error.is_some() {
         return Inputs {
             backend: backend_name,

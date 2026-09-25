@@ -1,4 +1,4 @@
-//! `fno mux serve --web` : the read-only web bridge.
+//! `fno mux serve --web` : the web bridge.
 //!
 //! A pure client. It attaches to a running mux session over the same per-session
 //! unix socket the native TUI uses, as an OBSERVER (`Attach { rows: 0, cols: 0 }`,
@@ -8,10 +8,12 @@
 //! connections as JSON, unmodified. The browser paints the structured cells
 //! directly (see `web_page.html`).
 //!
-//! Read-only is structural (Locked Decision 5): after sending `Attach` the bridge
-//! `forget()`s the socket's write half, so no code path can forward a browser
-//! byte upstream. The browser also never drives - it drops every inbound WS
-//! message and only picks which already-arriving frame to draw locally.
+//! The pane view is read-only by construction (Locked Decision 5): after sending
+//! `Attach` the bridge `forget()`s the socket's write half, so no code path can
+//! forward a browser byte upstream. The browser also never drives - it drops
+//! every inbound WS message and only picks which already-arriving frame to draw
+//! locally. The backlog board's writes are separate: guarded subprocess runs of
+//! the same `fno` verbs an agent runs (see `write_guard`), never socket input.
 //!
 //! Data flow, one direction only:
 //!   vt::Pane --composite--> Frame --broadcast--> bridge --WS/JSON--> browser
@@ -26,10 +28,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{Json, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, UnixStream};
@@ -118,6 +120,12 @@ struct AppState {
     token: Arc<str>,
     reign_html: PathBuf,
     fleet_html: PathBuf,
+    /// The mux session this bridge attaches to; a backlog launch names it to
+    /// the spawn door.
+    session: Arc<str>,
+    /// True when the bound address is loopback, so the backlog page may act.
+    /// Computed from the bound address, never from `--bind` text.
+    writable: bool,
     /// The cached backlog read model (`None` until the first gather).
     model: Arc<tokio::sync::Mutex<Option<CachedModel>>>,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
@@ -687,9 +695,18 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
     } else {
         args.bind.as_str()
     };
+    // Writes ride the bound address, not the `--bind` text: `localhost` and
+    // `::1` count, `0.0.0.0`, `::` and a tailscale address do not.
+    let writable = listener.local_addr().is_ok_and(|a| a.ip().is_loopback());
     println!(
-        "fno mux web (read-only): http://{host}:{}/?t={}",
-        args.port, token
+        "fno mux web ({}): http://{host}:{}/?t={}",
+        if writable {
+            "backlog writes on, loopback only"
+        } else {
+            "read-only"
+        },
+        args.port,
+        token
     );
     if wide {
         println!(
@@ -710,6 +727,8 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         token,
         reign_html: reign_html_path(),
         fleet_html: fleet_html_path(),
+        session: args.session.into(),
+        writable,
         model: Default::default(),
         shutdown: shutdown_rx,
     };
@@ -739,6 +758,7 @@ fn router(state: AppState) -> Router {
         .route("/backlog", get(backlog))
         .route("/backlog/model.json", get(backlog_model))
         .route("/backlog/node.json", get(backlog_node))
+        .route("/backlog/act", post(backlog_act))
         .route("/crown", get(crown))
         .route("/fleet", get(fleet))
         .route("/ws", get(ws_handler))
@@ -949,12 +969,19 @@ async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Respon
     if !token_ok(q.t.as_deref(), &st.token) {
         return unauthorized();
     }
+    // The page's write controls exist only when the serving bridge can
+    // write: one string replace, no second page.
+    let page = if st.writable {
+        BACKLOG_PAGE.replacen("<body>", "<body data-writable=\"true\">", 1)
+    } else {
+        BACKLOG_PAGE.to_string()
+    };
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        with_nav(BACKLOG_PAGE, NavPage::Backlog),
+        with_nav(&page, NavPage::Backlog),
     )
         .into_response()
 }
@@ -1056,6 +1083,205 @@ fn json_response<T: serde::Serialize>(v: &T) -> Response {
             &format!("model serialization failed: {e}"),
         ),
     }
+}
+
+/// True when an HTTP authority names the loopback interface: `localhost`,
+/// a loopback `IpAddr`, or either with a port, IPv6 bracketed or not.
+fn names_loopback(authority: &str) -> bool {
+    if let Ok(ip) = authority.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The ruling's write guards, in order: the bridge must be bound to
+/// loopback, the request's Host must name loopback (DNS-rebinding guard),
+/// and the Origin header, when the browser sent one, must be an http URL
+/// on loopback (cross-site guard; the value `null` included). Host must
+/// always pass; Origin only when sent.
+fn write_guard(headers: &HeaderMap, writable: bool) -> Result<(), (StatusCode, String)> {
+    if !writable {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "the bridge is read-only: it is not bound to loopback".into(),
+        ));
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| names_loopback(h));
+    if host.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "write refused: Host does not name loopback".into(),
+        ));
+    }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+        let ok = origin.strip_prefix("http://").is_some_and(names_loopback);
+        if !ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "write refused: Origin does not name loopback".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One backlog act the page can request.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "act", rename_all = "snake_case")]
+enum Act {
+    Field {
+        id: String,
+        field: String,
+        value: String,
+    },
+    Rank {
+        id: String,
+        place: String,
+    },
+    Blueprint {
+        id: String,
+    },
+    Target {
+        id: String,
+    },
+}
+
+impl Act {
+    fn id(&self) -> &str {
+        match self {
+            Act::Field { id, .. }
+            | Act::Rank { id, .. }
+            | Act::Blueprint { id }
+            | Act::Target { id } => id,
+        }
+    }
+}
+
+/// What a planned act runs: a backlog verb's argv through
+/// [`crate::backlog_write::run_verb`], or a launch through
+/// [`crate::server::agent_launch::run_dispatch_one`].
+#[derive(Debug)]
+enum Planned {
+    Verb(Vec<String>),
+    Dispatch { plan: bool },
+}
+
+/// The pure half of `POST /backlog/act`: 503 on a failed source read, 404
+/// when the read holds no such node, 409 when the card's backend cannot
+/// answer the act or the node is already being worked, 400 on a bad field
+/// value, else the planned argv or launch.
+fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (StatusCode, String)> {
+    if let Some(err) = &inputs.rows_error {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, err.clone()));
+    }
+    let id = act.id();
+    let Some(view) = backlog_model::node(inputs, id) else {
+        return Err((StatusCode::NOT_FOUND, format!("no node {id}")));
+    };
+    let unavailable = |feature: &str| {
+        view.unavailable
+            .iter()
+            .find(|u| u.feature == feature)
+            .map(|u| u.reason.clone())
+    };
+    match act {
+        Act::Field { field, value, .. } => {
+            if let Some(reason) = unavailable(backlog_model::unavailable_features::FIELD_EDITS) {
+                return Err((StatusCode::CONFLICT, reason));
+            }
+            let field = match field.as_str() {
+                "title" => crate::backlog_write::Field::Title,
+                "priority" => crate::backlog_write::Field::Priority,
+                "size" => crate::backlog_write::Field::Size,
+                "status" => crate::backlog_write::Field::Status,
+                other => return Err((StatusCode::BAD_REQUEST, format!("unknown field {other:?}"))),
+            };
+            crate::backlog_write::field_argv(id, field, value, "the web backlog board")
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))
+                .map(Planned::Verb)
+        }
+        Act::Rank { place, .. } => {
+            if let Some(reason) = unavailable(backlog_model::unavailable_features::CARD_MOVES) {
+                return Err((StatusCode::CONFLICT, reason));
+            }
+            let place = match place.as_str() {
+                "top" => crate::backlog_write::Place::Top,
+                "bottom" => crate::backlog_write::Place::Bottom,
+                other => return Err((StatusCode::BAD_REQUEST, format!("unknown place {other:?}"))),
+            };
+            crate::backlog_write::rank_argv(id, place, None)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))
+                .map(Planned::Verb)
+        }
+        Act::Blueprint { .. } | Act::Target { .. } => {
+            if view.card.claimed || view.card.live {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("{id} is already being worked; open its session instead"),
+                ));
+            }
+            Ok(Planned::Dispatch {
+                plan: matches!(act, Act::Blueprint { .. }),
+            })
+        }
+    }
+}
+
+/// The effect half of `POST /backlog/act`: a planned verb argv runs through
+/// the shared shell-out; a launch runs the mux's own dispatch door and
+/// carries its notice back. The launch arm's ok fact is `true`: the door
+/// reports refusals through its notice text.
+async fn run_planned(st: &AppState, id: &str, planned: Planned) -> (bool, String) {
+    match planned {
+        Planned::Verb(argv) => crate::backlog_write::run_verb(&argv, None).await,
+        Planned::Dispatch { plan } => {
+            let notice =
+                crate::server::agent_launch::run_dispatch_one(&st.session, Some(id), None, plan)
+                    .await;
+            (true, notice)
+        }
+    }
+}
+
+/// The 200 body: the verb's exit fact and its own last line.
+fn act_response(ok: bool, notice: &str) -> Response {
+    json_response(&serde_json::json!({ "ok": ok, "notice": notice }))
+}
+
+/// `POST /backlog/act?t=<token>`: guards, then the pure plan, then the
+/// effect. The guard order is the ruling's: loopback bind, loopback Host,
+/// loopback Origin when sent, then the token.
+async fn backlog_act(
+    Query(q): Query<WsQuery>,
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Act>,
+) -> Response {
+    if let Err((code, msg)) = write_guard(&headers, st.writable) {
+        return plain_status(code, &msg);
+    }
+    if !token_ok(q.t.as_deref(), &st.token) {
+        return unauthorized();
+    }
+    let id = body.id().to_string();
+    let inputs = model_inputs(&st).await;
+    let planned = match plan_act(&inputs, &body) {
+        Ok(p) => p,
+        Err((code, msg)) => return plain_status(code, &msg),
+    };
+    let (ok, notice) = run_planned(&st, &id, planned).await;
+    act_response(ok, &notice)
 }
 
 /// The gathered inputs, cached under [`backlog_model::REGATHER_AFTER`] while
@@ -1526,6 +1752,8 @@ mod tests {
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
             fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
             model: Default::default(),
             shutdown,
         };
@@ -1921,6 +2149,8 @@ console.log("evictedRowCount: 18 cases ok");
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
             fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
             model: Default::default(),
             shutdown,
         };
@@ -2257,6 +2487,8 @@ console.log("backlog page helpers: 11 cases ok");
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
             fleet_html: fleet_path,
+            session: Arc::<str>::from("sess"),
+            writable: true,
             model: Default::default(),
             shutdown,
         };
@@ -2509,6 +2741,295 @@ console.log("backlog page helpers: 11 cases ok");
         .unwrap();
         assert_eq!(status_web("t", &socket), 1);
         assert!(state.exists(), "status is a read door: it never deletes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_loopback_accepts_only_the_loopback_names() {
+        for good in [
+            "localhost",
+            "localhost:8722",
+            "127.0.0.1",
+            "127.0.0.1:8722",
+            "[::1]",
+            "[::1]:8722",
+            "::1",
+        ] {
+            assert!(names_loopback(good), "{good} is loopback");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:8722",
+            "127.0.0.1.example",
+            "0.0.0.0",
+            "0.0.0.0:8722",
+            "[::]",
+            "null",
+        ] {
+            assert!(!names_loopback(bad), "{bad} is not loopback");
+        }
+    }
+
+    // The ruling's guard order: loopback bind, loopback Host, loopback
+    // Origin when sent. The token gate sits after these in the handler.
+    #[test]
+    fn write_guard_refuses_in_ruling_order() {
+        use axum::http::{header, HeaderMap};
+        let mut h = HeaderMap::new();
+        // AC6-ERR: a non-loopback bind is read-only, every request refused.
+        let err = write_guard(&h, false).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.1,
+            "the bridge is read-only: it is not bound to loopback"
+        );
+        // Host must always name loopback.
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Host does not name loopback");
+        h.insert(header::HOST, "evil.example:8722".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Host does not name loopback");
+        h.insert(header::HOST, "127.0.0.1:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok(), "no Origin header: pass");
+        // AC5-ERR: an Origin that names another site is refused; `null` too.
+        h.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Origin does not name loopback");
+        h.insert(header::ORIGIN, "null".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Origin does not name loopback");
+        h.insert(header::ORIGIN, "http://127.0.0.1:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok());
+        h.insert(header::ORIGIN, "http://localhost:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok());
+    }
+
+    // AC4, AC9, AC10, and the 503/404/400 map of the pure half.
+    #[test]
+    fn plan_act_maps_errors_and_plans_the_argv() {
+        let inp = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-1", "status": "ready", "priority": "p1"
+        })]);
+        // AC4's argv half: a priority act plans the field_argv form.
+        let act = Act::Field {
+            id: "x-1".into(),
+            field: "priority".into(),
+            value: "p1".into(),
+        };
+        match plan_act(&inp, &act) {
+            Ok(Planned::Verb(args)) => {
+                assert_eq!(args, vec!["backlog", "update", "x-1", "--priority", "p1"]);
+            }
+            _ => panic!("a field act plans a verb argv"),
+        }
+        // AC9-EDGE: a claimed card refuses a launch, naming the node.
+        let claimed = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-2", "status": "in_progress"
+        })]);
+        let err = plan_act(&claimed, &Act::Blueprint { id: "x-2".into() }).unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(
+            err.1,
+            "x-2 is already being worked; open its session instead"
+        );
+        // AC10-ERR: an external backend's field-edits reason is the 409 body.
+        let mut github = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-3", "status": "ready"
+        })]);
+        github.backend = "github".into();
+        let err = plan_act(
+            &github,
+            &Act::Field {
+                id: "x-3".into(),
+                field: "status".into(),
+                value: "done".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1, "edit it in github");
+        // A failed read is 503; a miss is 404 naming the id; a bad field is
+        // 400.
+        let mut bad = backlog_model::fixture(Vec::new());
+        bad.rows_error = Some("the store read failed".into());
+        assert_eq!(
+            plan_act(&bad, &Act::Target { id: "x-1".into() })
+                .unwrap_err()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            plan_act(
+                &inp,
+                &Act::Target {
+                    id: "x-nope".into()
+                }
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let err = plan_act(
+            &inp,
+            &Act::Field {
+                id: "x-1".into(),
+                field: "color".into(),
+                value: "blue".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    // The route's refusal order over a real listener: guards, token, then
+    // the JSON extractor. No store read happens in any refusal, so the test
+    // never gathers.
+    #[tokio::test]
+    async fn act_route_refusals_come_in_ruling_order() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-act-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(router_state)).await.unwrap();
+        });
+        async fn post(stream: &mut tokio::net::TcpStream, head: &str, body: &[u8]) -> String {
+            stream.write_all(head.as_bytes()).await.unwrap();
+            if !body.is_empty() {
+                stream.write_all(body).await.unwrap();
+            }
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            reply
+        }
+        let body = br#"{"act":"field","id":"x-1","field":"priority","value":"p1"}"#;
+        // AC6-ERR: a read-only bridge refuses every act.
+        let readonly_state = AppState {
+            writable: false,
+            ..state.clone()
+        };
+        let ro_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ro_addr = ro_listener.local_addr().unwrap();
+        let ro_server = tokio::spawn(async move {
+            axum::serve(ro_listener, router(readonly_state))
+                .await
+                .unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(ro_addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", ro_addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(reply.contains("the bridge is read-only"), "{reply}");
+        ro_server.abort();
+        // AC7-ERR: wrong token, 401.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=wrong HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        // AC5-ERR: an evil Origin or a rebinding Host, 403 and no process.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: https://evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(
+            reply.contains("write refused: Origin does not name loopback"),
+            "{reply}"
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: evil.example:9\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(
+            reply.contains("write refused: Host does not name loopback"),
+            "{reply}"
+        );
+        // A non-JSON content type is refused by the extractor before the
+        // handler: 415.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 415"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC6's page half: the act controls exist only on a writing bridge.
+    #[tokio::test]
+    async fn backlog_page_flags_writability() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-flag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(router_state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.contains("data-writable=\"true\""), "{reply}");
+        server.abort();
+        // The read-only state: no flag anywhere in the page.
+        let ro_state = AppState {
+            writable: false,
+            ..state.clone()
+        };
+        let ro_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ro_addr = ro_listener.local_addr().unwrap();
+        let ro_server = tokio::spawn(async move {
+            axum::serve(ro_listener, router(ro_state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(ro_addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(!reply.contains("data-writable"), "{reply}");
+        ro_server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -72,6 +72,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `retire` | `daemon` | `fno-agents-daemon` | retires finished work | 300 s |
 | `machine_watch` | `daemon` | `fno-agents-daemon` | watches sustained machine footprint | 300 s |
 | `arm_watch` | `daemon` | `fno-agents-daemon` | pages the operator when arms stay broken past the threshold | 300 s |
+| `king_settle` | `daemon` | `fno-agents-daemon` | mails the owning king when a covered PR settles green or its node closes | 300 s |
 | `provider_cap` | `daemon` | `fno-agents-daemon` | provider cap accounting | 120 s |
 | `merge_close` | `daemon` | `fno-agents-daemon` | merge-close sweeps | 900 s |
 | `crown_ledger` | `daemon` | `fno-agents-daemon` | renders reign.html | 300 s |

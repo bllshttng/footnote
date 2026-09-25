@@ -627,6 +627,18 @@ jobs:
           PR_BASE_REF: ${{ github.base_ref }}
         run: bash scripts/ci/check-proto-version-bump.sh
 
+      - name: Registry schema field-set bump guard
+        # Same pull_request wiring as the proto guard, for the registry twin:
+        # a `fields` change in registry_schema.toml without a monotonic
+        # `version` bump re-opens the equal-version read (an fno built before
+        # the field landed reading newer rows as its own version, Python
+        # refusing the lot).
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/check-registry-schema-bump.sh
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -817,8 +829,14 @@ jobs:
     # harness imports through cli/.venv, blueprint_judge shells rg, and the
     # real-process tests spawn both built binaries. A lib red no longer
     # hides this shard: the two jobs run independently and the aggregator
-    # collects both verdicts.
-    timeout-minutes: 40
+    # collects both verdicts. Raised to 90 on 2026-09-24: the 60 cap
+    # cancelled this job at 60m16s with no failed test (the
+    # --test-threads=1 step alone ran 57 minutes on the runner image
+    # 20260920.314), the second cap cancel in two days on this leg. The
+    # lane-queue work in 2413 adds 12 real-process tests to it. The
+    # suite-size redesign is filed as demand on x-b7fa; this number names
+    # the measured cost, it does not fix the growth.
+    timeout-minutes: 90
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
 

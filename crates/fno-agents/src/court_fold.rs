@@ -328,6 +328,7 @@ fn fold_one(
         let held = state.is_some_and(|s| HELD_CLAIMS.contains(&s));
         nodes.push(json!({
             "id": id,
+            "cwd": entry.get("cwd").cloned().unwrap_or(Value::Null),
             "slug": s_str(entry, "slug").unwrap_or(""),
             "status": status,
             "worker": if held {
@@ -894,6 +895,31 @@ mod tests {
         let sum: i64 = counts.values().map(|v| v.as_i64().unwrap()).sum();
         assert_eq!(sum, 4);
         assert!(counts.contains_key("done") && counts.contains_key("idea"));
+    }
+
+    /// The settle arm reads each covered node's repo from the fold, so a
+    /// node row carries the graph's cwd verbatim.
+    #[test]
+    fn a_node_row_carries_the_graph_cwd() {
+        let workers = BTreeMap::new();
+        let mut e = entries();
+        e[1]["cwd"] = json!("/r");
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &e,
+            &no_projects(),
+            &workers,
+            true,
+            &no_owners(),
+            0,
+        );
+        let nodes = fold["nodes"].as_array().unwrap();
+        let x1 = nodes
+            .iter()
+            .find(|node| node["id"] == "x-1")
+            .expect("x-1 row");
+        assert_eq!(x1["cwd"], "/r");
     }
 
     #[test]
