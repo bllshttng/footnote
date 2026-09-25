@@ -132,6 +132,9 @@ const PRIORITY_MIGRATION: &[(&str, &str)] = &[("high", "p1"), ("medium", "p2"), 
 /// Legacy `status` vocabulary -> current (statuses.STATUS_MIGRATION).
 const STATUS_MIGRATION: &[(&str, &str)] = &[("claimed", "in_progress")];
 
+/// Legacy session `phase` vocabulary -> current (2026-09-25 rename).
+const PHASE_MIGRATION: &[(&str, &str)] = &[("do", "execute")];
+
 /// Derived `status` vocabulary that outranks the blocked read-time overlay.
 const OVERLAY_TERMINAL_STATUSES: &[&str] = &["done", "superseded", "deferred", "in_review"];
 
@@ -1175,6 +1178,18 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
                 obj.insert("status".to_string(), Value::String(to.to_string()));
             }
         }
+        if let Some(rows) = obj.get_mut("sessions").and_then(Value::as_array_mut) {
+            for row in rows.iter_mut() {
+                let Some(row_obj) = row.as_object_mut() else {
+                    continue;
+                };
+                if let Some(old) = row_obj.get("phase").and_then(Value::as_str) {
+                    if let Some((_, to)) = PHASE_MIGRATION.iter().find(|(from, _)| *from == old) {
+                        row_obj.insert("phase".to_string(), Value::String(to.to_string()));
+                    }
+                }
+            }
+        }
     }
     for e in entries.iter_mut() {
         if !is_dict(e) {
@@ -1386,9 +1401,9 @@ pub fn is_open_phase_row(row: &Value, phase: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether a session row is a valid, unfinished `do` window.
+/// Whether a session row is a valid, unfinished `execute` window.
 pub fn is_open_do_row(row: &Value) -> bool {
-    is_open_phase_row(row, "do")
+    is_open_phase_row(row, "execute")
 }
 
 /// The WORK-done verdict for one session, read through the reverse join over
