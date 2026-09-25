@@ -32,6 +32,7 @@ const IDENTIFY_POLL: Duration = Duration::from_millis(250);
 /// stamped with. Built before launch so a test's launcher can record it.
 pub(crate) struct LaunchSpec {
     pub argv: Vec<String>,
+    pub sock: PathBuf,
     pub cwd: PathBuf,
     pub keeper_log: PathBuf,
     pub agent_name: String,
@@ -226,6 +227,7 @@ where
     argv.extend(completed_argv);
     let spec = LaunchSpec {
         argv,
+        sock: sock.to_path_buf(),
         cwd: PathBuf::from(cwd),
         keeper_log: keeper_log.clone(),
         agent_name: row_name.clone(),
@@ -490,6 +492,11 @@ fn launch_keeper(spec: &LaunchSpec) -> Result<u32, String> {
         .open(&spec.keeper_log)
         .map_err(|e| format!("open {}: {e}", spec.keeper_log.display()))?;
     command.stderr(std::process::Stdio::from(log));
+    // The keeper binds the socket itself but never makes its directory; the
+    // Python spawn lane mkdirs the same parent before its Popen.
+    if let Some(parent) = spec.sock.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
     command.process_group(0);
     crate::claims::stamp_command_env(
         &mut command,
