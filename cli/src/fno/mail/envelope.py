@@ -1,8 +1,10 @@
 """Thin adapter for Rust's ``<fno_mail>`` renderer and body guard."""
+
 from __future__ import annotations
 
 import json as _json
 import re as _re
+import subprocess
 from typing import Optional
 
 from fno.paths import agents_registry_path
@@ -30,7 +32,6 @@ class ForgedEnvelopeError(ValueError):
 
 def _render_in_rust(payload: dict) -> str:
     from fno.rust_binary import find_dev_binary, resolve_binary
-    import subprocess
 
     binary = find_dev_binary() or resolve_binary() or "fno-agents"
     result = subprocess.run(
@@ -42,7 +43,7 @@ def _render_in_rust(payload: dict) -> str:
     )
     if result.returncode:
         raise ForgedEnvelopeError(result.stderr.strip())
-    return result.stdout.rstrip("\n")
+    return result.stdout.removesuffix("\n")
 
 
 # A quote closes the attribute early; an angle bracket forges a tag boundary

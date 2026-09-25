@@ -17,6 +17,28 @@ def _write_registry(path: Path, rows: list[dict]) -> None:
     )
 
 
+def test_rust_adapter_preserves_body_trailing_newlines(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    monkeypatch.setattr(
+        envelope.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout='<fno_mail from="s">body\n\n', stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.find_dev_binary", lambda: Path("/test/fno-agents")
+    )
+
+    assert envelope._render_in_rust({}) == '<fno_mail from="s">body\n'
+
+
 def test_harness_for_provider_missing_renders_unknown_never_a_vendor():
     # A null/blank provider_from is an ABSENCE of harness evidence, and
     # rendering it as "claude-code" made a null harness byte-identical to a
