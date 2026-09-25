@@ -188,6 +188,13 @@ fn open(payload: &Value) -> Result<Value, String> {
         .get("phase")
         .and_then(Value::as_str)
         .ok_or("parked payload carries no phase")?;
+    // One-release input alias, matching Python's PHASE_INPUT_ALIASES: a
+    // payload parked before the rename still opens. Drop the alias when the
+    // release window closes.
+    let phase = match phase {
+        "do" => "execute",
+        other => other,
+    };
     if !PHASES.contains(&phase) {
         return Err(format!("parked phase {phase:?} is not in the vocabulary"));
     }
