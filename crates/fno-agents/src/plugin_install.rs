@@ -494,6 +494,31 @@ fn push_root(
     roots.push(PluginRoot { path, origin, live });
 }
 
+/// The installPath strings installed_plugins.json registers for fno@footnote,
+/// existence unchecked: the sweep's guard must fire on the registry's word
+/// alone, since a registered-but-deleted path is exactly the lie the sweep
+/// must never create.
+fn registry_install_paths(home: &Path) -> Vec<PathBuf> {
+    let text = match std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json")) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    v.get("plugins")
+        .and_then(|p| p.get("fno@footnote"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| e.get("installPath").and_then(Value::as_str))
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The footnote marketplace's `source.source` kind ("directory", "file",
 /// "github", ...). None when the registry is unreadable or names no footnote
 /// marketplace.
@@ -969,6 +994,22 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
     }
     let cache = home.join(".claude/plugins/cache/footnote");
     if !cache.exists() {
+        return (removed, refused);
+    }
+    // installed_plugins.json is Claude's own registry: a tree it registers
+    // inside is never the sweep's to delete, whatever its staleness. Install
+    // registered cache/footnote/fno/<ver> here and this sweep deleted it in
+    // the same run, leaving the registry pointing at a missing tree and the
+    // review preflight's plugin-file check reading unknown.
+    if let Some(registered) = registry_install_paths(home)
+        .into_iter()
+        .find(|p| p.starts_with(&cache))
+    {
+        refused.push(format!(
+            "claude cache {} kept: installed_plugins.json registers {} inside it",
+            cache.display(),
+            registered.display()
+        ));
         return (removed, refused);
     }
     let live_roots: Vec<&PluginRoot> = roots.iter().filter(|r| r.live).collect();
@@ -2473,6 +2514,42 @@ mod tests {
             "{refused:?}"
         );
         assert!(cache.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The sweep must never delete a tree installed_plugins.json registers
+    /// inside: install registers cache/footnote/fno/<ver> and the same run's
+    /// sweep once deleted cache/footnote, leaving the registry pointing at a
+    /// missing tree and the review preflight's plugin-file check reading
+    /// unknown. The registry's word outranks the copy's staleness.
+    #[test]
+    fn sweep_keeps_the_cache_the_registry_registers_inside() {
+        let base = std::env::temp_dir().join(format!("pi-rm-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = fixture_home(&base);
+        let stage = base.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let cache = home.join(".claude/plugins/cache/footnote");
+        let install_path = cache.join("fno/0.4.0");
+        fs::create_dir_all(&install_path).unwrap();
+        write_registry(&home, &install_path);
+        write_marketplace(&home, "directory", &stage, &stage);
+        let live_stage = vec![PluginRoot {
+            path: stage.clone(),
+            live: true,
+            origin: "marketplace",
+        }];
+
+        let (removed, refused) = remove_stale_copies(&home, &live_stage);
+        assert!(removed.is_empty(), "removed: {removed:?}");
+        assert!(
+            refused.iter().any(|l| l.contains("installed_plugins.json")),
+            "{refused:?}"
+        );
+        assert!(
+            install_path.exists(),
+            "the registered installPath must survive the sweep"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }
