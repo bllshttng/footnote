@@ -73,11 +73,15 @@ pub fn blit_area(
             };
             *slot = map_cell(src);
             if wide {
-                if let Some(pad) = cells.get_mut(fr * frame_cols + fc + 1) {
-                    *pad = proto::Cell {
-                        flags: cell_flags::WIDE_SPACER,
-                        ..proto::Cell::default()
-                    };
+                // The pad stays inside the frame row: a wide glyph in the
+                // last column must never stamp the next row's first cell.
+                if fc + 1 < frame_cols {
+                    if let Some(pad) = cells.get_mut(fr * frame_cols + fc + 1) {
+                        *pad = proto::Cell {
+                            flags: cell_flags::WIDE_SPACER,
+                            ..proto::Cell::default()
+                        };
+                    }
                 }
                 x += 1;
             }

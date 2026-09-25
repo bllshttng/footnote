@@ -1431,7 +1431,7 @@ pub fn menu_byte_for(action_id: &str) -> Option<u8> {
 /// broken from whichever surface was missed.
 ///
 /// A teaser, not the key list: the short bar a pending prefix paints at
-/// once (the herdr-style prefix bar). Each key comes off the LIVE
+/// once. Each key comes off the LIVE
 /// key table via [`key_for`], so a rebind shows the real key; an action
 /// missing from the table drops silently rather than printing a gap. The
 /// full table stays in `?`.

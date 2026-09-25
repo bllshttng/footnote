@@ -136,17 +136,21 @@ pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> 
                         esc.push(0x1b);
                         continue;
                     }
-                    if (0x40..=0x7e).contains(&b) || esc.len() >= MAX_ESC_CARRY {
-                        esc.clear();
-                        continue;
+                    match esc_step(esc, b) {
+                        // A parameter byte carries; a ceiling overrun is
+                        // consumed whole.
+                        EscStep::Carried => continue,
+                        // The final byte completed a sequence this fold has no
+                        // mapping for: swallowed whole, never leaked.
+                        EscStep::Final => {
+                            esc.clear();
+                            continue;
+                        }
+                        // A C0 control mid-sequence is malformed: abandon the
+                        // sequence and reprocess the byte below rather than
+                        // losing it.
+                        EscStep::Reprocess => esc.clear(),
                     }
-                    if (0x20..=0x3f).contains(&b) {
-                        esc.push(b);
-                        continue;
-                    }
-                    // A C0 control mid-sequence is malformed: abandon the
-                    // sequence and reprocess the byte below rather than losing it.
-                    esc.clear();
                 }
             }
         }

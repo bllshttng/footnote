@@ -1442,13 +1442,15 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
 
 /// A list opened before the catalog read landed froze on "reading
 /// models...": reopen it in place so the rows re-derive from the landed
-/// outcome. No-op when nothing is open or the sheet no longer fits.
+/// outcome, keeping any filter the user typed meanwhile. No-op when nothing
+/// is open or the sheet no longer fits.
 pub(crate) fn refresh_open_picker(view: &mut View) {
-    let target = view
-        .launcher
-        .as_ref()
-        .and_then(|l| l.picker.as_ref().map(|p| (picker_anchor(l, view), p.field)));
-    let Some((Some(anchor), field)) = target else {
+    let target = view.launcher.as_ref().and_then(|l| {
+        l.picker
+            .as_ref()
+            .map(|p| (picker_anchor(l, view), p.field, p.filter.clone()))
+    });
+    let Some((Some(anchor), field, filter)) = target else {
         return;
     };
     if let Some(l) = view.launcher.as_mut() {
@@ -1460,6 +1462,12 @@ pub(crate) fn refresh_open_picker(view: &mut View) {
             Some(anchor),
             field,
         );
+        if !filter.is_empty() {
+            if let Some(mut pk) = l.picker.take() {
+                pk.filter = filter;
+                rebuild_picker(l, pk);
+            }
+        }
     }
 }
 
@@ -1734,6 +1742,20 @@ fn picker_rows(
                                 );
                             }
                         }
+                    }
+                    // Every harness row failed selectable(): the list would
+                    // render as a bare title. Name the reason, the way the
+                    // project and node pickers name an empty list.
+                    if rows.is_empty() {
+                        push_entry(
+                            &mut rows,
+                            &mut actions,
+                            "\u{2022}",
+                            "no harness installed",
+                            "install a harness, then reopen",
+                            false,
+                            None,
+                        );
                     }
                     if let Some(err) = models_err {
                         push_entry(
@@ -2329,12 +2351,12 @@ pub(crate) fn form_mode(view: &View) -> Mode {
         return Mode::Sheet;
     };
     let text_w = (view.term.1 as usize).saturating_sub(1);
-    let needed: usize = l
-        .chip_texts(view)
+    let chips = l.chip_texts(view);
+    let needed: usize = chips
         .iter()
         .map(|(f, label)| label_width(label) as usize + usize::from(is_picker_chip(*f)))
         .sum::<usize>()
-        + l.chip_texts(view).len().saturating_sub(1); // one-column gaps
+        + chips.len().saturating_sub(1); // one-column gaps
     if needed <= text_w {
         Mode::Bottom
     } else {
