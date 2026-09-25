@@ -1289,7 +1289,7 @@ async fn run(args: Vec<String>) -> i32 {
         // gone and its policy state is unknown, so it refuses rather than
         // falling through to a harness default the seam could have refused.
         if spawn_needs_python_seam(&params) {
-            let err = fno_agents::scrape::exec_python_front(&args);
+            let err = exec_python_front(&args);
             eprintln!(
                 "fno-agents: config.agents.profiles is read only by the Python \
                  spawn seam, and exec of 'fno agents spawn' failed: {err}. No \
@@ -1365,7 +1365,7 @@ async fn run(args: Vec<String>) -> i32 {
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = fno_agents::scrape::exec_python_front(&pane_args);
+            let err = exec_python_front(&pane_args);
             eprintln!(
                 "fno-agents: substrate 'pane' is mux-hosted via the Python CLI, \
                  but exec of 'fno agents spawn' failed: {err}. Install the fno \
@@ -1386,7 +1386,7 @@ async fn run(args: Vec<String>) -> i32 {
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = fno_agents::scrape::exec_python_front(&account_args);
+            let err = exec_python_front(&account_args);
             eprintln!(
                 "fno-agents: --account resolution runs in the Python CLI, but \
                  exec of 'fno agents spawn' failed: {err}. Run `fno agents \
@@ -1994,6 +1994,23 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
         return false;
     }
     params.get("defaults_applied").is_none()
+}
+
+fn exec_python_front(args: &[String]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(fno_agents::scrape::fno_bin())
+        .arg("agents")
+        .args(args)
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .exec();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return std::process::Command::new(fno_agents::scrape::fno_py())
+            .arg("agents")
+            .args(args)
+            .env("FNO_AGENTS_RUNTIME", "python")
+            .exec();
+    }
+    err
 }
 
 // The `--agent` refusal for codex names the native role form, not generic advice.
