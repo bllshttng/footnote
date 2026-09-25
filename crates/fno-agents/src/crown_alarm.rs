@@ -168,19 +168,33 @@ fn empty_crown_finding(
 /// second builder of the held list would be the dual implementation the
 /// port law refuses.
 pub fn collect(config_cwd: &Path) -> Result<(Vec<Finding>, String), String> {
-    let payload = read_court_payload(config_cwd)?;
+    let payload = read_court_payload(config_cwd);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    evaluate(
+    collect_from(
         &payload,
         &crate::operator_notice::notify_signals_path(),
         now,
     )
 }
 
-fn read_court_payload(config_cwd: &Path) -> Result<Value, String> {
+/// The judge over an already-read payload: the same verdict `collect`
+/// answers, with the read handed in, so one court read feeds both the
+/// crown alarm and the settle pass.
+pub(crate) fn collect_from(
+    payload: &Result<Value, String>,
+    store: &Path,
+    now_unix: u64,
+) -> Result<(Vec<Finding>, String), String> {
+    match payload {
+        Err(reason) => Err(reason.clone()),
+        Ok(payload) => evaluate(payload, store, now_unix),
+    }
+}
+
+pub(crate) fn read_court_payload(config_cwd: &Path) -> Result<Value, String> {
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
     let mut cmd = std::process::Command::new(&fno);
     cmd.args(["agents", "court", "--nodes"])
