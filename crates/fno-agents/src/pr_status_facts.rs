@@ -469,9 +469,6 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     let Some(check_runs) = payload.get("check_runs").and_then(Value::as_array) else {
         return json!({"error": "status-zero-job-runs needs a check_runs array"});
     };
-    // The op owns the runs listing: paginated, because a busy head carries
-    // more runs than one page and a zero-job failure past page 1 must still
-    // read red. No caller passes a pre-read page - one listing, one reader.
     let Some(sha) = payload
         .get("sha")
         .and_then(Value::as_str)
@@ -479,10 +476,40 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     else {
         return json!({"error": "status-zero-job-runs needs a non-empty sha"});
     };
+    match zero_job_scan(probes, &cwd, slug, sha, check_runs) {
+        Err(err) => json!({"error": err}),
+        Ok(scan) => json!({
+            "rows": scan.rows,
+            // The same listing, for the caller's workflow-name mapping.
+            "listing": scan.listing,
+            "check_runs": scan.check_runs,
+        }),
+    }
+}
+
+/// The zero-job scan's probe-generic core: the paginated runs listing, the
+/// timed-out relabel, and the shared rule. `zero_job_runs_op` shapes it as a
+/// JSON receipt; the pr_status reader calls it in process.
+pub(crate) struct ZeroJobScan {
+    pub rows: Vec<Value>,
+    pub listing: Vec<Value>,
+    pub check_runs: Vec<Value>,
+}
+
+pub(crate) fn zero_job_scan<P: GhProbe>(
+    probes: &P,
+    cwd: &Path,
+    slug: &str,
+    sha: &str,
+    check_runs: &[Value],
+) -> Result<ZeroJobScan, String> {
+    // The op owns the runs listing: paginated, because a busy head carries
+    // more runs than one page and a zero-job failure past page 1 must still
+    // read red. No caller passes a pre-read page - one listing, one reader.
     let path = format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100");
-    let runs: Vec<Value> = match probes
+    let runs: Vec<Value> = probes
         .run_gh(
-            &cwd,
+            cwd,
             &[
                 "api".to_string(),
                 path,
@@ -513,11 +540,8 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
                 }
             }
             runs
-        }) {
-        Ok(runs) => runs,
-        Err(err) => return json!({ "error": err }),
-    };
-    let mut check_runs = check_runs.clone();
+        })?;
+    let mut check_runs = check_runs.to_vec();
     for run in &mut check_runs {
         let timed_out = run.get("conclusion").and_then(Value::as_str) == Some("cancelled")
             && run
@@ -534,7 +558,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
         let path = format!("repos/{slug}/check-runs/{id}/annotations");
         let timeout = probes
             .run_gh(
-                &cwd,
+                cwd,
                 &[
                     "api".to_string(),
                     "--paginate".to_string(),
@@ -556,7 +580,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             "api".to_string(),
             format!("repos/{slug}/actions/runs/{id}/jobs?per_page=1"),
         ];
-        let (ok, stdout, _stderr) = probes.run_gh(&cwd, &args)?;
+        let (ok, stdout, _stderr) = probes.run_gh(cwd, &args)?;
         if !ok {
             return Err(format!("the jobs read for run {id} failed"));
         }
@@ -566,27 +590,24 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
     };
-    match zero_job_failures(&runs, &check_runs, &jobs_total) {
-        Err(err) => json!({"error": err}),
-        Ok(rows) => json!({
-            "rows": rows
-                .iter()
-                .map(|r| {
-                    json!({
-                        "name": r.path,
-                        "status": "completed",
-                        "conclusion": r.conclusion,
-                        "startedAt": r.created_at,
-                        "detailsUrl": r.url,
-                        "workflow": r.path,
-                    })
-                })
-                .collect::<Vec<_>>(),
-            // The same listing, for the caller's workflow-name mapping.
-            "listing": runs,
-            "check_runs": check_runs,
-        }),
-    }
+    let rows = zero_job_failures(&runs, &check_runs, &jobs_total)?
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.path,
+                "status": "completed",
+                "conclusion": r.conclusion,
+                "startedAt": r.created_at,
+                "detailsUrl": r.url,
+                "workflow": r.path,
+            })
+        })
+        .collect();
+    Ok(ZeroJobScan {
+        rows,
+        listing: runs,
+        check_runs,
+    })
 }
 
 // ---------------------------------------------------------------------------
