@@ -2549,6 +2549,9 @@ fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
         .as_deref()
         .filter(|session| !session.is_empty())
         .ok_or_else(|| format!("{} has no harness session id", row.name))?;
+    if crate::claims::resolve_identity().0.as_deref() != Some(session) {
+        return Err("the live crown holder is not this session".into());
+    }
     let label = row.name.as_str();
     if row.harness_title.as_deref() == Some(label) {
         return Ok(());

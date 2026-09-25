@@ -53,6 +53,14 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
         }
     }
     let mode = input.get("mode").and_then(Value::as_str).unwrap_or("wrap");
+    if !matches!(mode, "wrap" | "tag") {
+        return Err(format!("mail envelope: unknown render mode {mode:?}"));
+    }
+    if (mode == "wrap") != wrapping.is_some() {
+        return Err(format!(
+            "mail envelope: render mode {mode:?} has the wrong body shape"
+        ));
+    }
     let from_short = attr(input, "from").unwrap_or("");
     let harness_hint = attr(input, "harness");
     let from_session = attr(input, "from_session");
@@ -278,5 +286,8 @@ mod tests {
         assert!(render_at(&json!({"mode":"tag", "from":"a<"}), &path)
             .unwrap_err()
             .contains("angle bracket"));
+        assert!(render_at(&json!({"mode":"unknown", "from":"a"}), &path)
+            .unwrap_err()
+            .contains("unknown render mode"));
     }
 }

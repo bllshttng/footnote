@@ -200,6 +200,13 @@ pub fn name_crown(
     let shown = update(store_path, |store| {
         let names = live_names_in(store, &live);
         if let Some(existing) = names.get(&canon) {
+            if store
+                .crowns
+                .get(&canon)
+                .is_some_and(|record| record.name.eq_ignore_ascii_case(name))
+            {
+                return Ok(existing.clone());
+            }
             return Err(format!(
                 "this crown is already named {existing}; the name belongs to the crown"
             ));
@@ -275,6 +282,13 @@ pub fn keep_from(
     let live = live_index(registry_path)?;
     update(store_path, |store| {
         let Some(rec) = store.crowns.get(&old).cloned() else {
+            if store.crowns.get(&new).is_some_and(|rec| {
+                live.get(&new).is_some_and(|crown| {
+                    rec.holder_session.is_none() || rec.holder_session == crown.holder_session
+                })
+            }) {
+                return Ok(());
+            }
             return Err(format!(
                 "no crown name is recorded over {old}; nothing to keep"
             ));
@@ -448,6 +462,33 @@ mod tests {
         let dump = snapshot(&store_path(tmp.path())).unwrap();
         assert_eq!(dump["crowns"]["fno"]["regnal"], json!(1));
         assert_eq!(dump["crowns"]["fno"]["holder_session"], json!("sess-a"));
+    }
+
+    #[test]
+    fn retrying_the_same_name_repairs_a_label_rename_refusal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_registry(
+            tmp.path(),
+            json!([
+                crown_row("king-a", "fno", 1, "sess-a"),
+                crown_row("king-barnaby", "x-aaaa", 2, "sess-b")
+            ]),
+        );
+        let store = store_path(tmp.path());
+        let registry = registry_path(tmp.path());
+        let refused = name_crown(&store, &registry, "fno", "barnaby").unwrap_err();
+        assert!(
+            refused.contains("already names another worker"),
+            "{refused}"
+        );
+
+        write_registry(tmp.path(), json!([crown_row("king-a", "fno", 1, "sess-a")]));
+        assert_eq!(
+            name_crown(&store, &registry, "fno", "BARNABY").unwrap(),
+            "Barnaby"
+        );
+        let registry = crate::state::load_registry(&registry).unwrap();
+        assert_eq!(registry.entries[0].name, "king-barnaby");
     }
 
     #[test]
