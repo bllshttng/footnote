@@ -594,22 +594,23 @@ fn write_human(
         }
     };
     let (replaced, replaced_line) = replaced_parts(&receipt.node_id, receipt.replaced.as_ref());
+    let mut line = format!(
+        "noted {}: revision {}, {chars} chars\n{replaced_line}",
+        receipt.node_id, receipt.revision
+    );
+    // The encounters snapshot rides the receipt from inside the publication
+    // lock, so the hint can never fire on an encounter the write could not
+    // see.
     let hint = encounter_hint(
         &receipt.node_id,
-        entry,
+        &receipt.encounters,
         parsed.self_session.as_deref(),
         receipt.replaced.as_ref(),
     );
-    let line = match hint {
-        Some(h) => format!(
-            "noted {}: revision {}, {chars} chars\n{replaced_line}\n{h}",
-            receipt.node_id, receipt.revision
-        ),
-        None => format!(
-            "noted {}: revision {}, {chars} chars\n{replaced_line}",
-            receipt.node_id, receipt.revision
-        ),
-    };
+    if let Some(h) = hint {
+        line.push('\n');
+        line.push_str(&h);
+    }
     let out = json!({
         "status": "ok", "routed": "state", "node_id": receipt.node_id, "id": receipt.node_id,
         "text": text, "revision": receipt.revision, "journaled": receipt.journaled,
@@ -658,7 +659,7 @@ fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -
 /// never a gate.
 fn encounter_hint(
     node_id: &str,
-    entry: &Value,
+    encounters: &Value,
     self_session: Option<&str>,
     prior: Option<&node_state::CurrentStateView>,
 ) -> Option<String> {
@@ -667,7 +668,7 @@ fn encounter_hint(
     if p.source_session_id.as_deref() != Some(s) {
         return None;
     }
-    let already = entry["encounters"]
+    let already = encounters
         .as_array()
         .map(|items| {
             items.iter().any(|e| {
@@ -739,10 +740,9 @@ mod tests {
 
     #[test]
     fn same_author_and_no_encounter_hints_encounter() {
-        let entry = json!({"id": "t-1"});
         let hint = encounter_hint(
             "t-1",
-            &entry,
+            &json!(null),
             Some("sess-a"),
             Some(&view(3, Some("sess-a"))),
         );
@@ -752,9 +752,9 @@ mod tests {
 
     #[test]
     fn a_matching_encounter_silences_the_hint() {
-        let by_session = json!({"id": "t-1", "encounters": [
+        let by_session = json!([
             {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "session_id": "sess-a"}
-        ]});
+        ]);
         assert!(encounter_hint(
             "t-1",
             &by_session,
@@ -762,9 +762,9 @@ mod tests {
             Some(&view(3, Some("sess-a")))
         )
         .is_none());
-        let by_voter = json!({"id": "t-1", "encounters": [
+        let by_voter = json!([
             {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "voter_key": "sess-a"}
-        ]});
+        ]);
         assert!(encounter_hint(
             "t-1",
             &by_voter,
@@ -776,10 +776,9 @@ mod tests {
 
     #[test]
     fn a_different_prior_author_gets_no_hint() {
-        let entry = json!({"id": "t-1"});
         assert!(encounter_hint(
             "t-1",
-            &entry,
+            &json!(null),
             Some("sess-b"),
             Some(&view(3, Some("sess-a")))
         )
@@ -788,7 +787,8 @@ mod tests {
 
     #[test]
     fn no_self_session_gets_no_hint() {
-        let entry = json!({"id": "t-1"});
-        assert!(encounter_hint("t-1", &entry, None, Some(&view(3, Some("sess-a")))).is_none());
+        assert!(
+            encounter_hint("t-1", &json!(null), None, Some(&view(3, Some("sess-a")))).is_none()
+        );
     }
 }
