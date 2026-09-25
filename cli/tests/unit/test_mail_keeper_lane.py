@@ -285,7 +285,7 @@ def test_the_keeper_verb_miss_records_the_reason_token(monkeypatch):
     _fake_verb(monkeypatch, '{"delivered": false, "reason": "no-keeper-listener"}')
     reasons: list = []
     assert not d._mail_inject_keeper(KEEPER_SID, "x", harness="pi", reason_out=reasons)
-    assert reasons == ["no-keeper-listener"]
+    assert reasons == ["no-keeper-listener", "waited-0s"]
 
 
 def test_a_bus_only_keeper_recipient_is_refused_before_the_binary(monkeypatch):
