@@ -362,13 +362,9 @@ impl LaunchDraft {
             } else {
                 non_empty(&self.provider)
             },
-            // A row with no provider pin rides as a model-only value for the
-            // door to resolve. A provider selection carries both axes and
-            // leaves the harness explicitly pinned.
-            model_names_harness: self.harness() != "opencode"
-                && self.model_row.is_some()
-                && self.provider.is_empty()
-                && non_empty(&self.model).is_some(),
+            // The composer owns all three axes; keep the selected harness on
+            // the request even when a model row also names a provider.
+            model_names_harness: false,
             effort: non_empty(&self.effort),
             permission_mode: non_empty(&self.permission),
             placement: placement.map(str::to_string),
@@ -2516,6 +2512,34 @@ fn compact_chip_value(value: &str, limit: usize) -> String {
     preview
 }
 
+fn extra_flags_label(flags: &str) -> String {
+    if flags.is_empty() {
+        "flags".to_string()
+    } else {
+        format!("flags {}", compact_chip_value(flags, 28))
+    }
+}
+
+fn paint_extra_flags_cursor(buf: &mut RtBuffer, r: RtRect, flags: &str, cursor_chars: usize) {
+    if r.width == 0 {
+        return;
+    }
+    let char_count = flags.chars().count();
+    let visible_count = if char_count > 28 { 27 } else { char_count };
+    let cursor = cursor_chars.min(visible_count);
+    let prefix = if flags.is_empty() { "flags" } else { "flags " };
+    let prefix_width = crate::chrome::str_cols(prefix);
+    let cursor_width: usize = flags
+        .chars()
+        .take(cursor)
+        .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
+        .sum();
+    let col = prefix_width
+        .saturating_add(cursor_width)
+        .min(r.width.saturating_sub(1) as usize);
+    buf[(r.x + col as u16, r.y)].set_char('\u{2502}');
+}
+
 impl Launcher {
     /// One table feeds the layout, paint, width rule and mouse hit-test.
     pub(crate) fn chip_texts(&self, view: &View) -> Vec<(Focus, String)> {
@@ -2535,12 +2559,7 @@ impl Launcher {
             28,
         );
         let model = model_label(d);
-        let flags = if d.extra_flags.is_empty() {
-            "flags".to_string()
-        } else {
-            let preview = compact_chip_value(&d.extra_flags, 28);
-            format!("flags {preview}")
-        };
+        let flags = extra_flags_label(&d.extra_flags);
         let project = match d.cwd().rsplit('/').find(|s| !s.is_empty()) {
             Some(base) => base.to_string(),
             None => "project".to_string(),
@@ -2640,8 +2659,13 @@ impl Launcher {
                 f => (Role::Body, is_picker_chip(*f)),
             };
             paint_chip(buf, *r, label, role_style(role, &view.theme), caret);
-            if *focus == Focus::ExtraFlags && *focus == self.focus && r.width > 0 {
-                buf[(r.x + r.width - 1, r.y)].set_char('\u{2502}');
+            if *focus == Focus::ExtraFlags && *focus == self.focus {
+                paint_extra_flags_cursor(
+                    buf,
+                    *r,
+                    &self.draft.extra_flags,
+                    self.draft.extra_flags_cursor_chars,
+                );
             }
         }
         // The editor: a prompt gutter (a glyph before the first message row)
@@ -3011,8 +3035,13 @@ impl Launcher {
                 f => (Role::Body, is_picker_chip(*f)),
             };
             paint_chip(&mut buf, *r, label, role_style(role, &view.theme), caret);
-            if *focus == Focus::ExtraFlags && *focus == self.focus && r.width > 0 {
-                buf[(r.x + r.width - 1, r.y)].set_char('\u{2502}');
+            if *focus == Focus::ExtraFlags && *focus == self.focus {
+                paint_extra_flags_cursor(
+                    &mut buf,
+                    *r,
+                    &self.draft.extra_flags,
+                    self.draft.extra_flags_cursor_chars,
+                );
             }
         }
         // The editor, cursor mark and prompt gutter, exactly as the dock.
