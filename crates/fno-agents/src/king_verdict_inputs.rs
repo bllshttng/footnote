@@ -128,9 +128,15 @@ pub(crate) struct VerdictInputs {
 
 /// The caller's canonical crown scope: explicit `--scope` wins (canonicalized,
 /// refused when it names nothing); else the live registry row for this
-/// session's own identity, requiring a stamped, non-terminal crown (Python
-/// `resolve_scope` + `resolve_king_manifest_path`, whose wording is matched).
-fn resolve_scope(explicit_scope: Option<&str>, registry_path: &Path) -> Result<String, String> {
+/// session's own identity, requiring a stamped, non-terminal crown (the
+/// retired Python `resolve_scope`, whose wording is matched). Shared by the
+/// verdict, checkin and history verbs: the Rust reader tolerates unknown
+/// keys, so a registry row carrying a field this binary predates no longer
+/// blinds the crown resolution the way the strict Python reader did.
+pub(crate) fn resolve_scope(
+    explicit_scope: Option<&str>,
+    registry_path: &Path,
+) -> Result<String, String> {
     if let Some(raw) = explicit_scope {
         let canonical = crate::territory::canonical_scope(raw.trim());
         if canonical.is_empty() {
@@ -958,5 +964,118 @@ mod tests {
             err.contains("unreadable") || err.contains("corrupt"),
             "{err}"
         );
+    }
+
+    // --- the caller-crown resolution survives an unknown field ----
+
+    fn write_registry(dir: &Path, rows: Value) -> PathBuf {
+        let path = dir.join("registry.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": rows,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    fn crowned_row(extra: Value) -> Value {
+        let mut row = serde_json::json!({
+            "name": "king-a792",
+            "cwd": "/tmp/x",
+            "created_at": "2026-09-01T00:00:00Z",
+            "status": "idle",
+            "harness": "claude",
+            "harness_session_id": "ses-crown",
+            "crown_level": 2,
+            "crown_scope": "probe fleet",
+        });
+        if let Value::Object(map) = extra {
+            for (k, v) in map {
+                row[k] = v;
+            }
+        }
+        row
+    }
+
+    /// Identity env for the caller, with every vendor marker cleared so the
+    /// canonical markers win unambiguously. Callers hold the env lock.
+    fn with_crowned_identity<T>(f: impl FnOnce() -> T) -> T {
+        for (marker, _) in crate::claims::HARNESS_SESSION_MARKERS
+            .iter()
+            .chain(crate::claims::LEGACY_HARNESS_SESSION_MARKERS.iter())
+        {
+            std::env::remove_var(marker);
+        }
+        std::env::set_var("FNO_HARNESS_NAME", "claude");
+        std::env::set_var("FNO_HARNESS_SESSION_ID", "ses-crown");
+        let out = f();
+        std::env::remove_var("FNO_HARNESS_NAME");
+        std::env::remove_var("FNO_HARNESS_SESSION_ID");
+        out
+    }
+
+    /// The node's requested test, on the surviving leg: an equal-version
+    /// registry whose crowned row carries a field this binary does not
+    /// model still resolves the caller's crown. The strict Python reader
+    /// refused the whole file in this shape and took checkin down with it.
+    #[test]
+    fn crowned_row_with_unknown_field_still_resolves_the_scope() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("unknown-field");
+        let path = write_registry(
+            &dir,
+            serde_json::json!([crowned_row(serde_json::json!({"future_field": "x"}))]),
+        );
+        with_crowned_identity(|| {
+            let scope = resolve_scope(None, &path).expect("unknown key must not blind the read");
+            assert_eq!(scope, crate::territory::canonical_scope("probe fleet"));
+        });
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unreadable registry refuses naming the read failure, never the
+    /// misleading "no crowned registry row" the Python leg printed for this
+    /// case. A MISSING file is a valid empty registry, so the fixture is a
+    /// corrupt one: the defect class is a registry the reader cannot parse.
+    #[test]
+    fn unreadable_registry_refuses_by_name_not_no_crowned_row() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("unreadable");
+        let path = dir.join("registry.json");
+        fs::write(&path, "{not json").unwrap();
+        with_crowned_identity(|| {
+            let err = resolve_scope(None, &path).expect_err("must refuse");
+            assert!(
+                err.contains("the agent registry could not be read"),
+                "{err}"
+            );
+            assert!(!err.contains("no crowned registry row"), "{err}");
+        });
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An explicit `--scope` wins and never reads the registry (proved by
+    /// pointing at a path that cannot exist).
+    #[test]
+    fn explicit_scope_wins_without_reading_the_registry() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        with_crowned_identity(|| {
+            let scope = resolve_scope(
+                Some("probe"),
+                Path::new("/nonexistent/registry-probe/registry.json"),
+            )
+            .expect("explicit scope must win");
+            assert_eq!(scope, crate::territory::canonical_scope("probe"));
+        });
     }
 }

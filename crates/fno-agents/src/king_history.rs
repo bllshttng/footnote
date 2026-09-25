@@ -282,7 +282,10 @@ fn render(payload: &Value) -> String {
     lines.join("\n")
 }
 
-/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json|-J]`
+/// `king-history [--scope SCOPE] --events-path PATH [--events-path PATH ...] [--json|-J]`
+///
+/// With no `--scope`, the caller's crown scope is resolved natively from the
+/// registry (the retired Python `resolve_scope`).
 ///
 /// rc 0 read (any match count), 1 a store that cannot be opened or synced
 /// (the message names the store path), 2 usage failure.
@@ -308,15 +311,25 @@ pub fn run_king_history(args: &[String]) -> i32 {
             other => {
                 eprintln!("fno-agents king-history: unknown flag {other}");
                 eprintln!(
-                    "fno-agents king-history: --scope SCOPE --events-path PATH \
+                    "fno-agents king-history: [--scope SCOPE] --events-path PATH \
                      [--events-path PATH ...] [--json|-J]"
                 );
                 return 2;
             }
         }
     }
-    if scope.is_empty() || events_paths.is_empty() {
-        eprintln!("fno-agents king-history: --scope and --events-path are required");
+    if scope.is_empty() {
+        let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+        match crate::king_verdict_inputs::resolve_scope(None, &registry_path) {
+            Ok(resolved) => scope = resolved,
+            Err(msg) => {
+                eprintln!("king: {msg}");
+                return 2;
+            }
+        }
+    }
+    if events_paths.is_empty() {
+        eprintln!("fno-agents king-history: --events-path is required");
         return 2;
     }
     match scan(&events_paths, &scope) {
