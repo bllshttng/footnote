@@ -52,12 +52,13 @@ def test_an_envelope_without_it_is_byte_unchanged():
 
 
 def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
-    """A transcript-recovered reply must target the id that cannot collide."""
+    """Codex keeps the full reply address because its short ids can collide."""
     text = wrap_fno_mail(
         "hi",
         from_="01a025f8",
         id="msg-882e18",
         from_session=V7_A,
+        harness="codex",
     )
     assert sender_from_transcript_text(text, "msg-882e18") == V7_A
 

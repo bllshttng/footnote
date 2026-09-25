@@ -2389,7 +2389,8 @@ pub fn rename_agent(
 ) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes"
+                .to_string(),
         );
     }
     if let Some(node) = node {
@@ -2496,7 +2497,7 @@ pub fn rename_agent(
 }
 
 /// The label grammar `rename_agent` enforces (1..=64 chars from
-/// `[A-Za-z0-9_-]`). The ONE grammar predicate in this crate: the daemon's
+/// `[A-Za-z0-9_'-]`). The ONE grammar predicate in this crate: the daemon's
 /// `valid_agent_name` delegates here, so the spawn-time name rule and the
 /// rename-time rule cannot drift. (fno's proto.rs carries its own copy for the
 /// pre-subprocess notice; the crates do not link, only shell.)
@@ -2505,7 +2506,8 @@ pub fn is_valid_registry_label(name: &str) -> bool {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .enumerate()
+            .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (i > 0 && c == '\''))
 }
 
 /// The `agent.rename` RPC handler, beside the transaction it serves (the
@@ -2539,7 +2541,7 @@ pub(crate) fn rename_response(
         return Response::err(
             req.id,
             ErrorCode::InvalidParams,
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens",
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
         );
     }
     match rename_agent(registry_path, token, new_name, None) {

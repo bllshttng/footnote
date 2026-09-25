@@ -38,6 +38,38 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
 }
 
+#[test]
+fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
+    let mut view = wide_view(vec![
+        {
+            let mut row = agent_row("folio", 4, Some(AgentBadge::Working), false);
+            row.crown_level = Some(1);
+            row.crown_scope = Some("fno".into());
+            row.crown_name = Some("Folio".into());
+            row
+        },
+        {
+            let mut row = agent_row("worker-a", 5, Some(AgentBadge::Working), false);
+            row.crown_name = Some("Folio".into());
+            row
+        },
+    ]);
+    set_density(&mut view, Density::Extended);
+
+    let frame = view.compose();
+    let rendered: String = frame.cells.iter().map(|cell| cell.c).collect();
+    crate::frame_html::write_shot(
+        &frame,
+        "crown-worker-labels",
+        "Crown and worker rows use their registry labels",
+    );
+
+    assert!(rendered.contains("folio"), "{rendered:?}");
+    assert!(rendered.contains("worker-a"), "{rendered:?}");
+    assert!(!rendered.contains("Folio"), "{rendered:?}");
+    assert!(!rendered.contains("[L1 fno]"), "{rendered:?}");
+}
+
 // ---------------------------------------------------------------------------
 // the table rewrite: the sideline is a Table (status word, name, message, PR, age)
 // ---------------------------------------------------------------------------

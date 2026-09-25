@@ -42,7 +42,6 @@ def _no_real_mail_inject(monkeypatch):
     monkeypatch.setattr(
         dispatch_mod, "_registered_family1_state", lambda _entry: "working"
     )
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +230,9 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
 ) -> None:
     """A fresh send resolves the sender row through its mailbox address.
 
-    The CLI passes the sender's canonical handle, not its registry label. The
-    envelope must still carry the full session id (the harness rides the bus
-    record now, not the tag, x-d7cf).
+    The CLI passes the sender's canonical handle, not its registry label.
+    Codex keeps the full UUIDv7 reply address; Claude uses its short UUIDv4
+    handle.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -289,7 +288,10 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'from="{sender_session}"' in envelope
+    expected_from = (
+        sender_session if sender_harness == "codex" else canonical_handle(sender_session)
+    )
+    assert f'from="{expected_from}"' in envelope
 
 
 def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
@@ -520,7 +522,7 @@ def test_dispatch_send_durable_fallback_resolves_sender_once(
     assert result.delivery == "durable"
     assert proof_calls == [canonical_handle(sender_session)]
     record = next(m for m in iter_messages() if m.id == result.msg_id)
-    assert f'from="{sender_session}"' in record.body
+    assert f'from="{canonical_handle(sender_session)}"' in record.body
 
 
 @pytest.mark.parametrize(
@@ -590,7 +592,10 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    assert f'from="{sender_session}"' in record.body
+    expected_from = (
+        sender_session if sender_harness == "codex" else canonical_handle(sender_session)
+    )
+    assert f'from="{expected_from}"' in record.body
 
 
 def test_dispatch_send_keeps_unknown_for_unprovable_sender(

@@ -89,7 +89,6 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     renderer produced, not which topology produces a trailer (that pair is
     asserted in ``test_mail_origin.py``).
     """
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)

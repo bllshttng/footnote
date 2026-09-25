@@ -1756,9 +1756,6 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// cannot safely ignore it.
 pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
-    // One store read for the whole derive: the crown-name file contract
-    // (`crate::crown_names`). Missing or malformed reads as no names.
-    let (crown_names, crown_names_by_node) = crate::crown_names::read_crown_names();
     let rows = doc
         .get("agents")
         .or_else(|| doc.get("entries"))?
@@ -1981,12 +1978,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let crown_name = crate::crown_names::crown_name_for(
-            &crown_names,
-            &crown_names_by_node,
-            crown_scope.as_deref(),
-            row.get("node").and_then(|v| v.as_str()),
-        );
+        let crown_name = None;
         let spawned_by_session = row
             .get("spawned_by_session")
             .and_then(|v| v.as_str())

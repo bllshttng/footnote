@@ -487,19 +487,6 @@ impl View {
                     suffix.push_str(": ");
                     suffix.push_str(reason);
                 }
-                if let Some(level) = a.crown_level {
-                    let scope = a.crown_scope.as_deref().unwrap_or("?");
-                    match a.crown_name.as_deref() {
-                        Some(name) => {
-                            suffix.push_str(&format!(" [L{level} {name} \u{b7} {scope}]"))
-                        }
-                        None => suffix.push_str(&format!(" [L{level} {scope}]")),
-                    }
-                } else if let Some(name) = a.crown_name.as_deref() {
-                    // A worker that rolls up to a named crown: the name rides
-                    // the name cell so the lineage reads without a lookup.
-                    suffix.push_str(&format!(" [{name}]"));
-                }
                 let prefix_width = prefix.width();
                 let suffix_width = suffix.width();
                 let base_width = name_w.saturating_sub(prefix_width);

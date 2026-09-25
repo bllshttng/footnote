@@ -86,9 +86,8 @@ def test_render_quotes_the_seed_verbatim_and_says_not_to_run_it():
     assert SEED in rendered
     assert "do not execute this copy" in rendered
     assert rendered.rstrip().endswith("</fno_mail>")
-    # D2: `from` IS the full session id; the retired from_session
-    # attribute renders nowhere.
-    assert f'from="{SENDER_SESSION}"' in rendered
+    # Claude uses the short handle; the retired from_session attribute is absent.
+    assert f'from="{SENDER_SESSION[:8]}"' in rendered
     assert "from_session" not in rendered
 
 

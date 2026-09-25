@@ -224,12 +224,10 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
     reading, which is the defect the stamp exists to close - so the durable copy
     carries none while the live envelope carries one."""
     import fno.agents.dispatch as dispatch
-    import fno.mail.envelope as envelope
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import read_all_threads
 
     _register("king-fno", scope="fno", level=1, session="session-king")
-    envelope.fleet_has_crown_at.cache_clear()
     monkeypatch.setattr(dispatch, "_deliver_live", lambda *a, **k: False)
     monkeypatch.setattr(
         dispatch, "_registered_family1_state", lambda _entry: "working"

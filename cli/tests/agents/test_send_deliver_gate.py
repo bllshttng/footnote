@@ -1883,22 +1883,40 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
-    import re
-
     framed = inject_calls[0]["text"]
-    # D2: `from` holds the full session id when the sender resolved one.
-    assert re.match(r'^<fno_mail from="[0-9a-f-]{16,}"', framed), framed
+    # Claude uses the fleet's 8-hex handle; the separate from_name is its label.
+    assert framed.startswith('<fno_mail from="sender"'), framed
+    assert 'from_name="sender"' in framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
     assert ' session="' not in framed
 
 
-def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) -> None:
+def test_relay_continuation_into_crowned_session_carries_its_crown(
+    tmp_path, monkeypatch
+) -> None:
     # AC4-HP (x-3dcc via x-d7cf): the recipient-side relay ctx wraps B's replies,
     # which are injected into A, so its to_session is A's session and A reads its
     # own live crown on every continuation hop, not only the first message.
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _run_relay_loop
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="alice", harness="claude", cwd="/repo", log_path="",
+                harness_session_id="session-alice", status="live",
+                crown_level=1, crown_scope="fno",
+            ),
+            AgentEntry(
+                name="bob", harness="claude", cwd="/repo", log_path="",
+                harness_session_id="session-bob", status="live",
+            ),
+        ]
+    )
 
     calls: list = []
 
@@ -1911,15 +1929,6 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) 
         }
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    import fno.mail.envelope as envelope
-
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
-    monkeypatch.setattr(
-        envelope,
-        "crown_at",
-        lambda _path, session: "L1 fno" if session == "session-alice" else None,
-    )
-
     ctxs = {
         "alice": _MailCtx(
             from_="aaaa1111", model="unknown", to="bbbb2222",
@@ -1941,7 +1950,7 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) 
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="session-bob"'), body
+    assert body.startswith('<fno_mail from="bbbb2222"'), body
     assert 'to_rank="L1 fno"' in body, body
 
 
@@ -1953,10 +1962,6 @@ def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
     # reader whose address nobody measured.
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _wrap_relay_body
-
-    import fno.mail.envelope as envelope
-
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
 
     ctx = _MailCtx(
         from_="bbbb2222", model="unknown", to="aaaa1111",

@@ -2349,7 +2349,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidParams,
-                "name must be 1-64 chars of [A-Za-z0-9_-]",
+                "name must be 1-64 chars of [A-Za-z0-9_'-]",
             )
         }
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),

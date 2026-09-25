@@ -1,9 +1,8 @@
-"""Tests for the Python ``<fno_mail>`` renderer, the SINGLE source for the wire
-format G1. A Rust mirror used to live in ``crates/fno-agents/src/claude_drive.rs``
-and this file pinned parity against it; node x-1904 deleted that mirror as dead
-code once the live inject path stopped rendering its own envelope, so this file
-now pins the Python renderer's own output contract instead."""
+"""Contract tests for the Rust ``<fno_mail>`` renderer through its Python adapter."""
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -14,9 +13,10 @@ from fno.mail.envelope import (
 )
 
 
-@pytest.fixture(autouse=True)
-def crowned_fleet(monkeypatch):
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
+def _write_registry(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        json.dumps({"schema_version": 19, "agents": rows}), encoding="utf-8"
+    )
 
 
 def test_harness_for_provider_missing_renders_unknown_never_a_vendor():
@@ -79,8 +79,7 @@ def test_open_tag_renders_ranks_after_their_side():
 
 
 def test_open_tag_holds_one_full_id_address():
-    # D2: `from` IS the full session id when the caller resolved one;
-    # the retired from_session attribute renders nowhere.
+    # A caller can pass the already-selected full Codex reply address.
     full = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
     tag = fno_mail_open(from_=full, id="msg-fea270", to="08e8c104", origin="peer")
     assert tag == f'<fno_mail from="{full}" to="08e8c104" id="msg-fea270">'
@@ -136,21 +135,24 @@ def test_wrap_preserves_multiline_body():
     assert wrapped.endswith("</fno_mail>")
 
 
-def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
+def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path):
     # AC1-HP: the crown lines moved INTO the header as from_rank/to_rank,
     # read from the live registry at render time, never passed by a caller.
     import fno.mail.envelope as envelope
-    from pathlib import Path
-
-    registry = Path("/tmp/nonexistent-registry.json")
-
-    def _crown(path, session):
-        assert path == registry
-        return {"sender-session": "L2 epic-scope", "reader-session": "L1 fno"}.get(session)
+    registry = tmp_path / "crowned.json"
+    _write_registry(
+        registry,
+        [
+            {"name":"folio", "status":"live", "harness":"claude", "cwd":"/repo",
+             "harness_session_id":"sender-session", "created_at":"2026-09-23T20:00:00Z",
+             "crown_level":2, "crown_scope":"epic-scope"},
+            {"name":"quill", "status":"live", "harness":"claude", "cwd":"/repo",
+             "harness_session_id":"reader-session", "created_at":"2026-09-23T20:00:00Z",
+             "crown_level":1, "crown_scope":"fno"},
+        ],
+    )
 
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
-    monkeypatch.setattr(envelope, "crown_at", _crown)
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
     wrapped = envelope.wrap_fno_mail(
         "hi",
         from_="647b3a9c",
@@ -161,48 +163,74 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
         harness="claude",
     )
     assert wrapped == (
-        '<fno_mail from="sender-session" harness="claude-code" '
-        'from_rank="L2 epic-scope" to="278c9a89" to_rank="L1 fno" id="msg-5a760f">'
+        '<fno_mail from="647b3a9c" harness="claude-code" '
+        'from_rank="L2 epic-scope" from_name="folio" to="278c9a89" '
+        'to_name="quill" to_rank="L1 fno" id="msg-5a760f">'
         "hi"
         "</fno_mail>"
     )
     assert not any(line.startswith("-- ") for line in wrapped.splitlines())
 
 
-def test_wrap_from_holds_the_full_session_id_and_from_rank(monkeypatch):
-    # D2/D3: from IS from_session; from_rank comes from the registry only.
+def test_wrap_uses_the_short_handle_for_claude_but_reads_rank_by_session(
+    monkeypatch, tmp_path
+):
+    # Claude's UUIDv4 is not collision-prone; the short handle is its reply address.
     import fno.mail.envelope as envelope
-    from pathlib import Path
-
-    registry = Path("/tmp/nonexistent-registry.json")
-    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
-    monkeypatch.setattr(
-        envelope, "crown_at", lambda _p, s: "L1 fno" if s == "session-king" else None
+    registry = tmp_path / "claude.json"
+    _write_registry(
+        registry,
+        [{"name":"king", "status":"live", "harness":"claude", "cwd":"/repo",
+          "harness_session_id":"session-king", "created_at":"2026-09-23T20:00:00Z",
+          "crown_level":1, "crown_scope":"fno"}],
     )
+    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     wrapped = envelope.wrap_fno_mail(
         "hi", from_="king", from_session="session-king"
     )
-    assert wrapped.startswith('<fno_mail from="session-king" from_rank="L1 fno">')
+    assert wrapped.startswith('<fno_mail from="king" from_rank="L1 fno">')
     # from_rank with NO resolvable session renders nothing.
     plain = envelope.wrap_fno_mail("hi", from_="king")
     assert plain.startswith('<fno_mail from="king">')
     assert "from_rank" not in plain
 
 
-def test_envelope_overhead_budget(monkeypatch):
+def test_wrap_accepts_the_codex_full_session_reply_address(monkeypatch, tmp_path):
+    import fno.mail.envelope as envelope
+    registry = tmp_path / "codex.json"
+    _write_registry(
+        registry,
+        [{"name":"quill", "status":"live", "harness":"codex", "cwd":"/repo",
+          "harness_session_id":"session-codex", "created_at":"2026-09-23T20:00:00Z"}],
+    )
+    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
+
+    wrapped = envelope.wrap_fno_mail(
+        "hi",
+        from_="quill-short",
+        from_session="session-codex",
+        harness="codex",
+    )
+    assert wrapped.startswith(
+        '<fno_mail from="session-codex" harness="codex" from_name="quill">'
+    )
+
+
+def test_envelope_overhead_budget(monkeypatch, tmp_path):
     # The v2 header carries what the footers did, cheaper. Raising
     # either bound is a decision a PR must argue, not a test fix.
     import fno.mail.envelope as envelope
-    from pathlib import Path
-
     body = "ship the compact envelope"
     full_id = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
-    registry = Path("/tmp/nonexistent-registry.json")
+    registry = tmp_path / "registry.json"
+    sender = {"name":"a", "status":"live", "harness":"claude", "cwd":"/repo",
+              "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
+              "crown_level":2, "crown_scope":"epic-scope"}
+    reader = {"name":"b", "status":"live", "harness":"claude", "cwd":"/repo",
+              "harness_session_id":"reader", "created_at":"2026-09-23T20:00:00Z",
+              "crown_level":1, "crown_scope":"fno"}
+    _write_registry(registry, [sender, reader])
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
-    monkeypatch.setattr(
-        envelope, "crown_at", lambda _p, s: "L2 epic-scope" if s == full_id else "L1 fno"
-    )
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
     wrapped = envelope.wrap_fno_mail(
         body,
         from_="0199a1b2",
@@ -218,8 +246,11 @@ def test_envelope_overhead_budget(monkeypatch):
     # Crowned overhead, measured 176 at the reshaping (537 before the compaction).
     assert len(wrapped) - len(body) <= 200
 
-    monkeypatch.setattr(envelope, "crown_at", lambda _p, _s: None)
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: False)
+    sender.pop("crown_level")
+    sender.pop("crown_scope")
+    reader.pop("crown_level")
+    reader.pop("crown_scope")
+    _write_registry(registry, [sender, reader])
     peer_wrapped = envelope.wrap_fno_mail(
         body,
         from_="0199a1b2",
