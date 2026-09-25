@@ -167,11 +167,11 @@ The standing query is law-only and lifecycle-filtered: `fno backlog decisions <t
 
 Law is recorded where it is made, and scope names who it governs. The vocabulary has two values: `global` and `project:<slug>`. The slug is the settings project name, the same vocabulary a graph node's `project` field uses. A law and the nodes it governs answer one resolver.
 
-The law door (`fno inbox law set`) stamps the recording session's project by default. Widening to `global` is an explicit `--global`, because law is never inherited by silence. A repo outside the work map makes the door refuse and name the path it failed to place. The door fails closed so a guessed stamp never lands, while every reader fails open.
+The law door (`fno inbox law set`) stamps the recording session's project by default. Widening to `global` is explicit on the law-match crate verb: its `record-scope` request carries `global`, because law is never inherited by silence. A repo outside the work map makes the door refuse and name the path it failed to place. The door fails closed so a guessed stamp never lands, while every reader fails open.
 
-Every law reader filters. Global law reaches every session. A project law reaches only that project's sessions. A row with no scope reaches only fno sessions, because all 82 pre-scope rows were recorded in fno. The general ones get promoted by an explicit re-record with `--global`.
+Every law reader filters. Global law reaches every session. A project law reaches only that project's sessions. A row with no scope reaches only fno sessions, because all 82 pre-scope rows were recorded in fno. The general ones get promoted by an explicit re-record widened on the crate verb.
 
-Readers return the count they withheld. `fno backlog decisions --scope all` sees every project, and its JSON carries the note. The stage block lists a law's scope on its line. A workspace tier (`workspace:<name>`) is a rung nobody has reached. The field is a free string, so adding it later needs a reader branch and no migration.
+Readers return the count they withheld, and the report's JSON carries the note. The stage block lists a law's scope on its line. A workspace tier (`workspace:<name>`) is a rung nobody has reached. The field is a free string, so adding it later needs a reader branch and no migration.
 
 ## Where law reaches a session
 

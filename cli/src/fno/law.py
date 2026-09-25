@@ -119,7 +119,6 @@ def record_command(
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
-    is_global: bool = typer.Option(False, "--global", help="Rule every project; default stamps this one."),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (
@@ -150,11 +149,13 @@ def record_command(
     try:
         authority = require_marked_caller()
         graduation_data = graduation_or_guidance(graduation, graduation_ref)
-        # The door fails closed: no project, no stamp, no row.
-        answer = verb_call("law-match", {"mode": "record-scope", "global": is_global})
+        # The door fails closed: no project, no stamp, no row. The --global
+        # widening lives on the crate verb; this surface stamps the current
+        # project only.
+        answer = verb_call("law-match", {"mode": "record-scope", "global": False})
         scope = answer.get("scope")
         if not scope:
-            raise ValueError(str(answer.get("refusal") or "no project to stamp under; pass --global"))
+            raise ValueError(str(answer.get("refusal") or "no project to stamp under"))
         result = record_decision(
             subject=subject,
             decision=decision,

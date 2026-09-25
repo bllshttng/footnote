@@ -587,7 +587,6 @@ def backlog_decisions(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
-    scope: str = typer.Option("current", "--scope", metavar="current|all", help="'all' shows every project's laws."),
     subject_legacy: Optional[str] = typer.Option(
         None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
     ),
@@ -600,7 +599,7 @@ def backlog_decisions(
         canonical_flag="<subject>",
         legacy_flag="--subject",
     )
-    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json, scope)
+    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
 
 
 @shim_app.command("decide-reindex", hidden=True)
@@ -742,7 +741,6 @@ def _list_decisions(
     output: Optional[str],
     output_format: Optional[str],
     as_json: bool,
-    scope: str = "current",
 ) -> None:
     """Recover the decision history for a subject, newest first."""
     from fno.decide import (
@@ -800,7 +798,6 @@ def _list_decisions(
             lane=lane,
             state=state if state is not None else "all",
             entries=entries,
-            scope=scope,
         )
         standing_law = (
             current_law(subject)

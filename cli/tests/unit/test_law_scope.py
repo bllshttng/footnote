@@ -104,11 +104,25 @@ def test_door_stamps_the_recording_project(tmp_path, monkeypatch):
     assert data["scope"] == "project:demo"
 
 
-def test_door_stamps_global_only_by_flag(tmp_path, monkeypatch):
+def test_the_door_never_widens_on_its_own(tmp_path, monkeypatch):
+    """Widening lives on the crate verb's `global` key; the door cannot send it."""
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
     proj = _work_map(tmp_path, monkeypatch)
     monkeypatch.chdir(proj)
+    captured = {}
+
+    def fake_verb(verb, payload, *a, **k):
+        if payload["mode"] == "record-scope":
+            captured.update(payload)
+            return {"ok": True, "scope": "project:demo"}
+        if payload["mode"] == "validate":
+            return {"ok": True, "refusal": None}
+        return {"ok": True, "candidates": [], "total": 0, "lines": []}
+
+    import fno.rust_binary
+
+    monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb)
 
     result = _run(
         [
@@ -117,13 +131,13 @@ def test_door_stamps_global_only_by_flag(tmp_path, monkeypatch):
             "Every project answers only what needs the user.",
             "--rationale",
             "General.",
-            "--global",
         ]
     )
 
     assert result.exit_code == 0, result.output
+    assert captured["global"] is False
     data = _rows(index)[0]["data"]
-    assert data["scope"] == "global"
+    assert data["scope"] == "project:demo"
 
 
 def test_door_refuses_an_unplacable_repo(tmp_path, monkeypatch):
