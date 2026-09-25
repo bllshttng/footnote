@@ -37,12 +37,10 @@ pub(crate) fn scope_node_ids(
     crate::court_fold::compile_forced(scope, &entries, &projects, level)
 }
 
-/// The answered reading: user decisions for scope nodes, from EVERY
-/// answered page in the questions directory, any crown's page.
-pub(crate) fn answered_reading(cwd: &Path, scope_ids: &BTreeSet<String>) -> Result<Value, String> {
-    let dir = crate::state_path::resolve("questions", cwd)
-        .ok_or("the questions state path did not resolve")?;
-    let entries = std::fs::read_dir(&dir)
+/// Every readable question page in one directory, `(stem, text)`, conflict
+/// markers excluded: the shape both question folds read.
+fn read_question_pages(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("questions folder {} unreadable: {e}", dir.display()))?;
     let mut pages: Vec<(String, String)> = Vec::new();
     for path in entries.flatten().map(|e| e.path()) {
@@ -60,6 +58,15 @@ pub(crate) fn answered_reading(cwd: &Path, scope_ids: &BTreeSet<String>) -> Resu
         };
         pages.push((stem.to_string(), text));
     }
+    Ok(pages)
+}
+
+/// The answered reading: user decisions for scope nodes, from EVERY
+/// answered page in the questions directory, any crown's page.
+pub(crate) fn answered_reading(cwd: &Path, scope_ids: &BTreeSet<String>) -> Result<Value, String> {
+    let dir = crate::state_path::resolve("questions", cwd)
+        .ok_or("the questions state path did not resolve")?;
+    let pages = read_question_pages(&dir)?;
     Ok(json!({"rows": answered_from_pages(&pages, scope_ids)}))
 }
 
@@ -123,7 +130,8 @@ pub(crate) fn quiet_reading(
     scope_ids: &BTreeSet<String>,
 ) -> Result<Value, String> {
     let payload = top.ok_or("the workers reading failed; quiet workers are unreadable")?;
-    let quiet = quiet_scope_workers(payload, scope_ids);
+    let rows_all = payload_workers(payload)?;
+    let quiet = quiet_scope_workers(rows_all, scope_ids);
     let total = quiet.len();
     let rows: Vec<Value> = quiet
         .into_iter()
@@ -140,14 +148,9 @@ pub(crate) fn quiet_reading(
 /// worker's node comes off the row when the join resolved, else off its
 /// name; a row that names no scope node - kings, foreign workers - stays
 /// out.
-fn quiet_scope_workers(payload: &Value, scope_ids: &BTreeSet<String>) -> Vec<(String, String)> {
+fn quiet_scope_workers(workers: &[Value], scope_ids: &BTreeSet<String>) -> Vec<(String, String)> {
     let mut rows = Vec::new();
-    for w in payload
-        .get("workers")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for w in workers {
         if crate::king_checkin::s_str(w, "status") != Some("quiet") {
             continue;
         }
@@ -297,27 +300,8 @@ pub(crate) fn held_reading(scope: &str) -> Result<Value, String> {
         .and_then(Value::as_str)
         .filter(|d| !d.is_empty())
         .ok_or("items.json names no questions_dir")?;
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("questions folder {dir} unreadable: {e}"))?;
-    let mut paths: Vec<std::path::PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-        .collect();
-    paths.sort();
-    let mut pages: Vec<(String, String)> = Vec::new();
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if crate::attention_file::has_conflict_markers(&text) {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        pages.push((stem.to_string(), text));
-    }
+    let mut pages = read_question_pages(std::path::Path::new(dir))?;
+    pages.sort_by(|a, b| a.0.cmp(&b.0));
     let rows = held_from_pages(&pages, scope);
     Ok(json!({"open": rows.len(), "rows": rows}))
 }
@@ -374,20 +358,26 @@ pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
     Ok(payload)
 }
 
-/// The summary the beat journals, folded from the shared top payload, so
-/// the workers and quiet readings cost one `top` call between them.
-pub(crate) fn workers_summary(payload: &Value) -> Result<Value, String> {
+/// The payload's worker rows, behind the same positive-predicate guard the
+/// summary runs: a top payload whose census failed carries no rows, and a
+/// reading that answered from it would read as a quiet zero.
+fn payload_workers(payload: &Value) -> Result<&[Value], String> {
     let predicate = payload
         .get("predicate")
         .and_then(|p| p.as_str())
         .unwrap_or("")
-        .trim()
-        .to_string();
+        .trim();
     let workers = payload.get("workers").and_then(|w| w.as_array());
-    let workers = match (predicate.is_empty(), workers) {
-        (false, Some(w)) => w,
-        _ => return Err("the top payload carries no positive predicate".into()),
-    };
+    match (predicate.is_empty(), workers) {
+        (false, Some(w)) => Ok(w),
+        _ => Err("the top payload carries no positive predicate".into()),
+    }
+}
+
+/// The summary the beat journals, folded from the shared top payload, so
+/// the workers and quiet readings cost one `top` call between them.
+pub(crate) fn workers_summary(payload: &Value) -> Result<Value, String> {
+    let workers = payload_workers(payload)?;
     let mut oldest: Option<(f64, String)> = None;
     for w in workers {
         let age = w.get("status_age_s").and_then(|a| a.as_f64());
@@ -489,6 +479,12 @@ pub(crate) fn answered_lines(readings: &[crate::king_checkin::Reading]) -> Vec<S
             crate::king_checkin::dash(row.get("answer"))
         ));
     }
+    let hidden = rows
+        .len()
+        .saturating_sub(crate::king_checkin::MAX_COURT_ROWS);
+    if hidden > 0 {
+        lines.push(format!("  ... {hidden} more rows cut"));
+    }
     lines
 }
 
@@ -517,6 +513,12 @@ pub(crate) fn quiet_lines(readings: &[crate::king_checkin::Reading]) -> Vec<Stri
             crate::king_checkin::dash(row.get("node")),
             crate::king_checkin::dash(row.get("line"))
         ));
+    }
+    let hidden = rows
+        .len()
+        .saturating_sub(crate::king_checkin::MAX_COURT_ROWS);
+    if hidden > 0 {
+        lines.push(format!("  ... {hidden} more rows cut"));
     }
     lines
 }
@@ -695,8 +697,18 @@ mod tests {
         // No peek in tests: the reading itself shells out only per row, so
         // assert the fold shape through quiet_scope_workers above; here the
         // dead-payload path stays named.
-        let quiet = quiet_scope_workers(&payload, &ids);
+        let workers = payload.get("workers").and_then(Value::as_array).unwrap();
+        let quiet = quiet_scope_workers(workers, &ids);
         assert_eq!(quiet.len(), 1);
+    }
+
+    #[test]
+    fn a_payload_without_its_predicate_is_a_failed_read_not_a_quiet_zero() {
+        let ids = ids(&["x-1"]);
+        let err = quiet_reading(Some(&json!({"workers": null})), &ids).unwrap_err();
+        assert!(err.contains("positive predicate"), "err: {err}");
+        let err = quiet_reading(Some(&json!({"predicate": "", "workers": []})), &ids).unwrap_err();
+        assert!(err.contains("positive predicate"), "err: {err}");
     }
 
     #[test]

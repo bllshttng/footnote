@@ -3631,7 +3631,7 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(17)));
+        assert_eq!(data.get("coverage"), Some(&json!(19)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
         assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
     }
