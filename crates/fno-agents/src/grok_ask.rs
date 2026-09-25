@@ -44,6 +44,29 @@ fn build_argv(
     permission_mode: Option<&str>,
     harness_args: &[String],
 ) -> Result<Vec<String>, String> {
+    for token in harness_args {
+        let flag = token
+            .split_once('=')
+            .map_or(token.as_str(), |(flag, _)| flag);
+        if matches!(
+            flag,
+            "--session-id"
+                | "-s"
+                | "--resume"
+                | "-r"
+                | "--continue"
+                | "-c"
+                | "--fork-session"
+                | "--restore-code"
+        ) || token.starts_with("-s") && token.len() > 2
+            || token.starts_with("-r") && token.len() > 2
+        {
+            return Err(format!(
+                "grok headless owns session identity; remove {token:?} from harness arguments"
+            ));
+        }
+    }
+
     let mut argv = crate::harness_capabilities::HarnessContract::packaged()
         .and_then(|contract| {
             contract.render_session_argv("grok", "headless_create", Some(session_id))
@@ -83,6 +106,38 @@ fn new_session_id() -> Result<String, String> {
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_argv;
+
+    #[test]
+    fn fenced_args_cannot_replace_the_grok_session_identity() {
+        for flag in [
+            "--session-id=other",
+            "-s",
+            "--resume",
+            "-r",
+            "--continue",
+            "-c",
+            "--fork-session",
+            "--restore-code",
+        ] {
+            let error = build_argv(
+                "12345678-1234-4234-8234-123456789abc",
+                "hello",
+                "fno",
+                None,
+                None,
+                false,
+                None,
+                &[flag.into()],
+            )
+            .unwrap_err();
+            assert!(error.contains("session identity"), "{flag}: {error}");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
