@@ -118,9 +118,7 @@ A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map
 A	resource_meter.notifications.throttle_minutes	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/machine_watch.rs	# protocol: the Python config registry and Rust machine-watch reader must agree on the notification throttle key
 A	resource_meter.thresholds.cpu_busy_fraction	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/machine_watch.rs	# protocol: the Python config registry and Rust machine-watch reader must agree on the CPU busy threshold key
 # retired 2026-09-19: `spawn-gate: corrupted slot claim {key} ignored` - the Rust gate moved the pass-path prefix to `spawn-gate note:` (only refusals carry `spawn-gate:` now); the Python transport keeps its legacy wording until the port-or-delete follow-up lands
-# retired 2026-09-19: `spawn-gate: qos demotion of pid {pid} failed (non-fatal)` - same pass-path prefix move; the Python transport keeps its legacy wording until the port-or-delete follow-up lands
 # retired 2026-09-13: `fno_spawn_gate=0 operator bypass` - the verb owns the bypass message; the Python transport relays the refusal receipt instead of restating the words
-# retired 2026-09-19: `spawn-gate: worker slot claim {key} unavailable; proceeding uncounted` - same pass-path prefix move; the Python transport keeps its legacy wording until the port-or-delete follow-up lands
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
@@ -185,3 +183,4 @@ A	select line from events order by seq	py=cli/src/fno/events/store_client.py;rs=
 A	.[] | .filename // empty	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/merge_gates.rs	# jq projection spelling shared by the merge-gate file lists on both runtimes; landed from the same feature on both sides
 A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# the de-stub manifest filename is one contract spelled in the Python writer and the Rust gate reader
 A	target-session:{session_id}	py=cli/src/fno/target_cli.py;rs=crates/fno-agents/src/resume_gate.rs	# protocol: Python target claims and Rust resume reservations share the same full-session holder format
+A	docs/harnesses/capability-matrix.md	py=scripts/diagnostics/render-harness-matrix.py;rs=crates/fno-agents/src/bin/pr-affected.rs	# data: the renderer owns this generated path, and the Rust CI selector keeps Cargo on when that input changes

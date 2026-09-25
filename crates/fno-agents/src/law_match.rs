@@ -85,6 +85,23 @@ pub struct LawRow {
     pub decision: Option<String>,
     #[serde(default)]
     pub ts: Option<String>,
+    /// The authority lane the row was classified into by Python's
+    /// `_decision_lane` (`list_decisions` stamps it). That function is the
+    /// one implementation of the lane rule; this side consumes its verdict
+    /// and never re-derives it. Absent (older callers, goldens) reads as
+    /// "not law", the historical behavior of every consumer below.
+    #[serde(default)]
+    pub lane: Option<String>,
+}
+
+impl LawRow {
+    /// The retract gate's authority rule, as the ask gate reads it:
+    /// `fno backlog decide-retract` refuses every non-operator authority on a
+    /// law-lane row, so a question whose closing action is that retraction
+    /// has no agent-side remedy and may reach the user.
+    pub(crate) fn retraction_needs_operator(&self) -> bool {
+        self.lane.as_deref() == Some("law")
+    }
 }
 
 #[derive(Deserialize)]
@@ -719,6 +736,16 @@ fn stage_answer_with(
 fn validate_answer(req: &ValidateRequest) -> Value {
     let refusal = if req.subject.trim().is_empty() || req.decision.trim().is_empty() {
         Some("subject and decision are required".to_string())
+    } else if req.subject.trim().chars().count() < 2 || req.decision.trim().chars().count() < 2 {
+        // A one-character subject or decision is a placeholder, not a
+        // statement: a 2026-08-29 smoke run of this verb with x/y/z landed a
+        // live law nobody could act on or clear. The gate refuses the shape
+        // wherever it is invoked from, live session or suite.
+        Some(
+            "subject and decision must be more than one character: a single \
+             letter is a placeholder, not law"
+                .to_string(),
+        )
     } else if req
         .rationale
         .as_deref()
@@ -896,6 +923,7 @@ mod tests {
             subject: Some(subject.to_owned()),
             decision: Some(decision.to_owned()),
             ts: Some(ts.to_owned()),
+            lane: None,
         }
     }
 
@@ -1369,6 +1397,23 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_statement_is_refused() {
+        // The 2026-08-29 junk law was exactly this shape: a smoke call with
+        // x/y/z landed a live law only the operator could clear.
+        let req = validate_req("x", "y", Some("z"), None);
+        let answer = validate_answer(&req);
+        let refusal = answer["refusal"].as_str().expect("refusal");
+        assert!(
+            refusal.contains("must be more than one character"),
+            "{refusal}"
+        );
+        // The boundary: two characters are a statement, poor but legal.
+        let req = validate_req("mx", "my", Some("why"), None);
+        let answer = validate_answer(&req);
+        assert_eq!(answer["refusal"], Value::Null);
+    }
+
+    #[test]
     fn ac4_topic_a_topic_subject_with_a_cited_node_id_passes() {
         let req = validate_req("review-rounds-cap", "Cite x-aaaa in text.", Some("r"), None);
         let answer = validate_answer(&req);
@@ -1445,6 +1490,7 @@ mod tests {
             subject: Some("exhausted-rounds-disposition".to_owned()),
             decision: Some("A fourth round is spent".to_owned()),
             ts: None,
+            lane: None,
         };
         let lines = near_law_lines_from(&index, &new_law);
         assert_eq!(lines.len(), 1, "{lines:?}");

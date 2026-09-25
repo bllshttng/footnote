@@ -202,6 +202,30 @@ def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
     assert G._SPAWN_TIMEOUT_S > G._WORKER_TIMEOUT_S, "inner bound must fire first"
 
 
+def test_spawn_failure_reports_the_verdict_not_a_head_window(monkeypatch):
+    """AC2-HP (x-d769): gate notes run long, so the 200-char head window cut
+    the verdict line off the report. The reader keys on the last spawn-gate:
+    line instead."""
+    verdict = "spawn-gate: refused on ram_floor (ram_floor, exit 77): available_gb=1.2"
+
+    class _Proc:
+        returncode = 77
+        stdout = ""
+        stderr = f"spawn-gate note: {'n' * 300}\n{verdict}"
+
+    def _fake_run(cmd, **kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
+        # real binary; the fake stands in for the spawn only.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    with pytest.raises(RuntimeError) as ei:
+        G._spawn_groom_worker("brief", "/repo", G.GROOM_MODEL_DEFAULT, DAY.isoformat())
+    assert verdict in str(ei.value)
+
+
 # ── the skill brief contract ────────────────────────────────────────────────
 
 
