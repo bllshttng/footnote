@@ -20,7 +20,7 @@ _decision_read() {
         _DECISION_VERDICT="${cached#*$'\t'}"
         return 0
     fi
-    if out=$(fno backlog decisions "$id" 2>"$TMPDIR_BASE_VAL/decisions.err"); then
+    if out=$(fno backlog decisions "$id" --scope all 2>"$TMPDIR_BASE_VAL/decisions.err"); then
         rc=0
     else
         rc=$?
@@ -1142,7 +1142,7 @@ if isinstance(node_id, str) and node_id.strip():
         raise SystemExit(0)
     try:
         _subj, rows, damaged = list_decisions(
-            node_id.strip(), limit=None, state="all", entries=entries
+            node_id.strip(), limit=None, state="all", entries=entries, scope="all"
         )
     except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")

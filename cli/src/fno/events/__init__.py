@@ -1233,6 +1233,7 @@ def operator_decision(
     rationale: str | None = None,
     supersedes: str | None = None,
     reads: "list[dict[str, Any]] | None" = None,
+    scope: str | None = None,
     source: str = "target",
 ) -> dict[str, Any]:
     """Build an ``operator_decision`` event (a durable decision record).
@@ -1262,6 +1263,7 @@ def operator_decision(
         ("rationale", rationale[:QUESTION_CAP] if rationale else None),
         ("supersedes", supersedes),
         ("reads", reads),
+        ("scope", scope),
     ):
         if value is not None:
             data[key] = value

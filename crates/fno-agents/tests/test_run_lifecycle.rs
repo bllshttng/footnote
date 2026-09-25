@@ -1430,7 +1430,7 @@ fn an_idle_priority_lane_reserves_nothing() {
 }
 
 /// AC20-HP: at the suite door, a priority checkout's argv runs ahead of an
-/// earlier targeted waiter, and both waiting lines name the lane read.
+/// earlier whole-suite waiter, and both waiting lines name the lane read.
 #[test]
 fn the_priority_lane_orders_the_suite_door() {
     let root = std::fs::canonicalize(tmp_claims_root("prio-suite")).unwrap();
@@ -1450,13 +1450,14 @@ fn the_priority_lane_orders_the_suite_door() {
         .unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    // Q from w3 queues first, targeted.
+    // Q from w3 queues first, whole-suite argv (targeted runs pass the door
+    // without queuing, so the lane ordering is proven on whole waiters).
     let mut q = test_run(&root)
         .current_dir(&w3)
         .args(["--timeout", "30"])
         .arg("--")
         .arg(&fake)
-        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .args(["test", "--manifest-path", "x/Cargo.toml"])
         .env("FAKE_LABEL", "Q")
         .env("FAKE_ORDER", &order)
         .stderr(std::process::Stdio::piped())
@@ -1470,7 +1471,7 @@ fn the_priority_lane_orders_the_suite_door() {
         .args(["--timeout", "30"])
         .arg("--")
         .arg(&fake)
-        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .args(["test", "--manifest-path", "x/Cargo.toml"])
         .env("FAKE_LABEL", "P")
         .env("FAKE_ORDER", &order)
         .stderr(std::process::Stdio::piped())
@@ -1719,9 +1720,10 @@ fn the_ancestor_admit_passes_a_queued_waiter() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC24-HP: at the suite door a whole-suite waiter yields to a targeted
-/// waiter that queued after it, prints lane=full + yielding_to=normal and
-/// the one whole-suite notice, and runs after the targeted argv.
+/// AC24-HP (user ruling revision): at the suite door a targeted run passes
+/// WITHOUT queuing - it never touches the claim - while a whole-suite waiter
+/// holds the full lane, prints lane=full and the one whole-suite notice, and
+/// runs only once the holder frees.
 #[test]
 fn a_whole_suite_waiter_yields_to_a_targeted_run() {
     let root = std::fs::canonicalize(tmp_claims_root("full-lane")).unwrap();
@@ -1738,7 +1740,7 @@ fn a_whole_suite_waiter_yields_to_a_targeted_run() {
         .unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    // F: whole-suite argv, no filter, queues first.
+    // F: whole-suite argv, no filter, queues in the full lane.
     let mut f = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -1750,7 +1752,7 @@ fn a_whole_suite_waiter_yields_to_a_targeted_run() {
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_secs(1));
-    // T: targeted argv, queues second.
+    // T: targeted argv. It skips the claim entirely and runs at once.
     let mut t = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -1761,31 +1763,33 @@ fn a_whole_suite_waiter_yields_to_a_targeted_run() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(f.try_wait().unwrap().is_none() && t.try_wait().unwrap().is_none());
+    let t_status = t.wait().unwrap();
+    assert!(t_status.success(), "the targeted run completes immediately");
+    assert!(
+        f.try_wait().unwrap().is_none(),
+        "the whole-suite waiter still waits for the holder"
+    );
 
     let _ = holder.kill();
     let _ = holder.wait();
     let start = Instant::now();
-    let t_status = t.wait().unwrap();
     let f_status = f.wait().unwrap();
-    assert!(t_status.success() && f_status.success());
+    assert!(f_status.success());
     assert!(
         start.elapsed() < Duration::from_secs(6),
-        "both must run once the slot frees, took {:?}",
+        "F must run once the slot frees, took {:?}",
         start.elapsed()
     );
     let order_text = std::fs::read_to_string(&order).unwrap();
     assert_eq!(
         order_text.lines().collect::<Vec<_>>(),
         vec!["T", "F"],
-        "the targeted run goes first: {order_text}"
+        "the targeted run went first, without queuing: {order_text}"
     );
     let f_err = String::new();
     let mut f_err = f_err;
     std::io::Read::read_to_string(&mut f.stderr.take().unwrap(), &mut f_err).unwrap();
     assert!(f_err.contains("lane=full"), "{f_err}");
-    assert!(f_err.contains("yielding_to=normal"), "{f_err}");
     assert_eq!(
         f_err.matches("whole crate suite").count(),
         1,
@@ -1794,9 +1798,9 @@ fn a_whole_suite_waiter_yields_to_a_targeted_run() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC25-EDGE: a whole-suite waiter yields for at most its own budget, then
-/// joins the normal queue at the back: waiters that queued before the flip
-/// still go first, later arrivals go after.
+/// AC25-EDGE (user ruling revision): a whole-suite waiter yields for at most
+/// its own budget, then joins the normal queue at the back. Targeted runs
+/// pass the door without queuing, so both finish while F waits.
 #[test]
 fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
     let root = std::fs::canonicalize(tmp_claims_root("yield-cap")).unwrap();
@@ -1825,7 +1829,7 @@ fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(1500));
-    // T1: targeted, queued before the flip.
+    // T1: targeted, passes the door while F waits.
     let mut t1 = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -1836,8 +1840,12 @@ fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_secs(3));
-    // T2: targeted, queued after F's flip.
+    let t1_status = t1.wait().unwrap();
+    assert!(
+        t1_status.success(),
+        "a targeted run never waits on the claim"
+    );
+    // T2: targeted, same.
     let mut t2 = test_run(&root)
         .args(["--timeout", "30"])
         .arg("--")
@@ -1848,12 +1856,15 @@ fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let t2_status = t2.wait().unwrap();
+    assert!(
+        t2_status.success(),
+        "a targeted run never waits on the claim"
+    );
 
     let start = Instant::now();
     let f_status = f.wait().unwrap();
-    let t1_status = t1.wait().unwrap();
-    let t2_status = t2.wait().unwrap();
-    assert!(f_status.success() && t1_status.success() && t2_status.success());
+    assert!(f_status.success());
     let _ = holder.wait();
     let order_text = std::fs::read_to_string(&order).unwrap();
     let ran: Vec<&str> = order_text.lines().collect();
@@ -1870,8 +1881,8 @@ fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
         .position(|l| *l == "T1")
         .unwrap_or_else(|| panic!("T1 must run: {order_text}"));
     assert!(
-        t1_idx < f_idx && f_idx < t2_idx,
-        "T1 (queued before the flip) then F then T2: {order_text}"
+        t1_idx < f_idx && t2_idx < f_idx,
+        "both targeted runs precede F, which waited out its budget: {order_text}"
     );
     let f_err = String::new();
     let mut f_err = f_err;
