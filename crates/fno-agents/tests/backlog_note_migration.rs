@@ -21,7 +21,7 @@ fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
 }
 
 fn read_graph(path: &PathBuf) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    json!({"entries": fno_agents::graph_store::read_rows(path).unwrap()})
 }
 
 fn run_notes(args: &[&str]) -> (i32, String) {
@@ -66,14 +66,15 @@ fn ac8_originals_and_positions_survive_verbatim() {
         &graph,
         &[json!({
             "id": "d-9", "slug": "slug-d-9", "title": "n", "type": "feature",
-            "status": "done", "priority": "p1", "progress_notes": notes,
+            "status": "done", "priority": "p1", "completed_at": "2026-06-26T00:00:00Z",
+            "progress_notes": notes,
         })],
     );
     let g = graph.display().to_string();
     let empty = dir.path().join("empty.json");
     std::fs::write(&empty, "[]").unwrap();
     let empty_manifest = empty.display().to_string();
-    let (code, _) = run_notes(&[
+    let (code, out, err) = run_notes_full(&[
         "migrate",
         "--apply",
         "--manifest",
@@ -90,7 +91,10 @@ fn ac8_originals_and_positions_survive_verbatim() {
         .find(|r| r["id"] == json!("d-9"))
         .unwrap()
         .clone();
-    assert!(row.get("progress_notes").is_none());
+    assert!(
+        row["progress_notes"].as_array().is_some_and(Vec::is_empty),
+        "row={row}; stdout={out}; stderr={err}"
+    );
     assert!(row.get(node_state::HISTORY_MARKER_KEY).is_some());
     // Readback: three originals with positions, oversized one intact.
     let (records, total) =
@@ -230,8 +234,9 @@ fn inventory_reports_counts_and_hashes_without_writes() {
     let g = graph.display().to_string();
     let (code, out) = run_notes(&["inventory", "--json", "--graph", &g]);
     assert_eq!(code, 0);
-    assert!(out.contains("backend=sqlite"), "{out}");
-    assert!(out.contains(&hash[..20.min(hash.len())]) || out.contains("notes_hash"));
+    let inventory: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(inventory["nodes_scanned"], json!(1));
+    assert!(inventory.to_string().contains(&hash[..20.min(hash.len())]));
     assert_eq!(fno_agents::backlog::version(&graph).unwrap(), before);
 }
 

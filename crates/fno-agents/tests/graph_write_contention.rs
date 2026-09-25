@@ -128,11 +128,12 @@ fn commit(
 fn write_graph(tag: &str) -> (PathBuf, PathBuf, PathBuf, Keeper) {
     let home = temp_home(tag);
     let graph = home.join("graph.json");
-    std::fs::write(
-        &graph,
-        r#"{"entries":[{"id":"x-a","title":"a"},{"id":"x-b","title":"b"},{"id":"x-c","title":"c"},{"id":"x-d","title":"d"}]}"#,
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id":"x-a","slug":"x-a","title":"a","type":"feature","status":"ready","priority":"p2"}),
+        json!({"id":"x-b","slug":"x-b","title":"b","type":"feature","status":"ready","priority":"p2"}),
+        json!({"id":"x-c","slug":"x-c","title":"c","type":"feature","status":"ready","priority":"p2"}),
+        json!({"id":"x-d","slug":"x-d","title":"d","type":"feature","status":"ready","priority":"p2"}),
+    ]).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper(tag, &graph, &sock);
     wait_for_socket(&sock);

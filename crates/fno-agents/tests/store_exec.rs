@@ -42,14 +42,9 @@ fn exec_request(graph: &std::path::Path, body: &str) -> (i32, Option<Value>) {
 fn store_exec_serves_read_begin_commit_across_processes() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({
-            "entries": [{"id": "x-exe", "slug": "exec-node", "title": "e", "status": "ready"}]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id": "x-exe", "slug": "exec-node", "title": "e", "type": "feature", "status": "ready", "priority": "p2"})
+    ]).unwrap();
 
     // A read answers and binds no socket beside the graph file.
     let (code, reply) = exec_request(&graph, r#"{"id":1,"method":"read","params":{}}"#);

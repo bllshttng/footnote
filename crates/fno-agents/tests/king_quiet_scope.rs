@@ -47,9 +47,12 @@ fn a_quiet_board_with_undelivered_scope_stops_while_waiting() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let graph = home.join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        r#"{"entries":[{"id":"x-epic","type":"epic","priority":"p1","status":"done"}]}"#,
+        &[serde_json::json!({
+            "id": "x-epic", "slug": "x-epic", "title": "epic", "type": "epic",
+            "priority": "p1", "status": "done", "completed_at": "2026-08-18T00:00:00Z"
+        })],
     )
     .unwrap();
     let config = dir.path().join("config.toml");

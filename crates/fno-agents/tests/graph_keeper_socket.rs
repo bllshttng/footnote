@@ -316,7 +316,7 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
     let _keeper = spawn_keeper("wedge-test", &graph, &sock);
     wait_for_socket(&sock);
 
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -357,12 +357,14 @@ fn read_file_returns_the_bytes_load_graph_validates() {
     let _keeper = spawn_keeper("bytes-test", &graph, &sock);
     wait_for_socket(&sock);
     let mut stream = UnixStream::connect(&sock).unwrap();
-    let result = ok_result(rpc(&mut stream, 1, "read_file", json!({})));
+    let entries = ok_result(rpc(&mut stream, 1, "read", json!({})))["entries"].clone();
+    let result = ok_result(rpc(&mut stream, 2, "read_file", json!({})));
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(result["bytes_b64"].as_str().unwrap())
         .unwrap();
-    let on_disk = std::fs::read(&graph).unwrap();
-    assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["entries"], entries);
+    assert!(!graph.exists(), "the JSON anchor is not persisted");
     assert!(
         result["sha256"].as_str().unwrap().starts_with("sqlite:"),
         "the version token labels the store it names"
@@ -605,7 +607,7 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("busy-test", &graph, &sock);
     wait_for_socket(&sock);
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -1022,21 +1024,13 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
 fn ready_board_mode_orders_every_entry_with_its_facts() {
     let home = short_home("board-mode");
     let graph = home.join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_vec(&json!({
-            "entries": [
-                {"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"},
-                {"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"},
-                {"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
-                 "completed_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-loose", "status": "ready", "priority": "p1"},
-                {"id": "x-def", "status": "deferred", "priority": "p2"}
-            ]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id": "x-e", "slug": "x-e", "title": "epic", "status": "ready", "priority": "p1", "type": "epic"}),
+        json!({"id": "x-c1", "slug": "x-c1", "title": "child one", "status": "ready", "priority": "p2", "type": "feature", "parent": "x-e"}),
+        json!({"id": "x-c2", "slug": "x-c2", "title": "child two", "status": "done", "priority": "p2", "type": "feature", "parent": "x-e", "completed_at": "2026-09-01T00:00:00Z"}),
+        json!({"id": "x-loose", "slug": "x-loose", "title": "loose", "status": "ready", "priority": "p1", "type": "feature"}),
+        json!({"id": "x-def", "slug": "x-def", "title": "deferred", "status": "deferred", "priority": "p2", "type": "feature"}),
+    ]).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper("board-mode", &graph, &sock);
     wait_for_socket(&sock);
@@ -1104,7 +1098,7 @@ fn ready_board_mode_orders_every_entry_with_its_facts() {
 fn ready_board_mode_refuses_when_claims_are_unreadable() {
     let home = short_home("board-claims");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let claims_root = home.join("claims-root");
     std::fs::create_dir_all(claims_root.join(".fno")).unwrap();
     // A regular file where read_dir expects a directory: ENOTDIR, the

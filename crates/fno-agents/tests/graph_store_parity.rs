@@ -362,11 +362,17 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     let dir = tempfile::tempdir().expect("rs dir");
     let graph = dir.path().join("graph.json");
     let fixture: Value = serde_json::from_str(&fixture).expect("fixture json");
-    let entries = fixture
+    let mut entries = fixture
         .get("entries")
         .and_then(Value::as_array)
-        .expect("fixture entries");
-    fno_agents::graph_store::seed_rows(&graph, entries).expect("seed graph.db");
+        .expect("fixture entries")
+        .clone();
+    fno_agents::graph_store::apply_defaults(&mut entries, false);
+    let entries = entries
+        .into_iter()
+        .filter(|row| row.get("id").and_then(Value::as_str).is_some())
+        .collect::<Vec<_>>();
+    fno_agents::graph_store::seed_rows(&graph, &entries).expect("seed graph.db");
     let rs = rust_probe(&graph, &ops);
 
     // Schema-change regeneration: with REGENERATE_GOLDENS=1 the live probe

@@ -162,16 +162,22 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
             .chain(ids.into_iter().map(|id| {
                 // parent: the manifest scope compiles to the epic plus its
                 // descendants, so a workable row is a child of `drain`.
-                serde_json::json!({"id": id, "type": "feature", "status": "ready",
+                serde_json::json!({"id": id, "slug": id.clone(), "title": id.clone(), "type": "feature", "status": "ready",
                                    "priority": "p0", "plan_path": "/plans/p.md",
                                    "parent": "drain"})
             }))
             .collect();
-        fs::write(
-            &graph,
-            serde_json::to_string(&serde_json::json!({ "entries": nodes })).unwrap(),
-        )
-        .unwrap();
+        let mut rows = nodes;
+        for row in &mut rows {
+            let obj = row.as_object_mut().unwrap();
+            obj.entry("slug")
+                .or_insert_with(|| serde_json::json!("drain"));
+            obj.entry("title")
+                .or_insert_with(|| serde_json::json!("drain"));
+            obj.entry("priority")
+                .or_insert_with(|| serde_json::json!("p1"));
+        }
+        fno_agents::graph_store::seed_rows(&graph, &rows).unwrap();
     }
     fs::write(
         fno_dir.join("config.toml"),
