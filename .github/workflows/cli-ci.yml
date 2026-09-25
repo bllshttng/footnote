@@ -972,6 +972,13 @@ jobs:
         working-directory: crates/fno
         run: cargo test --lib --bins
 
+      - name: cargo test --ignored macOS-hanging restore fill, serial (fno mux)
+        # workspace_restore_fills_a_locate_tier_portal hangs on macOS PTYs and
+        # is #[ignore]d so local suites never wedge; the ubuntu shard still
+        # owns its verdict, so it runs here alone and serially.
+        working-directory: crates/fno
+        run: cargo test --lib workspace_restore_fills_a_locate_tier_portal_and_names_the_tier -- --ignored --test-threads=1
+
       - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).

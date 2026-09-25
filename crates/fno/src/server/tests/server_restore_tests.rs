@@ -1792,6 +1792,7 @@ fn workspace_restore_names_a_portal_whose_claude_plan_never_resolved() {
 }
 
 #[test]
+#[ignore = "hangs on macOS PTYs; green on the ubuntu CI shard, which runs it serially with --ignored below"]
 fn workspace_restore_fills_a_locate_tier_portal_and_names_the_tier() {
     // A Locate-tier row (no attach id, no peek reader) fills through the
     // inline argv and its row CARRIES the notice - a fill that cannot show

@@ -2865,7 +2865,8 @@ def cmd_name(
 
 
 # `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
-# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
+# entry resolves it). The retask transaction is native too: the empty-argv rename payload door
+# in fno-agents runs it, and run_retask is the thin front that builds the payload.
 
 
 @agents_app.command("retask", hidden=True)
