@@ -88,6 +88,11 @@ pub struct ReadyOpts {
     /// the claims store (`claims::list` + liveness) so the decision stays a
     /// pure function of entries + options.
     pub claimed: BTreeSet<String>,
+    /// node id -> the open question id that holds it, resolved by the caller
+    /// (`needs::held_map` over the question journals) so the decision stays a
+    /// pure function of entries + options. An entry named here drops with
+    /// reason `held:<qid>`, the receipt word the drain already uses.
+    pub held: std::collections::BTreeMap<String, String>,
     /// `config.backlog.staleness_days`, resolved by the caller. `None` (or a
     /// non-positive value) means "no config surface reached me" and the
     /// selection degrades to [`DEFAULT_STALENESS_DAYS`], the same fail-open
@@ -928,9 +933,16 @@ fn selection_guards(
     by_id: &BTreeMap<String, Value>,
     now_ms: i64,
     staleness_days: i64,
+    held: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
     if let Some(hold) = dispatch_hold_verdict(entry, by_id) {
         return Some(hold.guard_reason);
+    }
+    // A question the operator has not answered outranks every selector
+    // signal: the node leaves ready the moment it is named in blocks, so a
+    // dispatcher never spends a lane on the same ruling twice.
+    if let Some(qid) = entry_id(entry).and_then(|id| held.get(id)) {
+        return Some(format!("held:{qid}"));
     }
     if let Some(owner) = get_str(entry, "contained_in") {
         if !owner.is_empty() {
@@ -1582,7 +1594,14 @@ fn drops_for_filter(
             }
         }
         FILTER_SELECTION_GUARD => {
-            selection_guards(e, &ctx.by_id, ctx.opts.now_ms, ctx.staleness_days).or_else(|| {
+            selection_guards(
+                e,
+                &ctx.by_id,
+                ctx.opts.now_ms,
+                ctx.staleness_days,
+                &ctx.opts.held,
+            )
+            .or_else(|| {
                 // A cold idea the verb derivation is certain to refuse must
                 // not spend a drain tick: drop it where every autonomous
                 // dispatcher reads, attributed for `advance --explain`.
@@ -1926,6 +1945,59 @@ mod tests {
             .expect("x-a dropped");
         assert_eq!(drop.filter, "selection-guard");
         assert_eq!(drop.reason, "dead-ancestor:x-p");
+    }
+
+    #[test]
+    fn held_question_drops_the_node_with_the_question_reason() {
+        let entries = vec![json!({"id": "x-hold", "status": "ready", "priority": "p1"})];
+        let mut held_opts = opts(false);
+        held_opts
+            .held
+            .insert("x-hold".to_string(), "q-1".to_string());
+        let reply = select(&entries, &held_opts).unwrap();
+        assert!(reply.rows.is_empty());
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-hold")
+            .expect("x-hold dropped");
+        assert_eq!(drop.filter, "selection-guard");
+        assert_eq!(drop.reason, "held:q-1");
+    }
+
+    #[test]
+    fn empty_held_map_selects_normally() {
+        // Positive control: no open question, no drop.
+        let entries = vec![json!({"id": "x-hold", "status": "ready", "priority": "p1"})];
+        let reply = select(&entries, &opts(false)).unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert!(reply.drops.is_empty());
+    }
+
+    #[test]
+    fn scoped_parent_call_still_drops_a_held_child() {
+        // The epic fan-out dispatches children one at a time; a held child
+        // must leave that path too (the 2026-09-15 specimen route).
+        let entries = vec![
+            json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
+            json!({"id": "x-hold", "status": "ready", "priority": "p2", "parent": "x-e"}),
+        ];
+        let mut held_opts = opts(false);
+        held_opts.parent = Some("x-e".to_string());
+        held_opts
+            .held
+            .insert("x-hold".to_string(), "q-1".to_string());
+        let reply = select(&entries, &held_opts).unwrap();
+        assert!(reply
+            .rows
+            .iter()
+            .all(|r| r.get("id") != Some(&json!("x-hold"))));
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-hold")
+            .expect("x-hold dropped");
+        assert_eq!(drop.reason, "held:q-1");
     }
 
     #[test]
