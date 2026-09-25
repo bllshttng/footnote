@@ -242,6 +242,28 @@ fn moved_helpers_still_answer() {
 }
 
 #[test]
+fn snapshot_errors_and_staleness_ride_inputs_errors() {
+    // AC8-HP: the snapshot parse copies each errors line into Inputs.errors
+    // with the stale stamp first; rows stay the entries.
+    let doc = json!({
+        "backend": "github",
+        "stale_since": "2026-09-24T10:00:00Z",
+        "entries": [{"id": "E-1", "status": "ready", "priority": "p2"}],
+        "errors": ["closed window failed: gh down"],
+    });
+    let (rows, errors) = parse_snapshot_doc(&doc);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "E-1");
+    assert_eq!(
+        errors,
+        vec![
+            "tracker snapshot stale since 2026-09-24T10:00:00Z".to_string(),
+            "closed window failed: gh down".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn backlog_view_column_rule_follows_the_authority() {
     // AC21-HP rows, through the model's card path and the rule itself.
     use crate::backlog_view::kanban_column;
