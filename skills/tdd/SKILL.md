@@ -19,6 +19,8 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
 3. **GREEN:** write the simplest code that passes. Nothing beyond what the test requires.
 4. **Verify GREEN (mandatory):** the test passes and the other tests still pass. Still failing? Fix the implementation, not the test.
 5. **REFACTOR:** only after green, keep tests passing, add no behavior.
+
+**Scope.** The cycle runs the tests covering the files you changed (`fno doctor test <test files>`), never the whole suite: CI runs every suite on every PR. When a whole-suite local run is genuinely needed, start it as a background task: it queues on `test:suite` and the turn never blocks.
 6. **Commit** the pair.
 
 ## Acceptance criteria become tests
