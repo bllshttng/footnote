@@ -290,6 +290,7 @@ pub mod resume_pin;
 pub mod resume_receipt;
 pub(crate) mod resume_route;
 pub mod resume_wake;
+pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod rm_receipt;
