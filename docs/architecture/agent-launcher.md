@@ -5,7 +5,7 @@ One composer launches a new harness session through the canonical spawn door and
 ## Primary flow
 
 1. Prefix+i, the sideline menu, or `t` on a board card opens the composer. The catalog read arms at attach (a prefetch), not at first open.
-2. The chips carry the pick itself, never a field label: `claude-opus-5-5 · high`, `footnote`, `thread`. A chip shows its label word only when nothing can be shown (`agent`).
+2. The chips carry the pick itself, never a field label: `claude-opus-5-5 · high`, `footnote`, `thread`. When nothing can be shown, the chip falls back to its label word (`agent`).
 3. Enter on Launch puts ONE typed request (`ClientMsg::AgentLaunch`, v83) on the wire. The button disables. Duplicate submissions are suppressed at the source and at the server desk.
 4. The server validates pre-birth: absolute existing project list, supported substrate, message length. It answers duplicates with the SAME attempt and runs exactly one `fno agents spawn` off the core loop. The message rides `--prompt-file -` stdin, never argv.
 5. The client receives `ServerMsg::AgentLaunch` progress: `Starting`, then one terminal state (`Launched` / `Refused` / `Unknown`).
