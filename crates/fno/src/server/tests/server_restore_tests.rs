@@ -2358,8 +2358,15 @@ fn workspace_restore_focus_spends_no_headroom_at_zero() {
     core.shells = vec!["/bin/cat".into()];
     let cwd = std::env::temp_dir().join("fno-ws-restore-focus-spend");
     std::fs::create_dir_all(&cwd).unwrap();
-    let shell = core.spawn_pane(24, 80, cwd.to_string_lossy().as_ref()).unwrap();
-    core.session.add_squad(7, vec![cwd.to_string_lossy().into_owned()], None, leaf_tab(70, shell));
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        leaf_tab(70, shell),
+    );
     core.agents = vec![RegistryAgent {
         harness_session_id: Some("cap-session-live".into()),
         harness: Some("codex".into()),
@@ -2371,20 +2378,34 @@ fn workspace_restore_focus_spends_no_headroom_at_zero() {
     }];
     core.squad_members.insert(
         7u64,
-        vec![stored_worker("t-cap-live", "codex", "cap-session-live", cwd.to_string_lossy().as_ref())],
+        vec![stored_worker(
+            "t-cap-live",
+            "codex",
+            "cap-session-live",
+            cwd.to_string_lossy().as_ref(),
+        )],
     );
-    let first = run_workspace_restore_headroom(&mut core, false, Ok(revival_gate::unbounded_headroom()));
+    let first =
+        run_workspace_restore_headroom(&mut core, false, Ok(revival_gate::unbounded_headroom()));
     assert_eq!(first[0].outcome, "resumed", "{first:?}");
     let live_pane = first[0].pane.expect("the first restore names its pane");
 
-    let rows = run_workspace_restore_headroom(&mut core, false, Ok(revival_gate::ProbeHeadroom {
-        left: 0,
-        slots: 7,
-        cap: 7,
-    }));
+    let rows = run_workspace_restore_headroom(
+        &mut core,
+        false,
+        Ok(revival_gate::ProbeHeadroom {
+            left: 0,
+            slots: 7,
+            cap: 7,
+        }),
+    );
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].outcome, "focused", "{rows:?}");
-    assert_eq!(rows[0].pane, Some(live_pane), "the live pane is focused, not respawned");
+    assert_eq!(
+        rows[0].pane,
+        Some(live_pane),
+        "the live pane is focused, not respawned"
+    );
     for pid in [live_pane, shell] {
         core.reap_pane(pid);
     }
