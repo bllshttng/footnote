@@ -28,6 +28,13 @@ NODE = "ab-grantunit1"
 PR = 42
 
 
+@pytest.fixture(autouse=True)
+def _stub_pr_worktree_resolution(monkeypatch):
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+
+
 def _verdict(monkeypatch, state, reason="r", claim_state="stale"):
     """Stub the transport: the Rust owner's answer, as the consumers see it."""
     verdict = GrantVerdict(state, reason, node_id=NODE, claim_state=claim_state)

@@ -330,24 +330,41 @@ pub fn run(args: &[String]) -> i32 {
             format!("/fno:reign {}", scope.trim())
         }
     });
-    let session = flag(args, "--session")
-        .filter(|session| !session.trim().is_empty())
-        .or_else(|| std::env::var("FNO_HARNESS_SESSION_ID").ok())
-        .or_else(|| match harness.as_str() {
-            "codex" => std::env::var("CODEX_THREAD_ID").ok(),
-            "claude" => std::env::var("CLAUDE_SESSION_ID").ok(),
-            "gemini" => std::env::var("GEMINI_SESSION_ID").ok(),
-            _ => None,
-        })
-        .unwrap_or_default();
+    // The spawn door runs before the worker's session exists, and the
+    // caller's env names the spawner, never the worker. So it skips the
+    // session-bound legs; the worker's own Stop hook checks them after launch.
+    let pre_launch = args.iter().any(|arg| arg == "--pre-launch");
+    let session = if pre_launch {
+        String::new()
+    } else {
+        flag(args, "--session")
+            .filter(|session| !session.trim().is_empty())
+            .or_else(|| std::env::var("FNO_HARNESS_SESSION_ID").ok())
+            .or_else(|| match harness.as_str() {
+                "codex" => std::env::var("CODEX_THREAD_ID").ok(),
+                "claude" => std::env::var("CLAUDE_SESSION_ID").ok(),
+                "gemini" => std::env::var("GEMINI_SESSION_ID").ok(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
     let owner = flag(args, "--continuation-owner")
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| continuation_owner(&scope, &session));
+        .unwrap_or_else(|| {
+            continuation_owner(&scope, if pre_launch { "pre-launch" } else { &session })
+        });
 
     let ensure_goal = args.iter().any(|arg| arg == "--ensure-goal");
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let machine = machine_leg(&harness);
-    let stop = stop_leg(&harness, &session, &cwd);
+    let stop = if pre_launch {
+        ReadinessLeg {
+            state: LegState::Ready,
+            reason: Some("pre-launch: the worker's Stop hook checks this leg".to_string()),
+        }
+    } else {
+        stop_leg(&harness, &session, &cwd)
+    };
     let lifecycle = lifecycle_leg(&harness, &command);
     let provider_goal = provider_goal_leg(&harness);
     let mut snapshot = measure(machine, lifecycle, stop, provider_goal, owner);

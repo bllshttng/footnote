@@ -264,14 +264,24 @@ pub(crate) fn first_seen_age_s(path: &Path, key: &str, now: u64) -> Option<u64> 
     Some(age_seconds(ts, now))
 }
 
-/// The stored keys carrying `prefix`, so a reader can forget the clocks of
-/// scopes that left its payload.
+/// The stored keys carrying `prefix`, so a per-scope reader can act on what
+/// it marked and forget the clocks of scopes that left its payload.
 pub(crate) fn keys_with_prefix(path: &Path, prefix: &str) -> Vec<String> {
     load_store(path)
         .keys()
         .filter(|k| k.starts_with(prefix))
         .cloned()
         .collect()
+}
+
+/// The stored token under `key`, so a reader can act on what it marked. The
+/// store shapes stay private to this module.
+pub(crate) fn stored_token(path: &Path, key: &str) -> Option<String> {
+    load_store(path)
+        .get(key)
+        .and_then(|e| e.get("token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@
 //! layer, heal calls [`guarded_push`] instead, and heal.rs shrinks under the
 //! file-budget ratchet. Exit codes are heal's, so one table covers both
 //! verbs:
+//! `--pr <N>` selects the local worktree on that PR's head branch.
 //!
 //! * `0` pushed
 //! * `1` preflight red (heal already uses 1 for escalations; the meanings
@@ -615,6 +616,7 @@ fn current_branch_quoted(ctx: &PushCtx) -> String {
 /// Parsed verb arguments.
 struct VerbArgs {
     force: bool,
+    pr: Option<String>,
     in_flight: Option<String>,
     preflight: bool,
     git_bin: String,
@@ -627,6 +629,7 @@ struct VerbArgs {
 fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
     let mut a = VerbArgs {
         force: false,
+        pr: None,
         in_flight: None,
         preflight: false,
         git_bin: "git".to_string(),
@@ -649,6 +652,10 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         };
         match arg {
             "--force-ci-cancel" => a.force = true,
+            "--pr" => {
+                a.pr = Some(take("--pr")?);
+                i += 1;
+            }
             "--in-flight" => {
                 a.in_flight = Some(take("--in-flight")?);
                 i += 1;
@@ -681,6 +688,10 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         i += 1;
     }
     Ok(a)
+}
+
+fn resolve_pr_worktree_for_push(pr: &str, cwd: &Path, gh_bin: &str) -> Result<PathBuf, String> {
+    crate::pr_worktree::resolve_pr_with(cwd, pr, gh_bin)
 }
 
 fn unknown_flag(other: &str) -> String {
@@ -822,13 +833,22 @@ fn commit_citation_failures(log: &str) -> Vec<String> {
 /// when the branch was rebased), stamp, receipt. Exit codes: 0 pushed, 1
 /// preflight red, 2 in flight, 3 refusal, 4 read error.
 pub fn run_push(argv: &[String]) -> i32 {
-    let a = match parse_verb_args(argv) {
+    let mut a = match parse_verb_args(argv) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pr-push: {msg}");
             return 4;
         }
     };
+    if let Some(pr) = a.pr.as_deref() {
+        match resolve_pr_worktree_for_push(pr, &a.cwd, &a.gh_bin) {
+            Ok(worktree) => a.cwd = worktree,
+            Err(err) => {
+                eprintln!("pr-push: {err}; refusing to use the caller checkout");
+                return 4;
+            }
+        }
+    }
     let cwd = a.cwd.clone();
     let git = a.git_bin.clone();
 
@@ -1275,6 +1295,7 @@ pub fn run_push(argv: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::write_exec_stub as write_exec;
+    use std::process::Command;
 
     /// A fake gh: green rust-ci check runs, an empty status read, a failed
     /// cli-ci run with no check-run link, and a jobs read answering zero.
@@ -1326,6 +1347,115 @@ echo '{"check_runs":[]}'
 exit 1
 "#,
         )
+    }
+
+    #[test]
+    fn pr_push_from_canonical_resolves_the_pr_branch_worktree() {
+        let parsed = parse_verb_args(&["--pr".into(), "42".into()]).unwrap();
+        assert_eq!(parsed.pr.as_deref(), Some("42"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical");
+        let feature = dir.path().join("feature-worktree");
+        std::fs::create_dir(&canonical).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&canonical)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/pr-42",
+            feature.to_str().unwrap(),
+        ]);
+        let gh = write_exec(
+            dir.path(),
+            "gh-pr",
+            "#!/bin/sh\nprintf '%s\\n' 'feature/pr-42'\n",
+        );
+
+        assert_eq!(
+            resolve_pr_worktree_for_push("42", &canonical, gh.to_str().unwrap()).unwrap(),
+            feature
+        );
+    }
+
+    #[test]
+    fn pr_push_guard_runs_in_the_pr_worktree_when_started_from_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical");
+        let feature = dir.path().join("feature-worktree");
+        std::fs::create_dir(&canonical).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&canonical)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/pr-42",
+            feature.to_str().unwrap(),
+        ]);
+        let gh = write_exec(
+            dir.path(),
+            "gh-pr",
+            "#!/bin/sh\nprintf '%s\\n' 'feature/pr-42'\n",
+        );
+        let git_bin = write_exec(
+            dir.path(),
+            "git-probe",
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >> \"$(dirname \"$0\")/cwd.txt\"\nexit 1\n",
+        );
+        let capture = dir.path().join("cwd.txt");
+        let argv = [
+            "--pr",
+            "42",
+            "--in-flight",
+            "feature/pr-42",
+            "--cwd",
+            canonical.to_str().unwrap(),
+            "--gh-bin",
+            gh.to_str().unwrap(),
+            "--git-bin",
+            git_bin.to_str().unwrap(),
+        ]
+        .map(str::to_string);
+
+        let exit = run_push(&argv);
+
+        assert_eq!(exit, 0);
+        assert_eq!(
+            std::fs::read_to_string(capture).unwrap().trim(),
+            feature.to_str().unwrap()
+        );
     }
 
     #[test]

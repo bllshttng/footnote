@@ -7,14 +7,14 @@ A pass encodes a wave and abdicates (`/fno:reign <scope> --once`). A reign witho
 Three facts fix the design, all measured against the harness internals:
 
 - The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, and exits `NoWork` on a clean board or while it waits only on the user, CI or a worker. `NoProgress` remains the bounded fail-closed path.
-- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`; its settled-PR watch runs as `claude --bg --exec`, so quiet polling invokes no model. Other harnesses use the heartbeat or external wake documented in the beat table.
-- `king.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache. The watch is event-driven, not a Monitor, and relaunch is single-flight through its scope lock.
+- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`. The daemon's `king_settle` arm mails every crown on every harness, so quiet polling invokes no model anywhere. Other harnesses use the heartbeat or external wake documented in the beat table.
+- `king.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache.
 
 ## The one arm, and the demand reads
 
-The settled-PR watch is the one demand arm. It polls the crown row and `pr_nudge_escalated`, then checks only owned nodes and their PR merge gates. A quiet shell job costs no king turns; a matched ready PR mails the crown and exits. Its scope lock makes a check-in or postcompact relaunch safe.
+The `king_settle` arm is the one push arm. The daemon reads the court on its 300s beat. It mails the crown once per covered PR that settles green, and once per covered node that merges and closes. The king arms no watch.
 
-1. **Settled-PR watch, 600s.** The daemon nudge ladder is the one poke for every quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch joins that event to `manifest_session` and `owned` scope nodes, then reads `fno do pr status`. Ready with no blockers mails the crown the merge lever. A missing court row, unreadable event file or failed probe mails a named failure and exits.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm joins the court's owned nodes to their PR status reads. A green settled PR mails the crown the merge lever. A node that merged and closed mails the next-dispatch lever. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
 The deleted arms are demand reads. Each is read on demand. Mail arrives as a conversation turn and cannot be missed. The board and crown liveness are check-in body reads. A red row in `fno agents status` stays the mechanical trigger for the one dispatch exception. Main CI is read as one verdict token (`red`, `green`, `pending`), never a check-run count. Several of the most productive reign wakes began with "main flipped green". Capacity is the spawn gate's job. The gate refused twice in the measured reign, correctly. The band's five readings changed no decision.
 
@@ -44,7 +44,7 @@ The crown survives a compact. Its evidence does not. After a compaction the sess
 
 ## Stop semantics
 
-Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next heartbeat, mail or settled-PR watch wakes it. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook.
+Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next heartbeat or mail wakes it, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook.
 
 ## The dispatch exception and its journal row
 
