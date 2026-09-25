@@ -285,3 +285,69 @@ fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
         );
     }
 }
+
+#[test]
+fn list_hover_band_is_one_color_across_every_column_gap() {
+    // The list hover band paints ONE explicit bg across the whole row, the
+    // column gaps included. The striped band - lane-colored cells against
+    // lighter gaps - was per-cell inversion: a lane fg inverted into a
+    // colored background, a Default fg into the terminal's own, so the row
+    // read two colors.
+    let mut view = two_pane_view();
+    let mut worker = tab_agent(None, Some(AgentBadge::Working), false);
+    worker.harness = Some("codex".into()); // a lane-colored row: the stripe source
+    worker.name = "worker".into();
+    view.layout.agents = vec![worker];
+    let agent_i = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(_)))
+        .expect("an agent row renders");
+    view.hover_row = Some(agent_i);
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = view.sideline_paint_w().saturating_sub(1);
+    let row = agent_i - view.sideline_offset();
+    let cells = &frame.cells[row * cols..row * cols + text_w];
+    assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
+    for cell in cells {
+        assert_eq!(cell.bg, Color::Indexed(7), "one band bg, gaps included");
+        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "one band text color");
+        assert_eq!(cell.flags, 0, "no INVERSE inside the band");
+    }
+}
+
+#[test]
+fn composed_list_bands_hold_contrast_on_dark_and_light_frames() {
+    // The list layout's hover band, judged by the same lens as the card
+    // bands: the REAL painter's cells clear the 3:1 hover floor on a dark
+    // and a light terminal.
+    let mut view = two_pane_view();
+    let mut worker = tab_agent(None, Some(AgentBadge::Working), false);
+    worker.harness = Some("codex".into());
+    worker.name = "worker".into();
+    view.layout.agents = vec![worker];
+    view.term = (30, 140);
+    view.sideline_width = 80;
+    let agent_i = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(_)))
+        .expect("an agent row renders");
+    view.hover_row = Some(agent_i);
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = view.sideline_paint_w().saturating_sub(1);
+    let row = agent_i - view.sideline_offset();
+    let cells = &frame.cells[row * cols..row * cols + text_w];
+    for lens in crate::frame_html::THEMES {
+        for cell in cells.iter().filter(|c| c.c != ' ') {
+            let ratio = crate::frame_html::contrast_ratio(cell, lens);
+            assert!(
+                ratio >= 3.0,
+                "list hover band on {}: {ratio:.2}:1",
+                lens.name
+            );
+        }
+    }
+}

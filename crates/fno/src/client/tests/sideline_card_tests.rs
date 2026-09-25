@@ -596,7 +596,7 @@ fn unhighlighted_rows_read_on_a_light_terminal() {
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
-    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    let (_, detail_i) = card_rows_for(&v, "w1");
     let frame = v.compose();
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
