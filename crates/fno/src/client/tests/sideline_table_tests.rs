@@ -123,10 +123,10 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
 }
 
 #[test]
-fn sideline_selection_scrolls_into_view_and_paints_inverse() {
+fn sideline_selection_scrolls_into_view_and_paints_the_band() {
     // acceptance: 80 rows on a short panel with the selection past
     // the bottom -> the Table's offset scrolls the selected row into view
-    // and that row paints INVERSE.
+    // and that row paints the explicit hover band.
     let mut view = two_pane_view();
     let agents = (0..80)
         .map(|i| {
@@ -143,11 +143,10 @@ fn sideline_selection_scrolls_into_view_and_paints_inverse() {
     let cols = frame.cols as usize;
     let visible = view.sideline_visible_rows();
     let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
-    let flags = frame.cells[sel_row * cols].flags;
     assert_eq!(
-        flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selected row scrolls into view and paints inverse"
+        frame.cells[sel_row * cols].bg,
+        Color::Indexed(7),
+        "the selected row scrolls into view and paints the hover band"
     );
     assert_ne!(
         frame.cells[0].c, '\u{25be}',

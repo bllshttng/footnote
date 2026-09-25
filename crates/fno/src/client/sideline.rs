@@ -147,12 +147,13 @@ impl View {
                     self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
                 })
                 .collect();
-            let mut table = RtTable::new(table_rows, SIDELINE_COLUMNS)
+            let table = RtTable::new(table_rows, SIDELINE_COLUMNS)
                 .flex(Flex::Start)
-                .highlight_spacing(HighlightSpacing::Never);
-            if card {
-                table = table.row_highlight_style(RtStyle::new());
-            }
+                .highlight_spacing(HighlightSpacing::Never)
+                // The overlay pass is the one band painter: the Table's own
+                // row highlight (REVERSED by default) would paint an INVERSE
+                // band the spec forbids inside a highlight.
+                .row_highlight_style(RtStyle::new());
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, table_area, &mut buf, &mut st);
             off = st.offset();
@@ -260,6 +261,18 @@ impl View {
             };
             if let Some((text, flags)) = legacy {
                 paint_legacy_row(cells, r, cols, text_w, &text, flags);
+                if matches!(drow, DisplayRow::CardDetail(_)) {
+                    // Card line 2 on a light terminal: DIM washes the default
+                    // fg toward a light background until it vanishes. The
+                    // palette's own dim gray (index 8) dims a dark scheme and
+                    // stays a readable gray on a light one - the fg follows
+                    // the terminal instead of fighting it.
+                    for cell in &mut cells[r * cols..r * cols + text_w] {
+                        cell.fg = Color::Indexed(8);
+                        cell.flags &= !cell_flags::DIM;
+                        cell.flags &= !cell_flags::BOLD;
+                    }
+                }
             }
             if card {
                 self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
@@ -270,8 +283,8 @@ impl View {
             if matches!(drow, DisplayRow::NewSquad) {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
             }
-            let mut highlit =
-                !row_is_inert(drow) && (self.selector == Some(i) || self.hover_row == Some(i));
+            let chosen = matches!(drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && !a.exited);
+            let mut highlit = chosen || self.selector == Some(i) || self.hover_row == Some(i);
             if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
@@ -286,26 +299,17 @@ impl View {
                 highlit = true;
             }
             if highlit {
-                let row = &mut cells[r * cols..r * cols + text_w];
-                if card_pair {
-                    // One solid band across the full width of the card line,
-                    // gaps included: an explicit background, never per-span
-                    // inversion, so a span's own color cannot patch the
-                    // highlight.
-                    let (bg, fg, flags) = if card_chosen {
-                        (self.theme.accent, Color::Default, 0)
-                    } else {
-                        (Color::Default, Color::Default, cell_flags::INVERSE)
-                    };
-                    for cell in row {
-                        cell.bg = bg;
-                        cell.fg = fg;
-                        cell.flags = flags;
-                    }
-                } else {
-                    for cell in row {
-                        cell.flags ^= cell_flags::INVERSE;
-                    }
+                // One solid band across the full width of the row, gaps
+                // included: an explicit background and an explicit fg picked
+                // to contrast with it, never per-span inversion, so a span's
+                // own color cannot patch the highlight and the band reads the
+                // same on a dark and a light terminal.
+                let (fg, bg, flags) =
+                    crate::theme::band_style(card_chosen || (!card && chosen), &self.theme);
+                for cell in &mut cells[r * cols..r * cols + text_w] {
+                    cell.bg = bg;
+                    cell.fg = fg;
+                    cell.flags = flags;
                 }
             }
             let row_stamp = self.row_stamp_for(drow);
@@ -384,16 +388,12 @@ impl View {
         right_slot_w: usize,
         now: u64,
     ) -> RtRow<'static> {
-        // The focused pane's owning row is the sole standing full-width
-        // INVERSE band. An EXITED focused row is legibly dead: DIM accent
-        // instead of the bright band (a dead "you are here" never reads as a
-        // live one).
+        // An EXITED focus row is legibly dead: DIM accent on its cells and
+        // no band (a dead "you are here" never reads as a live one). A live
+        // focus row's band is the overlay's accent highlight.
         let is_focus = matches!(drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
-        let focus_exited = matches!(
-            drow,
-            DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && a.exited
-        );
-        let (row_cells, band): (Vec<RtCell>, u8) = match drow {
+        let focus_exited = is_focus && matches!(drow, DisplayRow::Agent(a) if a.exited);
+        let (row_cells, _): (Vec<RtCell>, u8) = match drow {
             // The full-width rows - squad and section bands, sublines, the
             // idle fold, the footer, the empty state - paint in the overlay
             // pass (`paint_legacy_row`): a band is edge-to-edge at EVERY
@@ -419,20 +419,12 @@ impl View {
                     flags |= cell_flags::DIM;
                 }
                 let status_fg = agent_lane_fg(a, lat, style.fg);
-                // The focused row's band carries INVERSE (or DIM when
-                // exited) and the accent ON the cells - the render patches
-                // span styles over row/cell styles, so anything not on the
-                // line itself is overpainted by the cell's own fg.
-                let focus_bit = if is_focus {
-                    if focus_exited {
-                        cell_flags::DIM
-                    } else {
-                        cell_flags::INVERSE
-                    }
-                } else {
-                    0
-                };
-                let cell_fg = if is_focus {
+                // An EXITED focus row is legibly dead: DIM accent on the
+                // cells, and the overlay gives it no band. A live focus
+                // row's band is the overlay's accent highlight; the cells
+                // stay ordinary.
+                let focus_bit = if focus_exited { cell_flags::DIM } else { 0 };
+                let cell_fg = if focus_exited {
                     self.theme.accent
                 } else {
                     status_fg
@@ -630,24 +622,7 @@ impl View {
                 )
             }
         };
-        // The focused row's band: INVERSE (or DIM when exited) with the
-        // accent carried across every cell and the band's padding, so the
-        // whole row is one colour.
-        let mut row_style = RtStyle::new();
-        if is_focus {
-            let focus_flags = if focus_exited {
-                cell_flags::DIM
-            } else {
-                cell_flags::INVERSE
-            };
-            row_style = row_style
-                .fg(rt_color(self.theme.accent))
-                .add_modifier(rt_modifier(focus_flags));
-        }
-        if band != 0 {
-            row_style = row_style.add_modifier(rt_modifier(band));
-        }
-        RtRow::new(row_cells).style(row_style)
+        RtRow::new(row_cells)
     }
 
     /// The card expansion of the display enumeration. `List` returns the

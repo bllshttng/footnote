@@ -862,50 +862,43 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
     // Display row 1 -> outer row 1: the focused agent row is a full-width
-    // INVERSE band, and the `▎` gutter glyph is gone.
+    // accent band, and the `▎` gutter glyph is gone.
     let lead = frame.cells[cols]; // outer row 1, col 0
     assert_ne!(
         lead.c, '▎',
         "the ▎ gutter is retired; the band is the signal"
     );
     assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row carries the standing INVERSE band"
+        lead.bg, LATTICE_ACCENT,
+        "the focused row carries the standing accent band"
     );
-    // The band fills the panel width (a right-edge text cell is still INVERSE).
+    // The band fills the panel width (a right-edge text cell is still banded).
     assert_eq!(
-        frame.cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        frame.cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "the focus band fills the panel width"
     );
 }
 
 #[test]
-fn active_marker_composes_with_selection_inverse() {
-    // x-4374 / AC3-UI: when the selector sits on the focused row, the XOR
-    // de-inverts its standing band so the selection reads under the cursor -
-    // the same grammar the old header bands used - instead of band and cursor
-    // masking each other.
+fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
+    // x-4374 / AC3-UI, restated for explicit bands: when the selector sits on
+    // the focused row, the chosen accent band wins - the cursor never masks
+    // the "you are here" signal (the card contract, list mode too).
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11));
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
     let lead = frame.cells[cols]; // outer row 1, col 0
-    assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        0,
-        "the selector de-inverts the focused row's band so the cursor reads"
-    );
+    assert_eq!(lead.bg, LATTICE_ACCENT, "the chosen band wins on selection");
 }
 
 #[test]
 fn xf331_focus_band_and_selector_are_distinct_treatments() {
     // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
-    // selector parked on a DIFFERENT row is a plain-INVERSE bar in the default
-    // colour - three-distinguishable, and the distinction is colour (survives
-    // weak-BOLD themes), not weight.
+    // selector parked on a DIFFERENT row is the palette-following hover band -
+    // the distinction is colour (survives weak-BOLD themes), not weight.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
     view.selector = Some(3); // notes squad header, a different actionable row
@@ -915,24 +908,19 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
 
     let focus_cell = frame.cells[cols]; // display row 1: the focus band
     assert_eq!(
-        focus_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focus row still wears a band"
-    );
-    assert_eq!(
-        focus_cell.fg, LATTICE_ACCENT,
-        "the focus band wears the accent colour"
+        focus_cell.bg, LATTICE_ACCENT,
+        "the focus row still wears the accent band"
     );
 
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
-        sel_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selector row is an inverse bar"
+        sel_cell.bg,
+        Color::Indexed(7),
+        "the selector row is the palette-following hover band"
     );
     assert_ne!(
-        sel_cell.fg, LATTICE_ACCENT,
-        "the selector bar is NOT the focus accent - the two read as distinct"
+        sel_cell.bg, LATTICE_ACCENT,
+        "the selector band is NOT the focus accent - the two read as distinct"
     );
 }
 
@@ -8378,14 +8366,14 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
     sel_view.selector = Some(4);
     let sel_frame = sel_view.compose();
     let sel_cell = sel_frame.cells[notes_row * cols + 2];
-    // (x-4374) The notes squad is a demoted header (no standing INVERSE); the
-    // selector TOGGLES INVERSE, so selecting it ADDS the band and the cursor
-    // row renders DIFFERENTLY from the unselected header.
+    // (x-4374) The notes squad is a demoted header (no standing band); the
+    // selector paints the explicit hover band, so the cursor row renders
+    // DIFFERENTLY from the unselected header.
     assert_ne!(
-        sel_cell.flags & cell_flags::INVERSE,
-        unsel_cell.flags & cell_flags::INVERSE,
+        sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
+    assert_eq!(sel_cell.bg, Color::Indexed(7), "hover band bg");
 }
 
 #[test]
@@ -8591,9 +8579,8 @@ fn headers_demoted_and_focused_row_wears_the_band() {
     assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
     // Row 1 = the agent row owning the focused pane: the sole standing band.
     assert_eq!(
-        cells[cols].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row wears the full-width band"
+        cells[cols].bg, LATTICE_ACCENT,
+        "the focused row wears the full-width accent band"
     );
     // The band spans the full width (a right-edge text cell is still INVERSE).
     assert_eq!(

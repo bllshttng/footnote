@@ -151,6 +151,34 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     }
 }
 
+/// The text color on a highlight band: the dark anchor. Band backgrounds are
+/// light in every palette this paints - accents read as highlights on a dark
+/// terminal and index 7 is the scheme's light gray - so dark text is the
+/// readable pick. The contrast tests hold that floor per theme.
+pub const BAND_TEXT: Color = Color::Rgb(0, 0, 0);
+
+/// `(fg, bg, flags)` for a sideline highlight band. `chosen` is the focused
+/// agent's accent band; selection and hover share the hover band, and the
+/// chosen color wins where they collide. Both legs are explicit colors that
+/// answer each other's contrast, so the band reads identically on a dark and
+/// a light terminal: INVERSE would make the terminal's own background the
+/// text color (pale-on-accent on a dark scheme, light-on-accent on a light
+/// one) and DIM washes the text toward the band. Neither belongs in a band.
+pub fn band_style(chosen: bool, t: &Theme) -> (Color, Color, u8) {
+    let bg = if chosen {
+        t.accent
+    } else if t.inherit {
+        // Index 7 follows the emulator's palette: the light gray every scheme
+        // defines, so the band is visible on a dark and a light terminal both.
+        Color::Indexed(7)
+    } else {
+        // A named theme's `sel` is a dark band; its light `title` fg answers
+        // it (the BodySel pair).
+        return (t.title, t.sel, 0);
+    };
+    (BAND_TEXT, bg, 0)
+}
+
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",

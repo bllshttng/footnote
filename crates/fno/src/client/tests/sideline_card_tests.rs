@@ -50,13 +50,7 @@ fn card_highlight_snapshot(view: &View, frame: &Frame, agent_i: usize, detail_i:
             let row = display_i - offset;
             frame.cells[row * cols..row * cols + text_w]
                 .iter()
-                .map(|cell| {
-                    if cell.flags & cell_flags::INVERSE == cell_flags::INVERSE {
-                        '#'
-                    } else {
-                        '.'
-                    }
-                })
+                .map(|cell| if cell.bg != Color::Default { '#' } else { '.' })
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
@@ -237,7 +231,8 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
 #[test]
 fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     // Per-cell background, not text: every cell of both lines carries the
-    // same band, the column gaps included.
+    // same band, the column gaps included. The pair is the theme's explicit
+    // hover pair - never INVERSE.
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
@@ -245,12 +240,9 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     v.hover_row = Some(agent_i);
     let frame = v.compose();
     for cell in card_pair_cells(&v, &frame, agent_i, detail_i) {
-        assert_eq!(cell.bg, Color::Default, "one background everywhere");
-        assert_eq!(
-            cell.flags & cell_flags::INVERSE,
-            cell_flags::INVERSE,
-            "the band is one uniform inverse"
-        );
+        assert_eq!(cell.bg, Color::Indexed(7), "one background everywhere");
+        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "explicit band text");
+        assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
     }
 }
 
@@ -270,7 +262,8 @@ fn chosen_card_paints_accent_across_both_lines() {
         let row = display_i - offset;
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, accent, "the chosen color fills the card line");
-            assert_eq!(cell.flags, 0, "one readable text color, no inversion");
+            assert_eq!(cell.fg, crate::theme::BAND_TEXT, "dark band text");
+            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
         }
     }
 }
@@ -432,4 +425,187 @@ fn king_label_walk_stops_on_a_lineage_cycle() {
     });
     let xr = xrow.expect("row x exists");
     assert_eq!(v.king_label(xr), None);
+}
+
+// The x-cd1c contrast family: every highlight band paints an explicit pair
+// whose readability the WCAG lens holds on a dark AND a light terminal, and
+// the unhighlighted rows' colored texts follow the terminal palette.
+
+fn lens_cell(fg: Color, bg: Color) -> crate::proto::Cell {
+    crate::proto::Cell {
+        c: 'x',
+        fg,
+        bg,
+        flags: 0,
+    }
+}
+
+fn lens_contrast(fg: Color, bg: Color, lens: crate::frame_html::Theme) -> f64 {
+    crate::frame_html::contrast_ratio(&lens_cell(fg, bg), lens)
+}
+
+fn shipped_mux_themes() -> Vec<crate::theme::Theme> {
+    let mut themes = vec![crate::theme::Theme::default_theme()];
+    for name in ["catppuccin", "tokyo-night", "gruvbox"] {
+        let (t, warn) = crate::theme::Theme::from_name(name);
+        assert!(warn.is_none(), "{name} must ship without a warning");
+        themes.push(t);
+    }
+    themes
+}
+
+#[test]
+fn band_pairs_hold_luminance_contrast_on_dark_and_light() {
+    // x-cd1c D1: every band is an explicit fg+bg pair with no INVERSE and no
+    // DIM. The CHOSEN band clears the 4.5:1 body-text floor (dark text on a
+    // light accent); the hover band clears the 3:1 bar (transient affordance,
+    // same text the row carries unhovered). `terminal` resolves its Indexed
+    // legs against each lens theme's real palette; named themes paint fixed
+    // RGB pairs, which the named-theme lens themes judge directly.
+    for t in shipped_mux_themes() {
+        for (chosen, floor) in [(true, 4.5), (false, 3.0)] {
+            let (fg, bg, flags) = crate::theme::band_style(chosen, &t);
+            assert_eq!(flags, 0, "no INVERSE and no DIM inside the band");
+            assert!(fg != Color::Default, "band fg must be explicit");
+            assert!(bg != Color::Default, "band bg must be explicit");
+            for lens in crate::frame_html::THEMES {
+                let ratio = lens_contrast(fg, bg, lens);
+                assert!(
+                    ratio >= floor,
+                    "{} chosen={chosen} on {}: {ratio:.2}:1 (floor {floor})",
+                    t.name,
+                    lens.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_dark_anchor_is_the_luminance_pick_on_every_accent() {
+    // x-cd1c D1: dark text on light accents is not taste, it is measurement.
+    // On a light terminal the default fg loses to the dark anchor on every
+    // shipped accent, which is the pick the band records.
+    let mut accents = vec![crate::theme::Theme::default_theme().accent];
+    for name in ["catppuccin", "tokyo-night", "gruvbox"] {
+        let (t, _) = crate::theme::Theme::from_name(name);
+        accents.push(t.accent);
+    }
+    let light_fg = Color::Rgb(0xf2, 0xf2, 0xf2);
+    for bg in accents {
+        let dark = lens_contrast(Color::Rgb(0, 0, 0), bg, crate::frame_html::LIGHT);
+        let light = lens_contrast(light_fg, bg, crate::frame_html::LIGHT);
+        assert!(dark >= 4.5, "accent {bg:?}: dark anchor {dark:.2}:1");
+        assert!(
+            dark > light,
+            "accent {bg:?}: dark anchor {dark:.2} must beat light {light:.2}"
+        );
+    }
+}
+
+#[test]
+fn composed_bands_hold_contrast_on_dark_and_light_frames() {
+    // x-cd1c D1, end to end: the REAL painter's chosen band (the worker's
+    // card) and hover band (the king's card) clear their floors on a dark and
+    // a light lens theme. The bands are explicit pairs, so the lens needs no
+    // inverse/dim modeling to judge them.
+    let mut v = card_view(king_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    v.layout.focus = 5; // w1 is the chosen card
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    let (king_i, king_detail_i) = card_rows_for(&v, "king-a");
+    v.hover_row = Some(king_i);
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    let mut chosen_cells: Vec<crate::proto::Cell> = Vec::new();
+    let mut hover_cells: Vec<crate::proto::Cell> = Vec::new();
+    for display_i in [agent_i, detail_i] {
+        let row = display_i - offset;
+        chosen_cells.push(frame.cells[row * cols]);
+        chosen_cells.push(frame.cells[row * cols + text_w - 1]);
+    }
+    for display_i in [king_i, king_detail_i] {
+        let row = display_i - offset;
+        hover_cells.push(frame.cells[row * cols]);
+        hover_cells.push(frame.cells[row * cols + text_w - 1]);
+    }
+    for lens in crate::frame_html::THEMES {
+        for cell in &chosen_cells {
+            let ratio = crate::frame_html::contrast_ratio(cell, lens);
+            assert_eq!(cell.flags & cell_flags::INVERSE, 0);
+            assert!(ratio >= 4.5, "chosen band on {}: {ratio:.2}:1", lens.name);
+        }
+        for cell in &hover_cells {
+            let ratio = crate::frame_html::contrast_ratio(cell, lens);
+            assert_eq!(cell.flags & cell_flags::INVERSE, 0);
+            assert!(ratio >= 3.0, "hover band on {}: {ratio:.2}:1", lens.name);
+        }
+    }
+}
+
+#[test]
+fn unhighlighted_rows_read_on_a_light_terminal() {
+    // x-cd1c D2: the colored texts on ordinary rows follow the terminal
+    // palette. Built-in lane colors resolve to ANSI indexed colors (never
+    // hard RGB), the lane fg stays visible on a light scheme, and the card's
+    // dim gray line 2 is index 8 with no DIM flag: dim on dark, readable on
+    // white.
+    let lanes: [(Option<&str>, Option<&str>, Option<&str>); 7] = [
+        (Some("codex"), None, None),
+        (Some("agy"), None, None),
+        (Some("opencode"), None, None),
+        (None, None, Some("zai")),
+        (None, None, Some("openai")),
+        (None, None, Some("anthropic")),
+        (None, None, Some("openrouter")),
+    ];
+    for lens in crate::frame_html::THEMES {
+        for (harness, model, route) in lanes {
+            let fg = crate::sideline_color::resolve_lane_color(harness, model, route, None)
+                .expect("builtin lanes resolve");
+            assert!(
+                matches!(fg, Color::Indexed(_)),
+                "lane {harness:?}/{route:?} must be ANSI named, got {fg:?}"
+            );
+            if lens.name == crate::frame_html::LIGHT.name {
+                let ratio = lens_contrast(fg, Color::Default, lens);
+                assert!(
+                    ratio >= 2.5,
+                    "lane {harness:?}/{route:?} on {lens:?}: {ratio:.2}:1"
+                );
+            }
+        }
+        // Card line 2: index 8, DIM flag gone.
+        let gray = lens_cell(Color::Indexed(8), Color::Default);
+        let ratio = crate::frame_html::contrast_ratio(&gray, lens);
+        if lens.name == crate::frame_html::LIGHT.name {
+            assert!(ratio >= 4.5, "line 2 gray on light: {ratio:.2}:1");
+        } else {
+            assert!(
+                ratio >= 2.0,
+                "line 2 gray still reads on {}: {ratio:.2}:1",
+                lens.name
+            );
+        }
+    }
+    // Through the real painter: the detail row carries the palette gray
+    // without the DIM flag.
+    let mut v = card_view(king_and_worker());
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let row = detail_i - v.sideline_offset();
+    let cells = &frame.cells[row * cols..row * cols + text_w];
+    let painted = cells.iter().filter(|c| c.c != ' ').count();
+    assert!(painted > 0, "detail row has text");
+    for cell in cells.iter().filter(|c| c.c != ' ') {
+        assert_eq!(cell.fg, Color::Indexed(8), "line 2 fg follows the palette");
+        assert_eq!(cell.flags & cell_flags::DIM, 0, "no DIM on line 2");
+    }
 }
