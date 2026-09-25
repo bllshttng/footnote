@@ -381,6 +381,40 @@ fn dsh_missing_provider_key_maps_to_its_typed_credential_refusal() {
 }
 
 #[test]
+fn moved_paste_fixtures_keep_measured_payload_and_submission_evidence() {
+    for (harness, text) in [
+        ("grok", include_str!("fixtures/grok-paste-trials.txt")),
+        ("kimi", include_str!("fixtures/kimi-paste-trials.txt")),
+    ] {
+        let number = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_default()
+        };
+        assert!(
+            number("payload_bytes") > 0,
+            "{harness} payload size missing"
+        );
+        assert!(
+            number("payload_lines") > 0,
+            "{harness} payload line count missing"
+        );
+        assert!(
+            number("paste_to_enter_delay_ms") > 0,
+            "{harness} measured delay missing"
+        );
+        assert!(
+            text.lines()
+                .filter(|line| line.starts_with("trial ") && line.contains("SUBMITTED"))
+                .count()
+                > 0,
+            "{harness} has no submitted trial"
+        );
+    }
+}
+
+#[test]
 fn unknown_server_request_is_answered_and_rejected() {
     use fno_agents::acp_stdio::AcpError;
 
