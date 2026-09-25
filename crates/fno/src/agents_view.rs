@@ -992,7 +992,20 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     };
     let mut out = Vec::with_capacity(workers.len());
     let mut terminal_skips = 0usize;
+    let mut spare_skips = 0usize;
     for w in &workers {
+        // A pre-warmed idle spare (`dispatch.source == "spare"`, empty seed)
+        // has no conversation to attach: it is daemon inventory, not live
+        // work, and the `cc-<id>` fallback below would mint it a phantom row.
+        // Understood, so it counts like a terminal skip, not schema drift.
+        if w.get("dispatch")
+            .and_then(|d| d.get("source"))
+            .and_then(|v| v.as_str())
+            == Some("spare")
+        {
+            spare_skips += 1;
+            continue;
+        }
         // A terminal `state` means the session is not attachable, so it is
         // not roster presence. An unknown/missing state stays (tolerant, and
         // `parse_claude_agents` holds unknowns rather than dropping them).
@@ -1066,7 +1079,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     // (tolerate-alien-row, tested), and a partial rename degrades visibly on
     // the sideline rather than as a fake-empty success; a ratio guard here
     // would break the documented 1-of-4 alien-row case.
-    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 {
+    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 && spare_skips == 0 {
         return None;
     }
     Some(out)
@@ -2328,13 +2341,24 @@ pub async fn watch_registry(
 /// 3. Foreign rows: every roster worker matching no registry short_id becomes
 ///    a synthesized external row (paneless, attachable via `attach_id`).
 /// 4. Sort by name (the determinism rule the change gate and layouts need).
+///
+/// The join key is the FIRST `-` segment of each side, not the raw bytes:
+/// the roster lists the 8-hex sessionId prefix, and a registry row whose
+/// minted `short_id` kept the full uuid must still own its roster worker -
+/// an exact-string join misses it and synthesizes a duplicate `cc-<id>`
+/// foreign row beside the row that is already there. (The mint-side fix
+/// that keeps the stored short_id 8-hex lives in the registry store.)
+fn roster_join_key(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
+}
+
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
     use std::collections::{HashMap, HashSet};
-    // short_id -> source account, so an upgrade can adopt the roster row's
+    // join key -> source account, so an upgrade can adopt the roster row's
     // structural account tag, not just test membership.
     let roster_by_id: HashMap<&str, Option<&str>> = roster
         .iter()
-        .map(|w| (w.short_id.as_str(), w.account.as_deref()))
+        .map(|w| (roster_join_key(&w.short_id), w.account.as_deref()))
         .collect();
 
     // Upgrade in place, then dedup the roster against the (borrowed) registry
@@ -2344,7 +2368,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         let Some(id) = r.attach_id.as_deref() else {
             continue;
         };
-        let Some(&acct) = roster_by_id.get(id) else {
+        let Some(&acct) = roster_by_id.get(roster_join_key(id)) else {
             continue;
         };
         // Structural roster-dir tag wins (Locked Decision 6) for EVERY matching
@@ -2367,10 +2391,14 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
     }
 
-    let reg_ids: HashSet<&str> = out.iter().filter_map(|r| r.attach_id.as_deref()).collect();
+    let reg_ids: HashSet<&str> = out
+        .iter()
+        .filter_map(|r| r.attach_id.as_deref())
+        .map(roster_join_key)
+        .collect();
     let mut foreign = Vec::new();
     for w in roster {
-        if reg_ids.contains(w.short_id.as_str()) {
+        if reg_ids.contains(roster_join_key(&w.short_id)) {
             continue; // adopted / already owned by a registry row
         }
         foreign.push(RegistryAgent {
@@ -2439,7 +2467,10 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
         // Only a roster row that still lists the id live synthesizes a child;
         // nothing lists it -> render nothing, exactly as today (AC4-EDGE).
-        let Some(roster_hit) = roster.iter().find(|w| w.short_id == id) else {
+        let Some(roster_hit) = roster
+            .iter()
+            .find(|w| roster_join_key(&w.short_id) == roster_join_key(id))
+        else {
             continue;
         };
         parked.push(RegistryAgent {
@@ -3744,6 +3775,41 @@ unheard_of_field = true
         assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
     }
 
+    #[test]
+    fn parse_roster_skips_a_pre_warmed_spare_worker() {
+        // A `dispatch.source == "spare"` worker is daemon inventory (a
+        // pre-warmed idle session, empty seed), not live work: it parses to
+        // no row instead of minting a `cc-<id>` phantom.
+        let raw = r#"[
+            {"id":"2aee5622","sessionId":"2aee5622-1111-2222-3333-444455556666","cwd":"/w",
+             "kind":"background","startedAt":1,
+             "dispatch":{"source":"spare","seed":{}}},
+            {"id":"ccc00000","sessionId":"ccc00000-1111-2222-3333-444455556666","cwd":"/w",
+             "name":"real-worker","kind":"background","startedAt":2,
+             "dispatch":{"source":"fleet","seed":{"name":"real-worker"}}}]"#;
+        let workers = parse_roster(raw).unwrap();
+        assert_eq!(workers.len(), 1, "the spare skips, the fleet worker stays");
+        assert_eq!(workers[0].name, "real-worker");
+        assert!(
+            !workers.iter().any(|w| w.name.starts_with("cc-")),
+            "no short-id fallback row for the spare"
+        );
+    }
+
+    #[test]
+    fn parse_roster_all_spare_roster_is_a_recognized_empty_fleet() {
+        // Every item was understood, so an all-spare roster is an empty live
+        // fleet (Some(empty)), never schema drift holding last-good rows.
+        let raw = r#"[
+            {"id":"2aee5622","sessionId":"2aee5622-1111-2222-3333-444455556666","cwd":"/w",
+             "kind":"background","startedAt":1,
+             "dispatch":{"source":"spare","seed":{}}},
+            {"id":"0dc7acc5","sessionId":"0dc7acc5-1111-2222-3333-444455556666","cwd":"/w",
+             "kind":"background","startedAt":2,
+             "dispatch":{"source":"spare","seed":{}}}]"#;
+        assert_eq!(parse_roster(raw), Some(Vec::new()));
+    }
+
     // ---- Union merge + dual-doc ReaderState (task 1.2) ----
 
     fn worker(short: &str, name: &str, cwd: &str) -> RosterWorker {
@@ -3779,6 +3845,39 @@ unheard_of_field = true
         assert_eq!(foreign.attach_id.as_deref(), Some("cc33dd44"));
         assert!(!foreign.exited);
         assert_eq!(foreign.mux, None);
+    }
+
+    #[test]
+    fn merge_joins_a_registry_row_whose_short_id_kept_the_full_uuid() {
+        // A registry row whose minted short_id stored the FULL uuid joins its
+        // roster worker by the 8-hex first segment, so no duplicate
+        // `cc-<id>` foreign row is synthesized beside the row that is
+        // already there (the mint-side fix lives in the registry store).
+        let uuid = "49a80492-388e-44a3-bd91-017be26bcaa0";
+        let reg = derive_rows(
+            &reg(&format!(
+                r#"{{"name":"warden","cwd":"/w","status":"live","provider":"claude","short_id":"{uuid}"}}"#
+            )),
+            NOW,
+        )
+        .unwrap();
+        let rows = merge_rows(reg, &[worker("49a80492", "roster-warden", "/w")]);
+        assert_eq!(rows.len(), 1, "the roster worker is owned, not foreign");
+        assert_eq!(rows[0].name, "warden");
+        assert!(!rows[0].external);
+        // The same join owns an exited row: roster presence upgrades it
+        // un-exited + external instead of leaving a dead twin behind.
+        let exited = derive_rows(
+            &reg(&format!(
+                r#"{{"name":"stale","cwd":"/w","status":"exited","provider":"claude","short_id":"{uuid}"}}"#
+            )),
+            NOW,
+        )
+        .unwrap();
+        let rows = merge_rows(exited, &[worker("49a80492", "roster-warden", "/w")]);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].exited, "roster presence revives the row");
+        assert!(rows[0].external);
     }
 
     #[test]
