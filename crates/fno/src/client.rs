@@ -1687,6 +1687,10 @@ enum MenuAction {
     /// overlay on `RenameTarget::Agent`. Built only for a non-external,
     /// unambiguous agent row.
     RenameAgent,
+    /// Open the portal PICKER for this row - the same numbered picker
+    /// sideline `P` opens (open portals plus a new-portal row), so a
+    /// right-click offers a portal choice where it offers placement.
+    PortalPicker,
 }
 
 impl MenuAction {
@@ -1720,6 +1724,7 @@ impl MenuAction {
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
             MenuAction::ClosePortal => Some("close-portal"),
+            MenuAction::PortalPicker => Some("open-in-portal"),
             _ => None,
         }
     }
@@ -6015,6 +6020,10 @@ impl View {
                 || self.recruit.is_some()
                 || self.search.is_some()
                 || self.hint
+                // The open row selector reserves the row its key hint
+                // paints: the hint is the discoverability the selector
+                // never had.
+                || self.selector.is_some()
                 || self.status_on)
     }
 
@@ -6172,6 +6181,16 @@ impl View {
         };
         if self.hint {
             let text = crate::keys::prefix_hint();
+            for (i, ch) in text.chars().take(cols).enumerate() {
+                put(cells, i, ch, 0);
+            }
+            return;
+        }
+        // The open row selector's key hint (the discoverability line the
+        // selector never had). Only a modal-less row reaches here: the
+        // confirm/name arms above outrank it.
+        if self.selector.is_some() {
+            let text = crate::keys::selector_hint();
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }
@@ -12078,6 +12097,14 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("close portal send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::PortalPicker => {
+            // One decision path with sideline `P`: the picker itself refuses
+            // what it cannot show (not attachable, no open portals to keep).
+            match view.portal_pick_decision(Some(a)) {
+                PortalPickDecision::Open(id) => view.open_portal_pick(id),
+                PortalPickDecision::Refuse(text) => view.set_notice(text),
+            }
+        }
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
                 // Recomputed at execute (a workspace added or removed between

@@ -31,6 +31,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     );
     let bindings = key_bindings();
     for section in [
+        KeySection::GlobalNoPrefix,
         KeySection::Global,
         KeySection::Navigation,
         KeySection::WorkspacesTabs,

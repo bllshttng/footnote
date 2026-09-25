@@ -9288,6 +9288,7 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
     // something this layer has no mapping for, so it is dropped rather than
     // silently acted on as an unmodified press.
     let mut esc = Vec::new();
+    assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;2D"), b"");
     assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5B"), Vec::<u8>::new());
 
     // Still split-safe: a parameterised sequence broken across reads leaks
@@ -9299,6 +9300,66 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
     }
     assert_eq!(keys, b"j".to_vec(), "only the real keypress survives");
     assert!(esc.is_empty());
+}
+
+#[test]
+fn the_placement_pickers_fold_shift_arrows_to_their_split_twin() {
+    // The arrow twin for shift+HJKL: in the placement pickers' fold, Shift+
+    // arrow folds to the UPPERCASE split key, split-across-reads included.
+    // Scoped to the pickers - the selector fold still drops a Shift+arrow
+    // whole (uppercase J/K reorder rows there).
+    let twins = [
+        (&b"\x1b[1;2A"[..], b'K'),
+        (&b"\x1b[1;2B"[..], b'J'),
+        (&b"\x1b[1;2C"[..], b'L'),
+        (&b"\x1b[1;2D"[..], b'H'),
+    ];
+    for (seq, want) in twins {
+        let mut esc = Vec::new();
+        assert_eq!(
+            fold_selector_keys_with_split_arrows(&mut esc, seq),
+            vec![*want],
+            "{:?} folds to its uppercase twin"
+        );
+        assert!(esc.is_empty());
+    }
+    // Split across reads folds all the same.
+    let mut esc = Vec::new();
+    let mut keys = Vec::new();
+    for chunk in [&b"\x1b"[..], &b"[1;2"[..], &b"D"[..]] {
+        keys.extend(fold_selector_keys_with_split_arrows(&mut esc, chunk));
+    }
+    assert_eq!(keys, b"H".to_vec());
+    // The selector fold still drops a Shift+arrow whole.
+    let mut esc = Vec::new();
+    assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;2A"), b"");
+}
+
+#[test]
+fn every_split_key_has_its_hjkl_and_arrow_twin() {
+    // The twin guarantee the hints advertise: the picker's split vocabulary
+    // (HJKL) covers the four directions and the shift-arrow fold produces
+    // exactly that set, so "shift+arrows/HJKL split" cannot silently lose a
+    // direction. Movement is the same promise on the plain fold: arrows
+    // produce exactly the hjkl set.
+    assert_eq!(split_dir(b'H'), Some(Dir::Left));
+    assert_eq!(split_dir(b'J'), Some(Dir::Down));
+    assert_eq!(split_dir(b'K'), Some(Dir::Up));
+    assert_eq!(split_dir(b'L'), Some(Dir::Right));
+    let shift = [
+        fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2A"),
+        fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2B"),
+        fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2D"),
+        fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2C"),
+    ];
+    assert_eq!(shift.concat(), b"KJHL".to_vec());
+    let plain = [
+        fold_selector_keys(&mut Vec::new(), b"\x1b[A"),
+        fold_selector_keys(&mut Vec::new(), b"\x1b[B"),
+        fold_selector_keys(&mut Vec::new(), b"\x1b[D"),
+        fold_selector_keys(&mut Vec::new(), b"\x1b[C"),
+    ];
+    assert_eq!(plain.concat(), b"kjhl".to_vec());
 }
 
 #[test]

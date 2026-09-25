@@ -915,6 +915,12 @@ fn paste_state(idx: usize) -> State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySection {
     Global,
+    /// Hard-coded chords the scanner dispatches OUTSIDE the rebindable
+    /// keymap (`esc_chord` and the global sideline chord). They carry no
+    /// [`KeyBinding`] and cannot rebind; the modal lists them through
+    /// [`meta_rows`] as reference, the same channel [`KeySection::SidelineRows`]
+    /// uses for bare keys.
+    GlobalNoPrefix,
     Navigation,
     WorkspacesTabs,
     Panes,
@@ -930,6 +936,7 @@ impl KeySection {
     pub fn title(self) -> &'static str {
         match self {
             KeySection::Global => "global",
+            KeySection::GlobalNoPrefix => "global (no prefix)",
             KeySection::Navigation => "navigation",
             KeySection::WorkspacesTabs => "workspaces & tabs",
             KeySection::Panes => "panes",
@@ -1320,6 +1327,10 @@ pub struct MenuKeyBinding {
 /// at build time and per offered action on every in-menu keypress.
 pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
     MenuKeyBinding {
+        action: "open-in-portal",
+        key: b'P',
+    },
+    MenuKeyBinding {
         action: "rename-tab",
         key: b'r',
     },
@@ -1459,6 +1470,13 @@ pub fn prefix_hint() -> String {
     format!(" {} ", parts.join(" \u{b7} "))
 }
 
+/// The one-line key hint the sideline paints while the row selector is open,
+/// so the keys the selector answers never need discovering by accident. The
+/// words name what the selector's own handlers run (client `selector_keys`).
+pub fn selector_hint() -> &'static str {
+    " selector: arrows/hjkl move \u{b7} enter open \u{b7} space peek \u{b7} x stop/remove \u{b7} P portal \u{b7} esc close "
+}
+
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
 /// structural specials (not simple byte lookups): the digit tab-select range
 /// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
@@ -1483,10 +1501,31 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             format!("literal {p}"),
             KeySection::Global,
         ),
-        // The global sideline chord (Ctrl+Opt+Left, a multi-byte CSI the
-        // scanner's ChordEsc branch dispatches, not chord()) has no row here:
-        // its modal row was reclaimed for the composer-key binding budget,
-        // and this doc plus the module header still name it.
+        // The hard-coded, non-rebindable chords: the global sideline chord
+        // (a multi-byte CSI the scanner's ChordEsc branch dispatches, not
+        // chord()) and the prefix-free arrow ladder. The rows derive from
+        // [`hardcoded_chords`], so the table and the guard test read one
+        // source and a chord without a table row fails CI.
+        (
+            "Ctrl+Opt+Left".into(),
+            "open the sideline row selector".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            "arrows".into(),
+            "focus the pane in that direction".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            "Ctrl+arrows".into(),
+            "resize the pane".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            "Shift+arrows".into(),
+            "move the pane".into(),
+            KeySection::GlobalNoPrefix,
+        ),
         // The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
         (
@@ -1658,6 +1697,60 @@ fn esc_chord(seq: &[u8]) -> EscScan {
         return EscScan::Partial;
     }
     EscScan::Invalid
+}
+
+/// The chords the scanner dispatches OUTSIDE the rebindable keymap, as
+/// (display, event) pairs: the global sideline chord and the prefix-free
+/// arrow ladder. One source for the which-key modal's "global (no prefix)"
+/// rows and for the guard test that fails when [`esc_chord`] completes a
+/// chord this list (and so the key table) never names - the exact gap that
+/// hid Ctrl+Opt+Left from every help surface.
+pub fn hardcoded_chords() -> Vec<(&'static str, Event)> {
+    use Command as C;
+    use Event::*;
+    vec![
+        ("Ctrl+Opt+Left", OpenSelector),
+        ("Up", Cmd(C::FocusDir(Dir::Up))),
+        ("Down", Cmd(C::FocusDir(Dir::Down))),
+        ("Left", Cmd(C::FocusDir(Dir::Left))),
+        ("Right", Cmd(C::FocusDir(Dir::Right))),
+        ("Ctrl+Up", Cmd(C::ResizeDir(Dir::Up))),
+        ("Ctrl+Down", Cmd(C::ResizeDir(Dir::Down))),
+        ("Ctrl+Left", Cmd(C::ResizeDir(Dir::Left))),
+        ("Ctrl+Right", Cmd(C::ResizeDir(Dir::Right))),
+        (
+            "Shift+Up",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Up,
+            }),
+        ),
+        (
+            "Shift+Down",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Down,
+            }),
+        ),
+        (
+            "Shift+Left",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Left,
+            }),
+        ),
+        (
+            "Shift+Right",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Right,
+            }),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -2412,6 +2505,53 @@ mod tests {
         let mut s = Scanner::default();
         assert_eq!(s.scan(b"\x1b[1;", now), Vec::<Event>::new());
         assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b[1;".to_vec())));
+    }
+
+    #[test]
+    fn every_hardcoded_chord_scans_to_a_listed_event() {
+        // The guard the key table lacked: EVERY chord the hard-coded scanner
+        // paths can complete must appear in [`hardcoded_chords`] - and so in
+        // the modal's "global (no prefix)" rows. A new hard-coded chord added
+        // without a table row fails here, which is exactly how Ctrl+Opt+Left
+        // went missing from every help surface.
+        let listed = hardcoded_chords();
+        let dir_seq = [
+            (b'A', Dir::Up),
+            (b'B', Dir::Down),
+            (b'C', Dir::Right),
+            (b'D', Dir::Left),
+        ];
+        let mut sequences: Vec<(Vec<u8>, &str)> = vec![(b"\x1b[1;7D".to_vec(), "Ctrl+Opt+Left")];
+        for (final_byte, _dir) in dir_seq {
+            let f = final_byte as char;
+            sequences.push((format!("\x1b[{f}").into_bytes(), "arrows"));
+            sequences.push((format!("\x1b[1;5{f}").into_bytes(), "Ctrl+arrows"));
+            sequences.push((format!("\x1b[1;2{f}").into_bytes(), "Shift+arrows"));
+        }
+        assert_eq!(
+            listed.len(),
+            sequences.len(),
+            "a chord joined or left the hard-coded set"
+        );
+        for (seq, display) in sequences {
+            let events = scan_all(&[&seq]);
+            assert_eq!(events.len(), 1, "{display}: one chord, one event");
+            let produced = &events[0];
+            assert!(
+                listed.iter().any(|(d, e)| *d == display && e == produced),
+                "{display} scans to {produced:?}, which the key table never lists"
+            );
+        }
+        // And the modal's rows name the section: the global chord and the
+        // three ladder rungs are documented, non-empty.
+        let rows = meta_rows();
+        for display in ["Ctrl+Opt+Left", "arrows", "Ctrl+arrows", "Shift+arrows"] {
+            assert!(
+                rows.iter()
+                    .any(|(d, _, s)| d == display && *s == KeySection::GlobalNoPrefix),
+                "the key table never lists {display}"
+            );
+        }
     }
 
     #[test]
