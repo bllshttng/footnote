@@ -1107,13 +1107,16 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
 }
 
 #[test]
-fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
-    // The leak shape this guards: a daemon on a throwaway home must not start
-    // the active-backlog supervisor, whose targets resolve from the real cwd
-    // and real graph - it would work the operator's board from a tempdir and
-    // pin ab_live true forever, so the daemon never idle-exits. One
+fn daemon_on_sandbox_home_runs_no_fleet_arm() {
+    // The leak shape this guards: a daemon on a throwaway home must not run
+    // ANY fleet arm. The active-backlog supervisor would work the operator's
+    // board from a tempdir and pin ab_live true forever; every tick arm
+    // (retirement sweep, crown ledger, machine watch, question pages, ...)
+    // resolves its targets from the real cwd, real graph, mux, ps and fno
+    // porcelain, so it acts on the shared fleet from a throwaway home. One
     // fleet_scope row names the scope; zero arm rows say the supervisor never
-    // ran; the daemon then exits idle.
+    // ran; zero daemon-scheduler tick rows say no arm ran; the daemon then
+    // exits idle.
     let home = short_home();
     home.ensure_root().unwrap();
     let cwd = std::env::temp_dir().join(format!("fnoe-sandbox-cwd-{}", std::process::id()));
@@ -1167,6 +1170,14 @@ fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
         common::count_events(&home, "\"arm\":\"active_backlog\""),
         0,
         "a sandbox home starts no active-backlog supervisor"
+    );
+    // Every daemon tick arm writes its row through tick_ledger::emit_tick
+    // with the daemon scheduler key into the home's own events.jsonl. Zero
+    // such rows: the arms never ran, not merely "ran quietly".
+    assert_eq!(
+        common::count_events(&home, "\"scheduler\":\"daemon\""),
+        0,
+        "a sandbox home runs no fleet arm"
     );
     std::fs::remove_dir_all(home.root()).ok();
     std::fs::remove_dir_all(&cwd).ok();

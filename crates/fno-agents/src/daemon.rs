@@ -1622,9 +1622,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         "daemon_fleet_scope",
         &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
     );
-    // A sandbox home starts no supervisor: its targets resolve from the real
-    // cwd and real graph, so it would work the operator's board from a
-    // tempdir and pin ab_live true forever.
+    // A sandbox home starts no supervisor and builds no fleet arms: their
+    // targets resolve from the real cwd and real graph, so they would work
+    // the operator's board from a tempdir (and pin ab_live true forever,
+    // so the daemon never idle-exits).
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {
@@ -1660,8 +1661,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     > = Arc::new(std::sync::Mutex::new(None));
     let mut drift_flag = crate::quiet_retire::DriftFlag::new();
     // The periodic fleet arms, extracted to daemon/fleet_arms.rs (this file
-    // is shrink-only). One driver, built once: its state is tick-local.
-    let mut fleet_arms = fleet_arms::FleetArms::new(&ctx.opts);
+    // is shrink-only). One driver, built once on a shared home only: a
+    // sandbox home builds none, so no arm can act on the shared fleet.
+    let mut fleet_arms = (!sandbox).then(|| fleet_arms::FleetArms::new(&ctx.opts));
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -1719,7 +1721,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 crate::orphan_reap::reap_daemon_children();
-                fleet_arms.tick(&ctx);
+                if let Some(arms) = fleet_arms.as_mut() {
+                    arms.tick(&ctx);
+                }
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
