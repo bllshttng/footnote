@@ -1246,13 +1246,10 @@ fn tab_label(
     (i + 1).to_string()
 }
 
-/// A pane's display label chain (v22) lives in [`pane_meta`] beside the
-/// builder that fills it; re-imported so the existing callers and tests
-/// resolve unchanged.
+/// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
+/// (file-budget ratchet); re-imported so callers and tests resolve.
 use pane_meta::pane_label;
 
-/// The label chain and the pure `PaneMeta` builder , out of this file
-/// under the file-budget ratchet.
 mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
@@ -1594,8 +1591,8 @@ pub(crate) struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
-    /// (v91) The context reading per transcript key, filled beside `tails`
-    /// by the same off-loop reader pass; joined into each pane's `PaneMeta`.
+    /// (v91) The context reading per transcript key, off the same reader
+    /// pass; joined into each pane's `PaneMeta`.
     ctx_by_session: HashMap<String, String>,
     /// (v48) Latest reachability-evidence map from the off-loop truth probe,
     /// joined into each agent row's `basis` / `last_activity_age_s` at layout
@@ -8641,10 +8638,8 @@ impl Core {
             );
             let focus = tab.focus;
             // Rect-driven pane sizing: only geometry that actually changed
-            // hits the PTY, so a resize storm's no-op tail is free (AC1-FR's
-            // bounded-update half; the storm's head coalesces at the channel).
-            // A framed pane's pty is its CONTENT rect: the border ring lives
-            // on cells the pane owns but the program never sees .
+            // hits the PTY (AC1-FR). A framed pane's pty is its CONTENT
+            // rect: the border ring is cells the program never sees.
             for (pid, r) in &rects {
                 if let Some(entry) = self.panes.get_mut(pid) {
                     let content = crate::pane_border::content_rect(*r);

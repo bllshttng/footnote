@@ -291,30 +291,6 @@ impl View {
             }
         }
 
-        // The empty state: nothing attached yet, so the content area wears
-        // the raised two-row f[no] mark instead of bare filler.
-        if self.layout.panes.is_empty() {
-            let grid = wordmark::two_row();
-            let w = grid[0].len();
-            let avail_r = rows.saturating_sub(origin_r + 1);
-            let avail_c = cols.saturating_sub(origin_c);
-            if avail_r >= grid.len() && avail_c >= w {
-                let r0 = origin_r + (avail_r - grid.len()) / 2;
-                let c0 = origin_c + (avail_c - w) / 2;
-                for (i, line) in grid.iter().enumerate() {
-                    for (j, (ch, role)) in line.iter().enumerate() {
-                        let (fg, _, flags) = cell_style(*role, &self.theme);
-                        cells[(r0 + i) * cols + c0 + j] = Cell {
-                            c: *ch,
-                            fg,
-                            bg: Color::Default,
-                            flags,
-                        };
-                    }
-                }
-            }
-        }
-
         // an edge drop zone lands on cells a PANE owns, which the
         // divider pass above skips by construction. Lit here, after the blit,
         // so the rim reads as a candidate the same way a seam does.
