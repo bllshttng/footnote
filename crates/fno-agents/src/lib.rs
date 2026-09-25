@@ -47,6 +47,7 @@
 pub mod acceptance_evidence;
 pub mod active_backlog;
 pub mod additional_prs;
+pub mod acp_stdio;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
