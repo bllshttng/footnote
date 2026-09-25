@@ -8,7 +8,7 @@ The three trial baseline passed with `STRESS_TRIALS=3`: `daemon_e2e=pass`, `pers
 
 Baseline support line counts: the stress harness had 225 lines. The daemon test had 2,783 lines. The persistence test had 777 lines. The workspace test had 863 lines.
 
-Baseline declarations: daemon had 30. Persistence had 14. Workspace had 9. Total: 53. None was ignored. A shared test-owner helper also runs once in each fno integration binary, adding two cases per stress trial.
+Baseline declarations: daemon had 30. Persistence had 14. Workspace had 9. Total: 53. None was ignored. The persistence and workspace binaries each run one shared test-owner check. They add two cases per stress trial.
 
 ## Cost evidence and owner choice
 
