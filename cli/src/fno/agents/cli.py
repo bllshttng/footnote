@@ -3033,9 +3033,6 @@ def cmd_list(
         "(advancing | awaiting-operator | parked | refused | unknown).",
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
-    all_rows: bool = typer.Option(
-        False, "--all", help="Also show reaped and retired sessions (native runtime)."
-    ),
     discovered: bool = typer.Option(
         True,
         "--discovered/--no-discovered",
@@ -3061,12 +3058,6 @@ def cmd_list(
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
-
-    # The native runtime intercepts `list` before this body runs, so --all
-    # reaches the daemon's retired-rows lane there; this fallback path has
-    # no receipts lane and names that instead of pretending.
-    if all_rows:
-        sys.stderr.write("WARN: --all retired rows need the native runtime\n")
 
     status_value: str | None = status.value if status is not None else None
     progress_value: str | None = progress.value if progress is not None else None
