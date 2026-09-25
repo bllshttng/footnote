@@ -274,14 +274,29 @@ fn refused_thread_routes_name_the_contract_reason_and_write_no_resume_event() {
         let refusal = contract.conversion(harness).unwrap().refusal;
         assert!(line.contains(&refusal), "{harness}: {line}");
     }
-    for harness in ["agy", "pi", "cursor-agent", "grok"] {
+    // agy and cursor-agent carry resume_session_id: the route is the keeper
+    // revival, which refuses a missing binary like any other in-terminal
+    // form before anything launches.
+    for harness in ["agy", "cursor-agent"] {
+        let row = fixture.row(harness, "thread", false);
+        let output = run_null(&fixture, row, &[], &empty_path);
+        assert_eq!(output.status.code(), Some(14), "{harness}: {output:?}");
+        let line = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            line.contains(&format!("{harness} CLI not on PATH")),
+            "{harness}: {line}"
+        );
+    }
+    // pi and grok carry no proven same-id revival: the refusal names the
+    // contract row that gates it and the hand form.
+    for harness in ["pi", "grok"] {
         let row = fixture.row(harness, "thread", false);
         let output = run_null(&fixture, row, &[], &empty_path);
         assert_eq!(output.status.code(), Some(13), "{harness}: {output:?}");
         let line = String::from_utf8_lossy(&output.stderr);
         assert!(
             line.contains(&format!(
-                "the {harness} keeper lane has no revival for an exited thread"
+                "[harness.{harness}.keeper] does not carry resume_session_id"
             )),
             "{harness}: {line}"
         );

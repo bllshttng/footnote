@@ -7,6 +7,10 @@ pub(crate) enum ResumeRoute {
     ClientResume,
     ServerResume,
     TerminalExec,
+    /// An exited thread row whose keeper lane carries a proven same-id
+    /// revival (`resume_session_id`): the door routes it to
+    /// `keeper_revival::revive`.
+    KeeperRevive,
     Refused(String),
 }
 
@@ -37,12 +41,28 @@ pub(crate) fn resume_route(
                 ResumeRoute::Refused(format!("fno agents resume: {name}: {}", conversion.refusal))
             }
             "keeper-rebind" => {
+                let carries_revival = contract
+                    .capabilities(harness)
+                    .ok()
+                    .and_then(|caps| caps.keeper.as_ref())
+                    .map(|keeper| {
+                        keeper
+                            .carries
+                            .iter()
+                            .any(|axis| axis == "resume_session_id")
+                    })
+                    .unwrap_or(false);
+                if carries_revival {
+                    return ResumeRoute::KeeperRevive;
+                }
                 let form = contract
                     .render_session_argv_raw(harness, "interactive_resume", Some(session_id))
                     .map(|argv| argv.join(" "))
                     .unwrap_or_else(|_| format!("{harness} interactive_resume"));
                 ResumeRoute::Refused(format!(
-                    "fno agents resume: {name}: the {harness} keeper lane has no revival for an exited thread yet; from a terminal, fno agents resume {name} runs {form}"
+                    "fno agents resume: {name}: the {harness} keeper lane has no proven \
+                     same-id revival yet ([harness.{harness}.keeper] does not carry \
+                     resume_session_id); from a terminal, {form} resumes it by hand"
                 ))
             }
             strategy => ResumeRoute::Refused(format!(
@@ -62,6 +82,23 @@ pub(crate) fn resume_route(
             "fno agents resume: {name}: the {harness} resume form is a terminal program and this caller has no terminal; run fno agents resume {name} from a terminal"
         ))
     }
+}
+
+/// Which harnesses the resume door can render an in-terminal resume form
+/// for, read off the packaged contract - the same read the route resolver
+/// and the identity check key on, so they cannot disagree.
+pub(crate) fn interactive_resume_supported(provider: &str) -> bool {
+    crate::harness_capabilities::HarnessContract::packaged()
+        .ok()
+        .and_then(|contract| {
+            contract.capabilities(provider).ok().and_then(|caps| {
+                caps.resume_strategy
+                    .forms
+                    .get("interactive_resume")
+                    .map(|form| form.kind != "unsupported")
+            })
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn print_resume_command(
@@ -298,23 +335,41 @@ mod tests {
             ResumeRoute::Refused(format!("fno agents resume: o: {refusal}"))
         );
 
+        // agy carries resume_session_id: the route is the revival.
+        assert_eq!(
+            resume_route(
+                "agy",
+                Some("thread"),
+                false,
+                false,
+                "a",
+                "actual-cv-session",
+                &contract
+            ),
+            ResumeRoute::KeeperRevive
+        );
+
+        // pi does not: the refusal names its keeper row and the hand form.
         let ResumeRoute::Refused(keeper_refusal) = resume_route(
-            "agy",
+            "pi",
             Some("thread"),
             false,
             false,
-            "a",
-            "actual-cv-session",
+            "p",
+            "actual-pi-session",
             &contract,
         ) else {
-            panic!("keeper thread must refuse");
+            panic!("a keeper lane without a proven revival must refuse");
         };
-        assert!(keeper_refusal.contains("the agy keeper lane has no revival"));
+        assert!(
+            keeper_refusal.contains("[harness.pi.keeper] does not carry resume_session_id"),
+            "{keeper_refusal}"
+        );
         for token in contract
-            .render_session_argv_raw("agy", "interactive_resume", Some("actual-cv-session"))
+            .render_session_argv_raw("pi", "interactive_resume", Some("actual-pi-session"))
             .unwrap()
         {
-            assert!(keeper_refusal.contains(&token));
+            assert!(keeper_refusal.contains(&token), "{keeper_refusal}");
         }
     }
 

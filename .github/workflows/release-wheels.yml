@@ -62,9 +62,17 @@ jobs:
       - name: Stamp release version
         if: inputs.version != ''
         # Workspace-only stamp (never committed): the wheel version carries the
-        # release version, not main's. sync-version.sh converts the PEP 440
-        # spelling to semver for the Cargo.toml files.
-        run: bash scripts/release/sync-version.sh "${{ inputs.version }}"
+        # release version, not main's. The script is taken from THIS workflow's
+        # commit, never the released checkout: the nightly ships the newest
+        # green rust-ci sha, which can be weeks old and carry a stamp script
+        # that predates the PEP 440 -> semver Cargo conversion, writing a PEP
+        # 440 version into Cargo.toml where cargo refuses to parse it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "${{ github.sha }}"
+          git show "${{ github.sha }}:scripts/release/sync-version.sh" > scripts/release/sync-version.sh
+          bash scripts/release/sync-version.sh "${{ inputs.version }}"
 
       - name: Set up Python
         uses: actions/setup-python@v5

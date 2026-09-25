@@ -932,8 +932,10 @@ fn dispatch_member(
     // mid-incident takes this branch on its first tick, proving the stop is
     // durable state rather than a missed announcement. Reconciliation and tick
     // reporting continue; only new dispatch is refused. An unreadable state
-    // fails closed with its own reason, never as clear.
-    let incident = crate::fleet_incident::verdict();
+    // fails closed with its own reason, never as clear. The gate asks the
+    // spawns question: dispatch is automatic spawning, so a stop that holds
+    // only tests or merges keeps dispatching.
+    let incident = crate::fleet_incident::verdict_for("spawns");
     if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
         let (token, generation, detail) = match &incident {
             crate::fleet_incident::Verdict::Stopped(r) => (
@@ -3390,6 +3392,7 @@ mod tests {
                 changed_at: "2026-09-13T01:07:00Z".into(),
                 changed_by: "op".into(),
                 reason: "load 385".into(),
+                holds: Vec::new(),
                 source: Some("file".into()),
             })
             .unwrap(),
@@ -3552,6 +3555,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(

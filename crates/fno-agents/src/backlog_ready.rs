@@ -91,7 +91,7 @@ pub struct ReadyOpts {
     /// node id -> the open question id that holds it, resolved by the caller
     /// (`needs::held_map` over the question journals) so the decision stays a
     /// pure function of entries + options. An entry named here drops with
-    /// reason `held:<qid>`, the receipt word x-55ae's drain already uses.
+    /// reason `held:<qid>`, the receipt word the drain already uses.
     pub held: std::collections::BTreeMap<String, String>,
     /// `config.backlog.staleness_days`, resolved by the caller. `None` (or a
     /// non-positive value) means "no config surface reached me" and the

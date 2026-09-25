@@ -829,6 +829,66 @@ def test_wave_append_readback_read_failure_names_uncertainty(tmp_graph, monkeypa
     assert "did not land" not in error
 
 
+def test_wave_receipt_names_where_the_payload_went(tmp_graph):
+    """x-ce1b AC1-HP: the non-JSON receipt names node, field, size and the
+    read-back command - never a minted_id line beside a successful fold."""
+    add = _invoke("--json", "backlog", "add", "Host work")
+    target_id = json.loads(add.stdout)["id"]
+
+    payload = "MARKER-CE1B first line\n" + ("ce1b payload filler for length\n" * 80)
+    assert len(payload) >= 2300
+    r = _invoke(
+        "backlog", "idea", "Measured finding",
+        "--wave-of", target_id,
+        "--difficulty", "medium",
+        "--details-file", "-",
+        input=payload,
+    )
+    assert r.exit_code == 0, r.output
+    assert target_id in r.stdout
+    assert "progress_notes" in r.stdout
+    assert str(len(payload)) in r.stdout
+    assert f"fno backlog get {target_id}" in r.stdout
+    assert "minted_id: null" not in r.stdout
+
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
+    notes = node.get("progress_notes") or []
+    assert notes and notes[-1]["kind"] == "wave"
+    assert notes[-1]["details"] == payload
+    assert len(_read_entries(tmp_graph)) == 1
+
+
+def test_wave_accept_on_fold_offer_keeps_details(tmp_graph, monkeypatch, tmp_path):
+    """x-ce1b AC3-EDGE: accepting the interactive fold offer files through the
+    same helper - JSON receipt names the host, details land byte for byte."""
+    import fno.graph.cli as gcli
+
+    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target_id = json.loads(target.stdout)["id"]
+    sidecar = tmp_path / "relatedness.json"
+    sidecar.write_text(json.dumps({target_id: []}))
+    monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
+    monkeypatch.setattr(gcli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(gcli.typer, "confirm", lambda *a, **k: True)
+
+    r = _invoke(
+        "--json", "backlog", "idea", "Difficulty routing filing surface estimate",
+        "--difficulty", "high",
+        "--details", "ACCEPT-MARKER-CE1B payload body",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "wave"
+    assert receipt["node_id"] == target_id
+    assert receipt["minted_id"] is None
+
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
+    notes = node.get("progress_notes") or []
+    assert notes and notes[-1]["kind"] == "wave"
+    assert "ACCEPT-MARKER-CE1B" in (notes[-1].get("details") or "")
+    assert len(_read_entries(tmp_graph)) == 1
+
+
 def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
