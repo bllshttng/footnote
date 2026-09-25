@@ -249,7 +249,7 @@ fn pytest_names_direct_set(args: &[String]) -> bool {
 /// True when the run selects a DIRECT set of tests rather than a whole
 /// suite: a cargo test narrower than a crate, or a pytest run naming a test
 /// file or nodeid. A direct-set run skips the `test:suite` claim entirely
-/// (the user ruling on x-0cea: a worker runs only the tests covering the
+/// (the user ruling of 2026-09-25: a worker runs only the tests covering the
 /// files it changed and never waits on the suite queue; CI runs every
 /// suite). Anything opaque - a bare `cargo build`, a shell out, an unknown
 /// program - reads false and queues.
@@ -1676,7 +1676,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let worktree = std::env::current_dir()
         .ok()
         .map(|cwd| crate::paths::worktree_repo_root(&cwd));
-    // The user ruling on x-0cea: a direct-set run (the tests covering the
+    // The user ruling of 2026-09-25: a direct-set run (the tests covering the
     // files a worker changed) never queues on test:suite; only a whole-suite
     // run is admitted through it. Nested runs inherit as before.
     let whole = !selects_direct_set(&opts.argv);
@@ -2016,7 +2016,7 @@ mod tests {
         }
     }
 
-    /// The x-0cea classifier: a pytest run naming a test file or nodeid is a
+    /// The direct-set classifier: a pytest run naming a test file or nodeid is a
     /// direct set; a directory, no path, or a flag value is not; anything
     /// opaque queues.
     #[test]

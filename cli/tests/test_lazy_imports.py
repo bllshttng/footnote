@@ -1308,7 +1308,7 @@ def test_fno_py_entrypoint_is_main():
 
 
 def test_plain_click_action_help_exits_clean():
-    """x-0cea: a plain-click action's --help behind the lazy group (a
+    """A plain-click action's --help behind the lazy group (a
     collapsed forward or a lazy stub) prints its help and exits 0. The
     plain-click Exit used to escape typer's vendored-click main as a
     traceback ending in click.exceptions.Exit: 0."""
