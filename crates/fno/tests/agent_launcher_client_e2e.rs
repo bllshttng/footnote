@@ -185,14 +185,17 @@ fn wheel_over_open_list_never_reaches_the_pane() {
     // sits over live panes; a wheel report over it is consumed, never
     // forwarded to the `cat -v` pane underneath.
     let scratch = Scratch::new("composer-wheel");
-    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    seed_routing_config(&scratch);
+    let envs = with_fake_harnesses(&scratch);
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     type_and_settle(&mut h, PREFIX);
     type_and_settle(&mut h, FULL);
     std::thread::sleep(Duration::from_millis(300));
-    type_and_settle(&mut h, DOWN); // the agent list opens over the panes
-    std::thread::sleep(Duration::from_millis(400));
-    type_and_settle(&mut h, b"\x1b[<64;60;12M"); // wheel up at row 12, col 60
+    type_and_settle(&mut h, DOWN); // the agent list opens, flipped above the dock
+    std::thread::sleep(Duration::from_millis(800));
+    type_and_settle(&mut h, b"\x1b[<64;35;12M"); // wheel up at row 12, col 35: over the list
     std::thread::sleep(Duration::from_millis(400));
     let screen = h.screen();
     let pane = pane_region(&screen);
