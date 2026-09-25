@@ -1095,10 +1095,13 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
 # and never instead of them. Eleven keys, closed so a typo is a parse error:
 # review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
-# acp. A claim's only field is `state`: native, capable, absent, unmeasured -
+# acp. A claim's fields are `state` (native, capable, absent, unmeasured -
 # defined once in harness_capabilities.rs beside FEATURE_STATES, the parser
-# that enforces them; the per-row comments below cite the measurements,
-# never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# that enforces them) and the optional `measured_by` receipt naming the
+# reader, version and date that settled the state. A state without a receipt
+# keeps its row comment, and the matrix renders the cell unmeasured rather
+# than repeating a word nobody can point at a measurement for. The per-row
+# comments below cite the measurements, never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
 # the refusal lives in the consuming lane, which names the key, the state, and
 # the probe that settles it. Every key used on any row needs a
 # [probe.features.<key>] declaration below, or the table refuses to load: a
