@@ -32,7 +32,7 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | Phase | Condition | Skill |
 |-------|-----------|-------|
 | 1. Plan | idea OR no plan bound yet | `fno:plan` |
-| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`) |
+| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`); load `fno:test-audit` authoring mode beside `fno:tdd` for the execute phase |
 | 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
 | 3. Review | Before `/fno:pr create`, on the final local HEAD | `/fno:review <size> --comment` (Codex `$fno:review`) runs in this session; see [phase-bodies.md](phase-bodies.md). Size: medium under 300 changed lines, high above, xhigh for risky surfaces. Findings hold on branch and HEAD and post when the PR opens |
