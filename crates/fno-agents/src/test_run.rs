@@ -42,29 +42,38 @@ const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Where cargo's own arguments start, when `argv` is a cargo test run:
+/// `test`/`t`, or `nextest run`/`r`, past any `+toolchain` pins. Any other
+/// program reads `None`.
+fn cargo_test_args_start(argv: &[String]) -> Option<usize> {
+    let is_cargo = argv
+        .first()
+        .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));
+    if !is_cargo {
+        return None;
+    }
+    let mut i = 1;
+    while i < argv.len() && argv[i].starts_with('+') {
+        i += 1;
+    }
+    match argv.get(i).map(String::as_str) {
+        Some("test") | Some("t") => Some(i + 1),
+        Some("nextest") => match argv.get(i + 1).map(String::as_str) {
+            Some("run") | Some("r") => Some(i + 2),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// True when `argv` is a cargo test run that selects no narrower target
 /// than a whole crate: no test-name filter, no `--test`/`--bin`/`--example`/
 /// `--bench`/`--doc`, no nextest filterset. `--lib` alone is whole: it runs
 /// every unit test. Any other program reads false. An unknown flag's value
 /// reads as a filter, so a doubt errs toward targeted.
 pub(crate) fn cargo_test_selects_whole_suite(argv: &[String]) -> bool {
-    let is_cargo = argv
-        .first()
-        .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));
-    if !is_cargo {
+    let Some(rest_start) = cargo_test_args_start(argv) else {
         return false;
-    }
-    let mut i = 1;
-    while i < argv.len() && argv[i].starts_with('+') {
-        i += 1;
-    }
-    let rest_start = match argv.get(i).map(String::as_str) {
-        Some("test") | Some("t") => i + 1,
-        Some("nextest") => match argv.get(i + 1).map(String::as_str) {
-            Some("run") | Some("r") => i + 2,
-            _ => return false,
-        },
-        _ => return false,
     };
     // Flags whose presence means the selection is narrower than a crate.
     const TARGETED: &[&str] = &[
@@ -156,6 +165,102 @@ pub(crate) fn cargo_test_selects_whole_suite(argv: &[String]) -> bool {
         }
     }
     true
+}
+
+/// Where pytest's own arguments start, when `argv` is a pytest run: a bare
+/// `pytest` program, or a python interpreter driving `-m pytest`. Any other
+/// program reads `None`.
+fn pytest_args_start(argv: &[String]) -> Option<usize> {
+    let argv0 = argv.first()?;
+    let base = Path::new(argv0).file_name()?.to_string_lossy().to_string();
+    if base.starts_with("pytest") {
+        return Some(1);
+    }
+    if !base.starts_with("python") {
+        return None;
+    }
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "-m" => {
+                return (argv.get(i + 1).map(String::as_str) == Some("pytest")).then_some(i + 2);
+            }
+            // Interpreter options before -m: keep scanning.
+            t if t.starts_with('-') => i += 1,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// True when pytest's arguments name a direct set: any argument that is a
+/// test FILE path or a `path::nodeid`. A directory argument collects the
+/// whole tree, so it reads whole, as does no path at all (the caller's
+/// default suite). Values of flags that take one are skipped, so
+/// `-c pytest.ini` is never mistaken for a target.
+fn pytest_names_direct_set(args: &[String]) -> bool {
+    const VALUE_FLAGS: &[&str] = &[
+        "-c",
+        "-o",
+        "-p",
+        "-n",
+        "-k",
+        "-m",
+        "-W",
+        "--maxprocesses",
+        "--dist",
+        "--maxfail",
+        "--deselect",
+        "--tb",
+        "--rootdir",
+        "--basetemp",
+        "--junitxml",
+        "--html",
+        "--cov",
+        "--result-log",
+    ];
+    let mut skip = false;
+    for tok in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if VALUE_FLAGS.contains(&tok.as_str()) {
+            skip = true;
+            continue;
+        }
+        if tok.starts_with('-') {
+            continue;
+        }
+        if tok.contains("::") {
+            return true;
+        }
+        let path = Path::new(tok);
+        if path.is_file() {
+            return true;
+        }
+        if path.is_dir() {
+            return false;
+        }
+    }
+    false
+}
+
+/// True when the run selects a DIRECT set of tests rather than a whole
+/// suite: a cargo test narrower than a crate, or a pytest run naming a test
+/// file or nodeid. A direct-set run skips the `test:suite` claim entirely
+/// (the user ruling on x-0cea: a worker runs only the tests covering the
+/// files it changed and never waits on the suite queue; CI runs every
+/// suite). Anything opaque - a bare `cargo build`, a shell out, an unknown
+/// program - reads false and queues.
+pub(crate) fn selects_direct_set(argv: &[String]) -> bool {
+    if cargo_test_args_start(argv).is_some() {
+        return !cargo_test_selects_whole_suite(argv);
+    }
+    match pytest_args_start(argv) {
+        Some(start) => pytest_names_direct_set(&argv[start..]),
+        None => false,
+    }
 }
 
 /// The claim key naming the one checkout that gets the next test or build
@@ -1571,10 +1676,13 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let worktree = std::env::current_dir()
         .ok()
         .map(|cwd| crate::paths::worktree_repo_root(&cwd));
-    let whole = cargo_test_selects_whole_suite(&opts.argv);
+    // The user ruling on x-0cea: a direct-set run (the tests covering the
+    // files a worker changed) never queues on test:suite; only a whole-suite
+    // run is admitted through it. Nested runs inherit as before.
+    let whole = !selects_direct_set(&opts.argv);
     let nested = nested_owner();
     let mut claimed = false;
-    if nested.is_none() {
+    if nested.is_none() && whole {
         if let Err(code) = acquire_suite_claim(
             &run_id,
             &holder,
@@ -1905,6 +2013,54 @@ mod tests {
                 !cargo_test_selects_whole_suite(&other),
                 "a non-cargo-test program must read false: {other:?}"
             );
+        }
+    }
+
+    /// The x-0cea classifier: a pytest run naming a test file or nodeid is a
+    /// direct set; a directory, no path, or a flag value is not; anything
+    /// opaque queues.
+    #[test]
+    fn direct_set_classifier_reads_the_selection() {
+        let v = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = std::fs::canonicalize(td.path()).unwrap();
+        std::fs::write(dir.join("test_x.py"), b"def test_a():\n   pass\n").unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let file = dir.join("test_x.py");
+        let file_arg = file.to_string_lossy().to_string();
+        let nodeid = format!("{}::test_a", file.to_string_lossy());
+        let dir_arg = dir.join("tests").to_string_lossy().to_string();
+
+        // A file or nodeid target is a direct set.
+        let mut with_file = v(&["python", "-m", "pytest"]);
+        with_file.push(file_arg);
+        assert!(selects_direct_set(&with_file), "{with_file:?}");
+
+        let mut with_nodeid = v(&["python3", "-m", "pytest", "-q"]);
+        with_nodeid.push(nodeid);
+        assert!(selects_direct_set(&with_nodeid), "{with_nodeid:?}");
+
+        // A directory target, no target, a flag value, and opaque programs
+        // all read whole and queue.
+        let mut with_dir = v(&[
+            "python",
+            "-m",
+            "pytest",
+            "-n",
+            "auto",
+            "--maxprocesses=4",
+            "--dist=loadgroup",
+        ]);
+        with_dir.push(dir_arg);
+        assert!(!selects_direct_set(&with_dir), "{with_dir:?}");
+
+        for whole in [
+            v(&["python", "-m", "pytest"]),
+            v(&["python", "-m", "pytest", "-c", "pytest.ini"]),
+            v(&["bash", "-c", "pytest -q"]),
+            v(&["cargo", "build"]),
+        ] {
+            assert!(!selects_direct_set(&whole), "{whole:?}");
         }
     }
 
