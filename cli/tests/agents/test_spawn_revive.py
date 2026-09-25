@@ -643,11 +643,26 @@ def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
     assert result.exit_code == 11, result.output
 
 
+def _admitting_gate(monkeypatch) -> None:
+    """An unrouted wake asks the spawn gate; stub it with an admitting guard."""
+
+    class _Guard:
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: _Guard(),
+    )
+
+
 def test_wake_and_deliver_degrades_on_claim_substrate_fault(revive_ready, monkeypatch):
     """The same fault, seen end to end: the wake reports a lane failure so the
     sender writes the durable fallback, instead of raising out of the command."""
     from fno.agents.harnesses import claude as claude_mod
     from fno.claims.io import ClaimCorrupted
+
+    _admitting_gate(monkeypatch)
 
     def _corrupt(**_kw):
         raise ClaimCorrupted("claim file is not valid YAML")
@@ -681,6 +696,8 @@ def test_wake_and_deliver_takes_no_outer_claim(revive_ready, monkeypatch):
     calls: list[dict] = []
     from fno.agents.harnesses import claude as claude_mod
 
+    _admitting_gate(monkeypatch)
+
     real_acquire = claude_mod.acquire_session_writer_claim
 
     def _spy(**kw):
@@ -695,3 +712,55 @@ def test_wake_and_deliver_takes_no_outer_claim(revive_ready, monkeypatch):
     ok, short = dispatch.wake_and_deliver(DEAD_UUID, "wake up")
     assert (ok, short) == (True, "7c5dcf5d")
     assert calls == []  # every acquire now lives inside the create path
+
+
+def test_a_wake_fork_row_names_the_parent_it_was_handed(revive_ready, monkeypatch):
+    """The wake fork stamps the parent triple it was handed, not the sender's
+    ambient session."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    _pin_supervisor(monkeypatch, revive_ready)
+    monkeypatch.setattr(
+        claude_mod,
+        "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sender-s")
+
+    dispatch.dispatch_spawn(
+        name="wake-deadbeef",
+        message="m",
+        harness="claude",
+        cwd=Path("/tmp"),
+        resume_session_id=DEAD_UUID,
+        parent_edge=("k1-parent", "claude", "/k1"),
+    )
+    row = next(e for e in load_registry() if e.name == "wake-deadbeef")
+    assert row.spawned_by_session == "k1-parent"
+    assert row.spawned_by_cwd == "/k1"
+
+
+def test_a_wake_fork_row_without_a_handed_parent_names_the_sender(
+    revive_ready, monkeypatch
+):
+    """Control: no handed triple -> the ambient sender is stamped, as every
+    non-wake spawn sees."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    _pin_supervisor(monkeypatch, revive_ready)
+    monkeypatch.setattr(
+        claude_mod,
+        "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sender-s")
+
+    dispatch.dispatch_spawn(
+        name="wake-feedface",
+        message="m",
+        harness="claude",
+        cwd=Path("/tmp"),
+        resume_session_id=DEAD_UUID,
+    )
+    control = next(e for e in load_registry() if e.name == "wake-feedface")
+    assert control.spawned_by_session == "sender-s"

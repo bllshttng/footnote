@@ -153,15 +153,17 @@ echo "AC1.2-EDGE: unknown ab-id exits non-zero, error printed for the caller"
 set +e
 EDGE_OUT="$(bash "$PARSER" "ab-deaddead" 2>/dev/null)"
 RC=$?
+EVAL_RC=0
+EDGE_MESSAGE="$(bash -c "$EDGE_OUT" 2>&1)" || EVAL_RC=$?
 set -e
 EDGE_OK=1
-if [[ $RC -eq 0 ]]; then
-    echo "  FAIL: unknown ab-id should return non-zero, got rc=0"
+if [[ $RC -eq 0 || $EVAL_RC -eq 0 ]]; then
+    echo "  FAIL: unknown ab-id and its eval-able error should return non-zero (parser rc=$RC, eval rc=$EVAL_RC)"
     FAIL=$((FAIL+1))
     EDGE_OK=0
 fi
-if [[ "$EDGE_OUT" != *"not found"* && "$EDGE_OUT" != *"Error resolving"* ]]; then
-    echo "  FAIL: unknown ab-id should print an eval-able error, got: $EDGE_OUT"
+if [[ "$EDGE_MESSAGE" != *"not found"* && "$EDGE_MESSAGE" != *"Error resolving"* ]]; then
+    echo "  FAIL: unknown ab-id should print an eval-able error, got: $EDGE_MESSAGE"
     FAIL=$((FAIL+1))
     EDGE_OK=0
 fi
