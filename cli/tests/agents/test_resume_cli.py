@@ -78,23 +78,22 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     # Assert the tail too, not just the order: "resume", the id, then the
     # daemon-attach flag the resume_strategy form always appends.
     assert res.exec_argv[-4:] == ["resume", sid, "--remote", "unix://"]
-    # The -c grant is global, so it must still precede the subcommand.
-    assert any("writable_roots=" in arg for arg in res.exec_argv)
-    grant_at = next(
-        i for i, a in enumerate(res.exec_argv) if "writable_roots=" in a
-    )
-    assert grant_at < res.exec_argv.index("resume")
+    # codex 0.156.1 refuses a writable_roots override paired with the form's
+    # --remote flag, so the grant is absent; --cd is the only global that
+    # rides, and it still precedes the subcommand.
+    assert not any("writable_roots=" in arg for arg in res.exec_argv)
+    assert res.exec_argv.index("--cd") < res.exec_argv.index("resume")
     assert res.exec_cwd == "/path/to/workdir"
 
 
-def test_codex_resume_grants_git_metadata_write_in_a_repo(tmp_path) -> None:
-    """A resumed codex in a linked worktree must still be able to commit.
+def test_codex_resume_linked_worktree_pins_cd_and_skips_remote_grant(tmp_path) -> None:
+    """A resumed codex in a linked worktree still lands on its worktree.
 
-    Its git metadata lives at <repo>/.git/worktrees/<name>/, outside the
-    workspace a bounded sandbox makes writable, and `codex resume` takes no
-    --add-dir - so the grant rides the global -c, ahead of the subcommand.
+    The writable-roots grant is gone from the argv: codex 0.156.1 refuses it
+    paired with the declared form's --remote flag, and the roots ride the
+    daemon turn carrier instead. The wrong-tree failure this test guards is
+    still answered by --cd naming the worktree outright.
     """
-    import json
     import pathlib
     import subprocess
 
@@ -128,15 +127,14 @@ def test_codex_resume_grants_git_metadata_write_in_a_repo(tmp_path) -> None:
 
     argv = res.exec_argv
     assert argv[0] == "codex"
-    assert argv[1] == "-c"
-    key, _, value = argv[2].partition("=")
-    assert key == "sandbox_workspace_write.writable_roots"
-    assert pathlib.Path(json.loads(value)[0]).resolve() == (repo / ".git").resolve()
-    # The grant is global, so it precedes the subcommand. So does --cd, which
-    # is why this checks order rather than a fixed index: pinning argv[3] made
-    # the test fail on a second global that was correctly placed.
-    assert argv.index("-c") < argv.index("resume")
+    # The refused pair stays out of the argv: no writable_roots override
+    # beside the form's --remote flag.
+    assert not any("writable_roots=" in arg for arg in argv)
+    # --cd precedes the subcommand (a codex global) and names the worktree,
+    # not the canonical checkout the session was spawned in.
     assert argv.index("--cd") < argv.index("resume")
+    cd_at = argv.index("--cd")
+    assert pathlib.Path(argv[cd_at + 1]).resolve() == wt.resolve()
     assert argv[-4:] == [
         "resume", "00000000-1111-2222-3333-444444444444", "--remote", "unix://",
     ]
@@ -454,7 +452,7 @@ def test_print_command_emits_one_liner() -> None:
     assert "cd " in res.output
     assert "exec codex " in res.output
     assert " resume sess-abc" in res.output
-    assert "writable_roots=" in res.output
+    assert "writable_roots=" not in res.output
     # The space-containing path must be quoted.
     assert "'/path/with space'" in res.output
     # No banner / no leading prose.
