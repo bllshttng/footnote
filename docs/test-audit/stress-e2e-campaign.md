@@ -2,21 +2,21 @@
 
 ## Baseline
 
-Pinned baseline: `bcb46735f595e0d85f817b64739d9a8b57037ef5`, the `origin/main` tip before main advanced again; a later fast-forward did not modify any file listed in this ledger.
+Baseline SHA: `bcb46735f595e0d85f817b64739d9a8b57037ef5`. It was `origin/main` before the follow-up fast-forwards. Those fast-forwards changed no test files listed below.
 
 The three trial baseline passed with `STRESS_TRIALS=3`: `daemon_e2e=pass`, `persistence=pass`, `workspace_persistence_e2e=pass`, and `daemons_left=0` on all three trials.
 
-Baseline line counts: `scripts/tests/stress-rust-e2e-concurrency.sh` 225; `crates/fno-agents/tests/daemon_e2e.rs` 2,783; `crates/fno/tests/persistence.rs` 777; `crates/fno/tests/workspace_persistence_e2e.rs` 863.
+Baseline support line counts: the stress harness had 225 lines. The daemon test had 2,783 lines. The persistence test had 777 lines. The workspace test had 863 lines.
 
-Baseline declarations: `daemon_e2e` 30; `persistence` 14; `workspace_persistence_e2e` 9; total 53, with no ignored declarations.
+Baseline declarations: daemon had 30. Persistence had 14. Workspace had 9. Total: 53. None was ignored.
 
 ## Cost evidence and owner choice
 
-Recent complete `cli-ci` run 36109172701 had `smoke-rest (4)` at 1,234 seconds (20.57m); the stress harness inside it ran three trials in 545 seconds (9.08m). Complete `rust-ci` run 36110477448 had the 20-trial stress job at 1,238 seconds (20.63m) and reported zero failures.
+Recent `cli-ci` run 36109172701 measured `smoke-rest (4)` at 1,234 seconds (20.57m). Its stress step ran three trials in 545 seconds (9.08m). Recent `rust-ci` run 36110477448 measured the 20-trial stress job at 1,238 seconds (20.63m). It reported zero failures.
 
-The workflow source records 35.9 seconds per repeated trial across the three binaries; recent runs confirm the repeated suite is a large cost. The stress job remains report-only, while the three-trial smoke lane is the blocking owner.
+The workflow source records 35.9 seconds per repeated trial across three binaries. Recent runs confirm this suite has high cost. The stress job reports results only. The three-trial smoke lane blocks.
 
-The selected subsystem is the three process-backed binaries executed together by `stress-rust-e2e-concurrency.sh`; the keeper is the full Rust integration test run, which still runs every declaration once per relevant PR.
+We chose the three process-backed binaries in `stress-rust-e2e-concurrency.sh` from these measurements. The ordinary Rust integration run remains their primary keeper. It still runs every declaration once per relevant PR.
 
 ## Owner-boundary ledger
 
@@ -58,7 +58,7 @@ The selected subsystem is the three process-backed binaries executed together by
 | `drift_warned_on_list_stderr_only` | R | Keeper preserves clean JSON stdout and a drift warning on stderr, and asserts `status --json` reports `drifted`. |
 | `daemon_cwd_survives_a_reaped_launch_worktree` | R | A real daemon retains a valid cwd after its launch worktree is removed. |
 
-The three deterministic waits (`daemon_idle_exits_over_terminal_rows_and_says_why`, `daemon_on_sandbox_home_starts_no_active_backlog_supervisor`, and `daemon_stays_resident_while_a_worker_socket_is_live`) remain in ordinary Cargo integration coverage but are omitted from repeated stress trials; the stress marker remains in the kept environment-probe declaration.
+Three deterministic daemon waits stay in ordinary Cargo integration coverage. The stress loop skips them after cutover. The environment probe still carries the stress marker.
 
 ### `crates/fno/tests/persistence.rs`
 
@@ -96,7 +96,7 @@ The three deterministic waits (`daemon_idle_exits_over_terminal_rows_and_says_wh
 
 ### Candidate evidence and preservation review
 
-The three read-only boundary reviewers compared each candidate with its production owner, callers, sibling proof, history, and smoke/Cargo routing. No contract was dropped. The C rows below move assertions into existing process-backed keepers; the F rows repair weak post-restart observations. No production seam or production code is removed.
+Three read-only boundary passes compared every candidate with production owners, callers, siblings, history, and test routing. They found no lost contract. The C rows move assertions into existing process-backed keepers. The F rows repair weak post-restart checks. No production code or seam was removed.
 
 | Candidate | Failure detected and surviving keeper | Non-test caller and history | Cut unlocked, risk, focused validation |
 |---|---|---|---|
@@ -110,20 +110,20 @@ The three read-only boundary reviewers compared each candidate with its producti
 
 ## `tests/spec` route inventory
 
-Before campaign one merged, the same baseline SHA had 17 Python tests passing in 17.39 seconds; `test_executor_transcription.sh` passed 23 assertions; `test_blueprint_phase_close.sh` passed; and `test_claims_arg.sh` stopped at preflight with two failures because both legacy templates had been removed from main.
+Before campaign one merged, 17 Python tests passed in 17.39s on the same SHA. The executor shell spec passed 23 assertions. Blueprint phase-close passed. Claims stopped at preflight with two failures because the old templates were gone.
 
-After campaign one merged, the current main baseline has 16 Python cases passing in 19.00 seconds; claims passes 12 assertions, executor transcription passes 17, and blueprint close passes. The parser owner fix is present at `scripts/lib/parse-claims-arg.sh`, with the error-output regression retained.
+After campaign one merged, the main baseline had 16 Python cases pass in 19.00s. Claims passed 12 assertions. Executor passed 17 assertions. Blueprint phase-close passed. `scripts/lib/parse-claims-arg.sh` owns the parser fix. The error-output regression stays.
 
-The route wrapper is `scripts/tests/test-spec-suite.sh`, auto-discovered by the existing smoke runner; it invokes all three Bash suites and the two Python files through `fno doctor test`.
+`scripts/tests/test-spec-suite.sh` is auto-discovered by the smoke runner. It runs all three Bash specs and both Python files through `fno doctor test`.
 
 ## Cutover result
 
-Cutover leaves 48 process-backed declarations (27 daemon, 14 persistence, 7 workspace), down from 53. The three-trial `cli-ci` and 20-trial report-only `rust-ci` stress samples each run 46 declarations per trial: five consolidated declarations become keepers, and the sandbox-idle and live-worker-socket declarations are skipped only in repeated sampling. All 48 still run in the ordinary Rust integration jobs.
+Cutover leaves 48 process-backed declarations. Baseline had 53 (30 daemon, 14 persistence, 9 workspace). The three-trial `cli-ci` and 20-trial report-only `rust-ci` samples run 46 declarations per trial. Five declarations were consolidated into keepers. Two deterministic daemon tests are skipped in repeated samples. Ordinary Rust integration still runs all 48.
 
-The three process test files shrink from 4,423 to 4,387 lines (-36). The stress harness grows from 225 to 240 lines (+15), and the new spec router is 9 lines. Rust production changes: 0 LOC; the Python runner change is comment-only and describes the new route.
+The three process test files shrink from 4,423 to 4,387 lines. That is 36 fewer lines. The stress harness grows from 225 to 240 lines. The new spec router has 9 lines. Rust production changes add 0 lines. The Python runner change only updates comments.
 
-The recent stress samples cost 545 seconds for the three-trial step and 1,238 seconds for the 20-trial report-only job, 29.72 runner-minutes combined. Before cutover, the three deterministic daemon waits cost about 13 seconds per trial; after the keeper fold plus stress-only skips, repeated samples avoid those 13 seconds. The routed specs add about 15 seconds to smoke. Projected affected-step cost is 1,499 seconds (24.98 runner-minutes), a 4.73-minute reduction; the PR body labels this an estimate because we do not wait for its CI.
+Recent stress samples cost 545s for the three-trial step and 1,238s for the 20-trial report-only job. Their combined cost was 29.72 runner-minutes. Three daemon waits cost about 13s per baseline trial. Consolidation and stress-only skips remove those waits. The new route adds about 15s to smoke. Projected affected-step cost is 1,499s (24.98 runner-minutes). That saves 4.73m. This is an estimate because we will not wait for PR CI.
 
-The stress sample executes 1,219 declarations across 23 trials before and 1,058 after, a reduction of 161 repeated executions. The smoke route adds three Bash specs and 16 Python cases that were not previously in CI. `scripts/tests/test-spec-suite.sh` passed through the smoke registry: claims 12/12, executor transcription 17/17, blueprint phase-close passed, and pytest 16/16. The focused smoke shard unit check for step-level CI env wiring passed (1/1).
+The stress loop executes 1,219 baseline declarations across 23 trials. Cutover executes 1,058. That is 161 fewer repeated executions. CI gains three Bash specs and 16 Python cases. They were not routed before. `scripts/tests/test-spec-suite.sh` passed the smoke registry. Claims passed 12/12. Executor passed 17/17. Blueprint phase-close passed. Pytest passed 16/16. The smoke shard wiring test passed 1/1.
 
-Preservation mutation proof: 8/8 contracts produced the named keeper assertion under one deliberate production-owner mutation; every owner source hash matched its original bytes after restoration. The mutations covered idle exit, no-op receipt, status drift field, rename, removal, clean-shutdown capture, restored focus, and worker tab location.
+Mutation proof: 8/8 contracts triggered their keeper assertion after an owner mutation. The runner restored each source file to its original SHA. Mutations covered idle exit, no-op receipt, status drift, rename, removal, clean shutdown capture, restored focus, and worker tab location.
