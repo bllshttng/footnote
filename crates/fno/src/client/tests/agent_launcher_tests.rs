@@ -799,11 +799,7 @@ fn chips_carry_values_not_labels() {
     let l = v.launcher.as_ref().unwrap();
     let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
     let joined = texts.join(" | ");
-    for want in [
-        "claude default",
-        "claude decides",
-        "thread",
-    ] {
+    for want in ["claude default", "claude decides", "thread"] {
         assert!(
             texts.iter().any(|t| t.contains(want)),
             "want {want:?} in {joined}"
@@ -859,8 +855,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
         })
         .collect();
     assert!(
-        labels.contains(&"claude default".to_string())
-            && labels.contains(&"zai-flash".to_string()),
+        labels.contains(&"claude default".to_string()) && labels.contains(&"zai-flash".to_string()),
         "picker lists defaults + routing rows: {labels:?}"
     );
     // Pick zai-flash: the chip reads the ROW name, the draft carries the
@@ -1010,9 +1005,7 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     assert_eq!(l.draft.placement_portal, 2);
     let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
     assert!(
-        texts
-            .iter()
-            .any(|t| t.contains("thread split beside")),
+        texts.iter().any(|t| t.contains("thread split beside")),
         "the chip shows the picked view: {texts:?}"
     );
 }
@@ -1091,11 +1084,7 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        labels,
-        vec!["codex default"],
-        "the query narrows the rows"
-    );
+    assert_eq!(labels, vec!["codex default"], "the query narrows the rows");
     assert!(matches!(
         picker.popup.rows.first(),
         Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
@@ -1114,7 +1103,11 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(still, vec!["codex default"], "`co` still filters: {still:?}");
+    assert_eq!(
+        still,
+        vec!["codex default"],
+        "`co` still filters: {still:?}"
+    );
     // Clearing the query fully restores every row.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;

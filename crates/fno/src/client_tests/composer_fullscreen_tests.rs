@@ -44,7 +44,10 @@ async fn toggle_composer_opens_over_a_hidden_panel_without_a_resize() {
     dispatch_event(&mut v, Event::ToggleComposer, &mut buf)
         .await
         .unwrap();
-    assert!(v.launcher.is_some(), "the sheet opens over the hidden panel");
+    assert!(
+        v.launcher.is_some(),
+        "the sheet opens over the hidden panel"
+    );
     assert!(
         buf.is_empty(),
         "opening reshapes the sheet, never the pane: {buf:?}"

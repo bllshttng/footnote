@@ -1346,9 +1346,13 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
             // The door prints one JSON document, pretty over many lines;
             // parse the whole buffer, then fall back to a lone JSON line
             // for callers that emit warning text around it.
-            let parsed: Option<serde_json::Value> = serde_json::from_str(stdout.trim_start())
-                .ok()
-                .or_else(|| stdout.lines().rev().find_map(|l| serde_json::from_str(l).ok()));
+            let parsed: Option<serde_json::Value> =
+                serde_json::from_str(stdout.trim_start()).ok().or_else(|| {
+                    stdout
+                        .lines()
+                        .rev()
+                        .find_map(|l| serde_json::from_str(l).ok())
+                });
             match parsed
                 .as_ref()
                 .and_then(|v| v.get("models"))
@@ -1440,17 +1444,22 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
 /// models...": reopen it in place so the rows re-derive from the landed
 /// outcome. No-op when nothing is open or the sheet no longer fits.
 pub(crate) fn refresh_open_picker(view: &mut View) {
-    let target = view.launcher.as_ref().and_then(|l| {
-        l.picker
-            .as_ref()
-            .map(|p| (picker_anchor(l, view), p.field))
-    });
+    let target = view
+        .launcher
+        .as_ref()
+        .and_then(|l| l.picker.as_ref().map(|p| (picker_anchor(l, view), p.field)));
     let Some((Some(anchor), field)) = target else {
         return;
     };
     if let Some(l) = view.launcher.as_mut() {
         l.picker = None;
-        open_picker_at(l, &view.launcher_catalog, &view.backlog, Some(anchor), field);
+        open_picker_at(
+            l,
+            &view.launcher_catalog,
+            &view.backlog,
+            Some(anchor),
+            field,
+        );
     }
 }
 
