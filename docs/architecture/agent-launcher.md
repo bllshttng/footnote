@@ -1,6 +1,6 @@
 # Agent launcher (the composer: one form, two paints)
 
-One composer launches a new harness session through the canonical spawn door and hands off to the native session. This is a launcher, not a chat client. After a verified birth the pane is focused, and the native harness UI owns everything after that. For a bg thread the roster row is the handoff. The composer has ONE draft, ONE focus order, ONE key rule and ONE hint row, with two paints: the bottom form in full-screen sideline, the centered sheet everywhere else.
+One composer launches a new harness session through the canonical spawn door and hands off to the native session. This is a launcher, not a chat client. After a verified birth the pane is focused, and the native harness UI owns everything after that. For a bg thread the roster row is the handoff. The composer has ONE draft, ONE focus order, ONE key rule and ONE hint row. Two paints exist: the bottom form in full-screen sideline, the centered sheet everywhere else.
 
 ## Primary flow
 
