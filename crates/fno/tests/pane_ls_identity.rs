@@ -28,6 +28,7 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         name: name.map(str::to_string),
+        portal: None,
     }
 }
 
