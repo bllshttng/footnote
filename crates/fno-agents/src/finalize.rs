@@ -1484,9 +1484,11 @@ pub(crate) fn resolve_handoffs_dir(
             }
         }
     }
-    if let Some(vault) = resolve_obsidian_vault(&candidates) {
-        if let Some(vroot) = resolve_vault_root(&vault, home) {
-            return vroot.join("internal").join(&project).join("handoffs");
+    if !vault_write_is_temp_stray(home, cwd) {
+        if let Some(vault) = resolve_obsidian_vault(&candidates) {
+            if let Some(vroot) = resolve_vault_root(&vault, home) {
+                return vroot.join("internal").join(&project).join("handoffs");
+            }
         }
     }
     let base = home
@@ -1809,6 +1811,26 @@ pub(crate) fn project_name_is_basename_fallback(home: Option<&Path>, cwd: &Path)
         }
     }
     slug_from_git_remote(cwd).is_none()
+}
+
+/// A cwd under any standard temp root: the OS temp dir, or the macOS scratch
+/// trees (`/tmp`, `/private/tmp`, `/var/folders`) that `std::env::temp_dir()`
+/// does not cover. Tests and leaked daemons run there; real projects do not.
+pub(crate) fn cwd_is_temporary(cwd: &Path) -> bool {
+    let mut roots = vec![std::env::temp_dir()];
+    roots.push(PathBuf::from("/tmp"));
+    roots.push(PathBuf::from("/private/tmp"));
+    roots.push(PathBuf::from("/var/folders"));
+    roots.iter().any(|r| cwd.starts_with(r))
+}
+
+/// True when a vault write from `cwd` would be a temp-named stray: under a
+/// temp root with a basename-fallback project name. The vault writers
+/// (escalations, questions, handoffs) contain such writes in their
+/// space/fallback dir instead of scattering `internal/fnoe<pid>_<n>/` into
+/// the real vault.
+pub(crate) fn vault_write_is_temp_stray(home: Option<&Path>, cwd: &Path) -> bool {
+    cwd_is_temporary(cwd) && project_name_is_basename_fallback(home, cwd)
 }
 
 /// Read the project id from a flat config.toml (`[project]\nid = "..."`). The
@@ -4203,6 +4225,34 @@ mod tests {
         );
         let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
         assert_eq!(got, home.join("myvault/internal/demo/handoffs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_handoffs_dir_refuses_temp_cwd_basename_fallback() {
+        // A temp cwd with NO project id takes the basename fallback; the vault
+        // branch would scatter internal/<tmp-basename>/handoffs into the real
+        // vault (the stray-dir leak). The refusal contains it in the default
+        // handoffs dir; a declared project id keeps the vault branch.
+        let dir = std::env::temp_dir().join(format!("fin-hd-stray-{}", std::process::id()));
+        let cwd = dir.join("fnoe999_0");
+        let home = dir.join("home");
+        let _ = fs::create_dir_all(&cwd);
+        let _ = fs::create_dir_all(&home);
+        write_settings(&home, "[obsidian]\nenabled = true\nvault = \"myvault\"\n");
+        let got = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(
+            got,
+            home.join(".fno/handoffs/fnoe999_0"),
+            "a temp cwd with a fallback name never reaches the vault"
+        );
+        write_settings(&cwd, "[project]\nid = \"demo\"\n");
+        let declared = resolve_handoffs_dir(None, None, &cwd, Some(&home));
+        assert_eq!(
+            declared,
+            home.join("myvault/internal/demo/handoffs"),
+            "a declared project id keeps the vault branch"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

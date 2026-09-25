@@ -102,26 +102,13 @@ pub(crate) fn vault_dir_with_home(cwd: &Path, home: Option<&Path>, leaf: &str) -
             // test or probe process (a leaked test daemon once wrote 203
             // `internal/fnoe<pid>_<n>/questions` dirs into the real vault).
             // Contain such writes in the space dir.
-            if cwd_is_temporary(cwd)
-                && crate::finalize::project_name_is_basename_fallback(home, cwd)
-            {
+            if crate::finalize::vault_write_is_temp_stray(home, cwd) {
                 return crate::paths::space_dir(cwd).join(leaf);
             }
             return vroot.join("internal").join(project).join(leaf);
         }
     }
     crate::paths::space_dir(cwd).join(leaf)
-}
-
-/// A cwd under any standard temp root: the OS temp dir, or the macOS scratch
-/// trees (`/tmp`, `/private/tmp`, `/var/folders`) that `std::env::temp_dir()`
-/// does not cover. Tests and leaked daemons run there; real projects do not.
-fn cwd_is_temporary(cwd: &Path) -> bool {
-    let mut roots = vec![std::env::temp_dir()];
-    roots.push(PathBuf::from("/tmp"));
-    roots.push(PathBuf::from("/private/tmp"));
-    roots.push(PathBuf::from("/var/folders"));
-    roots.iter().any(|r| cwd.starts_with(r))
 }
 
 /// Tolerant parse: anything missing is empty/None and [`problems`] names it.
