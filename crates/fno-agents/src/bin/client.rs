@@ -338,6 +338,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::review_summary::run_review_summary(&args[1..]);
     }
 
+    // PR creation reads this branch-vs-base test inventory for its body; it
+    // stays binary-direct because it only folds a local diff and needs no daemon.
+    if matches!(verb, "test-delta") {
+        return fno_agents::test_delta::run_test_delta(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct

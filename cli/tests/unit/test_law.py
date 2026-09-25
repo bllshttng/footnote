@@ -67,6 +67,21 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import fno.decide
 
     monkeypatch.setattr(fno.decide, "_decisions_index_path", lambda: index)
+    # The law door stamps the recording project and refuses an unmapped one,
+    # so the fixture provisiones a hermetic work map naming the pytest cwd
+    # itself (a direct match, layout-independent). The project is fno so the
+    # seeded legacy rows (no scope, read as project:fno) stay visible.
+    map_file = tmp_path / "settings.yaml"
+    map_file.write_text(
+        "work:\n"
+        "  workspaces:\n"
+        "    main:\n"
+        "      projects:\n"
+        "        - name: fno\n"
+        f"          path: {Path.cwd()}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(map_file))
     return index
 
 
@@ -185,6 +200,22 @@ def test_missing_rationale_is_refused_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "rationale is required" in result.output
+    assert _rows(index) == []
+
+
+def test_a_placeholder_statement_is_refused_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard against the 2026-08-29 junk law: a smoke call of this verb
+    with x/y/z reached the live index and only the operator could clear it.
+    The placeholder shape now fails wherever the verb is invoked from."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(["set", "x", "y", "--rationale", "z"])
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "more than one character" in result.output
     assert _rows(index) == []
 
 
@@ -869,6 +900,8 @@ class TestLawSetSweep:
 
         def fake_verb(verb, payload, *a, **k):
             assert verb == "law-match"
+            if payload["mode"] == "record-scope":
+                return {"ok": True, "scope": "project:fno"}
             if payload["mode"] == "validate":
                 return {"ok": True, "refusal": None}
             assert payload["mode"] == "law"
@@ -913,8 +946,12 @@ class TestLawSetSweep:
         monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
 
         def broken(*a, **k):
-            if len(a) > 1 and isinstance(a[1], dict) and a[1].get("mode") == "validate":
-                return {"ok": True, "refusal": None}
+            if len(a) > 1 and isinstance(a[1], dict):
+                mode = a[1].get("mode")
+                if mode == "validate":
+                    return {"ok": True, "refusal": None}
+                if mode == "record-scope":
+                    return {"ok": True, "scope": "project:fno"}
             raise RuntimeError("matcher exploded")
 
         monkeypatch.setattr("fno.rust_binary.verb_call", broken)

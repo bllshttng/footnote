@@ -2752,6 +2752,7 @@ fn attention_row(
         arm_value: None,
         reader: None,
         starved: false,
+        retries: Vec::new(),
     }
 }
 

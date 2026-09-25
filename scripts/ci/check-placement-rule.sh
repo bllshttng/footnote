@@ -142,7 +142,12 @@
 #      contract: to decide whether an untracked path is one of those links,
 #      it has to name the `.claude` segment setup wrote. It never constructs
 #      a path to store anything - the only `.claude` it forms is a link
-#      target it compares. archive-worktree.sh's salvage step skips the same
+#      target it compares. law_match.rs detects the same harness-native
+#      layout for the same reason: a law recorded from a worktree session
+#      attributes to the parent repo's project, and naming the `.claude`
+#      segment is how it tells that layout from the fno-managed and conductor
+#      ones. Comparison only; footnote stores nothing there.
+#      archive-worktree.sh's salvage step skips the same
 #      shape for the same reason: copying a setup-written link would copy a
 #      slice of the canonical checkout through it.
 #   3. autocorrect's OWN remaining ~/.claude/ files that this wave
@@ -291,6 +296,7 @@ crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
+crates/fno-agents/src/law_match.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/daemon_tests.rs

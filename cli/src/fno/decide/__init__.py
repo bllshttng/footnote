@@ -118,6 +118,7 @@ PROJECTION_FIELDS = (
     "rationale",
     "supersedes",
     "reads",
+    "scope",
     "question_id",
 )
 
@@ -498,6 +499,7 @@ def record_decision(
     asked_at: str | None = None,
     expiry_ref: dict[str, Any] | None = None,
     reads: "list[str] | None" = None,
+    scope: str | None = None,
     events_root: Any = None,
     source: str = "target",
 ) -> dict[str, Any]:
@@ -625,6 +627,7 @@ def record_decision(
         rationale=rationale,
         supersedes=supersedes,
         reads=read_rows,
+        scope=scope,
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
@@ -1212,6 +1215,7 @@ def list_decisions(
     lane: str | None = None,
     state: str | None = None,
     entries: "list[dict] | None" = None,
+    scope: str = "current",
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -1359,7 +1363,16 @@ def list_decisions(
     )
     if limit and limit > 0:
         out = out[:limit]
-    return subject or "(all)", out, damaged
+    label = subject or "(all)"
+    if scope.casefold() != "all":
+        try:
+            from fno.rust_binary import verb_call
+            answer = verb_call("law-match", {"mode": "scope-split", "rows": out})
+            out = answer["kept"]
+            label += str(answer.get("note") or "")
+        except Exception:
+            label += " (scope filter unavailable; nothing hidden)"
+    return label, out, damaged
 
 
 def current_law(subject: str) -> dict[str, Any]:
@@ -1397,7 +1410,7 @@ def current_law(subject: str) -> dict[str, Any]:
 
 def review_list() -> dict[str, Any]:
     """Report unresolved multi-ruling subjects without mutating the index."""
-    _, rows, damaged = list_decisions(limit=None, state="all")
+    _, rows, damaged = list_decisions(limit=None, state="all", scope="all")
     grouped: dict[str, list[dict[str, Any]]] = {}
     display_subjects: dict[str, str] = {}
     graph_entries = _graph_entries()
