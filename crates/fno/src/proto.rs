@@ -334,7 +334,9 @@ fn default_true() -> bool {
 /// the crown-name store file; floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
-pub const PROTO_VERSION: u32 = 90;
+/// v91: `PaneMeta.node`/`branch`/`ctx` (serde default), the pane frame's
+/// bottom-edge fields; floor stays 58.
+pub const PROTO_VERSION: u32 = 91;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -363,6 +365,8 @@ pub mod err_code;
 
 pub mod agent_launch;
 pub use agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
+
+pub mod pane_meta;
 
 /// Refuse frames larger than this. A full 500x500 styled grid serializes to a
 /// few MB of JSON; 32MB is far above any real frame, low enough that a
@@ -2528,11 +2532,8 @@ pub struct BlockMeta {
 /// navigator's goto targets plus a derived, display-only `label` (the running
 /// command / node / cwd basename, else `shell`). The client never focuses a
 /// pane by label - it sends `FocusPane(id)`; the label is filter/display text.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaneMeta {
-    pub id: u64,
-    pub label: String,
-}
+/// Lives in [`pane_meta`] beside its frame-edge fields (v91).
+pub use pane_meta::PaneMeta;
 
 /// One tab's catalog entry inside [`ServerMsg::Layout`]. `id` is the stable
 /// session-scoped tab identity (monotonic u64, never reused - Locked
@@ -4307,6 +4308,7 @@ mod tests {
                             panes: vec![PaneMeta {
                                 id: 4,
                                 label: "claude".into(),
+                                ..Default::default()
                             }],
                         },
                         TabMeta {

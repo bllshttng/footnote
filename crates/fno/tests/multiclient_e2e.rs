@@ -79,12 +79,16 @@ fn multiclient_clamp_letterbox_area_and_regrow_on_abrupt_death() {
     assert_eq!((rect.rows, rect.cols), (20, 80));
 
     // Kernel-winsize proof + identical frames: both clients converge on the
-    // same 20x80 grid content.
+    // same 18x78 grid content (the pane frame insets the pty).
     a.input(b"echo sz=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz=20 80#"));
-    b.wait_pane_text(15, pane, |t| t.contains("sz=20 80#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz=18 78#"));
+    b.wait_pane_text(15, pane, |t| t.contains("sz=18 78#"));
     let fa = a.frames.get(&pane).unwrap();
-    assert_eq!((fa.rows, fa.cols), (20, 80), "frame is the clamped grid");
+    assert_eq!(
+        (fa.rows, fa.cols),
+        (18, 78),
+        "frame is the clamped grid, frame-inset"
+    );
 
     // AC1-ERR: the constraining client dies WITHOUT Detach (socket dropped
     // abruptly). The Gone path recomputes the clamp: the tab regrows to the
@@ -92,7 +96,7 @@ fn multiclient_clamp_letterbox_area_and_regrow_on_abrupt_death() {
     drop(b);
     a.wait_layout(10, "regrown", |l| l.area == (40, 120));
     a.input(b"echo sz2=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz2=40 120#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz2=38 118#"));
 }
 
 #[test]
@@ -386,7 +390,7 @@ fn multiclient_resize_storm_while_coviewing_settles_on_final_clamp() {
     a.wait_layout(10, "a settles on final clamp", |l| l.area == (22, 70));
     b.wait_layout(10, "b settles on final clamp", |l| l.area == (22, 70));
     a.input(b"echo sz=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz=22 70#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz=20 68#"));
 }
 
 #[test]
