@@ -406,13 +406,16 @@ mod tests {
         .unwrap();
         let mut connection = connection();
         crate::backlog::nodes::ensure_table(&connection).unwrap();
-        connection
-            .execute(
-                "INSERT INTO nodes (id, ordinal, slug, title, status, priority)
-                 VALUES ('x-node', 0, 'node', 'Node', 'ready', 'p2')",
-                [],
-            )
-            .unwrap();
+        let node = crate::backlog::model::Node::from_json(&serde_json::json!({
+            "id": "x-node",
+            "slug": "node",
+            "title": "Node",
+            "type": "feature",
+            "status": "ready",
+            "priority": "p2"
+        }))
+        .unwrap();
+        crate::backlog::nodes::save(&connection, &node).unwrap();
         connection
             .execute(
                 "INSERT INTO node_decisions (node_id, event_id, seq)
