@@ -3967,47 +3967,17 @@ class _ExternalSelectionError(RuntimeError):
 
 
 def _joined_open_candidates() -> list[dict]:
-    """The transient joined selection model: ``list_open`` exactly once, one
+    """The transient joined selection model: the Rust snapshot exactly once.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.tracker import get_tracker
-    from fno.tracker import sidecar as sidecar_store
 
     tracker = get_tracker()
     try:
-        candidates = tracker.list_open()
+        entries = tracker._call("snapshot")["entries"]  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
-        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
-    joined: list[dict] = []
-    for c in candidates:
-        try:
-            sc = sidecar_store.load(c.id)
-        except Exception as exc:  # noqa: BLE001 - name the id, fail closed
-            raise _ExternalSelectionError(f"sidecar read failed for {c.id}: {exc}") from exc
-        row = {
-            "id": c.id,
-            "title": c.title,
-            "state": str(c.state.value),
-            "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
-            "parent": c.parent,
-            "blocked_by": list(c.blocked_by),
-            "priority": c.priority,
-            "rank": c.rank,
-            "created_at": c.created_at,
-            # Footnote-owned selection facts joined before the filters run.
-            "cwd": sc.cwd,
-            "plan_path": sc.plan_path,
-            "pr_number": sc.pr_number,
-            "pr_url": sc.pr_url,
-            "additional_prs": sc.additional_prs,
-            "batch": sc.batch,
-            "contained_in": sc.contained_in,
-            "sessions": sc.sessions,
-            "claimed_at": sc.claimed_at,
-            "cost_usd": sc.cost_usd,
-        }
-        joined.append(row)
-    return joined
+        raise _ExternalSelectionError(f"tracker {tracker.name!r} snapshot failed: {exc}") from exc
+    return [e for e in entries if e.get("state") == "open"]
 
 
     # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#joined-open-candidates-4307
@@ -6171,110 +6141,13 @@ def cmd_roadmap(
 # -- status --
 
 
-# The stamp a closed-blocker tombstone carries in the live snapshot. Any
-# non-empty string satisfies the consumer's has_stamp checks; a constant (not
-# the real close time) keeps the tombstone honest about being a projection of
-# "this dependency is satisfied", which is the only fact the consumer derives
-# from it.
-_SNAPSHOT_CLOSED_STAMP = "closed"
-
-
-def _build_live_snapshot(tracker=None) -> dict:
-    """The backend-neutral joined live view for non-Python consumers (the mux).
-
-    Enumerates through ``list_open`` (bounded to the open set: a backend with
-    thousands of historical rows is never materialized merely to render a
-    queue), joins each id's sidecar, and emits exactly the live fields the
-    Rust reader derives from. Readiness stays a derivation on the consumer
-    side: open items carry their ``blocked_by`` ids, and a dependency that is
-    already closed rides as a minimal tombstone row so the consumer's
-    read-time blocked/ready logic (which fails closed on an unknown blocker)
-    resolves it without footnote persisting any derived flag.
-    """
-    from fno.graph.slug import derive_base_slug
-    from fno.tracker import get_tracker
-    from fno.tracker import sidecar as sidecar_store
-
-    tracker = tracker or get_tracker()
-    try:
-        candidates = tracker.list_open()
-    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed like selection
-        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
-    open_ids = {c.id for c in candidates}
-
-    # Tombstones for closed dependencies referenced by open items. An
-    # unresolvable blocker id is skipped: the consumer's own fail-closed rule
-    # (unknown dep == blocked) is the correct outcome there, and this loop must
-    # not invent an opinion about a backend read that errored.
-    blocker_ids = {b for c in candidates for b in c.blocked_by} - open_ids
-    tombstones: dict[str, dict] = {}
-    for bid in sorted(blocker_ids):
-        try:
-            node = tracker.read(bid)
-        except Exception:  # noqa: BLE001 - advisory resolution; consumer fails closed
-            continue
-        if str(node.state.value) == "closed":
-            tombstones[bid] = {
-                "id": bid,
-                "status": "done",
-                "completed_at": _SNAPSHOT_CLOSED_STAMP,
-            }
-
-    entries = []
-    for c in candidates:
-        sc = sidecar_store.load(c.id)
-        entries.append(
-            {
-                "id": c.id,
-                # Display handle; transient (graph mode's persistent slugs are
-                # assigned by the store at write time, which a read-only
-                # snapshot must not do).
-                "slug": derive_base_slug(c.title) if c.title else "",
-                "title": c.title,
-                # Same three-way split _joined_open_candidates selects on:
-                # a PR means in_review, else a plan means ready, else idea.
-                # Computed here from evidence at read time, never stored.
-                "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
-                "priority": c.priority,
-                "rank": c.rank,
-                "created_at": c.created_at,
-                "parent": c.parent,
-                "blocked_by": list(c.blocked_by),
-                "plan_path": sc.plan_path,
-                "pr_number": sc.pr_number,
-                "pr_url": sc.pr_url,
-                "cwd": sc.cwd,
-            }
-        )
-    entries.extend(tombstones.values())
-    return {"backend": tracker.name, "entries": entries}
-
-
 @cli.command("status", hidden=True)
 def cmd_status(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
-    snapshot: bool = typer.Option(
-        False,
-        "--snapshot",
-        help=(
-            "Internal: emit the backend-neutral joined live view as one JSON "
-            "document. Consumed by the fno-agents mux reader when an external "
-            "tracker backend is selected; the summary render below is the "
-            "human surface."
-        ),
-    ),
 ) -> None:
     from fno.graph._intake import detect_project
-
-    if snapshot:
-        try:
-            typer.echo(json.dumps(_build_live_snapshot(), indent=2))
-        except _ExternalSelectionError as exc:
-            typer.echo(f"backlog status --snapshot: {exc}", err=True)
-            raise typer.Exit(code=1)
-        return
 
     entries = _display_entries("status.summary")
 

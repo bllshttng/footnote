@@ -38,10 +38,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # machinery inside the store itself).
 READ_ALLOWLIST = (
     "cli/src/fno/graph/store.py",
-    "cli/src/fno/tracker/graph_backend.py",
     "cli/src/fno/tracker/sidecar.py",
     "cli/src/fno/tracker/metadata.py",
-    "crates/fno/src/backlog_view.rs",  # consumes the neutral snapshot and graph store path
+    "crates/fno-agents/src/tracker/graph.rs",  # the graph tracker backend: rows over the store (the Rust leg of the deleted graph_backend.py)
+    "crates/fno/src/backlog_view.rs",  # consumes the neutral snapshot + graph-mode mtime path (task 1.2)
     "crates/fno-agents/src/graph_get.rs",  # refuses the default store under an external backend
     "crates/fno-agents/src/prove_it_verdicts.rs",  # the verdict reader's read-only walk, same external-backend refusal as graph_get
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)

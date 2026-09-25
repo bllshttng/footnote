@@ -34,19 +34,20 @@ fi
 # hanging the ritual.
 SNAP="$(mktemp -t retire-round-cap.XXXXXX)"
 trap 'rm -f "$SNAP"' EXIT
-if ! timeout 120 "$FNO_BIN" backlog status --snapshot > "$SNAP" 2>/dev/null; then
-  echo "retire-round-cap-findings: backlog status --snapshot failed or timed out; nothing retired" >&2
+if ! printf '{"tracker":"snapshot","backend":"graph"}' | timeout 120 "${FNO_AGENTS_BIN:-fno-agents}" graph-get > "$SNAP" 2>/dev/null; then
+  echo "retire-round-cap-findings: the tracker snapshot door failed or timed out; nothing retired" >&2
   exit 1
 fi
 
-# Candidates: OPEN nodes whose title carries the vent's prefix. jq exits 0 on
-# zero matches, so an empty answer is an answer, never a pipeline loss.
-# (A plain while-read array: macOS bash 3.2 has no mapfile.)
+# Candidates: OPEN nodes whose title carries the vent's prefix. The Rust
+# snapshot also carries a closed window, so the filter keeps state==open rows
+# only. jq exits 0 on zero matches, so an empty answer is an answer, never a
+# pipeline loss. (A plain while-read array: macOS bash 3.2 has no mapfile.)
 IDS=()
 while IFS= read -r id; do
   [[ -n "$id" ]] && IDS+=("$id")
 done < <(jq -r --arg p "$TITLE_PREFIX" \
-  '.entries // [] | map(select((.title // "") | startswith($p))) | .[].id' "$SNAP")
+  '.entries // [] | map(select((.title // "" | startswith($p)) and ((.state // "open") == "open"))) | .[].id' "$SNAP")
 
 if [[ ${#IDS[@]} -eq 0 ]]; then
   echo "retire-round-cap-findings: 0 open nodes titled '$TITLE_PREFIX ...'; nothing to retire"

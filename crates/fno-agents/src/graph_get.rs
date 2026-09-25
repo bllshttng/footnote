@@ -2,11 +2,11 @@
 //!
 //! Client-side and daemon-free, like [`crate::wait`]: a batch read is a
 //! filesystem read, not an agent-lifecycle operation, so it needs no daemon
-//! RPC. Not a routable `fno agents` verb (it stays out of `CLIENT_VERB_USAGE` /
-//! `RUST_CLIENT_VERBS`, the same rule `pr-heal` and `kill-check` follow) - the
-//! only caller is `fno backlog get`'s Python forwarder, which reaches for this
-//! binary only when it is handed more than one id (a single id keeps its
-//! existing all-Python path byte for byte).
+//! RPC. Not a routable `fno agents` verb (it serves from `bin/client.rs`'s
+//! dispatch, but stays out of `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`, the
+//! same rule `pr-heal` and `kill-check` follow) - the argv callers are
+//! `fno backlog get`'s Python forwarder (>1 id) and, through the stdin door,
+//! the tracker seam's Python client and the mux's `read_snapshot`.
 //!
 //! The census this verb answers: `backlog get` was 1,516 single-node calls
 //! over 21 days, one graph read each. A caller naming several ids in one
@@ -14,6 +14,7 @@
 
 use crate::graph_store;
 use serde_json::Value;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// The graph entry's lifecycle-status key, and its read. Lives here, not in
@@ -132,6 +133,24 @@ pub fn run_graph_get(args: &[String]) -> i32 {
             other => ids.push(other.to_string()),
         }
         i += 1;
+    }
+    // The stdin door (the gh-budget shape on fleet-incident): no positional
+    // ids plus a non-terminal stdin means one JSON payload naming a tracker
+    // op. Empty or non-JSON stdin falls through to the usage refusal below,
+    // so a script that passes no ids still gets the old message.
+    if ids.is_empty() && !std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).is_ok() {
+            if let Ok(payload) = serde_json::from_str::<Value>(&buf) {
+                if payload
+                    .as_object()
+                    .is_some_and(|o| o.contains_key("tracker"))
+                {
+                    println!("{}", crate::tracker::run_door(&payload));
+                    return 0;
+                }
+            }
+        }
     }
     if ids.is_empty() {
         eprintln!("fno-agents graph-get: needs at least one <id>");
