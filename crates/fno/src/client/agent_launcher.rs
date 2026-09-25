@@ -1343,10 +1343,12 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     let mut models_err = Some("routing inventory unavailable".to_string());
     let by_harness: std::collections::HashMap<String, Vec<ModelChoice>> = match inv {
         Some((true, stdout, _)) => {
-            let parsed: Option<serde_json::Value> = stdout
-                .lines()
-                .rev()
-                .find_map(|l| serde_json::from_str(l).ok());
+            // The door prints one JSON document, pretty over many lines;
+            // parse the whole buffer, then fall back to a lone JSON line
+            // for callers that emit warning text around it.
+            let parsed: Option<serde_json::Value> = serde_json::from_str(stdout.trim_start())
+                .ok()
+                .or_else(|| stdout.lines().rev().find_map(|l| serde_json::from_str(l).ok()));
             match parsed
                 .as_ref()
                 .and_then(|v| v.get("models"))
@@ -1434,6 +1436,24 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     )
 }
 
+/// A list opened before the catalog read landed froze on "reading
+/// models...": reopen it in place so the rows re-derive from the landed
+/// outcome. No-op when nothing is open or the sheet no longer fits.
+pub(crate) fn refresh_open_picker(view: &mut View) {
+    let target = view.launcher.as_ref().and_then(|l| {
+        l.picker
+            .as_ref()
+            .map(|p| (picker_anchor(l, view), p.field))
+    });
+    let Some((Some(anchor), field)) = target else {
+        return;
+    };
+    if let Some(l) = view.launcher.as_mut() {
+        l.picker = None;
+        open_picker_at(l, &view.launcher_catalog, &view.backlog, Some(anchor), field);
+    }
+}
+
 /// Open a picker on a precomputed anchor. The catalog and backlog ride as
 /// borrows so the key folder (holding `view.launcher.as_mut`) can reach
 /// them through their own, disjoint fields.
@@ -1462,7 +1482,9 @@ fn open_picker_at(
     } else {
         ""
     };
-    let mut popup = Popup::new(rows, Anchor::At { row, col }).footer(footer);
+    let mut popup = Popup::new(rows, Anchor::At { row, col })
+        .footer(footer)
+        .full_chrome();
     if !title.is_empty() {
         popup = popup.title(title);
     }
@@ -1518,7 +1540,7 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
     } else {
         "up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"
     };
-    let mut popup = Popup::new(rows, picker.anchor).footer(footer);
+    let mut popup = Popup::new(rows, picker.anchor).footer(footer).full_chrome();
     if !picker.filter.is_empty() {
         popup = popup.title(format!(
             "{} \u{b7} filter: {}",

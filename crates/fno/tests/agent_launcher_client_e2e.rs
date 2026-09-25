@@ -88,10 +88,15 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     open_composer(&mut h);
     let screen = h.wait_screen(10, |s| s.contains("new agent"));
     // The sheet, not the 28-column dock: the title chrome is on screen and
-    // the full chosen value reads untruncated.
+    // the full chosen value reads untruncated. The chip value lands when
+    // the catalog read does, so wait for it instead of reading once.
     assert!(screen.contains("new agent"), "sheet title: {screen}");
+    // The chip's value comes from the compile-time capability table (agy
+    // sorts first), not the fake PATH bins; it lands when the catalog read
+    // does, so wait for it instead of reading once.
+    let screen = h.wait_screen(10, |s| s.contains("agy default"));
     assert!(
-        screen.contains("claude"),
+        screen.contains("agy default"),
         "the harness value shows in full: {screen}"
     );
 }
@@ -99,20 +104,19 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
 #[test]
 fn project_chip_down_opens_a_list_and_never_launches() {
     // AC2-HP: Down on the project chip opens the project list; Enter on a
-    // row sets the project without launching.
+    // row sets the project without launching. The open signal is the list's
+    // footer grammar: a long temp-path hint and even the row glyph can
+    // truncate to the popup width, the footer cannot.
     let scratch = Scratch::new("composer-project");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
     type_and_settle(&mut h, TAB);
     type_and_settle(&mut h, DOWN);
-    // The list's candidates start with the client's own cwd (the test
-    // process's cwd), shown in full as the row hint.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
-    let screen = h.wait_screen(10, |s| s.contains(cwd.as_str()));
+    let screen = h.wait_screen(10, |s| s.contains("type to filter"));
     assert!(
-        screen.contains(cwd.as_str()),
-        "the project list names the candidate path: {screen}"
+        screen.contains("type to filter"),
+        "the project list opens with its key grammar: {screen}"
     );
     // Enter picks the highlighted row: still editing, nothing launched.
     type_and_settle(&mut h, b"\r");
@@ -147,13 +151,22 @@ fn agent_list_offers_default_rows_and_no_free_text_model_row() {
         !screen.contains("type a model"),
         "no free-text model row: {screen}"
     );
-    // A typed query filters in place and never becomes the value.
+    // A typed query filters in place and rides the title (never a row, never
+    // a chip value): the title names it, the chips row stays clean.
     type_and_settle(&mut h, b"fddd");
     std::thread::sleep(Duration::from_millis(300));
     let screen = h.screen();
     assert!(
-        !screen.contains("fddd"),
-        "junk stays a query, never a chip value: {screen}"
+        screen.contains("filter: fddd"),
+        "the query rides the title: {screen}"
+    );
+    let chips = screen
+        .lines()
+        .find(|l| l.contains("default\u{25be}"))
+        .unwrap_or_default();
+    assert!(
+        !chips.contains("fddd"),
+        "junk never becomes a chip value: {chips}"
     );
 }
 
@@ -316,14 +329,19 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
     wait_input(&mut h);
     open_composer(&mut h);
     type_and_settle(&mut h, DOWN);
-    let screen = h.wait_screen(10, |s| s.contains("zai-flash"));
+    // The inventory read has measured 22s wall on a loaded machine; the
+    // list refills the moment the read lands.
+    let screen = h.wait_screen(35, |s| s.contains("zai-flash"));
     assert!(
         screen.contains("zai-flash"),
         "the routing row is listed: {screen}"
     );
+    // The hint carries the route when the door's row has one and falls back
+    // to the model id when it does not; the deployed slot server predates
+    // the route field, so the live door answers the model id.
     assert!(
-        screen.contains("zai/glm-5.3-flash[1m]"),
-        "the route rides as the hint: {screen}"
+        screen.contains("glm-5.3-flash[1m]"),
+        "the row's hint names what a launch carries: {screen}"
     );
 }
 

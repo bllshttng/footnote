@@ -35,20 +35,20 @@ async fn toggle_composer_opens_closes_and_retains_the_draft() {
 }
 
 #[tokio::test]
-async fn toggle_composer_shows_hidden_sideline_and_sends_resize() {
+async fn toggle_composer_opens_over_a_hidden_panel_without_a_resize() {
+    // The sheet is an overlay: it neither shows the hidden sideline nor
+    // sends the pane a Resize.
     let mut v = two_pane_view();
     v.panel_on = false;
     let mut buf: Vec<u8> = Vec::new();
     dispatch_event(&mut v, Event::ToggleComposer, &mut buf)
         .await
         .unwrap();
-    assert!(v.panel_on, "hidden sideline shows first");
-    assert!(v.launcher.is_some(), "composer opens");
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Resize { .. } => {}
-        other => panic!("expected a Resize, got {other:?}"),
-    }
+    assert!(v.launcher.is_some(), "the sheet opens over the hidden panel");
+    assert!(
+        buf.is_empty(),
+        "opening reshapes the sheet, never the pane: {buf:?}"
+    );
 }
 
 #[tokio::test]

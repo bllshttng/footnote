@@ -959,10 +959,9 @@ pub(super) async fn route_launcher_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Toggle the composer: close retains the draft, as Esc does. Opening shows
-/// the sideline first when hidden, so the composer is never open and
-/// unpainted; a terminal too narrow to admit the rail opens nothing and
-/// says so.
+/// Toggle the composer: close retains the draft, as Esc does. Opening never
+/// touches the sideline or the pane's size - the sheet is an overlay; a
+/// terminal too short to admit it opens nothing and says so.
 pub(super) async fn toggle_composer(
     view: &mut View,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
