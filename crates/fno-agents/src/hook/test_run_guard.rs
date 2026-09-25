@@ -180,12 +180,9 @@ pub fn run(_args: &[String]) -> i32 {
 /// The whole verdict for one command string against one repository root:
 /// the refusal text, or None to allow. `root` of None (no resolvable repo)
 /// always allows. Separated from `run` so the tests exercise the same
-/// predicate the hook does, with no git subprocess in the loop. Reads as a
-/// foreground call; `decide_at_bg` is the form that takes one.
-fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
-    decide_at_bg(command, root, true)
-}
-
+/// predicate the hook does, with no git subprocess in the loop. `foreground`
+/// gates the whole-default-suite refusal only; every raw-run refusal holds
+/// in the background too.
 fn decide_at_bg(command: &str, root: Option<&Path>, foreground: bool) -> Option<String> {
     let Some(tokens) = lex(command) else {
         return None; // unbalanced quotes: cannot tell command position, allow
@@ -662,7 +659,7 @@ mod tests {
     }
 
     fn decide(cmd: &str, root: &Path) -> Option<String> {
-        decide_at(cmd, Some(root))
+        decide_at_bg(cmd, Some(root), true)
     }
 
     #[test]
@@ -900,7 +897,7 @@ mod tests {
 
     #[test]
     fn no_repo_allows() {
-        assert!(decide_at("pytest", None).is_none());
+        assert!(decide_at_bg("pytest", None, true).is_none());
     }
 
     #[test]
