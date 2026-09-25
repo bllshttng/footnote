@@ -1439,6 +1439,7 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    parent_edge: Optional[tuple] = None,
     # the row this resume forks FROM (fork_lineage.lineage_row_for);
     # states every axis the caller left unstated.
     lineage_row: object | None = None,
@@ -1711,7 +1712,7 @@ def _claude_create_path(
 
     # Best-effort ambient capture; never raises. The
     # spawn_trigger was already popped before bg_create above.
-    spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = parent_edge or _capture_parent_edge()
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
@@ -2365,6 +2366,7 @@ def dispatch_spawn(
     succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    parent_edge: Optional[tuple] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
     # Recorded on the row (never the child argv) so a routed spawn's row
@@ -2927,6 +2929,7 @@ def dispatch_spawn(
                         route_provider=route_provider,
                         node=node,
                         route_model=route_model,
+                        parent_edge=parent_edge,
                     )
                     from fno.agents.harnesses._claude_session_registry import seed_unverified_reason
                     return SpawnResult(
@@ -6656,24 +6659,8 @@ def wake_and_deliver(
     the second wake finds the first's row live and is refused as
     ``wake-already-in-flight``.
 
-    The uuid-scoped single-writer claim lives in ``_claude_create_path``,
-    not here: it is taken for every resume, pinned to the SPAWNED supervisor's
-    pid, and outlives this process. Holding it here instead would pin liveness to
-    the short-lived ``fno agents mail send`` process, so the claim would guard only the
-    probe->spawn window and go reclaimable the moment this command exits.
-
-    That claim is NOT redundant with the substrate's own fail-safe. That one
-    lives inside ``_is_revival``, which runs only when a same-name row ALREADY
-    exists -- and a wake derives a fresh name, so the FIRST wake of a session
-    would skip it entirely. This rung also fires whenever the inject probe
-    returned False, which happens for reasons unrelated to being asleep (the
-    runtime binary absent, a subprocess error, an unconfirmed poll budget), so
-    the target may well be live.
-
-    A claim is taken rather than a bare liveness probe because a probe is not
-    atomic: a daemon adoption or a differently-named ``--resume`` could acquire
-    ``session:<uuid>`` between the check and the spawn, and we would start a
-    second writer on one transcript anyway.
+    The single-writer claim lives in ``_claude_create_path`` (see there). Every
+    revival passes the spawn gate, charged to the revived row's parent, never the sender.
     """
     if not session_uuid:
         return False, "no-session-uuid"
@@ -6694,18 +6681,26 @@ def wake_and_deliver(
     spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
+    from fno.agents.launch_provenance import launch_account_for_session
 
+    parent = tuple(getattr(entry, f"spawned_by_{k}", None) for k in ("session", "harness", "cwd"))
     gate = None
     revived_reservation = False
     if route_provider is not None:
         # The revival launches work on the account the row pinned at mint, so
         # the gate reads that account's quota lock; an unattributed row skips.
-        from fno.agents.launch_provenance import launch_account_for_session
-
         try:
             gate = run_gate(
                 spawn_name, "bg", route_provider=route_provider,
-                account=launch_account_for_session(session_uuid),
+                account=launch_account_for_session(session_uuid), caller=parent[0],
+            )
+        except GateRefused as exc:
+            return False, f"spawn-exit-{exc.code}"
+    else:
+        try:
+            admit = run_gate(
+                spawn_name, "bg",
+                account=launch_account_for_session(session_uuid), caller=parent[0],
             )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
@@ -6810,6 +6805,7 @@ def wake_and_deliver(
             route_provider=route_provider,
             route_env=route_env,
             provider_gate=gate,
+            parent_edge=parent,
         )
         short = (
             getattr(result, "short_id", None)
@@ -6848,6 +6844,8 @@ def wake_and_deliver(
                 gate.release_gate_mutex()
             else:
                 gate.release()
+        if route_provider is None:
+            admit.release()
 
 
 def wake_drain_agent(
