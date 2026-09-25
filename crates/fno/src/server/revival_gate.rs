@@ -344,7 +344,14 @@ impl super::Core {
         replay: Box<ResumeReplay>,
     ) {
         match verdict {
-            Err(reason) => self.notice(id, format!("resume {name} refused: {reason}")),
+            Err(reason) => {
+                // The held seat itself names the refusal; it stays held, so
+                // a retry after a worker finishes is one click.
+                if let ResumeReplay::Held { pid } = *replay {
+                    self.write_restore_message(pid, &format!("{name} was not resumed: {reason}"));
+                }
+                self.notice(id, format!("resume {name} refused: {reason}"));
+            }
             Ok(()) => {
                 self.revival_admission = Some((name, std::time::Instant::now()));
                 match *replay {
