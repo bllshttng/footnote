@@ -382,4 +382,27 @@ mod tests {
         ];
         assert_eq!(tree_rss(&table, &[10]).get(&10), Some(&4));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn footprint_mb_reads_the_live_process_footprint() {
+        let pid = std::process::id();
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::proc_pid_rusage(
+                pid as libc::c_int,
+                libc::RUSAGE_INFO_V4,
+                (&mut info as *mut libc::rusage_info_v4).cast(),
+            )
+        };
+        assert_eq!(rc, 0);
+        let direct = info.ri_phys_footprint as f64 / 1024.0 / 1024.0;
+        let (footprint, unread) = footprint_mb(&[pid]);
+        let footprint = footprint.expect("macOS reads a footprint");
+        assert_eq!(unread, 0);
+        assert!(
+            footprint > direct / 4.0 && footprint < direct * 4.0,
+            "footprint_mb read {footprint} MB, a direct read says {direct} MB"
+        );
+    }
 }
