@@ -958,6 +958,7 @@ def run_gate(
     no_wait: bool = False,
     route_provider: Optional[str] = None,
     account: Optional[str] = None,
+    caller: object = ...,
     seed: Optional[str] = None,
     session_phase: Optional[str] = None,
     succession_scope: Optional[str] = None,
@@ -987,6 +988,7 @@ def run_gate(
     except Exception:  # noqa: BLE001 - no identity, no share check (an
         # operator-run spawn is not competing for the commons)
         caller_session = None
+    caller_session = caller_session if caller is ... else caller  # revival names its row's parent
     payload = {
         "mode": "gate",
         "name": name,
