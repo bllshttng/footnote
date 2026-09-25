@@ -683,49 +683,12 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     2
 }
 
-///: the CARGO_BUILD_BUILD_DIR value, ported from
-/// `cli/src/fno/paths.py cargo_build_dir_value`: config
-/// `paths.cargo_targets_base`, else `<state_dir>/cargo-build`, then
-/// `/{workspace-path-hash}` - cargo expands the template itself.
-fn cargo_build_dir_value(cwd: &Path) -> String {
-    let base = crate::agents_config::config_lookup(cwd, &["paths", "cargo_targets_base"])
-        .and_then(|v| v.as_str().map(str::to_string))
-        .map(|raw| {
-            let p = PathBuf::from(shellexpand_home(&raw));
-            if p.is_absolute() {
-                p
-            } else {
-                cwd.join(p)
-            }
-        })
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|d| d.join("cargo-build")))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".fno").join("cargo-build"))
-                .unwrap_or_else(|| PathBuf::from(".fno/cargo-build"))
-        });
-    format!("{}/{{workspace-path-hash}}", base.display())
-}
-
-fn shellexpand_home(raw: &str) -> String {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest).display().to_string();
-        }
-    }
-    raw.to_string()
-}
-
 /// The bash hook exported this for its loop-check child; the native handler IS
 /// that process, so it sets the env in place and every done_probe it spawns
-/// inherits it. A session preset wins, and a value that does not carry the
-/// cargo template is never exported (it cannot be a build-dir answer).
+/// inherits it. A session preset wins; the shared resolver answers the value.
 fn export_session_build_dir(driver: &str, owner_cwd: &Path) {
-    if driver == "target" && std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none() {
-        let v = cargo_build_dir_value(owner_cwd);
-        if v.ends_with("/{workspace-path-hash}") {
-            std::env::set_var("CARGO_BUILD_BUILD_DIR", v);
-        }
+    if driver == "target" {
+        crate::cargo_build_dirs::fill_build_dir_env(owner_cwd);
     }
 }
 
@@ -1353,15 +1316,6 @@ mod tests {
         assert!(!T::DoneUnreviewed.releases_claim());
         assert!(!T::DoneAwaitingMerge.releases_claim());
         assert!(!T::DonePlanned.releases_claim());
-    }
-
-    #[test]
-    fn cargo_build_dir_value_ends_with_the_cargo_template() {
-        let dir = std::env::temp_dir().join(format!("stop-gate-cargo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let v = cargo_build_dir_value(&dir);
-        assert!(v.ends_with("/{workspace-path-hash}"), "{v}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The shell contract, native now: an unset env is resolved from
