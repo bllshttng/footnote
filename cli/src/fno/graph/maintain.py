@@ -826,7 +826,7 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
 
     An encounter inside the window is somebody saying this node cost them time
     recently. Unwindowed it would be a permanent exemption any agent could
-    switch on with no undo, so the drain reads the vote's own ``ts``.
+    switch on with no undo, so the drain reads the vote's own ``created_at``.
 
     The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
     "no freshness signal from the plan" (not movement), never an error.

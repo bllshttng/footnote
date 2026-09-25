@@ -66,6 +66,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         spawned_by_session: None,
         lineage_kind: None,
         harness_session_id: registry.harness_session_id.clone(),

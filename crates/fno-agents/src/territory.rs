@@ -269,12 +269,15 @@ pub struct Territory {
     pub cwd: String,
 }
 
-/// One live crown row: the canonical scope, its rung, its holder's name.
+/// One live crown row: the canonical scope, its rung, its holder's name and
+/// the holder's harness session id (the crown-name store binds its record by
+/// session id, law d-e952ed19 - never by the mutable row name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Crown {
     pub scope: String,
     pub level: u8,
     pub holder: String,
+    pub holder_session: Option<String>,
 }
 
 /// The `active_backlog` config block, coerced with the Python validator's
@@ -446,6 +449,7 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
             scope: canon,
             level,
             holder: row.name.clone(),
+            holder_session: row.harness_session_id.clone(),
         });
     }
     out.sort_by(|a, b| a.scope.cmp(&b.scope));

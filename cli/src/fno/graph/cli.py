@@ -2914,7 +2914,7 @@ def cmd_encounter(
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "evidence": evidence,
     }
     if as_operator:
