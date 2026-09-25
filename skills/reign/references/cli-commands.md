@@ -130,10 +130,11 @@ Everywhere else, resume first and deliver the instruction with `fno agents mail 
 
 ## Blueprint retask
 
-Close blueprint provenance before clearing its pane:
+Close blueprint provenance under the worker's identity before clearing its pane:
 
 ```bash
-fno backlog session close <node> --summary "<summary>" --launch "/fno:target <node>"
+read -r WORKER_HARNESS WORKER_SESSION < <(fno agents list --json | jq -r '.agents[] | select(.name == "<blueprint-worker>") | "\(.harness) \(.harness_session_id)"')
+fno backlog session close <node> --harness "$WORKER_HARNESS" --session-id "$WORKER_SESSION" --summary "<summary>" --launch "/fno:target <node>"
 fno agents retask <blueprint-worker> --node <node>
 ```
 

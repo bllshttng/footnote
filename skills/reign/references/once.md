@@ -469,11 +469,12 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. A finished blueprint closes its provenance before the pane is cleared, then the king calls one read-and-verified retask transaction:
 
 ```bash
-fno backlog session close <node> --summary "<what the plan settled>" --launch "/fno:target <node>"
+read -r WORKER_HARNESS WORKER_SESSION < <(fno agents list --json | jq -r '.agents[] | select(.name == "<blueprint-worker>") | "\(.harness) \(.harness_session_id)"')
+fno backlog session close <node> --harness "$WORKER_HARNESS" --session-id "$WORKER_SESSION" --summary "<what the plan settled>" --launch "/fno:target <node>"
 fno agents retask <blueprint-worker> --node <node>
 ```
 
-`session close` refuses unresolved identity and records the blueprint session with its honest end. `retask` proves the positive idle marker, clears, waits for the changed session id, renames the registry label, verifies the model tier, and submits the no-merge target only after the switch is verified. A `spawn_required` or other refusal preserves the pane and routes through the existing fresh-spawn path. At or above the context threshold, use a fresh successor instead of clearing. Do not drive the picker or target verb by hand.
+`session close` refuses unresolved identity and records the blueprint session with its honest end. It closes under the worker's identity, never yours: the row belongs to the session that planned, and that session's claim dates its start. `retask` proves the positive idle marker and clears the pane. It waits for the changed session id, renames the registry label and verifies the model tier. It submits the no-merge target only after the switch is verified. A `spawn_required` or other refusal preserves the pane and routes through the existing fresh-spawn path. At or above the context threshold, use a fresh successor instead of clearing. Do not drive the picker or target verb by hand.
 
 The order is close-blueprint, retask, target - never target-then-switch. A retask refusal (`pane_not_idle`, `worker_not_live`) is not a verdict about the pane; read the pane before you believe it. Decoded refusals and the model-ladder note: [workflow-routes.md](workflow-routes.md).
 

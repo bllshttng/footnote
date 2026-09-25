@@ -52,7 +52,8 @@ on:
 jobs:
   real-codex-0145:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Widest of 40 passing runs sampled 2026-09-24: 0.5m.
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -389,9 +390,10 @@ jobs:
     # 15 killed the heaviest shard at 15m15s on four consecutive 2026-09-09
     # runs, and 25 was still not enough, when a Rust-source change put a
     # workspace cargo rebuild in the shard's path; the other three shards
-    # finish in 8 to 11 minutes. 40 bounds the hang without starving the
-    # rebuild.
-    timeout-minutes: 50
+    # finish in 8 to 11 minutes. The widest passing shard sampled
+    # 2026-09-24 was 21.3m, so 30 fails a hang 20 minutes sooner and still
+    # clears it by 40 percent.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -417,7 +419,7 @@ jobs:
           STRESS_TRIALS: "3"
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 50 || true' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 30 || true' EXIT
           uv run --project cli fno-py doctor test smoke --skip 'Pytest*' --shard ${{ matrix.shard }}/4
 
       # Static dead-import guard: a module move down a layer can leave
@@ -495,7 +497,8 @@ jobs:
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Widest of 40 passing runs sampled 2026-09-24: 0.2m.
+    timeout-minutes: 5
     continue-on-error: true
     # paths: cli/src/fno/review/prompts/**, agents/**
     # Job runs whenever those paths appear in the changeset (top-level trigger
@@ -524,7 +527,8 @@ jobs:
     name: per-turn hook latency budgets
     needs: [smoke-pytest]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Widest of 14 passing runs sampled 2026-09-24: 6.9m.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -573,16 +577,15 @@ jobs:
     name: cargo test (fno-agents) + schema parity
     needs: [smoke-pytest]
     runs-on: ubuntu-latest
-    # 40, kept from the old single `test` job, now over half the work. Split
-    # 2026-09-17 (x-e8b1) after two runs (main at 37da45e9, PR 2137) were
-    # cancelled at this cap: the job could pass on its merits and still not
-    # finish in the time it was given, so main read red and every PR in the
-    # queue waited on one job. Shard by crate, the x-5b73 smoke split, instead
-    # of raising the number - a raised cap only hides the growth until the
-    # next PR pays it. The real-process integration shard moved to its own
-    # job (test-agents-integration) the same way, after a green suite ran
-    # into this cap at 40.25m against a 34m median on passing runs.
-    timeout-minutes: 40
+    # This job once held the whole cargo suite, and on 2026-09-17 two runs
+    # (main at 37da45e9, PR 2137) that could pass were cancelled at its cap.
+    # So the suite shards by crate, as the smoke lane does, instead of
+    # raising the number: a raised cap only hides the growth until the next
+    # PR pays it. The real-process integration shard moved to its own job,
+    # test-agents-integration. After that split the widest of 12 passing
+    # runs sampled 2026-09-24 was 11.1m. 20 leaves room for a cold cargo
+    # cache, and a hang fails sooner.
+    timeout-minutes: 20
 
     # The claim classifier parity harness needs the FULL oracle package
     # (pydantic included: fno.claims.staleness imports claims/types.py), not a
@@ -816,27 +819,26 @@ jobs:
         run: cargo test --lib --bins --no-fail-fast
 
   test-agents-integration:
-    name: cargo test integration (fno-agents)
+    name: cargo test integration (fno-agents) ${{ matrix.shard }}/4
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
-    # The real-process integration shard moved out of test-agents after the
-    # FNO_BIN-fixed suite ran green into the 40-minute cap (40.25m here vs a
-    # 34m median on passing runs): a green run could not finish in the time
-    # it was given, the same shape that forced the 2026-09-17 (x-e8b1) crate
-    # split. The leg measured 1128s (76 percent of the pre-split whole job)
-    # on 2026-08-27, so it carries its own job and its own cap. Provisioning
-    # mirrors test-agents step for step: verify_evidence_parity and
-    # tests/common spawn bare python3 (yaml, psutil), the claim parity
+    # The real-process integration tests run apart from test-agents, in
+    # four shards split by test name (scripts/ci/cargo-test-shard.sh). One
+    # job used to run them all serially, and one binary, tests/loop_check.rs,
+    # took 997 of the suite's 1734 test seconds on 2026-09-24, so a split by
+    # binary could not beat that one file. Split by name, each shard runs
+    # about 7 minutes of tests after a 5 minute build.
+    # Provisioning mirrors test-agents step for step: verify_evidence_parity
+    # and tests/common spawn bare python3 (yaml, psutil), the claim parity
     # harness imports through cli/.venv, blueprint_judge shells rg, and the
-    # real-process tests spawn both built binaries. A lib red no longer
-    # hides this shard: the two jobs run independently and the aggregator
-    # collects both verdicts. Raised to 90 on 2026-09-24: the 60 cap
-    # cancelled this job at 60m16s with no failed test (the
-    # --test-threads=1 step alone ran 57 minutes on the runner image
-    # 20260920.314), the second cap cancel in two days on this leg. The
-    # lane-queue work in 2413 adds 12 real-process tests to it. The
-    # suite-size redesign is filed as demand on x-b7fa; this number names
-    # the measured cost, it does not fix the growth.
-    timeout-minutes: 90
+    # real-process tests spawn both built binaries. The aggregator reads
+    # the matrix as one verdict. On a slow runner image a shard's quarter
+    # of the tests plus the build lands near 20 minutes; the cap leaves
+    # room above that.
+    timeout-minutes: 30
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
 
@@ -904,13 +906,12 @@ jobs:
         run: cargo build --bin fno-agents
 
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
-        working-directory: crates/fno-agents
         env:
           HOME: ${{ runner.temp }}/fno-test-home
           CARGO_HOME: /home/runner/.cargo
           RUSTUP_HOME: /home/runner/.rustup
           FNO_TEST_HERMETIC: "0"
-        run: cargo test --test '*' --no-fail-fast -- --test-threads=1
+        run: bash scripts/ci/cargo-test-shard.sh crates/fno-agents ${{ matrix.shard }} 4 --test-threads=1
 
   test-mux:
     name: cargo test (fno mux)
@@ -921,7 +922,8 @@ jobs:
     # everything except the fno-agents integration leg at about six minutes.
     # No python or uv steps here: flock_interop.rs, the cross-language test,
     # lives in fno-agents, and no fno crate test spawns the cli venv.
-    timeout-minutes: 20
+    # The widest of 14 passing runs sampled 2026-09-24 was 11.1m.
+    timeout-minutes: 15
 
     steps:
       - name: Checkout

@@ -20,6 +20,7 @@ pub use crate::backlog::model::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1035,7 +1036,7 @@ pub fn finding_create(
             minted = mint_finding_id();
             let taken = rows
                 .iter()
-                .any(|row| finding_ids_in(row).iter().any(|id| id == &minted));
+                .any(|row| super::findings::finding_ids_in(row).contains(&minted));
             if !taken {
                 break;
             }
@@ -1070,13 +1071,7 @@ pub fn finding_create(
     let stored = rows
         .iter()
         .find(|row| crate::graph_store::entry_id(row) == Some(node_id))
-        .and_then(|row| row.get("findings").and_then(Value::as_array))
-        .map(|items| {
-            items
-                .iter()
-                .any(|item| item.get("finding_id").and_then(Value::as_str) == Some(minted.as_str()))
-        })
-        .unwrap_or(false);
+        .is_some_and(|row| super::findings::finding_ids_in(row).contains(&minted));
     if !stored {
         return Err(ApiError(format!(
             "finding {minted} committed but not read back"
@@ -1093,19 +1088,6 @@ fn mint_finding_id() -> String {
     let mut bytes = [0u8; 4];
     getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn finding_ids_in(row: &Value) -> Vec<String> {
-    row.get("findings")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("finding_id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Stamp `resolved_at` on a finding. An unknown id is an error; an
@@ -1506,6 +1488,117 @@ pub fn session_end(
     }
 }
 
+/// One session record's recorded stamps, for [`session_backfill`].
+pub struct SessionFill {
+    pub phase: String,
+    pub harness: String,
+    pub session_id: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub ended_by: String,
+}
+
+/// Fill missing `started_at` and `ended_at` on session records from recorded
+/// sources, all in one write. A stamp already there is never overwritten; a
+/// fill matches its node, phase, harness and session id. Returns the stamps
+/// written. A node that rides the raw carry takes none.
+pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, Vec<&SessionFill>> = HashMap::new();
+    for (node, fill) in fills {
+        by_node.entry(node.as_str()).or_default().push(fill);
+    }
+    let mut written = 0;
+    if by_node.is_empty() {
+        return Ok(written);
+    }
+    mutate(store, "session_backfill", |rows| {
+        written = 0;
+        for row in rows.iter_mut() {
+            let Some(mine) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = written;
+            for record in parsed.sessions.iter_mut().flatten() {
+                for fill in mine {
+                    if record.phase != fill.phase
+                        || record.harness != fill.harness
+                        || record.session_id != fill.session_id
+                    {
+                        continue;
+                    }
+                    if record.started_at.as_deref().is_none_or(str::is_empty)
+                        && fill.started_at.is_some()
+                    {
+                        record.started_at = fill.started_at.clone();
+                        written += 1;
+                    }
+                    if record.ended_at.as_deref().is_none_or(str::is_empty)
+                        && fill.ended_at.is_some()
+                    {
+                        record.ended_at = fill.ended_at.clone();
+                        record.ended_by = Some(fill.ended_by.clone());
+                        written += 1;
+                    }
+                }
+            }
+            if written > before {
+                *row = parsed.to_json();
+            }
+        }
+        Ok(written > 0)
+    })?;
+    Ok(written)
+}
+
+/// Fill `ended_at` on every `phase` record that has none, whoever opened it,
+/// for each (node, ended_at, ended_by), all in one write: a ship record ends
+/// at the merge, whichever session linked the PR. The first end named for a
+/// node wins. Returns the records ended. A node that rides the raw carry
+/// takes none.
+pub fn phase_end(
+    store: &Store,
+    phase: &str,
+    ends: &[(String, String, &str)],
+) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, (&str, &str)> = HashMap::new();
+    for (node, at, by) in ends {
+        by_node.entry(node.as_str()).or_insert((at.as_str(), *by));
+    }
+    let mut ended = 0;
+    if by_node.is_empty() {
+        return Ok(ended);
+    }
+    mutate(store, "phase_end", |rows| {
+        ended = 0;
+        for row in rows.iter_mut() {
+            let Some(&(at, by)) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = ended;
+            for record in parsed.sessions.iter_mut().flatten() {
+                if record.phase == phase && record.ended_at.as_deref().is_none_or(str::is_empty) {
+                    record.ended_at = Some(at.to_string());
+                    record.ended_by = Some(by.to_string());
+                    ended += 1;
+                }
+            }
+            if ended > before {
+                *row = parsed.to_json();
+            }
+        }
+        Ok(ended > 0)
+    })?;
+    Ok(ended)
+}
+
 pub fn encounter_create(
     store: &Store,
     id: &str,
@@ -1524,7 +1617,7 @@ pub fn encounter_create(
                 .encounters
                 .get_or_insert_with(Vec::new)
                 .push(Encounter {
-                    ts: crate::graph_store::now_isoformat(),
+                    created_at: crate::graph_store::now_isoformat(),
                     evidence: input.evidence.clone(),
                     session_id: input.session_id.clone(),
                     voter_key: None,
