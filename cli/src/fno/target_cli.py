@@ -1429,7 +1429,7 @@ def denominator_ratio(
         except (ValueError, TypeError):
             return None
 
-    counts = {"plan": 0, "deliverables": 0, "none": 0}
+    counts = {"plan": 0, "deliverables": 0, "derived": 0, "none": 0}
     ones = 0
     for e in events:
         if _ts(e) is None or _ts(e) < cutoff:
@@ -1454,6 +1454,7 @@ def denominator_ratio(
         "deliverables_1": ones,
         "plan_backed": counts["plan"],
         "deliverables_declared": counts["deliverables"],
+        "deliverables_derived": counts["derived"],
         "none": counts["none"],
         "since_days": since_days,
         "verdict": verdict,
@@ -1464,7 +1465,8 @@ def denominator_ratio(
     typer.echo(
         f"deliverables:1 ratio: {ratio if ratio is not None else 'n/a'}%  "
         f"({ones} of {declared} declared; plan={counts['plan']}, "
-        f"deliverables={counts['deliverables']}, none={counts['none']})  {verdict}"
+        f"deliverables={counts['deliverables']}, derived={counts['derived']}, "
+        f"none={counts['none']})  {verdict}"
     )
 
 
@@ -1782,23 +1784,35 @@ def init(
                 )
                 raise typer.Exit(code=2)
 
-    # Scope denominator gate: a code node dispatched with no plan and no
-    # --deliverables makes 'shipped M of N' inexpressible. Fires only for a
-    # resolved node - a free-text idea makes its own denominator via /blueprint,
-    # and a bound plan back-filled just above already satisfies it. Sits AFTER
-    # the back-fill so a node with a bound plan is never refused for lacking one,
-    # and BEFORE the manifest is written (no state on a refusal). enumerated_scope
-    # withdraws the cheap --deliverables exit for an unambiguously enumerated node.
-    # Exit 2 matches init's other refusals; REVIEW_GATE_REFUSED (9) is the
-    # check-review-gate verb's code, re-stamped from this 2 for shell callers.
-    from fno.target.denominator import absent_denominator_refusal
+    # Scope denominator: a plan-less code node states its own scope. The
+    # deliverables count is derived from the node's own details (highest
+    # ordinal marker, a two-member construction, else 1) and the run proceeds
+    # - the derived count is falsifiable, so 'shipped M of N' stays
+    # expressible without a blueprint. Fires only for a resolved node - a
+    # free-text idea makes its own denominator via /blueprint, and a bound
+    # plan back-filled just above already satisfies it. Sits AFTER the
+    # back-fill and BEFORE the manifest is written. An explicit
+    # --deliverables wins; the derivation stamps the manifest when absent.
+    _deliverables_derived = False
+    if (
+        deliverables is None
+        and not (plan_path and plan_path.strip())
+        and isinstance(_dispatch_node, dict)
+        and _dispatch_node.get("domain") == "code"
+    ):
+        from fno.target.denominator import derive_deliverables
 
-    _denom_refusal = absent_denominator_refusal(
-        node=_dispatch_node, plan_path=plan_path, deliverables=deliverables
-    )
-    if _denom_refusal:
-        typer.echo(_denom_refusal, err=True)
-        raise typer.Exit(code=2)
+        deliverables = derive_deliverables(
+            str(_dispatch_node.get("title") or ""),
+            str(_dispatch_node.get("details") or ""),
+        )
+        _deliverables_derived = True
+        typer.echo(
+            f"fno do target init: no plan bound, so the deliverables count is "
+            f"derived from the node's own details: {deliverables}. Pass "
+            f"--deliverables N to declare a different count.",
+            err=True,
+        )
 
     # A DECLARED required binding revalidates natively before the claim;
     # undeclared = no gate, so no binary is needed to decline one.
@@ -1890,7 +1904,9 @@ def init(
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
         _maybe_check_resume_receipt()
-        _record_denominator_choice(plan_path, deliverables, _dispatch_node)
+        _record_denominator_choice(
+            plan_path, deliverables, _dispatch_node, derived=_deliverables_derived
+        )
     raise typer.Exit(code=propagate_returncode(proc.returncode))
 
 
@@ -1945,14 +1961,18 @@ def _bind_node_plan_path(node: dict, plan_path: str) -> None:
 
 
 def _record_denominator_choice(
-    plan_path: Optional[str], deliverables: Optional[int], node: Optional[dict]
+    plan_path: Optional[str],
+    deliverables: Optional[int],
+    node: Optional[dict],
+    *,
+    derived: bool = False,
 ) -> None:
     """Emit a ``target_denominator`` event for the deliverables-1 ratio.
 
-    Best-effort: a recording failure never fails a successful init. The cheap
-    ``--deliverables`` exit is the load-bearing bypass risk (reflexive N=1
-    degrades the gate to a formality); this event is how that abuse gets measured
-    off the events log instead of noticed by hand.
+    Best-effort: a recording failure never fails a successful init. A declared
+    ``--deliverables`` exit stays the load-bearing bypass risk (reflexive N=1
+    degrades the measurement to a formality); a derived count records as its
+    own kind so it never reads as a declaration in the ratio.
     """
     try:
         from fno.events import _build, append_event
@@ -1960,6 +1980,8 @@ def _record_denominator_choice(
 
         if plan_path and plan_path.strip():
             denominator = "plan"
+        elif derived:
+            denominator = "derived"
         elif deliverables is not None:
             denominator = "deliverables"
         else:

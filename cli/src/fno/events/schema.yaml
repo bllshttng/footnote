@@ -881,15 +881,15 @@ event_types:
     consumers: [hooks/target-stop-hook.sh]
 
   - name: target_denominator
-    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
+    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), a count derived from the node's own details (denominator=derived), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration; a derived count is its own kind so it never reads as a declaration in the ratio."
     sources: [target]
     data:
       required: [denominator]
       properties:
         session_id: { type: string, description: "The run's fno_id; best-effort (used to dedup retried inits in the ratio)." }
-        denominator: { type: string, enum: [plan, deliverables, none] }
-        count: { type: integer, description: "The declared deliverable count when denominator=deliverables; absent otherwise." }
-        enumerated: { type: boolean, description: "Whether enumerated_scope fired on the node (withdrawing the cheap exit)." }
+        denominator: { type: string, enum: [plan, deliverables, derived, none] }
+        count: { type: integer, description: "The declared or derived deliverable count; absent only when denominator=none." }
+        enumerated: { type: boolean, description: "Whether the node's own prose reads as an unambiguous enumeration." }
     consumers: [operator]
 
   - name: phase_rolled_back
