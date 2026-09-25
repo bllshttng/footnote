@@ -141,8 +141,10 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
     assert a.name != b.name
     rows = load_registry()
     assert len(rows) == 2
+    # The transport short id is the derived 8-hex job key, not the full
+    # session id: claude attach refuses a full uuid.
     ids = {r.short_id for r in rows}
-    assert ids == {"11111111-aaaa", "22222222-bbbb"}
+    assert ids == {"11111111", "22222222"}
 
 
 def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypatch) -> None:

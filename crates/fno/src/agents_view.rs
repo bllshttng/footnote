@@ -2931,8 +2931,14 @@ mod tests {
             NOW,
         )
         .unwrap();
-        assert_eq!(rows[0].attach_id.as_deref(), Some("49a80492"));
-        assert_eq!(rows[1].attach_id.as_deref(), Some("abcd1234"));
+        // Rows render in attention order, so look the rows up by name.
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("row {n} missing"))
+        };
+        assert_eq!(by_name("warden").attach_id.as_deref(), Some("49a80492"));
+        assert_eq!(by_name("spawned").attach_id.as_deref(), Some("abcd1234"));
     }
 
     #[test]
