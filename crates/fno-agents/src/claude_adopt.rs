@@ -93,6 +93,40 @@ pub fn transcript_model(session_id: &str) -> Option<String> {
     model
 }
 
+/// The thread title an adopt names its row after: the transcript's FIRST
+/// `summary` entry. `None` for a missing/unreadable transcript or a session
+/// that stated no summary yet - the caller falls through to the next naming
+/// source, never to a guess.
+pub fn transcript_title(session_id: &str) -> Option<String> {
+    transcript_title_in(&crate::claude_drive::claude_projects_dir(), session_id)
+}
+
+/// [`transcript_title`] under an explicit projects base, so the read is
+/// unit-testable without touching the ambient `~/.claude`.
+pub fn transcript_title_in(base: &Path, session_id: &str) -> Option<String> {
+    let path = crate::claude_drive::find_transcript_in(base, session_id)?;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        // A transcript is append-only JSONL; summaries live on their own
+        // `type: "summary"` entries and the first one is the thread's title.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("summary") {
+            if let Some(title) = v
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The model-provider this session's observed model is recorded to run on,
 /// matched against `~/.fno/route-settings/*.json`. The file's
 /// `FNO_ROUTE_PROVIDER` stamp is the source - the observed model only SELECTS
@@ -298,6 +332,46 @@ mod tests {
                 Lineage::captured((None, None, None)),
             )
         }
+    }
+
+    #[test]
+    fn transcript_title_reads_the_first_summary_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{uuid}.jsonl")),
+            concat!(
+                r#"{"type":"user","message":{"role":"user"}}"#,
+                "\n",
+                r#"{"type":"summary","summary":"Fix the sideline phantom rows","leafUuid":"x"}"#,
+                "\n",
+                r#"{"type":"summary","summary":"A later summary never wins","leafUuid":"y"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_title_in(tmp.path(), uuid).as_deref(),
+            Some("Fix the sideline phantom rows"),
+            "the first summary entry is the thread title"
+        );
+        // A transcript with no summary answers nothing: the caller falls
+        // through to the next naming source, never to a guess.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(
+            bare.join(format!("{uuid}.jsonl")),
+            r#"{"type":"user","message":{"role":"user"}}"#,
+        )
+        .unwrap();
+        assert_eq!(transcript_title_in(bare.as_path(), uuid), None);
+        // A missing transcript answers nothing too.
+        assert_eq!(
+            transcript_title_in(tmp.path(), "b1c2d3e4-1111-2222-3333-444455556666"),
+            None
+        );
     }
 
     #[test]

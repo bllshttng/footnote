@@ -2123,6 +2123,10 @@ pub(crate) fn run_with_release(
             peer_drives_pr,
             pr_settled,
             origin_corpse: !is_spawn,
+            registry_terminal: matches!(
+                e.status,
+                crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
+            ),
             open_work_retire_s,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);

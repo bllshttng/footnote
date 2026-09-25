@@ -135,6 +135,12 @@ pub struct GcRow {
     /// ESRCH. The origin gate skips such a row, so it is judged like any
     /// other row; every downstream gate still applies.
     pub origin_corpse: bool,
+    /// The registry's own status reads terminal (`exited`,
+    /// `permanent-dead`): a sweep observed the exit and stamped it. Distinct
+    /// from `session_terminal` (the LIVE roster's state, which a session
+    /// old enough to have exited usually no longer appears in). The origin
+    /// gate reads it for the adopted-retire arm.
+    pub registry_terminal: bool,
     /// The open-work window (change 2): how long an OPEN-work row may
     /// sit transcript-quiet before its node stops counting as evidence of a
     /// live session. Quiet past it, the row falls to the same grace gate a
@@ -305,10 +311,21 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     // fact about a session, and done-plus-quiet does not make it fno's to
     // remove - unless the row is provably a registry corpse, in which case
     // there is no session left to own it and the row is judged like any
-    // other: every downstream gate still applies.
+    // other: every downstream gate still applies. An adopted row whose
+    // status reads terminal and that holds no open node and no open PR is a
+    // finished session nobody owns anymore: it takes the same grace gate a
+    // spawned row takes instead of keeping forever as a phantom. A live
+    // adopted row, or one still driving work, keeps exactly as before.
     if row.origin.as_deref() != Some("spawn") && !row.origin_corpse {
-        let origin = row.origin.clone().unwrap_or_default();
-        return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
+        let adopted_finished = row.origin.as_deref() == Some("adopted")
+            && row.registry_terminal
+            && !matches!(&row.work, WorkState::Open { .. })
+            && row.open_pr.is_none();
+        if !adopted_finished {
+            let origin = row.origin.clone().unwrap_or_default();
+            return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
+        }
+        return grace_gate(row, grace_secs);
     }
     // The cascade's holds relay through here so every keep is named by the
     // policy: a conflict between witnesses, or PR evidence contradicting a
@@ -2379,6 +2396,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }
@@ -2388,6 +2406,121 @@ mod tests {
     /// moved on, and THIS session's own blueprint row carries `ended_at`.
     /// Quiet past the 1200 s planner grace (d-81c6da7e), not the 900 s
     /// default, retires it without closing the feature or inventing a node.
+    /// An adopted row the harness finished: registry status terminal, no
+    /// open node, no open PR. It takes the same grace gate a spawned row
+    /// takes instead of keeping forever as a phantom.
+    fn adopted_finished() -> GcRow {
+        GcRow {
+            origin: Some("adopted".into()),
+            registry_terminal: true,
+            work: WorkState::NoProvenance,
+            transcript_age_s: Some(GRACE + 1),
+            ..retiring()
+        }
+    }
+
+    #[test]
+    fn an_exited_adopted_row_with_no_open_work_retires_after_grace() {
+        assert_eq!(
+            gc_decide(&adopted_finished(), GRACE),
+            (GcAction::Retire, None),
+            "quiet past the grace window, a finished adopted row retires"
+        );
+        // Inside the window the session keeps, exactly like a spawned row.
+        let young = GcRow {
+            transcript_age_s: Some(GRACE - 1),
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::Active { age_s: GRACE - 1 })
+            ),
+            "inside the grace window the row is not retired yet"
+        );
+        // An unresolvable transcript is never quiet: keep, never retire.
+        let unaged = GcRow {
+            transcript_age_s: None,
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&unaged, GRACE),
+            (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
+        );
+    }
+
+    #[test]
+    fn a_live_adopted_row_still_keeps_as_not_spawn() {
+        // Terminality is the registry's own status here; a LIVE adopted row
+        // keeps on the origin gate exactly as before.
+        let live = GcRow {
+            registry_terminal: false,
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&live, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+        // So does an adopted row whose status never went terminal at all.
+        let untouchable = GcRow {
+            origin: Some("adopted".into()),
+            registry_terminal: false,
+            work: WorkState::AllDone { nodes: vec![] },
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&untouchable, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+    }
+
+    #[test]
+    fn an_adopted_row_still_driving_work_keeps() {
+        // An open node pins the row: the work may still need driving.
+        let open_node = GcRow {
+            work: WorkState::Open {
+                node: "x-open".into(),
+                status: "in_progress".into(),
+            },
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&open_node, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+        // An open PR strands with nothing left to drive it - never a
+        // retirement on a session that owns one.
+        let open_pr = GcRow {
+            open_pr: Some(("x-open".into(), 42)),
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&open_pr, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+    }
+
     #[test]
     fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
         let planner = GcRow {
@@ -3537,6 +3670,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
@@ -3571,6 +3705,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }

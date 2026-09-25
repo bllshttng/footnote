@@ -1339,6 +1339,13 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     let session = id.canonical_session_id().to_string();
     let short = derived_short_id(&session);
     let is_claude = harness == "claude";
+    // The display name: the thread title when the transcript carries one,
+    // else the linked node id, else the derivable short-id form. A bare
+    // short id reads as a phantom row, never as work.
+    let name = crate::claude_adopt::transcript_title(&session)
+        .map(|t| t.chars().take(48).collect::<String>())
+        .or_else(|| (!id.fno_id.is_empty()).then(|| id.fno_id.clone()))
+        .unwrap_or_else(|| synthesized_name(&short));
     // The synthesizing session's ambient identity: this fn runs in
     // the CLIENT process, so the markers name the session that vouched for
     // the adopted row.
@@ -1348,7 +1355,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // Synthesized from an identity that arrived without a row; the lane
         // it ran on is unobserved, so the substrate stays unknown.
         substrate: None,
-        name: synthesized_name(&short),
+        name,
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
