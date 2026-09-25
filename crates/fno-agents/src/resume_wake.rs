@@ -1929,18 +1929,12 @@ mod tests {
         let jobs = claude_home.jobs_dir_for("abcd1234");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("claude"),
+        crate::write_exec_stub(
+            &bin,
+            "claude",
             "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
              echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"idle\"}]'; fi\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        );
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", crate::path_with(&bin));
 
@@ -2007,17 +2001,11 @@ mod tests {
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stop_log = temp.path().join("stop.log");
-        std::fs::write(
-            bin.join("claude"),
-            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", stop_log.display()),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", stop_log.display()),
+        );
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", crate::path_with(&bin));
 

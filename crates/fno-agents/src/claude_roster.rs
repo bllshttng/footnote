@@ -800,19 +800,15 @@ mod tests {
     #[test]
     fn pinned_agents_reader_uses_the_plan_config_dir() {
         let _guard = crate::path_test_guard();
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let log = temp.path().join("config-dir");
-        let script = bin.join("claude");
-        std::fs::write(
-            &script,
+        crate::write_exec_stub(
+            &bin,
+            "claude",
             "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$FNO_TEST_CLAUDE_CONFIG_LOG\"\nprintf '%s\\n' '{\"agents\":[{\"kind\":\"background\",\"short_id\":\"abcd1234\",\"status\":\"idle\"}]}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let old_path = std::env::var_os("PATH");
         let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
