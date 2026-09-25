@@ -115,14 +115,14 @@ fn seed_journal_segment(path: &std::path::Path, first: usize) -> u64 {
 }
 
 /// The graph the backlog reader derives: ~6,000 nodes (ready becomes cards,
-/// idea/done do not), each carrying a long details string, all project fno.
+/// triage/done do not), each carrying a long details string, all project fno.
 fn seed_graph(path: &std::path::Path) -> u64 {
     let details = "d".repeat(DETAILS_BYTES);
     let mut rows = Vec::with_capacity(GRAPH_NODES);
     for i in 0..GRAPH_NODES {
         let status = match i % 3 {
             0 => "ready",
-            1 => "idea",
+            1 => "triage",
             _ => "done",
         };
         rows.push(serde_json::json!({

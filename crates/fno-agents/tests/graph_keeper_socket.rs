@@ -838,9 +838,9 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         }
     }
 
-    // Each note node's final revision equals its successful write count: a
-    // reverted note write (clobbered by a stale whole-file publish) reads as
-    // a revision below the count of ok answers.
+    // Each acknowledged write must be present in the final revision. A write
+    // can commit before its transport outcome is reported, so the revision
+    // may exceed the count of successful replies but must never be lower.
     for (node, ok) in &note_out {
         let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
         let row = rows
@@ -848,8 +848,8 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();
         let revision = row["current_state"]["revision"].as_u64().unwrap();
-        assert_eq!(
-            revision, *ok,
+        assert!(
+            revision >= *ok,
             "node {node} answered ok {ok} times but its final revision is {revision}"
         );
     }

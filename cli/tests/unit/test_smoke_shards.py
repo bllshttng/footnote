@@ -88,8 +88,8 @@ def test_the_workflow_actually_shards_the_gate() -> None:
     assert selectors, "the smoke gate needs no shard jobs carrying --only/--skip"
     counts = {job: sum(1 for candidate, *_rest in selectors if candidate == job)
               for job, *_rest in selectors}
-    assert counts == {"smoke-pytest": 10, "smoke-rest": 4}, (
-        f"expected ten pytest legs and four rest legs, found {counts}"
+    assert counts == {"smoke-pytest": 13, "smoke-rest": 4}, (
+        f"expected thirteen pytest legs and four rest legs, found {counts}"
     )
 
 
@@ -146,7 +146,7 @@ def test_the_shards_cover_every_step() -> None:
 
 
 def test_pytest_runs_in_every_pytest_shard() -> None:
-    """The expensive half runs once in each of the ten pytest legs."""
+    """The expensive half runs once in each of the thirteen pytest legs."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
@@ -155,7 +155,7 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
         for job, shard, total, flag, globs in _shard_selectors()
         if step in _selected(names, flag, globs, shard, total)
     ]
-    assert carriers == [("smoke-pytest", shard) for shard in range(1, 11)]
+    assert carriers == [("smoke-pytest", shard) for shard in range(1, 14)]
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:

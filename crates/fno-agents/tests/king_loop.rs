@@ -1296,7 +1296,6 @@ fn every_king_noprogress_terminal_escalates() {
 fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
     let events = cwd.join("events.jsonl");
 
     // A manifest with a ceiling of 3 rather than the default 40.
