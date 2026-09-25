@@ -2525,9 +2525,6 @@ pub struct BlockMeta {
     pub implicit: bool,
 }
 
-/// `ServerMsg::Err` codes. One namespace so the CLI's exit-code mapping and
-/// the server's error construction never drift.
-
 /// One pane inside a [`TabMeta`] (v22): the leaf id the session
 /// navigator's goto targets plus a derived, display-only `label` (the running
 /// command / node / cwd basename, else `shell`). The client never focuses a
