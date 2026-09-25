@@ -33,12 +33,16 @@ STATE_FILE=".fno/target-state.md"
 # `fno gate set` can find their plugin scripts when run from a foreign project
 # with no env hint. `fno` is a uv-tool install whose wheel does not carry
 # hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to arbitrary `fno`
-# subprocesses - the pointer is then the only env-less source. PLUGIN_ROOT here
-# is always the real plugin (parent of this hook's dir); the manifest check is
-# a belt-and-suspenders guard. Mirrors fno.paths._persist_plugin_root and
-# is read by fno.paths._read_persisted_plugin_root. errexit-safe.
+# subprocesses - the pointer is then the only env-less source. The hook copy
+# that runs can live in a linked worktree (a spawned worker's feature
+# worktree), so a worktree root must never become the machine-global value:
+# every env-less reader would run that unmerged branch, and the merge sweep
+# would later leave the pointer dangling. A linked worktree has a .git FILE;
+# a canonical checkout has a .git DIRECTORY; an installed stage has none.
+# Read by fno.paths._read_persisted_plugin_root. errexit-safe.
 prime_plugin_root_pointer() {
     [[ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]] || return 0
+    [[ -f "$PLUGIN_ROOT/.git" ]] && return 0
     local home="${FNO_HOME:-$HOME/.fno}"
     local ptr="$home/plugin-root"
     if [[ -f "$ptr" ]] && [[ "$(cat "$ptr" 2>/dev/null)" == "$PLUGIN_ROOT" ]]; then
@@ -57,6 +61,9 @@ prime_plugin_root_pointer || true
 # actually changing, so the common session pays one string compare and no
 # subprocess. Repair-only: never wires the hook for someone who did not ask.
 heal_claude_worktree_hook() {
+    # A worktree start neither flips the stamp nor runs the repair, for the
+    # same reason prime_plugin_root_pointer skips worktrees.
+    [[ -f "$PLUGIN_ROOT/.git" ]] && return 0
     local settings="$HOME/.claude/settings.json"
     [[ -f "$settings" ]] || return 0
     grep -q 'worktree-remove\.sh' "$settings" 2>/dev/null || return 0
