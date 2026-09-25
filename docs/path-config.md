@@ -226,6 +226,14 @@ def test_my_feature(tmp_path, monkeypatch):
 
 The helper writes a minimal `config.toml` and sets `FNO_CONFIG`. The settings cache keys on that declaration, so no cache clearing is needed.
 
+### Sandbox a shell reproduction
+
+`FNO_HOME` does not sandbox the backlog. Config `state_dir` decides where the graph lives. A store write under `FNO_HOME` that targets the default store (`~/.fno`) is refused. Writes to explicit graph paths and to the FNO_CONFIG store are served. To sandbox a shell reproduction, write a `config.toml` that holds `schema_version = 1` and `state_dir = "<tmp dir>"`, then export `FNO_CONFIG=<that file>`.
+
+Confirm with a read before the first write: `fno backlog get <live node id>` must answer "No node matching". A read that returns the live node means the sandbox is not on. Do not write.
+
+Known leak: the graph.html render can still drop a file in `~/.fno` under this recipe, even though the store itself stays in the sandbox. A later fix retires this note.
+
 ## Settings cache key
 
 `fno.config._loader._settings_key` is what `load_settings()` caches on, and it has two halves.
