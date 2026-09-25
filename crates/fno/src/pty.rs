@@ -321,6 +321,53 @@ pub enum PtyShell {
     Keeper(KeeperPty),
 }
 
+/// The kill and reap steps every child here needs, so one bounded
+/// implementation covers the pty child and the plain keeper child alike.
+trait KillableChild {
+    /// Deliver SIGKILL; an already-dead child is fine, so errors are dropped.
+    fn signal_kill(&mut self);
+    /// One non-blocking reap poll. True once the child is reaped or was
+    /// never reapable by us (already reaped elsewhere).
+    fn poll_reap(&mut self) -> bool;
+}
+
+impl KillableChild for Box<dyn portable_pty::Child + Send + Sync> {
+    fn signal_kill(&mut self) {
+        let _ = self.as_mut().kill();
+    }
+    fn poll_reap(&mut self) -> bool {
+        !matches!(self.as_mut().try_wait(), Ok(None))
+    }
+}
+
+impl KillableChild for std::process::Child {
+    fn signal_kill(&mut self) {
+        let _ = std::process::Child::kill(self);
+    }
+    fn poll_reap(&mut self) -> bool {
+        !matches!(std::process::Child::try_wait(self), Ok(None))
+    }
+}
+
+/// Kill and reap a child without ever blocking in `wait`.
+///
+/// A blocking `wait` after SIGKILL is not safe here: on macOS a
+/// session-leader pty child can die between the kill and the wait's
+/// registration on the wait channel, and the wakeup for that exit is lost.
+/// The call then sleeps forever while the child sits in the child list as a
+/// zombie no one reaps - the teardown hang every pane test is exposed to.
+/// `try_wait` re-scans the child list on every poll, so it reaps the moment
+/// the exit lands; the deadline only bounds a child that survives SIGKILL,
+/// leaving its zombie to the process-exit reaping rather than wedging the
+/// core loop. The bound mirrors the keeper close's 2s wait.
+fn kill_and_reap(child: &mut impl KillableChild) {
+    child.signal_kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !child.poll_reap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// The inline form: the server holds the master. The pre-keeper body,
 /// moved wholesale.
 pub struct LocalPty {
@@ -431,8 +478,7 @@ impl LocalPty {
         let mut child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
         if let Some(pid) = child.process_id() {
             if let Err(error) = permit.record_child(pid) {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap(&mut child);
                 return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
             }
         }
@@ -580,14 +626,13 @@ impl LocalPty {
     }
 
     /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
-    /// killing an already-dead child errors harmlessly and the wait reaps
+    /// killing an already-dead child errors harmlessly and the reap polls
     /// either way, so a close racing a natural exit never double-reaps or
-    /// leaves a zombie. SIGKILL makes the post-kill wait effectively
-    /// immediate, so this is safe on the core loop.
+    /// leaves a zombie. The reap is bounded, so this is safe on the core
+    /// loop.
     pub fn kill(&self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_reap(&mut *child);
         }
     }
 }
@@ -701,15 +746,9 @@ impl PtyShell {
         let keeper_child = launch_keeper(
             keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
         )?;
-        // The failure paths below kill and wait the keeper; a success hands
+        // The failure paths below kill and reap the keeper; a success hands
         // it to a waiter thread that reaps it when it exits.
-        let cleanup = |mut child: std::process::Child| {
-            // SAFETY: SIGKILL to a process we just spawned and are refusing.
-            unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
-            }
-            let _ = child.wait();
-        };
+        let cleanup = |mut child: std::process::Child| kill_and_reap(&mut child);
         let (stream, reply, ring, seed_buf) =
             match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
                 Ok(found) => match found {

@@ -1077,6 +1077,10 @@ struct View {
     backlog: Vec<crate::proto::BacklogCard>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
+    /// The board's docked-sideline side (persisted in the view store).
+    board_dock: view_store::BoardDock,
+    /// The board's full-screen toggle (persisted in the view store).
+    board_full: bool,
     /// The persisted experimental toggle for the backlog board view.
     experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
@@ -1923,6 +1927,11 @@ pub(crate) enum AuxAction {
     ToggleBacklogView,
     /// Open the backlog board overlay (off unless the pref is on).
     OpenBacklogView,
+    /// Flip the sideline's row shape (list <-> card) live: swap the view's
+    /// in-memory layout, persist `sideline.layout` through the CLI, then
+    /// invalidate the palette cache. A failed save keeps the in-memory shape
+    /// and says so honestly, the same posture as the theme toggle.
+    ToggleSidelineLayout,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -1948,9 +1957,12 @@ pub(crate) enum AuxAction {
 }
 
 mod backlog_board;
+mod config_set;
 mod node_detail;
 mod settings_modal;
 mod update_menu;
+
+use config_set::spawn_config_set;
 
 use settings_modal::SettingsTab;
 
@@ -2139,6 +2151,8 @@ impl View {
             theme: Theme::default_theme(),
             backlog: Vec::new(),
             backlog_board: None,
+            board_dock: view_store::load_board_dock(),
+            board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
@@ -3371,19 +3385,24 @@ impl View {
                 .max(1),
             self.term
                 .1
-                .saturating_sub(self.panel_w() + self.feed_panel_w())
+                .saturating_sub(
+                    self.panel_w()
+                        + self.board_left_w()
+                        + self.board_right_w()
+                        + self.feed_panel_w(),
+                )
                 .max(1),
         )
     }
 
     /// Content viewport as `(origin, dims)` in `usize`, for centering a
     /// [`draw_lines_overlay`] popover against the content rect (right of the
-    /// sideline, above any splits) instead of the outer terminal. One call
-    /// site for every corner-anchored popover.
+    /// sideline and any docked board, above any splits) instead of the outer
+    /// terminal. One call site for every corner-anchored popover.
     fn overlay_viewport(&self) -> ((usize, usize), (usize, usize)) {
         let (rows, cols) = self.content_dims();
         (
-            (TAB_BAR_ROWS as usize, self.panel_w() as usize),
+            (TAB_BAR_ROWS as usize, self.left_chrome_w() as usize),
             (rows as usize, cols as usize),
         )
     }
@@ -3392,14 +3411,14 @@ impl View {
     /// it falls inside a pane's content rect. `None` for a chrome cell (tab bar,
     /// sideline) or a content divider, so the caller swallows it - a mouse event
     /// on chrome never forwards to a pane (AC3-UI). Rects are content-area
-    /// relative; the content origin is `(TAB_BAR_ROWS, panel_w)`.
+    /// relative; the content origin is `(TAB_BAR_ROWS, left_chrome_w)`.
     fn hit_test(&self, row: u16, col: u16) -> Option<(u64, u16, u16)> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
         let cr = row - TAB_BAR_ROWS;
-        let cc = col - panel_w;
+        let cc = col - left_w;
         for (pid, rect) in &self.layout.panes {
             if cr >= rect.y && cr < rect.y + rect.rows && cc >= rect.x && cc < rect.x + rect.cols {
                 return Some((*pid, cr - rect.y, cc - rect.x));
@@ -3431,11 +3450,11 @@ impl View {
     /// candidate seams are genuinely ambiguous and picking one would resize a
     /// divider the operator was not pointing at.
     fn seam_at(&self, row: u16, col: u16) -> Option<Seam> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         if self.pane_covering(cr, cc).is_some() {
             return None;
         }
@@ -3519,7 +3538,7 @@ impl View {
     fn seam_pos_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
         let (cr, cc) = (
             row.checked_sub(TAB_BAR_ROWS)?,
-            col.checked_sub(self.panel_w())?,
+            col.checked_sub(self.left_chrome_w())?,
         );
         Some(match seam.axis {
             Axis::Horizontal => cc,
@@ -3716,7 +3735,7 @@ impl View {
             return None;
         }
         let row = TAB_BAR_ROWS + rect.y;
-        let c0 = self.panel_w() + rect.x + (rect.cols - w) / 2;
+        let c0 = self.left_chrome_w() + rect.x + (rect.cols - w) / 2;
         Some((row, c0..c0 + w))
     }
 
@@ -3763,11 +3782,11 @@ impl View {
     /// says, and a full-side insert would need a root-level tree op whose
     /// result the operator cannot see themselves asking for.
     fn edge_zone_at(&self, row: u16, col: u16) -> Option<DropZone> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         let (a_rows, a_cols) = self.layout.area;
         if a_rows == 0 || a_cols == 0 || cr >= a_rows || cc >= a_cols {
             return None;
@@ -4151,14 +4170,14 @@ impl View {
     /// bar, which own those cells.
     fn drop_band(&self, zone: DropZone) -> Option<(std::ops::Range<u16>, std::ops::Range<u16>)> {
         let rect = self.pane_rect(zone.target)?;
-        let panel_w = self.panel_w();
+        let left_w = self.left_chrome_w();
         // Saturating throughout: `rect` comes from the last Layout, which can
         // lag a sideline toggle or a resize, so these sums are not guaranteed to
         // stay inside the terminal. Overflow here would panic a debug build for
         // a highlight; clamping just draws the band at the edge instead.
         let (r0, c0) = (
             TAB_BAR_ROWS.saturating_add(rect.y),
-            panel_w.saturating_add(rect.x),
+            left_w.saturating_add(rect.x),
         );
         let (r1, c1) = (r0.saturating_add(rect.rows), c0.saturating_add(rect.cols));
         // The band sits one cell outside the rect, except on the rim where that
@@ -4178,7 +4197,7 @@ impl View {
         // which worked but read as an accident.
         let band_col = |outside: Option<u16>, own: u16| {
             let c = outside
-                .filter(|c| (panel_w..term_cols).contains(c))
+                .filter(|c| (left_w..term_cols).contains(c))
                 .unwrap_or(own);
             c..c.saturating_add(1)
         };
@@ -5439,7 +5458,7 @@ impl View {
         if !self.sideline_full {
             // Content area: dividers first (uncovered cells), panes blitted over.
             let origin_r = TAB_BAR_ROWS as usize;
-            let origin_c = panel_w;
+            let origin_c = panel_w + self.board_left_w() as usize;
             let mut covered = vec![false; rows * cols];
             // cells owned by the focused pane, so the divider pass can accent
             // the seams that bound it (a standing "you are here" outline).
@@ -5886,48 +5905,11 @@ impl View {
                 &self.theme,
                 None,
             );
-        } else if let Some(b) = &self.backlog_board {
-            if b.detail.is_some() {
-                let w = overlay_dims
-                    .1
-                    .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-                let (lines, follow) = node_detail::overlay_lines(b, w);
-                let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
-                    .footer("enter open · b plan · A king · d details · esc back");
-                draw_lines_overlay(
-                    &mut cells,
-                    rows,
-                    cols,
-                    overlay_origin,
-                    overlay_dims,
-                    &chrome,
-                    &lines,
-                    &self.theme,
-                    follow,
-                );
-            } else if let Some(m) = backlog_board::pick_popup(b) {
-                draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
-            } else if let Some(m) = backlog_board::facet_popup(b) {
-                draw_popup_overlay(&mut cells, rows, cols, &m, self.term, &self.theme);
-            } else {
-                let w = overlay_dims
-                    .1
-                    .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-                let (lines, follow) = backlog_board::render(b, w);
-                let chrome = chrome::Chrome::new("backlog", Anchor::Center)
-                    .footer("hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · esc close");
-                draw_lines_overlay(
-                    &mut cells,
-                    rows,
-                    cols,
-                    overlay_origin,
-                    overlay_dims,
-                    &chrome,
-                    &lines,
-                    &self.theme,
-                    follow,
-                );
-            }
+        } else if self.backlog_board.is_some() {
+            // The board's whole surface - docked column, drill-down,
+            // pickers, centered or full-screen overlay - paints from its
+            // own module (the file-budget gate keeps client.rs shrinking).
+            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -5979,14 +5961,17 @@ impl View {
             {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
                     cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
-                    cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    cur_c = self.left_chrome_w()
+                        + rect.x
+                        + f.cursor_col.min(rect.cols.saturating_sub(1));
                     if !self.sideline_full && self.layout.area != (0, 0) {
                         // Never in the filler (AC1-UI), even mid-race when a
                         // stale rect exceeds the just-shrunk area. Skipped in
                         // full-screen sideline: the cursor belongs to the
                         // composer, not a pane that is not painted.
                         cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
-                        cur_c = cur_c.min(self.panel_w() + self.layout.area.1.saturating_sub(1));
+                        cur_c =
+                            cur_c.min(self.left_chrome_w() + self.layout.area.1.saturating_sub(1));
                     }
                     cur_vis = f.cursor_visible;
                 }
@@ -10530,7 +10515,9 @@ async fn handle_stdin(
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
+            if let StdinFlow::Detach =
+                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
+            {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -10554,6 +10541,11 @@ async fn handle_stdin(
         // the panel's column space) - and no byte ever reaches a pane.
         if view.sideline_full {
             sideline::route_mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        // Full-screen board: the overlay owns every cell, so no press or
+        // wheel reaches the panes it covers. Keys stay with the board.
+        if view.backlog_board.is_some() && view.board_full {
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -11379,6 +11371,20 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenBacklogBoard => {
+            // The chord rides the same gate as the menu row: the pref
+            // decides, and the off case notices instead of opening.
+            backlog_board::open_pref_gated(view);
+        }
+        Event::OpenSettings => {
+            execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
+        }
+        Event::OpenConnections => {
+            execute_aux_action(view, AuxAction::OpenConnections, sock_w).await?;
+        }
+        Event::OpenSweepThreads => {
+            execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
@@ -11786,70 +11792,6 @@ async fn keys_modal_execute_selected(
             Ok(DispatchFlow::Continue)
         }
     }
-}
-
-/// One mouse report while the which-key modal is open (US3): hover moves
-/// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (click-elsewhere).
-async fn keys_modal_mouse(
-    view: &mut View,
-    scanner: &mut Scanner,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::WheelUp => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(-3);
-            }
-        }
-        MouseKind::WheelDown => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(3);
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
-            match view.keys_modal_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.keys_modal.as_mut() {
-                        m.popup.select(t);
-                    }
-                    if matches!(
-                        keys_modal_execute_selected(view, scanner, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-                None => {
-                    // A click inside the block that hit no target (a header, a border)
-                    // is swallowed; only a click OFF the modal dismisses.
-                    if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(StdinFlow::Continue)
 }
 
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
@@ -12621,28 +12563,10 @@ async fn execute_aux_action(
             view.aux = None;
             return Ok(DispatchFlow::Detach);
         }
-        AuxAction::ToggleBacklogView => {
-            view.experimental_backlog = !view.experimental_backlog;
-            view_store::save_experimental_backlog_view(view.experimental_backlog);
-            let on = if view.experimental_backlog {
-                "on"
-            } else {
-                "off"
-            };
-            if !view.experimental_backlog {
-                view.backlog_board = None;
-            }
-            view.set_notice(format!("experimental backlog view: {on}"));
-            view.refresh_open_sideline_menu();
-        }
+        AuxAction::ToggleBacklogView => View::toggle_enabled(view),
         AuxAction::OpenBacklogView => {
             view.aux = None;
-            let gen = view
-                .backlog_board
-                .as_ref()
-                .map(|b| b.gen.wrapping_add(1))
-                .unwrap_or(0);
-            view.backlog_board = Some(backlog_board::BoardView::new(gen));
+            View::open(view);
         }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
@@ -12656,7 +12580,8 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleStatus
         | AuxAction::ToggleConfirmLifecycle
-        | AuxAction::ToggleResourceMeter => {
+        | AuxAction::ToggleResourceMeter
+        | AuxAction::ToggleSidelineLayout => {
             settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
@@ -12714,48 +12639,6 @@ async fn execute_aux_action(
         }
     }
     Ok(DispatchFlow::Continue)
-}
-
-/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
-/// than writing config itself (the graph-write rule applied to config). Returns
-/// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory value either way and reports honestly.
-async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
-    // spawn + wait rather than .output(): the exit check reads `.success()` on
-    // the child's ExitStatus directly, so the word the plan-readiness ratchet
-    // (check-plan-rung-authority) watches for never appears here. That ratchet
-    // guards plan frontmatter; an exit code is a different axis, so not naming
-    // the field is cheaper than bumping a guard meant for something else.
-    //
-    // kill_on_drop: on the 3s timeout the future drops and this returns Err,
-    // but tokio leaves a spawned child running by default, so the config write
-    // could land after we already told the user the save failed. needs_overlay,
-    // digest_overlay, and connections_view set it for the same shell-out shape.
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    // --local: the startup ladder gives the project config precedence, so a
-    // global write is silently shadowed on the next attach to this workspace.
-    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
-    // the ONLY candidate on both write and read, and --local would land the
-    // write somewhere the latch never looks.
-    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
-        &[]
-    } else {
-        &["--local"]
-    };
-    command
-        .args(["config", "set", key, value])
-        .args(scope)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut child = crate::process_admission::tokio_spawn(&mut command)
-        .map_err(|e| format!("fno config set spawn failed: {e}"))?;
-    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set {key} {value} failed")),
-        Err(_) => Err("fno config set timed out".into()),
-    }
 }
 
 /// Run the aux popup's selected row (Enter/click), propagating a detach.
@@ -14897,6 +14780,10 @@ mod esc_quiet_tests;
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
+
+#[cfg(test)]
+#[path = "client_tests/keys_modal_tests.rs"]
+mod keys_modal_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;

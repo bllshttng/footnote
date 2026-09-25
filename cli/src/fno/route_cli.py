@@ -359,14 +359,16 @@ def inventory_cmd(
     else:
         typer.echo(f"objective={inv.objective}"
                    + (f" prefer_harness={inv.prefer_harness}" if inv.prefer_harness else ""))
-        cols = ("name", "harness", "model", "band", "percentile", "effort", "verdict")
+        cols = ("name", "harness", "model", "band", "percentile", "effort", "window", "verdict")
+        # .get: a route-slot binary older than the window column answers rows
+        # without the key; a blank cell beats a KeyError on the whole table.
         widths = {
-            c: max(len(c), *(len(r[c]) for r in rows)) if rows else len(c)
+            c: max(len(c), *(len(r.get(c, "")) for r in rows)) if rows else len(c)
             for c in cols
         }
 
         def _fmt(r: dict[str, str]) -> str:
-            return "  ".join(r[c].ljust(widths[c]) for c in cols).rstrip()
+            return "  ".join(r.get(c, "").ljust(widths[c]) for c in cols).rstrip()
 
         typer.echo(_fmt({c: c.upper() for c in cols}))
         for r in rows:

@@ -7,6 +7,16 @@ use serde_json::{json, Value};
 /// The `mode: "inventory"` leg: `{"rows": [...], "refusals": [...],
 /// "drift": [...]}`. Rows arrive already family-resolved by the pre-pass.
 pub fn inventory_leg(payload: &Value) -> Value {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let routing_rows = crate::agents_config::config_lookup(&cwd, &["routing", "models"])
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    inventory_leg_with(payload, &routing_rows)
+}
+
+/// Testable body of [`inventory_leg`]: the same answer over handed-in routing
+/// rows, so unit tests stay hermetic (no config on disk).
+pub fn inventory_leg_with(payload: &Value, routing_rows: &[toml::Value]) -> Value {
     let rows_in: Vec<Value> = payload
         .get("inventory")
         .and_then(|i| i.get("rows"))
@@ -60,6 +70,11 @@ pub fn inventory_leg(payload: &Value) -> Value {
         } else {
             "ok"
         };
+        let reading = crate::context_window::window_from_rows(&model, routing_rows);
+        let window = match reading.measured_at {
+            Some(date) => format!("{} (measured {})", reading.tokens, date),
+            None => format!("unmeasured, default {}", reading.tokens),
+        };
         let model_cell = match row.get("family").and_then(Value::as_str) {
             Some(family) if !family.is_empty() => format!("{family} -> {model}"),
             _ => model.clone(),
@@ -78,6 +93,7 @@ pub fn inventory_leg(payload: &Value) -> Value {
             // f64 Display prints the shortest round-trip decimal, not `:g`.
             "percentile": percentile.map(|p| format!("{p}")).unwrap_or_default(),
             "effort": effort,
+            "window": window,
             "verdict": verdict,
         }));
     }
@@ -250,5 +266,36 @@ mod tests {
         ] {
             assert!(rows[0].get(key).is_some(), "old key {key} still present");
         }
+    }
+
+    #[test]
+    fn window_cell_shows_the_dated_row_or_the_unmeasured_default_ac7() {
+        let routing: Vec<toml::Value> = toml::from_str::<toml::Value>(
+            "[[rows]]\nmodel = \"glm-5.3-flash[1m]\"\ncontext = 1310720\ncontext_measured_at = \"2026-09-17\"\n",
+        )
+        .unwrap()
+        .get("rows")
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap();
+        let out = inventory_leg_with(
+            &json!({
+                "inventory": {"rows": [
+                    {"name": "flash", "harness": "claude", "model": "glm-5.3-flash", "band": "medium", "effort": ""},
+                    {"name": "other", "harness": "codex", "model": "gpt-6-luna", "band": "high", "effort": ""},
+                ]},
+                "known_harnesses": KNOWN,
+            }),
+            &routing,
+        );
+        let rows = out["rows"].as_array().unwrap();
+        assert_eq!(rows[0]["window"], "1310720 (measured 2026-09-17)");
+        assert_eq!(
+            rows[1]["window"],
+            format!(
+                "unmeasured, default {}",
+                crate::context_window::window_for_model("gpt-6-luna")
+            )
+        );
     }
 }

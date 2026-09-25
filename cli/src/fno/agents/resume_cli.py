@@ -121,7 +121,14 @@ def _build_resume_argv(
 
         from fno.agents.harnesses.codex import git_writable_config_args
 
-        grant = git_writable_config_args(Path(cwd)) if cwd else []
+        # codex 0.156.1 refuses a writable_roots override paired with --remote
+        # (the declared codex resume form carries --remote unix://), so the
+        # grant rides only a non-remote form; the roots reach the thread
+        # through the turn carrier instead. The Rust twin makes the same call.
+        remote_form = "--remote" in argv
+        grant = (
+            git_writable_config_args(Path(cwd)) if cwd and not remote_form else []
+        )
         # Without --cd, codex asks session-directory vs current-directory and
         # defaults to the SESSION directory, which is the canonical checkout
         # recorded at spawn rather than the worktree the row works in.

@@ -63,9 +63,9 @@ fn missing_diff_keys(prev_data: Option<&Value>) -> Vec<&'static str> {
 
 /// Render cap for the per-node rows a court line prints (the count in the
 /// payload stays whole, only the rendered rows are cut, as the board does).
-const MAX_COURT_ROWS: usize = 25;
+pub(crate) const MAX_COURT_ROWS: usize = 25;
 
-fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
 
@@ -80,15 +80,15 @@ fn iso_now() -> String {
 /// One reading could not be taken; the beat continues without it.
 struct ReaderError(String);
 
-struct Reading {
-    name: &'static str,
-    ok: bool,
-    value: Value,
-    error: String,
+pub(crate) struct Reading {
+    pub(crate) name: &'static str,
+    pub(crate) ok: bool,
+    pub(crate) value: Value,
+    pub(crate) error: String,
 }
 
 impl Reading {
-    fn failed(name: &'static str, error: String) -> Self {
+    pub(crate) fn failed(name: &'static str, error: String) -> Self {
         Reading {
             name,
             ok: false,
@@ -96,7 +96,7 @@ impl Reading {
             error,
         }
     }
-    fn took(name: &'static str, value: Value) -> Self {
+    pub(crate) fn took(name: &'static str, value: Value) -> Self {
         Reading {
             name,
             ok: true,
@@ -167,7 +167,7 @@ fn gh_error_cause(error: &str) -> String {
     )
 }
 
-fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
+pub(crate) fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
     let mut argv = vec![fno_bin()];
     argv.extend(args.iter().map(std::ffi::OsString::from));
     run_capture(&argv)
@@ -791,42 +791,6 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
     }))
 }
 
-fn r_workers() -> Result<Value, String> {
-    let (_, out, err) = fno_verb(&["agents", "top", "--json"])?;
-    let payload: Value = serde_json::from_str(out.trim())
-        .map_err(|e| format!("top payload did not parse: {e}: {}", err.trim()))?;
-    let predicate = payload
-        .get("predicate")
-        .and_then(|p| p.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let workers = payload.get("workers").and_then(|w| w.as_array());
-    let workers = match (predicate.is_empty(), workers) {
-        (false, Some(w)) => w,
-        _ => return Err("the top payload carries no positive predicate".into()),
-    };
-    let mut oldest: Option<(f64, String)> = None;
-    for w in workers {
-        let age = w.get("status_age_s").and_then(|a| a.as_f64());
-        let handle = w
-            .get("handle")
-            .and_then(|h| h.as_str())
-            .or_else(|| s_str(w, "name"))
-            .unwrap_or("");
-        if let Some(age) = age {
-            if oldest.as_ref().map(|(a, _)| age > *a).unwrap_or(true) {
-                oldest = Some((age, handle.to_string()));
-            }
-        }
-    }
-    let (age, handle) = oldest.ok_or_else(|| "every status_age_s is null".to_string())?;
-    Ok(json!({
-        "live_workers": workers.len(),
-        "oldest_worker_seen": format!("{}s {}", age as i64, handle),
-    }))
-}
-
 fn r_crown() -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["agents", "court", "--json"])?;
     let payload: Value = serde_json::from_str(out.trim())
@@ -1049,104 +1013,6 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
-/// The held reading: this crown's open questions, read from the page
-/// frontmatter the attention arm froze at write time. The folder comes from
-/// items.json's `questions_dir`, so a king in any project reads the one
-/// folder the daemon writes. A missing or stale items.json is a failed
-/// reading, never `held: none`: the arm being down must not read as "no
-/// questions".
-fn r_held(ctx: &Ctx) -> Result<Value, String> {
-    let index_path = crate::attention_arm::attention_dir()
-        .map_err(|e| e.to_string())?
-        .join("items.json");
-    let raw = std::fs::read_to_string(&index_path)
-        .map_err(|_| "the attention arm has not written items.json".to_string())?;
-    let index: Value =
-        serde_json::from_str(&raw).map_err(|e| format!("items.json unreadable: {e}"))?;
-    let as_of = index.get("as_of").and_then(Value::as_u64).unwrap_or(0);
-    let now = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let age = now.saturating_sub(as_of);
-    if age > 600 {
-        return Err(format!(
-            "items.json is {age}s old; the attention arm is not beating"
-        ));
-    }
-    let dir = index
-        .get("questions_dir")
-        .and_then(Value::as_str)
-        .filter(|d| !d.is_empty())
-        .ok_or("items.json names no questions_dir")?;
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("questions folder {dir} unreadable: {e}"))?;
-    let mut paths: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-        .collect();
-    paths.sort();
-    let mut pages: Vec<(String, String)> = Vec::new();
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if crate::attention_file::has_conflict_markers(&text) {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        pages.push((stem.to_string(), text));
-    }
-    let rows = held_from_pages(&pages, &ctx.scope);
-    Ok(json!({"open": rows.len(), "rows": rows}))
-}
-
-/// The pure fold: open pages whose question_id the stem names and whose
-/// crown equals this check-in's canonical scope, oldest first. Rows carry
-/// what the render needs to name the decide verb.
-fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Value> {
-    let canon = crate::territory::canonical_scope(scope);
-    let mut rows: Vec<(u64, Value)> = Vec::new();
-    for (stem, text) in pages {
-        let Some((front, _)) = crate::attention_file::parse_page(text) else {
-            continue;
-        };
-        if front.status != "open" {
-            continue;
-        }
-        if !crate::attention_arm::stem_names_id(stem, &front.question_id) {
-            continue;
-        }
-        if crate::territory::canonical_scope(&front.crown) != canon {
-            continue;
-        }
-        let epoch = chrono::DateTime::parse_from_rfc3339(&front.asked_at)
-            .map(|d| d.timestamp().max(0) as u64)
-            .unwrap_or(0);
-        let node = front
-            .blocks
-            .first()
-            .cloned()
-            .filter(|b| !b.is_empty() && b != "none")
-            .or_else(|| Some(front.node.clone()).filter(|n| !n.is_empty() && n != "none"));
-        rows.push((
-            epoch,
-            json!({
-                "node": node,
-                "question_id": front.question_id,
-                "question": front.title,
-                "ts": front.asked_at,
-                "epoch": epoch,
-            }),
-        ));
-    }
-    rows.sort_by_key(|(epoch, _)| *epoch);
-    rows.into_iter().map(|(_, v)| v).collect()
-}
-
 /// One verdict token for the check-in line, from the shared reader's rows:
 /// every check-run page, legacy statuses, and runs that failed before
 /// minting a job. GitHub's combined status is gone from the reduce: it reads
@@ -1253,10 +1119,38 @@ fn control_plane_attention(
             crate::loops_pause::DispatchPause::Manual { .. } => "fno do loops status",
             _ => "fno agents incident status",
         };
+        // The tail reads the breaker's typed reach, never a fixed claim:
+        // what is held and what proceeds come from the record the moment
+        // the summary renders.
+        let tail = match p {
+            crate::loops_pause::DispatchPause::Manual { .. } => {
+                "; loop dispatch is held; merges proceed".to_string()
+            }
+            crate::loops_pause::DispatchPause::FleetIncident { holds, .. } => {
+                let admits: Vec<String> = crate::fleet_incident::SCOPES
+                    .iter()
+                    .filter(|s| !holds.contains(&(*s).to_string()))
+                    .map(|s| s.to_string())
+                    .collect();
+                if admits.is_empty() {
+                    "; the breaker holds every scope until it clears".to_string()
+                } else {
+                    format!(
+                        "; the breaker holds {}; {} proceed until it clears",
+                        holds.join(", "),
+                        admits.join(" and ")
+                    )
+                }
+            }
+            // An unreadable breaker stays out of the summary (its rows stay
+            // overdue faults), so this arm never renders.
+            _ => String::new(),
+        };
         attention.push(format!(
-            "{} arms paused on purpose: {}; merges and dispatch are held until the breaker clears ({verb})",
+            "{} arms paused on purpose: {}{} ({verb})",
             paused.len(),
-            p.detail()
+            p.detail(),
+            tail
         ));
     }
     attention.extend(
@@ -1326,12 +1220,37 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("court", r_court(&beat.folded));
     take("territory", r_territory(ctx));
     take("capacity", r_capacity());
-    take("workers", r_workers());
+    let workers_payload = crate::king_answers::fetch_workers_payload();
+    take(
+        "workers",
+        workers_payload
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(crate::king_answers::workers_summary),
+    );
+    // The scope-answer readings share one scope compile and one top call.
+    let scope_ids =
+        crate::king_answers::scope_node_ids(&ctx.graph, &ctx.cwd, &ctx.scope, ctx.level);
+    take(
+        "answered",
+        scope_ids
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|ids| crate::king_answers::answered_reading(&ctx.cwd, ids)),
+    );
+    take("quiet_workers", {
+        let top = workers_payload.as_ref().ok();
+        match (top, scope_ids.as_ref()) {
+            (Some(top), Ok(ids)) => crate::king_answers::quiet_reading(Some(top), ids),
+            (None, _) => Err("the workers reading failed; quiet workers are unreadable".into()),
+            (_, Err(e)) => Err(e.clone()),
+        }
+    });
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
-    take("held", r_held(ctx));
+    take("held", crate::king_answers::held_reading(&ctx.scope));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("parked", r_parked());
@@ -1595,7 +1514,7 @@ fn finish_change(derived: String, model: Option<&str>, data: &mut Map<String, Va
 // ---------------------------------------------------------------------------
 // render
 
-fn dash(v: Option<&Value>) -> String {
+pub(crate) fn dash(v: Option<&Value>) -> String {
     match v {
         None | Some(Value::Null) => "-".into(),
         Some(Value::String(s)) => s.clone(),
@@ -1749,41 +1668,9 @@ fn render_lines(
         }
     }
 
-    match failed("held") {
-        Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
-        None => {
-            // This crown's questions: the rows carry node, question id and
-            // ask time; a row with a node names the decide verb, a row with
-            // none names the clear verb.
-            let rows = by_name("held")
-                .map(|r| &r.value)
-                .unwrap_or(&Value::Null)
-                .get("rows")
-                .and_then(|r| r.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if rows.is_empty() {
-                lines.push("held: none".into());
-            } else {
-                lines.push(format!("held: {} question(s) for this crown", rows.len()));
-                for row in rows.iter().take(MAX_COURT_ROWS) {
-                    let qid = dash(row.get("question_id"));
-                    let node = row
-                        .get("node")
-                        .and_then(Value::as_str)
-                        .filter(|n| !n.is_empty() && *n != "none");
-                    match node {
-                        Some(n) => lines.push(format!(
-                            "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
-                        )),
-                        None => lines.push(format!(
-                            "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
-                        )),
-                    }
-                }
-            }
-        }
-    }
+    lines.extend(crate::king_answers::answered_lines(readings));
+
+    lines.extend(crate::king_answers::held_lines(readings));
 
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
@@ -1831,6 +1718,8 @@ fn render_lines(
             }
         }
     }
+
+    lines.extend(crate::king_answers::quiet_lines(readings));
 
     match failed("territory") {
         Some(r) => lines.push(format!("READER FAILED territory: {}", r.error)),
@@ -3196,6 +3085,8 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("held", json!({"open": 0, "rows": []})),
+            Reading::took("answered", json!({"rows": []})),
+            Reading::took("quiet_workers", json!({"quiet": 0, "read": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
             Reading::took("parked", json!({"open": 0, "rows": []})),
@@ -3740,9 +3631,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(17)));
+        assert_eq!(data.get("coverage"), Some(&json!(19)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 17 of 17 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3924,7 +3815,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
+            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -4008,6 +3899,62 @@ mod tests {
     }
 
     #[test]
+    fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "answered",
+                json!({"rows": [
+                    {"node": "x-1", "question_id": "q-1", "answer": "keep the lane",
+                     "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                ]}),
+            ),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "quiet_workers",
+                json!({"quiet": 1, "read": 1, "rows": [
+                    {"worker": "t-x-1-glm", "node": "x-1",
+                     "line": "RESULT: BLOCKED need a ruling"},
+                ]}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "answered: 1 user decision(s) in scope"),
+            "lines: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("x-1 (q-1): keep the lane")));
+        assert!(lines.iter().any(|l| l == "quiet: 1 worker(s) in scope"));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("t-x-1-glm (x-1): RESULT: BLOCKED need a ruling")));
+        // A failed read keeps its line and says so; it never blanks.
+        set_reading(
+            &mut readings,
+            Reading::failed("quiet_workers", "peek exited 13".into()),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "READER FAILED quiet_workers: peek exited 13"),
+            "lines: {lines:?}"
+        );
+    }
+
+    #[test]
     fn held_rows_render_the_decide_verb_and_none_when_clear() {
         let mut readings = sample_readings(
             json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
@@ -4053,7 +4000,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 16 of 16 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 18 of 18 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4191,7 +4138,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 16 of 17 readings ok")));
+            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
@@ -4537,6 +4484,7 @@ mod tests {
             pause: Some(DispatchPause::FleetIncident {
                 generation: 5,
                 reason: "two cargo runs".to_string(),
+                holds: vec!["spawns".to_string(), "tests".to_string()],
             }),
             ..crate::tick_ledger::TickTrace::default()
         };
@@ -4553,6 +4501,19 @@ mod tests {
             "line: {}",
             out[0]
         );
+        // The reach is read, not claimed: holds from the record, and merges
+        // named as proceeding while they are not in the hold list.
+        assert!(
+            out[0].contains("the breaker holds spawns, tests"),
+            "line: {}",
+            out[0]
+        );
+        assert!(out[0].contains("merges proceed"), "line: {}", out[0]);
+        assert!(
+            out.iter()
+                .all(|l| !l.contains("merges and dispatch are held")),
+            "the false claim must be gone: lines {out:?}"
+        );
         assert!(
             out.iter().all(|l| !l.contains("tick_overdue")),
             "lines: {out:?}"
@@ -4561,6 +4522,32 @@ mod tests {
             out.iter().all(|l| !l.contains("pr watch refresh")),
             "lines: {out:?}"
         );
+    }
+
+    // AC-EDGE: a manual loops pause names what it holds, and the tail
+    // never claims merges are held.
+    #[test]
+    fn a_manual_pause_says_loop_dispatch_is_held_and_merges_proceed() {
+        use crate::loops_pause::DispatchPause;
+        let rows: Vec<crate::tick_ledger::ArmStatus> = ["king_wake", "watchdog"]
+            .iter()
+            .map(|a| pause_row(a))
+            .collect();
+        let trace = crate::tick_ledger::TickTrace {
+            pause: Some(DispatchPause::Manual {
+                state: "paused".to_string(),
+                detail: "loops paused by op".to_string(),
+            }),
+            ..crate::tick_ledger::TickTrace::default()
+        };
+        let out = control_plane_attention(&rows, &trace, &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(
+            out[0].contains("loop dispatch is held; merges proceed"),
+            "line: {}",
+            out[0]
+        );
+        assert!(out[0].contains("fno do loops status"), "line: {}", out[0]);
     }
 
     // AC10-EDGE: no pause, the output is today's: the row lines only.
@@ -4801,60 +4788,5 @@ mod tests {
         assert_eq!(level, None);
         assert_eq!(board_state, None);
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    fn held_page(
-        id: &str,
-        crown: &str,
-        status: &str,
-        asked_at: &str,
-        node: Option<&str>,
-    ) -> (String, String) {
-        let node_line = match node {
-            Some(n) => format!("node: {n}\n"),
-            None => String::new(),
-        };
-        let stem = format!("20260923-{id}-test-x-none");
-        let text = format!(
-            "---\nquestion_id: {id}\nkind: question\nstatus: {status}\ntitle: t-{id}\nasked_at: {asked_at}\n{node_line}crown: {crown}\n---\n\n# t-{id}\n"
-        );
-        (stem, text)
-    }
-
-    // AC11-HP: only this crown's open questions, oldest first, each with the
-    // verb that clears it.
-    #[test]
-    fn held_from_pages_lists_this_crowns_open_questions_oldest_first() {
-        let pages = vec![
-            held_page("q-new", "x-b", "open", "2026-09-23T12:00:00Z", Some("x-1")),
-            held_page("q-old", "x-b", "open", "2026-09-22T08:00:00Z", None),
-            held_page(
-                "q-other",
-                "fno",
-                "open",
-                "2026-09-21T08:00:00Z",
-                Some("x-2"),
-            ),
-            held_page(
-                "q-closed",
-                "x-b",
-                "answered",
-                "2026-09-20T08:00:00Z",
-                Some("x-3"),
-            ),
-        ];
-        let rows = held_from_pages(&pages, "x-b");
-        assert_eq!(rows.len(), 2, "AC11-HP: only x-b's open pages: {rows:?}");
-        assert_eq!(
-            rows[0].get("question_id").and_then(|v| v.as_str()),
-            Some("q-old"),
-            "oldest first"
-        );
-        assert_eq!(
-            rows[1].get("question_id").and_then(|v| v.as_str()),
-            Some("q-new")
-        );
-        // The node-less row reads as null so the render names the clear verb.
-        assert_eq!(rows[0].get("node"), Some(&Value::Null));
     }
 }

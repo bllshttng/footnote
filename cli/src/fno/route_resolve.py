@@ -66,7 +66,6 @@ class InventoryRow:
     percentile: Optional[float] = None
     effort: str = ""
     cost_per_mtok_in: Optional[float] = None
-    context: Optional[int] = None
     # The declared access path's verified native-view label; empty is
     # unverified. Qualification metadata: carried, never ranked.
     operator_view: str = ""
@@ -129,7 +128,7 @@ def inventory_from_rows(
             order.append(name)
         for key in (
             "name", "harness", "model", "route", "account", "band", "effort",
-            "cost_per_mtok_in", "context", "operator_view",
+            "cost_per_mtok_in", "operator_view",
         ):
             value = _field(row, key, None)
             if value not in (None, ""):
@@ -162,7 +161,6 @@ def inventory_from_rows(
             percentile=pct,
             effort=str(merged.get("effort", "") or "").strip(),
             cost_per_mtok_in=merged.get("cost_per_mtok_in"),
-            context=merged.get("context"),
             operator_view=str(merged.get("operator_view", "") or "").strip(),
         )
     obj = objective if objective in _OBJECTIVES else _OBJECTIVES[0]

@@ -814,7 +814,9 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # assertion) composes ahead of the resume exec, so the snippet is a
     # quoted `sh -c` script rather than a bare `codex` invocation.
     assert rust.stdout.startswith("cd /tmp/proj && exec sh -c ")
-    assert "writable_roots=" in rust.stdout
+    # codex 0.156.1 refuses the writable_roots override on the declared
+    # form's --remote lane, so the grant is absent from the snippet.
+    assert "writable_roots=" not in rust.stdout
     assert "app-server" in rust.stdout and "daemon" in rust.stdout
     # The Rust reader resolved the agent and rendered ITS session id, and the
     # daemon-attach flag trails it: codex's globals (-c, --cd) sit before the
