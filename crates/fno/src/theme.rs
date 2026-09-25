@@ -58,6 +58,9 @@ pub enum Role {
     /// click. DIM under `terminal`, the theme's `dim` color under a named theme.
     BodyDim,
     ScrollTrack,
+    /// The `f[no]` brand mark's raised `[no]`: the accent, dimmed, so the
+    /// mark reads as one word without shouting (the wave note).
+    Wordmark,
     ScrollThumb,
 }
 
@@ -116,6 +119,9 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
             ),
+            // Amber under `terminal` too: `accent` survives the inherit branch
+            // (see the field doc), so the brand mark keeps its two-tone read.
+            Role::Wordmark => (t.accent, Color::Default, cell_flags::DIM),
             // Body, Border: plain inverse.
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
@@ -148,6 +154,7 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         Role::Footer => (t.dim, Color::Default, 0),
         Role::ScrollTrack => (t.dim, Color::Default, cell_flags::DIM),
         Role::ScrollThumb => (t.border, Color::Default, cell_flags::BOLD),
+        Role::Wordmark => (t.accent, Color::Default, cell_flags::DIM),
     }
 }
 
