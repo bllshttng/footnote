@@ -34,6 +34,14 @@ pub(super) fn retired_rows(home: &AgentsHome) -> Vec<Value> {
     let causes = newest_reap_causes(home);
     for (path, receipt) in receipts {
         let cause = causes.get(&receipt.harness_session_id);
+        let (cause, cause_at, basis) = match cause {
+            Some((kind, ts, why)) => (kind.clone(), ts.clone(), why.clone()),
+            None => (
+                "not recorded".to_string(),
+                "not recorded".to_string(),
+                "not recorded".to_string(),
+            ),
+        };
         let ledger_node = receipt
             .ledger
             .as_ref()
@@ -48,9 +56,9 @@ pub(super) fn retired_rows(home: &AgentsHome) -> Vec<Value> {
             "cwd": receipt.cwd,
             "state": "reaped",
             "reaped_at": receipt.reaped_at,
-            "cause": cause.map(|c| c.0).unwrap_or("not recorded"),
-            "cause_at": cause.map(|c| c.1).unwrap_or("not recorded"),
-            "basis": cause.map(|c| c.2).unwrap_or("not recorded"),
+            "cause": cause,
+            "cause_at": cause_at,
+            "basis": basis,
             "node": ledger_node,
             "resume": receipt.resume,
             "receipt": path.display().to_string(),
