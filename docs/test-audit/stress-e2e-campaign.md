@@ -8,7 +8,7 @@ The three trial baseline passed with `STRESS_TRIALS=3`: `daemon_e2e=pass`, `pers
 
 Baseline support line counts: the stress harness had 225 lines. The daemon test had 2,783 lines. The persistence test had 777 lines. The workspace test had 863 lines.
 
-Baseline declarations: daemon had 30. Persistence had 14. Workspace had 9. Total: 53. None was ignored.
+Baseline declarations: daemon had 30. Persistence had 14. Workspace had 9. Total: 53. None was ignored. A shared test-owner helper also runs once in each fno integration binary, adding two cases per stress trial.
 
 ## Cost evidence and owner choice
 
@@ -118,12 +118,12 @@ After campaign one merged, the main baseline had 16 Python cases pass in 19.00s.
 
 ## Cutover result
 
-Cutover leaves 48 process-backed declarations. Baseline had 53 (30 daemon, 14 persistence, 9 workspace). The three-trial `cli-ci` and 20-trial report-only `rust-ci` samples run 46 declarations per trial. Five declarations were consolidated into keepers. Two deterministic daemon tests are skipped in repeated samples. Ordinary Rust integration still runs all 48.
+Cutover leaves 48 process-backed declarations. Baseline had 53 (30 daemon, 14 persistence, 9 workspace). The three-trial `cli-ci` and 20-trial report-only `rust-ci` samples run 48 cases per trial. Each trial includes two shared test-owner cases and 46 audited declarations. Six old declarations were retired. The rename and removal checks now share one new keeper. Two deterministic daemon tests are skipped only in repeated samples. Ordinary Rust integration runs all 50 cases.
 
 The three process test files shrink from 4,423 to 4,387 lines. That is 36 fewer lines. The stress harness grows from 225 to 240 lines. The new spec router has 9 lines. Rust production changes add 0 lines. The Python runner change only updates comments.
 
 Recent stress samples cost 545s for the three-trial step and 1,238s for the 20-trial report-only job. Their combined cost was 29.72 runner-minutes. Three daemon waits cost about 13s per baseline trial. Consolidation and stress-only skips remove those waits. The new route adds about 15s to smoke. Projected affected-step cost is 1,499s (24.98 runner-minutes). That saves 4.73m. This is an estimate because we will not wait for PR CI.
 
-The stress loop executes 1,219 baseline declarations across 23 trials. Cutover executes 1,058. That is 161 fewer repeated executions. CI gains three Bash specs and 16 Python cases. They were not routed before. `scripts/tests/test-spec-suite.sh` passed the smoke registry. Claims passed 12/12. Executor passed 17/17. Blueprint phase-close passed. Pytest passed 16/16. The smoke shard wiring test passed 1/1.
+The stress loop executed 1,265 cases across 23 baseline trials. Cutover will execute 1,104. That is 161 fewer repeated cases. CI gains three Bash specs and 16 Python cases. They were not routed before. `scripts/tests/test-spec-suite.sh` passed the smoke registry. Claims passed 12/12. Executor passed 17/17. Blueprint phase-close passed. Pytest passed 16/16. The smoke shard wiring test passed 1/1. The post-merge full run passed one trial: 27 daemon, 15 persistence, and 8 workspace cases, with no daemon leaks.
 
 Mutation proof: 8/8 contracts triggered their keeper assertion after an owner mutation. The runner restored each source file to its original SHA. Mutations covered idle exit, no-op receipt, status drift, rename, removal, clean shutdown capture, restored focus, and worker tab location.
