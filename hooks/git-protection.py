@@ -490,6 +490,37 @@ def _candidate_repo_roots():
     return roots
 
 
+_PR_WORKTREE_CACHE = {}
+
+
+def _pr_worktree_root(pr_number):
+    """Resolve the PR worktree through the Rust-owned branch selector."""
+    if not str(pr_number).isdigit():
+        return None
+    key = (os.getcwd(), str(pr_number))
+    if key in _PR_WORKTREE_CACHE:
+        return _PR_WORKTREE_CACHE[key]
+    try:
+        proc = subprocess.run(
+            [os.environ.get("FNO_AGENTS_BIN", "fno-agents"), "pr-worktree"],
+            input=json.dumps(
+                {"cwd": os.getcwd(), "pr": int(pr_number), "timeout_secs": 1}
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if proc.returncode != 0:
+            _PR_WORKTREE_CACHE[key] = None
+        else:
+            value = json.loads(proc.stdout)
+            worktree = Path(value["worktree"])
+            _PR_WORKTREE_CACHE[key] = worktree.resolve() if worktree.is_dir() else None
+    except Exception:
+        _PR_WORKTREE_CACHE[key] = None
+    return _PR_WORKTREE_CACHE[key]
+
+
 def _parse_active_state(state_file, freshness_limit=3600):
     """Return the frontmatter dict for an active target session at state_file,
     else None. Active means: file exists, mtime within freshness_limit, and
@@ -552,10 +583,8 @@ def _get_active_target_session(prefer_pr=None):
     - state file mtime is within the last hour
     - frontmatter status is IN_PROGRESS
 
-    Candidate repo roots are the hook's own root plus every git worktree (see
-    _candidate_repo_roots), so a session running in a worktree is found even
-    when the hook's cwd is the canonical checkout. The cwd root is checked
-    first.
+    A numbered PR binds authorization to the exact worktree on its head
+    branch. An unnumbered merge keeps the fail-closed scan across worktrees.
 
     Selection FAILS CLOSED on ambiguity - widening discovery across worktrees
     must never let one session's auto_merge_approved + artifact authorize an
@@ -576,7 +605,12 @@ def _get_active_target_session(prefer_pr=None):
     ungated except for _closure_trailer_refusal.)
     """
     matches = []
-    for repo_root in _candidate_repo_roots():
+    if prefer_pr is not None:
+        pr_root = _pr_worktree_root(prefer_pr)
+        repo_roots = [pr_root] if pr_root is not None else []
+    else:
+        repo_roots = _candidate_repo_roots()
+    for repo_root in repo_roots:
         state_file = repo_root / ".fno" / "target-state.md"
         fm = _parse_active_state(state_file)
         if fm is not None:
@@ -747,7 +781,7 @@ def _stacked_base_refusal(command=""):
 # one PreToolUse hook with a 60s budget; the coverage veto's comment states the
 # pair arithmetic. Split literals can drift apart, and the drift test pins this
 # definition against the doc's per-invocation ceiling.
-_VETO_PROBE_TIMEOUT = 25
+_VETO_PROBE_TIMEOUT = 24
 _HOLD_PROBE_TIMEOUT = 5
 
 
@@ -768,7 +802,10 @@ def _inprocess_dispatch_hold_reason(pr_number):
         # only route to a slower reader, never a weaker verdict.
         return False, None
     try:
-        return True, merge_hold_reason(int(pr_number), os.getcwd())
+        repo = _pr_worktree_root(pr_number)
+        if repo is None:
+            return True, "PR worktree lookup unavailable; refusing to assume no dispatch hold"
+        return True, merge_hold_reason(int(pr_number), str(repo))
     except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
         return True, (
             f"dispatch hold check unavailable ({type(exc).__name__}); "
@@ -849,8 +886,8 @@ def _coverage_refusal(command=""):
         # 15s of verify waits before the CLI's own coverage read starts (see
         # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout kills
         # exactly that probe mid-wait and fails open in the storm state, so
-        # this carries the shared 25s: over the shim's ceiling. The worst case
-        # counts the git probes ahead of the vetoes too (1s + 1s + 2s): 54s
+        # this carries the shared 24s: over the shim's ceiling. The worst case
+        # counts the git probes and PR lookup too (1s + 1s + 2s + 2s): 54s
         # plus process startup of the 60s hook budget, margin under 6s.
         timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
@@ -914,8 +951,9 @@ def _review_hold_refusal(command=""):
     produced none. ``fno do pr merge`` consults the precise per-branch predicate;
     this hook cannot.
 
-    NOT a third `fno` subprocess. The two vetoes above already spend 25s each
-    against a 60s harness budget with under 6s of margin, and a hook that gets
+    NOT a third `fno` subprocess. The two vetoes above already spend 24s each
+    against a 60s harness budget with under 6s of margin; PR lookup is bounded
+    to two more seconds so a hook that gets
     killed emits no verdict at all - so a third probe would let an unauthorized
     merge through on the very storm state the guard exists for. A claim lockfile
     is a file, so this reads the directory instead: microseconds, no budget.
@@ -975,7 +1013,7 @@ def _live_merge_switch_armed(repo_root, fm):
     how the hook drifts from every other reader. In-process first (the hook
     interpreter often carries the package); the resolver CLI as the fallback
     when it does not, budgeted at 5s because the lineage and coverage probes
-    elsewhere in this hook can each approach 25s of the 60s PreToolUse
+    elsewhere in this hook can each approach 24s of the 60s PreToolUse
     budget - a fresh independent wait here can push the hook past it, and a
     hook killed mid-run emits NO verdict, letting the raw merge proceed.
     Either resolver unavailable, slow, or unreadable ->
