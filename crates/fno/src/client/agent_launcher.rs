@@ -26,6 +26,7 @@ use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchSt
 /// refuses an over-cap message anyway; this only stops a close-marker-less
 /// paste from growing the carry forever.
 const MAX_PASTE_CARRY: usize = 16 * 1024;
+const MAX_LAUNCH_FLAGS_CHARS: usize = 1024;
 
 /// The editor's prompt gutter: the marker glyph and one space, before the
 /// first message row. The message wraps inside what remains.
@@ -44,9 +45,11 @@ pub(crate) struct HarnessChoice {
     pub name: String,
     pub native: bool,
     pub installed: bool,
-    /// This harness's routing rows off `fno config route inventory`, the
-    /// model picker's real choices.
+    /// This harness's configured model choices. OpenCode uses its own model
+    /// list because its model IDs carry `provider/model`.
     pub models: Vec<ModelChoice>,
+    /// A harness-specific model catalog failure, such as OpenCode's own list.
+    pub models_error: Option<String>,
     /// See harness_capabilities.toml `efforts`: `None` = no surface at all,
     /// `Some([])` = the axis exists with provider passthrough (free text),
     /// a filled list = the enumerable choices.
@@ -71,22 +74,28 @@ impl HarnessChoice {
     }
 }
 
-/// One model choice off the routing inventory: `name` is the routing row's
-/// label (what the chip shows once picked), `model` the model id the launch
-/// carries, `route` who resolves it (the agent list's hint), `verdict` the
-/// inventory's reachability verdict (`ok` selectable).
+/// One configured model choice: `name` is what the model chip shows, `model`
+/// is the launch id, and `route`/`provider` preserve its configured route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelChoice {
     pub name: String,
     pub model: String,
     pub route: String,
+    /// Derived from the configured account route; no provider list is baked in.
+    pub provider: Option<String>,
     pub verdict: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecentModelChoice {
+    pub harness: String,
+    pub choice: ModelChoice,
 }
 
 /// The catalog read's outcome (the update-probe shape): the dock opens
 /// instantly on whatever is in hand and refreshes when the probe lands. The
-/// second field of `Ok` carries the routing-inventory read's failure, when
-/// the model lists could not be fetched; the harness rows still stand.
+/// second field of `Ok` carries the account-record read's failure when model
+/// lists could not be fetched; harness rows still stand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogOutcome {
     Ok(Vec<HarnessChoice>, Option<String>),
@@ -96,13 +105,13 @@ pub(crate) enum CatalogOutcome {
 /// Which control owns the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
-    /// The agent chip: harness, model and effort folded into one value
-    /// (`claude-opus-5-5 · high`, or `claude default`). Its list is the
-    /// Conductor-style picker.
-    Agent,
+    Harness,
+    Provider,
+    Model,
     Project,
     Permission,
     Placement,
+    ExtraFlags,
     Message,
     Launch,
     /// The Unknown-outcome acknowledge chip: Enter resolves the blocked
@@ -111,26 +120,37 @@ pub(crate) enum Focus {
 }
 
 impl Focus {
-    fn tab_order() -> [Focus; 7] {
-        [
-            Focus::Agent,
+    fn tab_order(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
+        let mut order = vec![Focus::Harness];
+        if has_multiple_providers(catalog, &launcher.draft.harness()) {
+            order.push(Focus::Provider);
+        }
+        order.extend([
+            Focus::Model,
             Focus::Project,
             Focus::Permission,
             Focus::Placement,
+            Focus::ExtraFlags,
             Focus::Message,
             Focus::Launch,
-            Focus::Dismiss,
-        ]
+        ]);
+        if matches!(
+            &launcher.phase,
+            Phase::Unknown { .. } | Phase::Submitting { .. }
+        ) {
+            order.push(Focus::Dismiss);
+        }
+        order
     }
 
-    fn next(self) -> Focus {
-        let order = Self::tab_order();
+    fn next(self, launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Focus {
+        let order = Self::tab_order(launcher, catalog);
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         order[(pos + 1) % order.len()]
     }
 
-    fn prev(self) -> Focus {
-        let order = Self::tab_order();
+    fn prev(self, launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Focus {
+        let order = Self::tab_order(launcher, catalog);
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         order[(pos + order.len() - 1) % order.len()]
     }
@@ -168,6 +188,7 @@ pub(crate) enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Launcher {
     pub draft: LaunchDraft,
+    pub recent_models: Vec<RecentModelChoice>,
     pub focus: Focus,
     pub phase: Phase,
     /// The request id this dock's button armed, if a launch is owned.
@@ -185,14 +206,18 @@ pub(crate) enum PickerAction {
     Set(String),
     /// The "<harness> decides" first row: clear the pin.
     Clear,
-    /// A routing row in the agent list: pin the model (model-only, the door
-    /// resolves harness/route/account) and move to the row's harness.
+    ClearModel,
+    SetProvider(String),
+    ClearProvider,
+    /// A configured routing row: pin its harness, provider and model together.
     PickRow {
         harness: String,
         name: String,
         model: String,
+        route: String,
+        provider: Option<String>,
     },
-    /// The `<harness> default` row in the agent list: move to that harness
+    /// A harness option: move to that harness
     /// and drop any model pin.
     SetHarness(String),
     /// A row of the project dropdown: pin that candidate cwd.
@@ -273,18 +298,21 @@ pub(crate) struct LaunchDraft {
     /// carries it only while the message's second word still names it, so
     /// an edit that retargets or erases the message drops the binding.
     pub node: Option<String>,
-    /// The model id the launch carries; empty = harness default (never an
-    /// invented resolved value).
+    /// The model id the launch carries; empty = harness default.
     pub model: String,
-    /// The picked routing ROW's name, when the model pin came from one; the
-    /// chip shows it and the request rides as a model-only pin.
+    /// The configured routing row picked on the model chip.
     pub model_row: Option<String>,
+    /// The provider of the selected configured route, when present.
+    pub provider: String,
     pub effort: String,
     pub permission: String,
     pub placement: Placement,
     /// The portal index a thread placement opens through, resolved from the
     /// live layout when the placement is picked (next free index).
     pub placement_portal: u8,
+    /// Additional spawn argv, edited directly in the flags chip.
+    pub extra_flags: String,
+    pub extra_flags_cursor_chars: usize,
     pub revision: u64,
 }
 
@@ -329,10 +357,18 @@ impl LaunchDraft {
             harness: self.harness(),
             substrate: substrate.to_string(),
             model: non_empty(&self.model),
-            // A model picked from a routing row rides as a model-only pin:
-            // the door resolves the row's harness, route, account and
-            // effort. A typed model keeps the explicit --harness override.
-            model_names_harness: self.model_row.is_some() && non_empty(&self.model).is_some(),
+            provider: if self.harness() == "opencode" && self.model_row.is_some() {
+                None
+            } else {
+                non_empty(&self.provider)
+            },
+            // A row with no provider pin rides as a model-only value for the
+            // door to resolve. A provider selection carries both axes and
+            // leaves the harness explicitly pinned.
+            model_names_harness: self.harness() != "opencode"
+                && self.model_row.is_some()
+                && self.provider.is_empty()
+                && non_empty(&self.model).is_some(),
             effort: non_empty(&self.effort),
             permission_mode: non_empty(&self.permission),
             placement: placement.map(str::to_string),
@@ -349,6 +385,7 @@ impl LaunchDraft {
                     == Some(id.as_str())
             }),
             message: self.message.clone(),
+            extra_flags: Vec::new(),
         }
     }
 
@@ -365,6 +402,57 @@ impl LaunchDraft {
 fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Split the flags field into argv without invoking a shell. Quotes and
+/// backslashes group values; expansion and command substitution never run.
+fn parse_extra_flags(input: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for c in input.chars() {
+        if escaped {
+            word.push(c);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('"') if c == '\\' => escaped = true,
+            Some(_) => word.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                started = true;
+            }
+            None if c == '\\' => {
+                escaped = true;
+                started = true;
+            }
+            None if c.is_whitespace() => {
+                if started {
+                    args.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            None => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if escaped {
+        return Err("extra launch flags end with an unfinished escape".to_string());
+    }
+    if quote.is_some() {
+        return Err("extra launch flags contain an unclosed quote".to_string());
+    }
+    if started {
+        args.push(word);
+    }
+    Ok(args)
 }
 
 /// A terminal launch attempt the View remembers ACROSS dock close/reopen,
@@ -392,7 +480,8 @@ pub(crate) fn open(view: &mut View) {
         Some(l) => l,
         None => Launcher {
             draft: fresh_draft(view),
-            focus: Focus::Agent,
+            recent_models: Vec::new(),
+            focus: Focus::Harness,
             phase: Phase::Editing,
             armed: None,
             next_request_id: 1,
@@ -422,9 +511,12 @@ pub(crate) fn open(view: &mut View) {
     }
     // A missing OR degraded catalog re-probes: one transient failure must
     // not stick for the session while a healthy one stays last-outcome-wins.
-    // A PARTIAL read (`Ok` harness rows, `Some` model-read failure) re-probes
-    // too: the default rows launch, but the next open deserves its models.
-    if !matches!(view.launcher_catalog, Some(CatalogOutcome::Ok(_, None))) {
+    // A partial model read re-probes too: defaults still launch, but the next
+    // open retries any failed routing or harness-specific model list.
+    if !matches!(
+        &view.launcher_catalog,
+        Some(CatalogOutcome::Ok(rows, None)) if rows.iter().all(|row| row.models_error.is_none())
+    ) {
         view.catalog_want = true;
     }
 }
@@ -439,6 +531,10 @@ pub(crate) fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutco
                 l.draft.harness_idx = 0;
             }
         }
+    }
+    if l.focus == Focus::Provider && !has_multiple_providers(catalog, &l.draft.harness()) {
+        l.focus = Focus::Model;
+        l.picker = None;
     }
 }
 
@@ -490,7 +586,7 @@ pub(crate) fn open_with(
         launcher.draft.project_idx = idx;
     }
     launcher.phase = Phase::Editing;
-    launcher.focus = Focus::Agent;
+    launcher.focus = Focus::Harness;
     launcher.draft.bump();
     Ok(())
 }
@@ -520,10 +616,13 @@ fn fresh_draft(view: &View) -> LaunchDraft {
         node: None,
         model: String::new(),
         model_row: None,
+        provider: String::new(),
         effort: String::new(),
         permission: String::new(),
         placement: Placement::default(),
         placement_portal: 0,
+        extra_flags: String::new(),
+        extra_flags_cursor_chars: 0,
         revision: 1,
     }
 }
@@ -626,6 +725,22 @@ async fn submit(
     }
     let request_id = l.next_request_id;
     l.next_request_id += 1;
+    if !l.draft.provider.is_empty() && l.draft.model.is_empty() {
+        l.phase = Phase::Refused {
+            request_id,
+            reason: "choose a model for the selected provider".to_string(),
+        };
+        return Ok(());
+    }
+    let extra_flags = match parse_extra_flags(&l.draft.extra_flags)
+        .and_then(|flags| crate::dispatch_launch::validate_extra_flags(&flags).map(|_| flags))
+    {
+        Ok(flags) => flags,
+        Err(reason) => {
+            l.phase = Phase::Refused { request_id, reason };
+            return Ok(());
+        }
+    };
     // The catalog stays the authority on availability: an unavailable
     // (not-installed or non-native) selection refuses pre-wire with its own
     // reason, draft intact.
@@ -642,7 +757,8 @@ async fn submit(
         l.phase = Phase::Refused { request_id, reason };
         return Ok(());
     }
-    let request = l.draft.request(request_id);
+    let mut request = l.draft.request(request_id);
+    request.extra_flags = extra_flags;
     l.armed = Some(request_id);
     l.phase = Phase::Submitting { request_id };
     write_msg(sock_w, &ClientMsg::AgentLaunch(request))
@@ -877,6 +993,36 @@ fn backspace(draft: &mut LaunchDraft) {
     draft.bump();
 }
 
+fn insert_extra_flag_char(draft: &mut LaunchDraft, c: char) {
+    if draft.extra_flags.chars().count() >= MAX_LAUNCH_FLAGS_CHARS {
+        return;
+    }
+    let byte = char_byte(&draft.extra_flags, draft.extra_flags_cursor_chars);
+    draft.extra_flags.insert(byte, c);
+    draft.extra_flags_cursor_chars += 1;
+    draft.bump();
+}
+
+fn backspace_extra_flag(draft: &mut LaunchDraft) {
+    if draft.extra_flags_cursor_chars == 0 {
+        return;
+    }
+    let cur = char_byte(&draft.extra_flags, draft.extra_flags_cursor_chars);
+    let prev = char_byte(&draft.extra_flags, draft.extra_flags_cursor_chars - 1);
+    draft.extra_flags.replace_range(prev..cur, "");
+    draft.extra_flags_cursor_chars -= 1;
+    draft.bump();
+}
+
+fn move_extra_flag_cursor(draft: &mut LaunchDraft, delta: i32) {
+    let len = draft.extra_flags.chars().count();
+    draft.extra_flags_cursor_chars = if delta < 0 {
+        draft.extra_flags_cursor_chars.saturating_sub(1)
+    } else {
+        (draft.extra_flags_cursor_chars + 1).min(len)
+    };
+}
+
 fn char_byte(s: &str, chars: usize) -> usize {
     s.char_indices()
         .nth(chars)
@@ -934,7 +1080,7 @@ pub(crate) async fn launcher_keys(
             break;
         }
         // The open picker consumes the keys first: Up/Down move, Left/Right
-        // cycle the effort (agent list), Enter commits, Esc closes the
+        // cycle effort in the model picker, Enter commits, Esc closes the
         // PICKER only (a second Esc closes the composer). Everything else -
         // Tab included - falls through to the dock.
         if view.launcher.as_ref().is_some_and(|l| l.picker.is_some()) {
@@ -952,8 +1098,8 @@ pub(crate) async fn launcher_keys(
                         // Tab hands the keyboard back to the dock, which
                         // then moves focus normally.
                     }
-                    LKey::Left | LKey::Right if picker.field == Focus::Agent => {
-                        // In the agent list the arrows cycle the current
+                    LKey::Left | LKey::Right if picker.field == Focus::Model => {
+                        // In the model list the arrows cycle the current
                         // harness's effort (default first); the list rebuilds
                         // so the chip's value stays the one truth.
                         let delta = if matches!(key, LKey::Left) { -1 } else { 1 };
@@ -1016,12 +1162,14 @@ pub(crate) async fn launcher_keys(
             }
             LKey::Tab => {
                 if let Some(l) = view.launcher.as_mut() {
-                    l.focus = l.focus.next();
+                    let focus = l.focus.next(l, &view.launcher_catalog);
+                    l.focus = focus;
                 }
             }
             LKey::BackTab => {
                 if let Some(l) = view.launcher.as_mut() {
-                    l.focus = l.focus.prev();
+                    let focus = l.focus.prev(l, &view.launcher_catalog);
+                    l.focus = focus;
                 }
             }
             LKey::Up | LKey::Down => {
@@ -1037,7 +1185,8 @@ pub(crate) async fn launcher_keys(
                     if l.focus == Focus::Message {
                         move_up_down(&mut l.draft, delta);
                     } else if delta < 0 {
-                        l.focus = l.focus.prev();
+                        let focus = l.focus.prev(l, &view.launcher_catalog);
+                        l.focus = focus;
                     } else if let Some(anchor) = open_anchor {
                         open_picker_at(
                             l,
@@ -1047,7 +1196,8 @@ pub(crate) async fn launcher_keys(
                             l.focus,
                         );
                     } else {
-                        l.focus = l.focus.next();
+                        let focus = l.focus.next(l, &view.launcher_catalog);
+                        l.focus = focus;
                     }
                 }
             }
@@ -1055,10 +1205,12 @@ pub(crate) async fn launcher_keys(
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
                         Focus::Message => move_left(&mut l.draft),
-                        Focus::Agent => {
+                        Focus::ExtraFlags => move_extra_flag_cursor(&mut l.draft, -1),
+                        Focus::Harness => {
                             cycle_harness(&mut l.draft, -1);
                             clear_unoffered_pins(&mut l.draft, &view.launcher_catalog);
                         }
+                        Focus::Provider => cycle_provider(&mut l.draft, -1, &view.launcher_catalog),
                         Focus::Project => {
                             l.draft.project_idx = l.draft.project_idx.saturating_sub(1);
                             l.draft.bump();
@@ -1071,10 +1223,12 @@ pub(crate) async fn launcher_keys(
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
                         Focus::Message => move_right(&mut l.draft),
-                        Focus::Agent => {
+                        Focus::ExtraFlags => move_extra_flag_cursor(&mut l.draft, 1),
+                        Focus::Harness => {
                             cycle_harness(&mut l.draft, 1);
                             clear_unoffered_pins(&mut l.draft, &view.launcher_catalog);
                         }
+                        Focus::Provider => cycle_provider(&mut l.draft, 1, &view.launcher_catalog),
                         Focus::Project => {
                             if l.draft.project_idx + 1 < l.draft.projects.len() {
                                 l.draft.project_idx += 1;
@@ -1089,6 +1243,7 @@ pub(crate) async fn launcher_keys(
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
                         Focus::Message => backspace(&mut l.draft),
+                        Focus::ExtraFlags => backspace_extra_flag(&mut l.draft),
                         Focus::Permission => {
                             l.draft.permission.pop();
                             l.draft.bump();
@@ -1158,6 +1313,7 @@ pub(crate) async fn launcher_keys(
                             );
                         }
                         Focus::Message => insert_char(&mut l.draft, c),
+                        Focus::ExtraFlags => insert_extra_flag_char(&mut l.draft, c),
                         Focus::Permission => {
                             // Free text only where the capability table
                             // declares an empty choice list; the picker's
@@ -1180,6 +1336,13 @@ pub(crate) async fn launcher_keys(
                         let room = MAX_MAIL_TEXT.saturating_sub(l.draft.message.chars().count());
                         for c in text.chars().take(room) {
                             insert_char(&mut l.draft, c);
+                        }
+                    } else if l.focus == Focus::ExtraFlags {
+                        let room = MAX_LAUNCH_FLAGS_CHARS
+                            .saturating_sub(l.draft.extra_flags.chars().count());
+                        for c in text.chars().take(room) {
+                            let c = if c.is_whitespace() { ' ' } else { c };
+                            insert_extra_flag_char(&mut l.draft, c);
                         }
                     }
                     // A paste while another field is focused: the bytes are
@@ -1226,11 +1389,24 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         return;
     };
     if let Some(name) = &draft.model_row {
-        if !row.models.iter().any(|m| &m.name == name) {
+        if !row
+            .models
+            .iter()
+            .any(|m| &m.name == name && m.provider.as_deref().unwrap_or_default() == draft.provider)
+        {
             draft.model.clear();
             draft.model_row = None;
             draft.bump();
         }
+    }
+    if !draft.provider.is_empty()
+        && !row
+            .models
+            .iter()
+            .any(|m| m.provider.as_deref() == Some(draft.provider.as_str()))
+    {
+        draft.provider.clear();
+        draft.bump();
     }
     // A missing axis (None) clears any pin outright: the new harness has no
     // surface for it, so the value is stale by definition. Some([]) keeps
@@ -1269,6 +1445,61 @@ fn cycle_harness(draft: &mut LaunchDraft, delta: i32) {
     draft.bump();
 }
 
+fn catalog_models<'a>(catalog: &'a Option<CatalogOutcome>, harness: &str) -> Vec<&'a ModelChoice> {
+    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+        return Vec::new();
+    };
+    rows.iter()
+        .find(|row| row.name == harness)
+        .map(|row| row.models.iter().collect())
+        .unwrap_or_default()
+}
+
+fn providers_for_harness(catalog: &Option<CatalogOutcome>, harness: &str) -> Vec<String> {
+    let mut providers: Vec<String> = catalog_models(catalog, harness)
+        .into_iter()
+        .filter_map(|model| model.provider.clone())
+        .collect();
+    providers.sort();
+    providers.dedup();
+    providers
+}
+
+fn has_multiple_providers(catalog: &Option<CatalogOutcome>, harness: &str) -> bool {
+    let models = catalog_models(catalog, harness);
+    let explicit = providers_for_harness(catalog, harness).len();
+    let default = usize::from(models.iter().any(|model| model.provider.is_none()));
+    explicit + default > 1
+}
+
+fn cycle_provider(draft: &mut LaunchDraft, delta: i32, catalog: &Option<CatalogOutcome>) {
+    let providers = providers_for_harness(catalog, &draft.harness());
+    if providers.is_empty() {
+        return;
+    }
+    let mut choices = vec![String::new()];
+    choices.extend(providers);
+    let current = choices
+        .iter()
+        .position(|p| p == &draft.provider)
+        .unwrap_or(0);
+    let len = choices.len() as i32;
+    let next = (current as i32 + delta).rem_euclid(len) as usize;
+    draft.provider = choices[next].clone();
+    if let Some(name) = &draft.model_row {
+        if !choices.iter().any(|provider| {
+            provider == &draft.provider
+                && catalog_models(catalog, &draft.harness())
+                    .iter()
+                    .any(|m| &m.name == name && m.provider.as_deref() == Some(provider))
+        }) {
+            draft.model.clear();
+            draft.model_row = None;
+        }
+    }
+    draft.bump();
+}
+
 // -- catalog -----------------------------------------------------------------
 
 /// The harness capability contract the mux already ships and the spawn door
@@ -1285,10 +1516,10 @@ fn next_free_portal(view: &View) -> u8 {
     (0..=u8::MAX).find(|p| !used.contains(p)).unwrap_or(0)
 }
 
-/// The catalog read: a compiled-in table plus PATH stats, then one bounded
-/// read of the routing inventory for the model lists. Delivered through the
-/// probe channel so the dock's render flow has one shape for "not yet read"
-/// and "read"; async because the inventory read is a subprocess.
+/// The catalog read: a compiled-in table plus PATH stats, then bounded reads
+/// for configured routing rows and OpenCode's installed model list. Delivered
+/// through the probe channel so the dock has one "not yet read" and "read"
+/// shape; async because both reads are subprocesses.
 pub(crate) async fn load_catalog() -> CatalogOutcome {
     let Ok(parsed) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
         return CatalogOutcome::Degraded("harness catalog: capability table unparseable".into());
@@ -1317,6 +1548,7 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                 native: true,
                 installed: on_path(name),
                 models: Vec::new(),
+                models_error: None,
                 efforts,
                 permission_modes,
             }
@@ -1326,96 +1558,187 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     if rows.is_empty() {
         return CatalogOutcome::Degraded("harness catalog: empty capability table".into());
     }
-    // Models: one bounded inventory read (the same door `fno` resolves),
-    // never a per-harness probe. A failure degrades the MODEL lists only:
-    // the harness rows stand, and the agent list names the failure with the
-    // default rows still launchable. 30s: the inventory door has measured
-    // 22s wall on a loaded machine - a 5s budget turned "cold open" into
-    // "degraded for the session", which is the exact defect this fixes.
+    // Non-OpenCode model choices come from configured account records.
+    // OpenCode owns its provider/model IDs and supplies them through its model
+    // list command. Both reads are bounded and run off the UI loop.
     let bin = crate::server::fno_bin().to_string_lossy().into_owned();
-    let argv = [bin.as_str(), "config", "route", "inventory", "--json"];
-    let inv = crate::dispatch_launch::run_fno_captured(
-        &argv,
-        std::time::Duration::from_secs(30),
-        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-    )
-    .await;
-    let mut models_err = Some("routing inventory unavailable".to_string());
-    let by_harness: std::collections::HashMap<String, Vec<ModelChoice>> = match inv {
-        Some((true, stdout, _)) => {
-            // The door prints one JSON document, pretty over many lines;
-            // parse the whole buffer, then fall back to a lone JSON line
-            // for callers that emit warning text around it.
-            let parsed: Option<serde_json::Value> =
-                serde_json::from_str(stdout.trim_start()).ok().or_else(|| {
-                    stdout
-                        .lines()
-                        .rev()
-                        .find_map(|l| serde_json::from_str(l).ok())
-                });
-            match parsed
-                .as_ref()
-                .and_then(|v| v.get("models"))
-                .and_then(|m| m.as_array())
-            {
-                Some(items) => {
-                    let mut map: std::collections::HashMap<String, Vec<ModelChoice>> =
-                        std::collections::HashMap::new();
-                    for row in items {
-                        let (Some(name), Some(harness)) = (
-                            row.get("name").and_then(|x| x.as_str()),
-                            row.get("harness").and_then(|x| x.as_str()),
-                        ) else {
-                            continue;
-                        };
-                        // `model_id` is the raw id the launch carries; older
-                        // inventories only have the display cell, which may
-                        // carry a family prefix.
-                        let Some(model) = row
-                            .get("model_id")
-                            .and_then(|x| x.as_str())
-                            .or_else(|| row.get("model").and_then(|x| x.as_str()))
-                        else {
-                            continue;
-                        };
-                        let route = row
-                            .get("route")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let verdict = row
-                            .get("verdict")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        map.entry(harness.to_string())
-                            .or_default()
-                            .push(ModelChoice {
-                                name: name.to_string(),
-                                model: model.to_string(),
-                                route,
-                                verdict,
-                            });
-                    }
-                    models_err = None;
-                    map
-                }
-                // The read succeeded but carried no model list: name the
-                // shape, not the transport.
-                None => {
-                    models_err = Some("routing inventory response unreadable".to_string());
-                    std::collections::HashMap::new()
-                }
+    let account_argv = [bin.as_str(), "config", "get", "accounts.records", "-J"];
+    let opencode_argv = ["opencode", "models", "--pure"];
+    let opencode_installed = rows
+        .iter()
+        .any(|row| row.name == "opencode" && row.selectable());
+    let timeout = std::time::Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let (accounts, opencode) = tokio::join!(
+        crate::dispatch_launch::run_fno_captured(&account_argv, timeout, deadline),
+        async {
+            if opencode_installed {
+                crate::dispatch_launch::run_fno_captured(&opencode_argv, timeout, deadline).await
+            } else {
+                None
             }
         }
-        _ => std::collections::HashMap::new(),
+    );
+    let (by_harness, models_err) = match accounts {
+        Some((true, stdout, _)) => match parse_configured_account_models(&stdout) {
+            Ok(rows) => (rows, None),
+            Err(error) => (std::collections::HashMap::new(), Some(error)),
+        },
+        Some((false, _, stderr)) => (
+            std::collections::HashMap::new(),
+            Some(format!("account records unavailable: {}", stderr.trim())),
+        ),
+        None => (
+            std::collections::HashMap::new(),
+            Some("account records could not be read".to_string()),
+        ),
+    };
+    let (opencode_models, opencode_error) = if opencode_installed {
+        match opencode {
+            Some((true, stdout, _)) => {
+                let models = parse_opencode_models(&stdout);
+                if models.is_empty() {
+                    (
+                        models,
+                        Some("opencode models returned no provider/model rows".into()),
+                    )
+                } else {
+                    (models, None)
+                }
+            }
+            Some((false, _, stderr)) => (
+                Vec::new(),
+                Some(format!("opencode models failed: {}", stderr.trim())),
+            ),
+            None => (Vec::new(), Some("opencode models could not be read".into())),
+        }
+    } else {
+        (Vec::new(), None)
     };
     for row in &mut rows {
-        if let Some(list) = by_harness.get(&row.name) {
+        if row.name == "opencode" {
+            row.models = opencode_models.clone();
+            row.models_error = opencode_error.clone();
+        } else if let Some(list) = by_harness.get(&row.name) {
             row.models = list.clone();
         }
     }
     CatalogOutcome::Ok(rows, models_err)
+}
+
+pub(crate) fn provider_from_route(route: &str) -> Option<String> {
+    route
+        .split_once('/')
+        .map(|(provider, _)| provider.trim())
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn parse_configured_account_models(
+    stdout: &str,
+) -> Result<std::collections::HashMap<String, Vec<ModelChoice>>, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|_| "account records response was unreadable".to_string())?;
+    let records_value = value
+        .get("value")
+        .ok_or_else(|| "account records response had no value list".to_string())?;
+    if records_value.is_null() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let records = records_value
+        .as_array()
+        .ok_or_else(|| "account records response had no value list".to_string())?;
+    let mut by_harness: std::collections::HashMap<String, Vec<ModelChoice>> =
+        std::collections::HashMap::new();
+    for record in records {
+        let Some(harness) = record.get("harness").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let route = record
+            .get("route")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim();
+        let declared_provider = record
+            .get("route_provider_id")
+            .or_else(|| record.get("provider"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty());
+        let declared_model = record
+            .get("model_name")
+            .or_else(|| record.get("model"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        let route_provider = provider_from_route(route);
+        let route_model = route.split_once('/').map(|(_, model)| model.trim());
+        let provider = declared_provider
+            .map(str::to_string)
+            .or(route_provider)
+            .or_else(|| declared_model.and_then(provider_from_route));
+        let model_source = declared_model.or(route_model);
+        let Some(model_source) = model_source.filter(|model| !model.is_empty()) else {
+            continue;
+        };
+        let model_id = provider
+            .as_ref()
+            .and_then(|provider| {
+                model_source
+                    .strip_prefix(provider)
+                    .and_then(|rest| rest.strip_prefix('/'))
+            })
+            .unwrap_or(model_source)
+            .to_string();
+        let route = if route.is_empty() {
+            provider
+                .as_ref()
+                .map(|provider| format!("{provider}/{model_id}"))
+                .unwrap_or_default()
+        } else {
+            route.to_string()
+        };
+        let name = if model_id.is_empty() {
+            continue;
+        } else {
+            model_id.clone()
+        };
+        let choices = by_harness.entry(harness.to_string()).or_default();
+        if choices
+            .iter()
+            .any(|choice| choice.model == model_id && choice.provider == provider)
+        {
+            continue;
+        }
+        choices.push(ModelChoice {
+            name,
+            model: model_id,
+            route,
+            provider,
+            verdict: "ok".to_string(),
+        });
+    }
+    Ok(by_harness)
+}
+
+pub(crate) fn parse_opencode_models(stdout: &str) -> Vec<ModelChoice> {
+    let mut models = Vec::new();
+    for id in stdout.lines().map(str::trim).filter(|id| !id.is_empty()) {
+        let Some(provider) = provider_from_route(id) else {
+            continue;
+        };
+        if models.iter().any(|model: &ModelChoice| model.name == id) {
+            continue;
+        }
+        models.push(ModelChoice {
+            name: id.to_string(),
+            model: id.to_string(),
+            route: String::new(),
+            provider: Some(provider),
+            verdict: "ok".to_string(),
+        });
+    }
+    models
 }
 
 // -- picker ------------------------------------------------------------------
@@ -1426,6 +1749,11 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
 #[cfg(test)]
 pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     if !is_picker_chip(l.focus) {
+        return false;
+    }
+    if l.focus == Focus::Provider
+        && !has_multiple_providers(&view.launcher_catalog, &l.draft.harness())
+    {
         return false;
     }
     let Some(anchor) = picker_anchor(l, view) else {
@@ -1484,24 +1812,22 @@ fn open_picker_at(
     let Some((row, col)) = anchor else {
         return false;
     };
+    if field == Focus::Provider && !has_multiple_providers(catalog, &l.draft.harness()) {
+        return false;
+    }
     let (rows, actions) = picker_rows(l, catalog, backlog);
     let (all_rows, all_actions) = (rows.clone(), actions.clone());
-    // The agent list names its own effort-cycling grammar in the footer.
-    let footer = if field == Focus::Agent {
+    // The model picker names its effort-cycling grammar in the footer.
+    let footer = if field == Focus::Model {
         "up/down move \u{b7} left/right effort \u{b7} type to filter \u{b7} enter pick \u{b7} esc back"
     } else {
         "up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"
     };
-    let title = if field == Focus::Agent {
-        "agent"
-    } else if field == Focus::Project {
-        "project"
-    } else {
-        ""
-    };
+    let title = title_for(field);
     let mut popup = Popup::new(rows, Anchor::At { row, col })
         .footer(footer)
-        .full_chrome();
+        .full_chrome()
+        .full_width_selection();
     if !title.is_empty() {
         popup = popup.title(title);
     }
@@ -1552,12 +1878,15 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
             }
         }
     }
-    let footer = if picker.field == Focus::Agent {
+    let footer = if picker.field == Focus::Model {
         "up/down move \u{b7} left/right effort \u{b7} type to filter \u{b7} enter pick \u{b7} esc back"
     } else {
         "up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"
     };
-    let mut popup = Popup::new(rows, picker.anchor).footer(footer).full_chrome();
+    let mut popup = Popup::new(rows, picker.anchor)
+        .footer(footer)
+        .full_chrome()
+        .full_width_selection();
     if !picker.filter.is_empty() {
         popup = popup.title(format!(
             "{} \u{b7} filter: {}",
@@ -1580,7 +1909,9 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
 /// can never split the two spellings apart.
 fn title_for(field: Focus) -> String {
     match field {
-        Focus::Agent => "agent".to_string(),
+        Focus::Harness => "harness".to_string(),
+        Focus::Provider => "provider".to_string(),
+        Focus::Model => "model".to_string(),
         Focus::Project => "project".to_string(),
         _ => String::new(),
     }
@@ -1648,17 +1979,6 @@ fn push_entry(
     actions.push(action);
 }
 
-/// One header row push (inert row, no action).
-fn push_row(
-    rows: &mut Vec<PopupRow>,
-    actions: &mut Vec<Option<PickerAction>>,
-    row: PopupRow,
-    action: Option<PickerAction>,
-) {
-    rows.push(row);
-    actions.push(action);
-}
-
 /// entry carrying its reason (the popup's greyed-with-reason grammar).
 fn picker_rows(
     l: &Launcher,
@@ -1674,121 +1994,233 @@ fn picker_rows(
         format!("{harness} decides")
     };
     match l.focus {
-        Focus::Agent => {
-            // The Conductor-style agent list: one header per installed
-            // native harness, then `<harness> default`, then its routing
-            // rows with the route as hint. A read in flight shows one
-            // disabled `reading models...` row; a failed one names the
-            // reason - the default rows need no read.
-            match catalog {
-                Some(CatalogOutcome::Ok(catalog_rows, models_err)) => {
-                    for h in catalog_rows.iter().filter(|h| h.selectable()) {
-                        push_row(
-                            &mut rows,
-                            &mut actions,
-                            PopupRow::Header(h.name.clone()),
-                            None,
-                        );
-                        let picked_row = h
-                            .models
-                            .iter()
-                            .any(|m| Some(&m.name) == l.draft.model_row.as_ref())
-                            && !l.draft.model.is_empty();
-                        let default_glyph = if !picked_row && h.name == l.draft.harness() {
+        Focus::Harness => match catalog {
+            Some(CatalogOutcome::Ok(rows_found, _)) => {
+                for h in rows_found.iter().filter(|h| h.selectable()) {
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        if h.name == harness {
                             "\u{2713}"
                         } else {
                             "\u{2022}"
-                        };
-                        push_entry(
-                            &mut rows,
-                            &mut actions,
-                            default_glyph,
-                            &format!("{name} default", name = h.name),
-                            "",
-                            true,
-                            Some(PickerAction::SetHarness(h.name.clone())),
-                        );
-                        for m in &h.models {
-                            let check = Some(&m.name) == l.draft.model_row.as_ref()
-                                && !l.draft.model.is_empty();
-                            let hint = if m.route.is_empty() {
-                                m.model.clone()
-                            } else {
-                                m.route.clone()
-                            };
-                            if m.verdict == "ok" {
-                                push_entry(
-                                    &mut rows,
-                                    &mut actions,
-                                    if check { "\u{2713}" } else { "\u{2022}" },
-                                    &m.name,
-                                    &hint,
-                                    true,
-                                    Some(PickerAction::PickRow {
-                                        harness: h.name.clone(),
-                                        name: m.name.clone(),
-                                        model: m.model.clone(),
-                                    }),
-                                );
-                            } else {
-                                push_entry(
-                                    &mut rows,
-                                    &mut actions,
-                                    "\u{2022}",
-                                    &m.name,
-                                    &format!("{hint} ({})", m.verdict),
-                                    false,
-                                    None,
-                                );
-                            }
-                        }
-                    }
-                    // Every harness row failed selectable(): the list would
-                    // render as a bare title. Name the reason, the way the
-                    // project and node pickers name an empty list.
-                    if rows.is_empty() {
+                        },
+                        &h.name,
+                        "",
+                        true,
+                        Some(PickerAction::SetHarness(h.name.clone())),
+                    );
+                }
+                if rows.is_empty() {
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        "no harness installed",
+                        "install a harness, then reopen",
+                        false,
+                        None,
+                    );
+                }
+            }
+            None => push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "reading harnesses...",
+                "",
+                false,
+                None,
+            ),
+            Some(CatalogOutcome::Degraded(error)) => push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "harness list unavailable",
+                error,
+                false,
+                None,
+            ),
+        },
+        Focus::Provider => {
+            push_entry(
+                &mut rows,
+                &mut actions,
+                if l.draft.provider.is_empty() {
+                    "\u{2713}"
+                } else {
+                    "\u{2022}"
+                },
+                "any provider",
+                "",
+                true,
+                Some(PickerAction::ClearProvider),
+            );
+            let providers = providers_for_harness(catalog, &harness);
+            for provider in providers {
+                push_entry(
+                    &mut rows,
+                    &mut actions,
+                    if provider == l.draft.provider {
+                        "\u{2713}"
+                    } else {
+                        "\u{2022}"
+                    },
+                    &provider,
+                    "",
+                    true,
+                    Some(PickerAction::SetProvider(provider)),
+                );
+            }
+            if rows.len() == 1 {
+                push_entry(
+                    &mut rows,
+                    &mut actions,
+                    "\u{2022}",
+                    "no configured providers",
+                    "from this harness",
+                    false,
+                    None,
+                );
+            }
+        }
+        Focus::Model => match catalog {
+            Some(CatalogOutcome::Ok(rows_found, models_err)) => {
+                let models = rows_found
+                    .iter()
+                    .find(|row| row.name == harness)
+                    .map(|row| &row.models);
+                let recent: Vec<&RecentModelChoice> = l
+                    .recent_models
+                    .iter()
+                    .filter(|recent| {
+                        recent.harness == harness
+                            && models.is_some_and(|models| {
+                                models.iter().any(|model| {
+                                    model.name == recent.choice.name
+                                        && model.model == recent.choice.model
+                                })
+                            })
+                            && (l.draft.provider.is_empty()
+                                || recent.choice.provider.as_deref()
+                                    == Some(l.draft.provider.as_str()))
+                    })
+                    .take(5)
+                    .collect();
+                if !recent.is_empty() {
+                    rows.push(PopupRow::Header("recent".to_string()));
+                    actions.push(None);
+                    for recent in recent {
                         push_entry(
                             &mut rows,
                             &mut actions,
                             "\u{2022}",
-                            "no harness installed",
-                            "install a harness, then reopen",
-                            false,
-                            None,
+                            &recent.choice.name,
+                            &recent.choice.route,
+                            true,
+                            Some(PickerAction::PickRow {
+                                harness: recent.harness.clone(),
+                                name: recent.choice.name.clone(),
+                                model: recent.choice.model.clone(),
+                                route: recent.choice.route.clone(),
+                                provider: recent.choice.provider.clone(),
+                            }),
                         );
                     }
-                    if let Some(err) = models_err {
+                }
+                rows.push(PopupRow::Header("configured".to_string()));
+                actions.push(None);
+                push_entry(
+                    &mut rows,
+                    &mut actions,
+                    if l.draft.model.is_empty() {
+                        "\u{2713}"
+                    } else {
+                        "\u{2022}"
+                    },
+                    "harness default",
+                    "",
+                    true,
+                    Some(PickerAction::ClearModel),
+                );
+                if let Some(models) = models {
+                    for m in models.iter().filter(|m| {
+                        l.draft.provider.is_empty()
+                            || m.provider.as_deref() == Some(l.draft.provider.as_str())
+                    }) {
+                        let check = Some(&m.name) == l.draft.model_row.as_ref()
+                            && !l.draft.model.is_empty();
+                        let hint = if m.route.is_empty() && m.model != m.name {
+                            m.model.clone()
+                        } else if m.route == m.model {
+                            String::new()
+                        } else {
+                            m.route.clone()
+                        };
+                        push_entry(
+                            &mut rows,
+                            &mut actions,
+                            if check { "\u{2713}" } else { "\u{2022}" },
+                            &m.name,
+                            &hint,
+                            m.verdict == "ok",
+                            (m.verdict == "ok").then(|| PickerAction::PickRow {
+                                harness: harness.clone(),
+                                name: m.name.clone(),
+                                model: m.model.clone(),
+                                route: m.route.clone(),
+                                provider: m.provider.clone(),
+                            }),
+                        );
+                    }
+                }
+                let harness_error = rows_found
+                    .iter()
+                    .find(|row| row.name == harness)
+                    .and_then(|row| row.models_error.as_deref());
+                if let Some(error) = harness_error {
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        "model list unavailable",
+                        error,
+                        false,
+                        None,
+                    );
+                } else if harness != "opencode" {
+                    if let Some(error) = models_err {
                         push_entry(
                             &mut rows,
                             &mut actions,
                             "\u{2022}",
                             "model list unavailable",
-                            err,
+                            error,
                             false,
                             None,
                         );
                     }
                 }
-                None => push_entry(
-                    &mut rows,
-                    &mut actions,
-                    "\u{2022}",
-                    "reading models...",
-                    "",
-                    false,
-                    None,
-                ),
-                Some(CatalogOutcome::Degraded(e)) => push_entry(
-                    &mut rows,
-                    &mut actions,
-                    "\u{2022}",
-                    "model list unavailable",
-                    e,
-                    false,
-                    None,
-                ),
             }
-        }
+            None => push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "reading models...",
+                "",
+                false,
+                None,
+            ),
+            Some(CatalogOutcome::Degraded(error)) => push_entry(
+                &mut rows,
+                &mut actions,
+                "\u{2022}",
+                "model list unavailable",
+                error,
+                false,
+                None,
+            ),
+        },
         Focus::Project => {
             // The project dropdown: the draft's candidate cwds, basename as
             // the label, the full path as the hint. Enter on the chip opens
@@ -1952,6 +2384,8 @@ pub(crate) fn apply_picker_action(
             harness,
             name,
             model,
+            route,
+            provider,
         } => {
             // The row's harness moves first so the pin the pick carries is
             // judged against the RIGHT harness's rows; the picked model
@@ -1960,9 +2394,51 @@ pub(crate) fn apply_picker_action(
                 l.draft.harness_idx = idx;
             }
             l.draft.model = model;
-            l.draft.model_row = Some(name);
+            l.draft.model_row = Some(name.clone());
+            l.draft.provider = provider.unwrap_or_default();
+            let recent_model = ModelChoice {
+                name: name.clone(),
+                model: l.draft.model.clone(),
+                route,
+                provider: non_empty(&l.draft.provider),
+                verdict: "ok".to_string(),
+            };
+            l.recent_models
+                .retain(|recent| recent.harness != harness || recent.choice.name != name);
+            l.recent_models.insert(
+                0,
+                RecentModelChoice {
+                    harness: harness.clone(),
+                    choice: recent_model,
+                },
+            );
+            l.recent_models.truncate(5);
             l.draft.bump();
             clear_unoffered_pins(&mut l.draft, catalog);
+        }
+        PickerAction::SetProvider(provider) => {
+            l.draft.provider = provider;
+            if let Some(name) = &l.draft.model_row {
+                if !catalog_models(catalog, &l.draft.harness()).iter().any(|m| {
+                    &m.name == name && m.provider.as_deref() == Some(l.draft.provider.as_str())
+                }) {
+                    l.draft.model.clear();
+                    l.draft.model_row = None;
+                }
+            }
+            l.draft.bump();
+        }
+        PickerAction::ClearProvider => {
+            l.draft.provider.clear();
+            l.draft.model.clear();
+            l.draft.model_row = None;
+            l.draft.bump();
+        }
+        PickerAction::ClearModel => {
+            l.draft.model.clear();
+            l.draft.model_row = None;
+            l.draft.provider.clear();
+            l.draft.bump();
         }
         PickerAction::SetHarness(name) => {
             if let Some(idx) = l.draft.harnesses.iter().position(|h| *h == name) {
@@ -2015,50 +2491,56 @@ pub(crate) fn apply_picker_action(
 
 // -- render ------------------------------------------------------------------
 
-/// The agent chip's value: the pick itself. A pinned model shows `model ·
-/// effort`; no model shows `{harness} default`; nothing to show shows the
-/// label word `agent`.
-fn agent_label(d: &LaunchDraft, catalog: &Option<CatalogOutcome>) -> String {
-    let harness = if d.harnesses.is_empty() {
-        match catalog {
-            None => String::new(),
-            Some(CatalogOutcome::Degraded(_)) => String::new(),
-            Some(CatalogOutcome::Ok(rows, _)) => rows
-                .iter()
-                .find(|r| r.selectable())
-                .map(|r| r.name.clone())
-                .unwrap_or_default(),
-        }
-    } else {
-        d.harness()
-    };
-    let base = if let Some(row) = &d.model_row {
-        // The picked routing ROW's name is the value the operator chose;
-        // the model id rides the launch.
-        row.clone()
-    } else if !d.model.is_empty() {
-        d.model.clone()
-    } else if harness.is_empty() {
-        return "agent".to_string();
-    } else {
-        format!("{harness} default")
-    };
-    if d.effort.is_empty() {
+/// The model chip shows the selected configured row or explicit model id.
+fn model_label(d: &LaunchDraft) -> String {
+    let base = d
+        .model_row
+        .clone()
+        .or_else(|| non_empty(&d.model))
+        .unwrap_or_else(|| "default".to_string());
+    let label = if d.effort.is_empty() {
         base
     } else {
         format!("{base} \u{b7} {}", d.effort)
+    };
+    compact_chip_value(&label, 28)
+}
+
+fn compact_chip_value(value: &str, limit: usize) -> String {
+    let mut chars = value.chars();
+    let mut preview: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        preview.pop();
+        preview.push('\u{2026}');
     }
+    preview
 }
 
 impl Launcher {
-    /// The chip row's values, left to right: the agent chip (harness, model
-    /// and effort folded into one value), project, permission, placement,
-    /// then the phase controls pinned right (cancel while an attempt is in
-    /// flight or unresolved, then Launch). One table feeds the layout, the
-    /// paint, the width rule and the mouse hit-test.
+    /// One table feeds the layout, paint, width rule and mouse hit-test.
     pub(crate) fn chip_texts(&self, view: &View) -> Vec<(Focus, String)> {
         let d = &self.draft;
-        let agent = agent_label(d, &view.launcher_catalog);
+        let harness = compact_chip_value(
+            &non_empty(&d.harness()).unwrap_or_else(|| "harness".to_string()),
+            28,
+        );
+        let provider = compact_chip_value(
+            &non_empty(&d.provider).unwrap_or_else(|| {
+                if d.model_row.is_some() {
+                    "default provider".to_string()
+                } else {
+                    "provider".to_string()
+                }
+            }),
+            28,
+        );
+        let model = model_label(d);
+        let flags = if d.extra_flags.is_empty() {
+            "flags".to_string()
+        } else {
+            let preview = compact_chip_value(&d.extra_flags, 28);
+            format!("flags {preview}")
+        };
         let project = match d.cwd().rsplit('/').find(|s| !s.is_empty()) {
             Some(base) => base.to_string(),
             None => "project".to_string(),
@@ -2070,12 +2552,17 @@ impl Launcher {
         } else {
             format!("{} decides", d.harness())
         };
-        let mut chips = vec![
-            (Focus::Agent, agent),
+        let mut chips = vec![(Focus::Harness, harness)];
+        if has_multiple_providers(&view.launcher_catalog, &d.harness()) {
+            chips.push((Focus::Provider, provider));
+        }
+        chips.extend([
+            (Focus::Model, model),
             (Focus::Project, project),
             (Focus::Permission, permission),
             (Focus::Placement, d.placement.label().to_string()),
-        ];
+            (Focus::ExtraFlags, flags),
+        ]);
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             chips.push((Focus::Dismiss, "[cancel]".to_string()));
         }
@@ -2153,6 +2640,9 @@ impl Launcher {
                 f => (Role::Body, is_picker_chip(*f)),
             };
             paint_chip(buf, *r, label, role_style(role, &view.theme), caret);
+            if *focus == Focus::ExtraFlags && *focus == self.focus && r.width > 0 {
+                buf[(r.x + r.width - 1, r.y)].set_char('\u{2502}');
+            }
         }
         // The editor: a prompt gutter (a glyph before the first message row)
         // and, on an empty draft, dim placeholder text naming the shape.
@@ -2324,8 +2814,21 @@ fn role_style(role: Role, t: &Theme) -> RtStyle {
 pub(crate) fn is_picker_chip(f: Focus) -> bool {
     matches!(
         f,
-        Focus::Agent | Focus::Project | Focus::Permission | Focus::Placement
+        Focus::Harness
+            | Focus::Provider
+            | Focus::Model
+            | Focus::Project
+            | Focus::Permission
+            | Focus::Placement
     )
+}
+
+fn has_caret(f: Focus) -> bool {
+    is_picker_chip(f)
+}
+
+fn has_control_suffix(f: Focus) -> bool {
+    has_caret(f) || f == Focus::ExtraFlags
 }
 
 /// Which paint the composer wears. One draft, one focus order, one key
@@ -2354,7 +2857,7 @@ pub(crate) fn form_mode(view: &View) -> Mode {
     let chips = l.chip_texts(view);
     let needed: usize = chips
         .iter()
-        .map(|(f, label)| label_width(label) as usize + usize::from(is_picker_chip(*f)))
+        .map(|(f, label)| label_width(label) as usize + usize::from(has_control_suffix(*f)))
         .sum::<usize>()
         + chips.len().saturating_sub(1); // one-column gaps
     if needed <= text_w {
@@ -2504,10 +3007,13 @@ impl Launcher {
         for (focus, label, r) in &sl.chips {
             let (role, caret) = match focus {
                 Focus::Launch => (Role::Chip, false),
-                f if *f == self.focus => (Role::BodySel, true),
+                f if *f == self.focus => (Role::BodySel, is_picker_chip(*f)),
                 f => (Role::Body, is_picker_chip(*f)),
             };
             paint_chip(&mut buf, *r, label, role_style(role, &view.theme), caret);
+            if *focus == Focus::ExtraFlags && *focus == self.focus && r.width > 0 {
+                buf[(r.x + r.width - 1, r.y)].set_char('\u{2502}');
+            }
         }
         // The editor, cursor mark and prompt gutter, exactly as the dock.
         let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
@@ -2700,9 +3206,6 @@ pub(crate) async fn launcher_mouse(
                 Some(pk.popup.render(view.term).contains(rep.row, rep.col))
             })
             .unwrap_or(false);
-        if !over && !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-            return Ok(false);
-        }
         let hit = view.launcher.as_ref().and_then(|l| {
             let pk = l.picker.as_ref()?;
             let r = pk.popup.render(view.term);
@@ -2717,6 +3220,23 @@ pub(crate) async fn launcher_mouse(
                 .find(|(_, off, len)| col >= *off && col < off + len)
                 .map(|(t, _, _)| *t)
         });
+        if matches!(rep.kind, MouseKind::Move) {
+            if over {
+                if let (Some(target), Some(l)) = (
+                    hit.filter(|target| *target != crate::chrome::ESC_CLOSE_HIT),
+                    view.launcher.as_mut(),
+                ) {
+                    if let Some(picker) = l.picker.as_mut() {
+                        picker.popup.select(target);
+                    }
+                }
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+            return Ok(over);
+        }
         let portal = next_free_portal(view);
         // Field-disjoint snapshot for the commit path.
         let catalog = view.launcher_catalog.clone();
@@ -2731,7 +3251,13 @@ pub(crate) async fn launcher_mouse(
             match hit {
                 Some(target) => {
                     picker.popup.select(target);
-                    let action = picker.actions.get(target).cloned().flatten();
+                    let action = picker
+                        .popup
+                        .targets()
+                        .get(target)
+                        .and_then(|(row, _)| picker.actions.get(*row))
+                        .cloned()
+                        .flatten();
                     l.picker = Some(picker);
                     if let Some(action) = action {
                         apply_picker_action(l, &catalog, action, portal);

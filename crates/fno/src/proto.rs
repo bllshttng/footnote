@@ -334,7 +334,9 @@ fn default_true() -> bool {
 /// the crown-name store file; floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
-pub const PROTO_VERSION: u32 = 90;
+/// v91: `AgentLaunchRequest.provider` + `extra_flags` (serde default),
+/// configured provider selection and argv additions for the composer; floor stays 58.
+pub const PROTO_VERSION: u32 = 91;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4054,7 +4056,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 90);
+        assert_eq!(PROTO_VERSION, 91);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

@@ -128,6 +128,9 @@ pub struct Popup {
     /// which-key modal scrolls; short anchored menus keep this 0). Clamped in
     /// [`Popup::render`] so it can never scroll past the last screenful.
     pub scroll: usize,
+    /// Extend selectable entry rows to the inner width required by the
+    /// chrome, including a longer footer or title.
+    full_width_selection: bool,
     /// The chrome every modal wears. Its level is derived from `anchor` and
     /// private (no setter), so every centered modal is Full and every anchored
     /// menu is Bare with no way for a call site to disagree.
@@ -190,6 +193,7 @@ impl Popup {
             anchor,
             sel: 0,
             scroll: 0,
+            full_width_selection: false,
         }
     }
 
@@ -218,6 +222,13 @@ impl Popup {
     /// both rows must render while the menu stays anchored to its chip.
     pub fn full_chrome(mut self) -> Self {
         self.chrome = self.chrome.full();
+        self
+    }
+
+    /// Make entry hit targets and selection spans fill the rendered inner
+    /// width. Useful when the footer is wider than every row.
+    pub fn full_width_selection(mut self) -> Self {
+        self.full_width_selection = true;
         self
     }
 
@@ -368,7 +379,15 @@ impl Popup {
             })
             .max()
             .unwrap_or(0);
-        let width = content_w.clamp(1, WIDTH_CAP.min(tcols));
+        let width = if self.full_width_selection {
+            content_w
+                .min(WIDTH_CAP)
+                .max(self.chrome.min_inner_w())
+                .min(tcols)
+                .max(1)
+        } else {
+            content_w.clamp(1, WIDTH_CAP.min(tcols))
+        };
 
         let mut target_idx = 0usize;
         let mut lines = Vec::with_capacity(self.rows.len());

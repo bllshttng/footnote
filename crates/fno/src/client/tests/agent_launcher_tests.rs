@@ -33,6 +33,7 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
                 native: *native,
                 installed: *installed,
                 models: Vec::new(),
+                models_error: None,
                 // Free-text surface by default: the effort chip stays
                 // offered in tests that do not name a list.
                 efforts: Some(Vec::new()),
@@ -158,20 +159,32 @@ fn esc_hides_and_reopening_restores_the_draft() {
 #[test]
 fn tab_walks_the_field_order() {
     let mut v = view_with_launcher();
+    let mut one_provider = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, _) = &mut one_provider {
+        rows[0].models.push(super::agent_launcher::ModelChoice {
+            name: "anthropic/claude-sonnet".into(),
+            model: "anthropic/claude-sonnet".into(),
+            route: String::new(),
+            provider: Some("anthropic".into()),
+            verdict: "ok".into(),
+        });
+    }
+    v.launcher_catalog = Some(one_provider);
+    sync_catalog(&mut v);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Agent -> Project -> Permission -> Placement -> Message (4 tabs; every
-    // field is always in the walk - the pins no longer fold away).
+    // With one configured provider the provider chip is hidden, so Harness ->
+    // Model -> Project -> Permission -> Placement -> ExtraFlags -> Message.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
         Focus::Message,
-        "Agent -> Project -> Permission -> Placement -> Message (4 tabs)"
+        "six visible fields reach Message"
     );
-    // A fifth tab reaches Launch.
+    // The next tab reaches Launch.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
     });
@@ -363,10 +376,29 @@ fn launched_pane_update_returns_the_focus_pane_and_the_seed_note() {
 #[test]
 fn chip_row_paints_fields_and_launch_on_one_row() {
     let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    let mut choices = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, _) = &mut choices {
+        rows[0].models = vec![
+            super::agent_launcher::ModelChoice {
+                name: "anthropic/claude-sonnet".into(),
+                model: "anthropic/claude-sonnet".into(),
+                route: String::new(),
+                provider: Some("anthropic".into()),
+                verdict: "ok".into(),
+            },
+            super::agent_launcher::ModelChoice {
+                name: "zai/glm".into(),
+                model: "zai/glm".into(),
+                route: String::new(),
+                provider: Some("zai".into()),
+                verdict: "ok".into(),
+            },
+        ];
+    }
+    v.launcher_catalog = Some(choices);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 40, 3);
+    let area = RtRect::new(0, 0, 120, 3);
     let rects = l.dock_layout_rects(&v, area);
     let labels: Vec<(String, u16)> = rects
         .chips
@@ -376,8 +408,11 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
         .collect();
     let row_text: String = labels.iter().map(|(s, x)| format!("{s}@{x} ")).collect();
     assert!(
-        row_text.contains("claude default@"),
-        "the agent chip carries the pick: {row_text}"
+        row_text.contains("claude@")
+            && row_text.contains("provider@")
+            && row_text.contains("default@")
+            && row_text.contains("flags@"),
+        "harness, provider, model, and flags have separate chips: {row_text}"
     );
     let launch_x = labels
         .iter()
@@ -401,7 +436,7 @@ fn chips_paint_in_the_popup_control_vocabulary() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Agent;
+        l.focus = Focus::Model;
     }
     let l = v.launcher.as_ref().unwrap();
     let area = RtRect::new(0, 0, 80, 3);
@@ -409,7 +444,7 @@ fn chips_paint_in_the_popup_control_vocabulary() {
     let mut buf = RtBuffer::empty(area);
     l.paint(&v, &mut buf, area);
     for (f, _, r) in &rects.chips {
-        let focused = *f == Focus::Agent;
+        let focused = *f == Focus::Model;
         assert!(
             !buf[(r.x, r.y)].modifier.contains(Modifier::DIM),
             "chip {f:?} must not read as a dim caption"
@@ -422,6 +457,10 @@ fn chips_paint_in_the_popup_control_vocabulary() {
         if super::agent_launcher::is_picker_chip(*f) {
             let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
             assert_eq!(last, "\u{25be}", "picker chip {f:?} ends in the caret");
+        }
+        if *f == Focus::ExtraFlags && focused {
+            let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
+            assert_eq!(last, "\u{2502}", "the flags field shows its text cursor");
         }
     }
     // Adjacent same-row chips are separated by one default-styled column.
@@ -673,6 +712,224 @@ fn launcher_mouse_clicks_launch_and_submits() {
 }
 
 #[test]
+fn launcher_mouse_motion_over_choice_keeps_picker_open_without_committing() {
+    let mut v = view_with_launcher();
+    v.sideline_full = true;
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let row = picker
+        .popup
+        .rows
+        .iter()
+        .position(
+            |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "codex"),
+        )
+        .unwrap();
+    let target = picker
+        .popup
+        .targets()
+        .iter()
+        .position(|(ri, _)| *ri == row)
+        .unwrap();
+    let rendered = picker.popup.render(v.term);
+    let (line_idx, line) = rendered
+        .lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.hits.iter().any(|(hit, _, _)| *hit == target))
+        .unwrap();
+    let col = line
+        .hits
+        .iter()
+        .find(|(hit, _, _)| *hit == target)
+        .map(|(_, col, _)| *col)
+        .unwrap();
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Move,
+        row: (rendered.origin.0 + line_idx) as u16,
+        col: (rendered.origin.1 + col) as u16,
+        shift: false,
+    };
+    let mut sock = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        assert!(
+            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+                .await
+                .unwrap()
+        );
+    });
+    let launcher = v.launcher.as_ref().unwrap();
+    assert!(launcher.picker.is_some(), "hover leaves the dropdown open");
+    assert_eq!(
+        launcher.draft.harness(),
+        "claude",
+        "hover never commits a row"
+    );
+    assert_eq!(launcher.picker.as_ref().unwrap().popup.sel, target);
+    let click = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        ..rep
+    };
+    rt.block_on(async {
+        assert!(
+            super::agent_launcher::launcher_mouse(&mut v, click, &mut sock)
+                .await
+                .unwrap()
+        );
+    });
+    let launcher = v.launcher.as_ref().unwrap();
+    assert!(launcher.picker.is_none(), "a left click commits and closes");
+    assert_eq!(launcher.draft.harness(), "codex", "the clicked row commits");
+}
+
+#[test]
+fn launcher_mouse_left_click_outside_closes_picker() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: 0,
+        col: 79,
+        shift: false,
+    };
+    let mut sock = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        assert!(
+            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+                .await
+                .unwrap()
+        );
+    });
+    assert!(v.launcher.as_ref().unwrap().picker.is_none());
+}
+
+#[test]
+fn launcher_picker_selection_fills_the_footer_widened_row() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Model;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let rendered = picker.popup.render(v.term);
+    let selected = rendered
+        .lines
+        .iter()
+        .find(|line| line.roles.contains(&crate::theme::Role::BodySel))
+        .expect("selected option line");
+    let selected_cells = selected
+        .roles
+        .iter()
+        .filter(|role| **role == crate::theme::Role::BodySel)
+        .count();
+    assert_eq!(
+        selected_cells,
+        rendered.width - 2,
+        "highlight fills the inner box"
+    );
+    assert_eq!(
+        selected.hits.first().map(|(_, _, width)| *width),
+        Some(rendered.width - 2),
+        "the click target uses the same full row width"
+    );
+}
+
+#[test]
+fn launcher_mouse_click_uses_popup_target_to_find_the_model_row() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        choices[0].models = vec![
+            super::agent_launcher::ModelChoice {
+                name: "unavailable".into(),
+                model: "offline-model".into(),
+                route: "closed/offline-model".into(),
+                provider: Some("closed".into()),
+                verdict: "not-installed".into(),
+            },
+            super::agent_launcher::ModelChoice {
+                name: "openrouter-qwen".into(),
+                model: "qwen/qwen3-coder".into(),
+                route: "openrouter/qwen/qwen3-coder".into(),
+                provider: super::agent_launcher::provider_from_route("openrouter/qwen/qwen3-coder"),
+                verdict: "ok".into(),
+            },
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Model;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let row = picker
+        .popup
+        .rows
+        .iter()
+        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter/qwen/qwen3-coder"))
+        .unwrap();
+    let target = picker
+        .popup
+        .targets()
+        .iter()
+        .position(|(ri, _)| *ri == row)
+        .unwrap();
+    assert_ne!(
+        row, target,
+        "disabled options make row and target indexes differ"
+    );
+    let rendered = picker.popup.render(v.term);
+    let (line_idx, col) = rendered
+        .lines
+        .iter()
+        .enumerate()
+        .find_map(|(line_idx, line)| {
+            line.hits
+                .iter()
+                .find(|(hit, _, _)| *hit == target)
+                .map(|(_, col, _)| (line_idx, *col))
+        })
+        .unwrap();
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: (rendered.origin.0 + line_idx) as u16,
+        col: (rendered.origin.1 + col) as u16,
+        shift: false,
+    };
+    let mut sock = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        assert!(
+            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+                .await
+                .unwrap()
+        );
+    });
+    let launcher = v.launcher.as_ref().unwrap();
+    assert!(launcher.picker.is_none());
+    assert_eq!(launcher.draft.model_row.as_deref(), Some("openrouter-qwen"));
+    assert_eq!(launcher.draft.provider, "openrouter");
+}
+
+#[test]
 fn launcher_mouse_click_on_footer_is_unconsumed() {
     let mut v = view_with_launcher();
     v.sideline_full = true;
@@ -790,16 +1047,24 @@ fn caret_survives_chip_truncation() {
 
 #[test]
 fn chips_carry_values_not_labels() {
-    // The chips carry VALUES, not field labels - the agent chip
-    // folds harness/model/effort (`claude default` with nothing pinned),
-    // permission names who decides, placement shows where.
+    // A single configured provider has no provider chip to dead-end on.
     let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    let mut one_provider = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, _) = &mut one_provider {
+        rows[0].models.push(super::agent_launcher::ModelChoice {
+            name: "anthropic/claude-sonnet".into(),
+            model: "anthropic/claude-sonnet".into(),
+            route: String::new(),
+            provider: Some("anthropic".into()),
+            verdict: "ok".into(),
+        });
+    }
+    v.launcher_catalog = Some(one_provider);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
     let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
     let joined = texts.join(" | ");
-    for want in ["claude default", "claude decides", "thread"] {
+    for want in ["claude", "default", "flags", "claude decides", "thread"] {
         assert!(
             texts.iter().any(|t| t.contains(want)),
             "want {want:?} in {joined}"
@@ -809,13 +1074,19 @@ fn chips_carry_values_not_labels() {
         texts.iter().all(|t| !t.contains(": ")),
         "no field labels anywhere: {joined}"
     );
+    assert!(!l
+        .chip_texts(&v)
+        .iter()
+        .any(|(focus, _)| *focus == Focus::Provider));
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Provider;
+    assert!(!super::agent_launcher::open_picker(&mut l, &v));
 }
 
 #[test]
 fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
-    // AC3-HP: the model picker lists "<harness> decides", then the claude
-    // routing rows, then free text; picking a row sets the chip to the ROW
-    // name (and change 5's wire field rides the row's model id).
+    // The model picker lists the current harness default and that harness's
+    // configured rows; choosing a row pins its model and provider.
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
     if let CatalogOutcome::Ok(choices, _) = &mut rows {
@@ -824,12 +1095,14 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
                 name: "claude-opus-5".into(),
                 model: "claude-opus-5".into(),
                 route: String::new(),
+                provider: None,
                 verdict: "ok".into(),
             },
             super::agent_launcher::ModelChoice {
-                name: "zai-flash".into(),
-                model: "glm-5.3-flash[1m]".into(),
-                route: "zai/glm-5.3-flash[1m]".into(),
+                name: "qwen3-coder".into(),
+                model: "qwen/qwen3-coder".into(),
+                route: "openrouter/qwen/qwen3-coder".into(),
+                provider: Some("openrouter".into()),
                 verdict: "ok".into(),
             },
         ];
@@ -837,7 +1110,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Agent;
+    l.focus = Focus::Model;
     assert!(
         super::agent_launcher::open_picker(&mut l, &v),
         "picker opens"
@@ -855,21 +1128,27 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
         })
         .collect();
     assert!(
-        labels.contains(&"claude default".to_string()) && labels.contains(&"zai-flash".to_string()),
-        "picker lists defaults + routing rows: {labels:?}"
+        labels.contains(&"harness default".to_string())
+            && labels.contains(&"qwen3-coder".to_string()),
+        "model picker lists the default + configured routing rows: {labels:?}"
     );
-    // Pick zai-flash: the chip reads the ROW name, the draft carries the
-    // row's model id, and the harness moves to the row's harness.
+    // Pick the OpenRouter route: model and provider come from the configured row.
     let target = picker
         .popup
         .rows
         .iter()
         .position(
-            |r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "zai-flash"),
+            |r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "qwen3-coder"),
         )
         .unwrap();
+    let target_idx = picker
+        .popup
+        .targets()
+        .iter()
+        .position(|(ri, _)| *ri == target)
+        .unwrap();
     let mut l = v.launcher.as_mut().unwrap();
-    l.picker.as_mut().unwrap().popup.select(target);
+    l.picker.as_mut().unwrap().popup.select(target_idx);
     let action = l
         .picker
         .as_ref()
@@ -882,15 +1161,133 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     v.launcher = Some(l.clone());
     let l = v.launcher.as_ref().unwrap();
     assert!(l.picker.is_none(), "commit closes the picker");
-    assert_eq!(l.draft.model, "glm-5.3-flash[1m]");
-    assert_eq!(l.draft.model_row.as_deref(), Some("zai-flash"));
+    assert_eq!(l.draft.model, "qwen/qwen3-coder");
+    assert_eq!(l.draft.model_row.as_deref(), Some("qwen3-coder"));
+    assert_eq!(l.draft.provider, "openrouter");
+
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Model;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    assert!(matches!(
+        l.picker.as_ref().unwrap().popup.rows.first(),
+        Some(crate::popup::PopupRow::Header(section)) if section == "recent"
+    ));
+    assert!(l.picker.as_ref().unwrap().popup.rows.iter().any(
+        |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "qwen3-coder")
+    ));
+}
+
+#[test]
+fn provider_and_model_choices_come_from_configured_rows() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("opencode", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        choices[0].models = super::agent_launcher::parse_opencode_models(
+            "openrouter/qwen/qwen3-coder\nlocal/llama-3.3\n",
+        );
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+
+    let mut l = v.launcher.take().unwrap();
+    assert!(l
+        .chip_texts(&v)
+        .iter()
+        .any(|(focus, _)| *focus == Focus::Provider));
+    l.focus = Focus::Provider;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    let provider_row = l
+        .picker
+        .as_ref()
+        .unwrap()
+        .popup
+        .rows
+        .iter()
+        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter"))
+        .unwrap();
+    assert!(l.picker.as_ref().unwrap().popup.rows.iter().all(|row| {
+        !matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "zai")
+    }));
+    let action = l.picker.as_ref().unwrap().actions[provider_row]
+        .clone()
+        .unwrap();
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
+    assert_eq!(l.draft.provider, "openrouter");
+
+    l.focus = Focus::Model;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    let model_row = l
+        .picker
+        .as_ref()
+        .unwrap()
+        .popup
+        .rows
+        .iter()
+        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter-qwen"))
+        .unwrap();
+    let action = l.picker.as_ref().unwrap().actions[model_row]
+        .clone()
+        .unwrap();
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
+    let request = l.draft.request(3);
+    assert_eq!(request.harness, "opencode");
+    assert_eq!(l.draft.provider, "openrouter");
+    assert_eq!(
+        request.provider, None,
+        "OpenCode carries provider/model in one id"
+    );
+    assert_eq!(
+        request.model.as_deref(),
+        Some("openrouter/qwen/qwen3-coder")
+    );
+}
+
+#[test]
+fn account_rows_supply_model_and_provider_options() {
+    let configured = r#"{"value":[
+      {"id":"anthropic-main","harness":"claude","model_name":"sonnet"},
+      {"id":"openrouter-main","harness":"claude","route_provider_id":"openrouter","model_name":"qwen/qwen3-coder"},
+      {"id":"codex-main","harness":"codex"}
+    ]}"#;
+    let by_harness = super::agent_launcher::parse_configured_account_models(configured).unwrap();
+    let claude = &by_harness["claude"];
+    assert_eq!(
+        claude.len(),
+        2,
+        "only accounts with configured models appear"
+    );
+    assert!(claude
+        .iter()
+        .any(|model| { model.model == "sonnet" && model.provider.is_none() }));
+    assert!(claude.iter().any(|model| {
+        model.model == "qwen/qwen3-coder" && model.provider.as_deref() == Some("openrouter")
+    }));
+    assert!(
+        !by_harness.contains_key("codex"),
+        "no model row is invented"
+    );
+
+    let mut v = view_with_launcher();
+    let mut catalog = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, _) = &mut catalog {
+        rows[0].models = claude.clone();
+    }
+    v.launcher_catalog = Some(catalog);
+    sync_catalog(&mut v);
+    assert!(v
+        .launcher
+        .as_ref()
+        .unwrap()
+        .chip_texts(&v)
+        .iter()
+        .any(|(focus, _)| *focus == Focus::Provider));
 }
 
 #[test]
 fn degraded_inventory_names_the_failure_and_keeps_defaults() {
-    // When the inventory read fails, the agent list shows a disabled entry
-    // carrying the reason and the `<harness> default` rows stay launchable;
-    // no free-text model row exists.
+    // When the inventory read fails, the model list shows a disabled entry
+    // carrying the reason and the harness default stays launchable;
+    // No model row is fabricated when the configured inventory is absent.
     let mut v = view_with_launcher();
     v.launcher_catalog = Some(CatalogOutcome::Ok(
         vec![HarnessChoice {
@@ -898,6 +1295,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
             native: true,
             installed: true,
             models: Vec::new(),
+            models_error: None,
             efforts: Some(Vec::new()),
             permission_modes: Some(Vec::new()),
         }],
@@ -905,7 +1303,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
     ));
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Agent;
+    l.focus = Focus::Model;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let l = v.launcher.as_ref().unwrap();
@@ -941,16 +1339,62 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
         "the failure is named: {disabled:?}"
     );
     assert!(
-        enabled.contains(&"claude default"),
+        enabled.contains(&"harness default"),
         "the default row still launches: {enabled:?}"
     );
     assert!(
         !enabled.iter().any(|d| d.contains("type a model")),
-        "no free-text model row: {enabled:?}"
+        "no invented model row: {enabled:?}"
     );
     assert!(
         !v.launcher.as_ref().unwrap().draft.harnesses.is_empty(),
         "harness choices survive the degraded model list"
+    );
+}
+
+#[test]
+fn extra_flags_chip_parses_argv_without_shell_expansion() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    v.launcher.as_mut().unwrap().focus = Focus::ExtraFlags;
+    let mut sock = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(
+            &mut v,
+            b"--agent abc --name 'two words' --label $HOME",
+            &mut sock,
+        )
+        .await;
+    });
+    let draft = &v.launcher.as_ref().unwrap().draft;
+    assert!(draft.extra_flags.starts_with("--agent abc"));
+    let texts: Vec<_> = v
+        .launcher
+        .as_ref()
+        .unwrap()
+        .chip_texts(&v)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert!(texts
+        .iter()
+        .any(|text| text.starts_with("flags --agent abc")));
+
+    v.launcher.as_mut().unwrap().focus = Focus::Launch;
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let mut wire = std::io::Cursor::new(sock);
+    let crate::proto::ClientMsg::AgentLaunch(request) =
+        crate::proto::read_msg_sync(&mut wire).unwrap()
+    else {
+        panic!("composer wrote a different client message");
+    };
+    assert_eq!(
+        request.extra_flags,
+        vec!["--agent", "abc", "--name", "two words", "--label", "$HOME"]
     );
 }
 
@@ -1057,20 +1501,19 @@ fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
 
 #[test]
 fn typing_in_an_open_picker_filters_the_rows() {
-    // Change 7: the picker's rows narrow in place as the operator types;
-    // the query rides a visible header; Backspace widens; the commit
-    // actions follow their rows through the filter.
+    // The harness picker narrows its configured choices in place; the query
+    // stays visible in the title and Backspace widens the list again.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Agent;
+    l.focus = Focus::Harness;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Type `cod`: only the codex row survives; the header names the query.
+    // Type `cod`: only the configured codex row survives.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"cod", &mut sock).await;
     });
@@ -1084,11 +1527,8 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(labels, vec!["codex default"], "the query narrows the rows");
-    assert!(matches!(
-        picker.popup.rows.first(),
-        Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
-    ));
+    assert_eq!(labels, vec!["codex"], "the query narrows the rows");
+    assert!(picker.popup.chrome.title.contains("filter: cod"));
     // Backspace once: the query `co` still narrows to codex.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f], &mut sock).await;
@@ -1103,11 +1543,7 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        still,
-        vec!["codex default"],
-        "`co` still filters: {still:?}"
-    );
+    assert_eq!(still, vec!["codex"], "`co` still filters: {still:?}");
     // Clearing the query fully restores every row.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
@@ -1127,21 +1563,18 @@ fn typing_in_an_open_picker_filters_the_rows() {
 
 #[test]
 fn enter_commits_the_highlighted_row_under_an_active_filter() {
-    // The picker's sel indexes SELECTABLE targets (the filter header is
-    // skipped); Enter must resolve the commit through the row that target
-    // points at. The regression: actions.get(sel) read the header's None and
-    // the highlighted codex row never committed.
+    // Filtering keeps the target/action mapping on the actual harness row.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Agent;
+    l.focus = Focus::Harness;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // `co` leaves header + codex; the selection sits on codex (target 0).
+    // `co` leaves codex as the selected harness target.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"co", &mut sock).await;
     });
@@ -1150,8 +1583,8 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
         assert_eq!(picker.filter, "co", "the query is live");
         assert_eq!(
             picker.popup.rows.len(),
-            2,
-            "narrowed to header + row: {:?}",
+            1,
+            "narrowed to one row: {:?}",
             picker.popup.rows
         );
         let (ri, _) = picker.popup.selected().unwrap();
@@ -1265,7 +1698,7 @@ fn open_with_binds_message_project_and_node() {
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
     assert_eq!(l.draft.request(9).node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
-    assert_eq!(l.focus, Focus::Agent);
+    assert_eq!(l.focus, Focus::Model);
 }
 
 #[test]

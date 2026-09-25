@@ -177,7 +177,7 @@ impl Chrome {
     /// chip can never make a border row wider than the body rows (which would
     /// break the rectangle). Normal modals are far wider than this; it only
     /// kicks in for a tiny body with a long title.
-    fn min_inner_w(&self) -> usize {
+    pub(crate) fn min_inner_w(&self) -> usize {
         // ` esc ` is 5; every level reserves at least that plus a leading `─`.
         const ESC_INNER: usize = 6;
         let title_w = match self.level {
