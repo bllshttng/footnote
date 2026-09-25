@@ -2498,7 +2498,9 @@ pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreErr
 /// A strict rows read for consumers whose boundary contract needs unreadable
 /// stores to remain unknown, never an empty list.
 pub fn read_rows_strict(path: &Path) -> Result<Vec<Value>, StoreError> {
-    crate::backlog::read_entries(path).map_err(StoreError::Sqlite)
+    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
+    apply_defaults(&mut rows, true);
+    Ok(rows)
 }
 
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
