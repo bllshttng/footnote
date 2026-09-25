@@ -112,16 +112,13 @@ pub struct LinearTracker {
 
 impl LinearTracker {
     pub fn from_env() -> Self {
+        let api_key = std::env::var("FNO_TRACKER_LINEAR_API_KEY").unwrap_or_default();
         Self::new(
-            std::env::var("FNO_TRACKER_LINEAR_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+            Some(api_key.clone()).filter(|v| !v.trim().is_empty()),
             std::env::var("FNO_TRACKER_LINEAR_TEAM")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            Box::new(RealLinear {
-                api_key: std::env::var("FNO_TRACKER_LINEAR_API_KEY").unwrap_or_default(),
-            }),
+            Box::new(RealLinear { api_key }),
         )
     }
 
@@ -212,7 +209,8 @@ impl LinearTracker {
                         .and_then(|e| e.get("identifier"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
-                    if !other.is_empty() && other != id {
+                    if !other.is_empty() && other != id && !blocked_by.contains(&other.to_string())
+                    {
                         blocked_by.push(other.to_string());
                     }
                 }
@@ -291,6 +289,14 @@ impl LinearTracker {
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
             {
+                if node
+                    .get("identifier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    continue;
+                }
                 out.push(Self::candidate_of(node, since.is_some()));
             }
             let more = page
@@ -354,7 +360,13 @@ impl Tracker for LinearTracker {
         let mut nodes = Self::nodes_of(&data, id)?;
         match nodes.len() {
             0 => Err(TrackerError::NotFound(id.to_string())),
-            _ => Ok(Self::candidate_of(&nodes.remove(0), false).node),
+            _ => {
+                let node = Self::candidate_of(&nodes.remove(0), false).node;
+                if node.id.is_empty() {
+                    return Err(TrackerError::NotFound(id.to_string()));
+                }
+                Ok(node)
+            }
         }
     }
 
@@ -411,9 +423,15 @@ impl Tracker for LinearTracker {
             json!({ "id": issue_id, "stateId": done }),
             id,
         )?;
-        if data.get("issueUpdate").and_then(Value::as_object).is_none() {
+        let payload = data
+            .get("issueUpdate")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                TrackerError::Backend(format!("linear issueUpdate answered nothing for {id}"))
+            })?;
+        if payload.get("success").and_then(Value::as_bool) != Some(true) {
             return Err(TrackerError::Backend(format!(
-                "linear issueUpdate answered nothing for {id}"
+                "linear refused to close {id}: success is not true"
             )));
         }
         Ok(())
