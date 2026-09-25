@@ -11,7 +11,7 @@ One composer launches a new harness session through the canonical spawn door and
 5. The client receives `ServerMsg::AgentLaunch` progress: `Starting`, then one terminal state (`Launched` / `Refused` / `Unknown`).
 6. A verified pane birth focuses the new pane through the existing `FocusPane` command path. The seed is never sent again on attach.
 
-The composer owns every key and every mouse report while it is open: a bare H/J/K/L inside a resize repeat window is text for the draft, never a resize. A wheel or focus report over an open list is consumed, never forwarded. An unknown CSI (a focus report `ESC [ I`) is dropped whole, so nothing wedges the fold and no byte lands as text.
+The composer owns every key and every mouse report while it is open. A bare H/J/K/L inside a resize repeat window is text for the draft, never a resize. A wheel or focus report over an open list is consumed, never forwarded. An unknown CSI (a focus report `ESC [ I`) is dropped whole, so nothing wedges the fold and no byte lands as text.
 
 ## The key rule
 
