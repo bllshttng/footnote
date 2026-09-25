@@ -1057,12 +1057,14 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
 }
 
 #[test]
-fn daemon_idle_exits_over_terminal_rows_and_says_why() {
-    // x-cd31 acceptance, in the user's demanded form: assert the exit by BOTH
-    // the pid being gone AND the reason:idle event. The pid alone has two
-    // explanations (an idle exit, a crash); the event names which fired. The
-    // roster here is the established-machine shape - terminal rows, no live
-    // worker - which the old registry-emptiness gate could never exit from.
+fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
+    // The leak shape this guards: a daemon on a throwaway home must not start
+    // the active-backlog supervisor, whose targets resolve from the real cwd
+    // and real graph - it would work the operator's board from a tempdir and
+    // pin ab_live true forever, so the daemon never idle-exits. One
+    // fleet_scope row names the scope; zero arm rows say the supervisor never
+    // ran; terminal registry rows also do not keep the daemon from an honest
+    // idle exit.
     let home = short_home();
     home.ensure_root().unwrap();
     seed_codex_source(
@@ -1077,45 +1079,6 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
         "uuid-idle-2",
         fno_agents::AgentStatus::Exited,
     );
-
-    let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
-    let pid = daemon.id();
-
-    // Wait for the positive marker, not for silence. 60s, not 20s: the daemon
-    // needs 3s of true idleness, and a loaded machine (the 20-trial stress
-    // run) has been measured red-lining a 20s bound while the daemon behaved;
-    // the bound exists to prove the exit happens, never to time its lateness.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let idle_fired = || {
-        last_event_of(&home, "daemon_shutting_down")
-            .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
-            == Some("idle".to_string())
-    };
-    while !idle_fired() {
-        assert!(
-            Instant::now() < deadline,
-            "daemon never idle-exited over terminal rows"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let _ = daemon.wait();
-    assert!(!pid_alive(pid), "the daemon is gone");
-    let exited = last_event_of(&home, "daemon_exited").expect("daemon_exited emitted");
-    assert_eq!(exited["data"]["reason"], json!("idle"));
-    assert_eq!(exited["data"]["clean"], json!(true));
-    std::fs::remove_dir_all(home.root()).ok();
-}
-
-#[test]
-fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
-    // The leak shape this guards: a daemon on a throwaway home must not start
-    // the active-backlog supervisor, whose targets resolve from the real cwd
-    // and real graph - it would work the operator's board from a tempdir and
-    // pin ab_live true forever, so the daemon never idle-exits. One
-    // fleet_scope row names the scope; zero arm rows say the supervisor never
-    // ran; the daemon then exits idle.
-    let home = short_home();
-    home.ensure_root().unwrap();
     let cwd = std::env::temp_dir().join(format!("fnoe-sandbox-cwd-{}", std::process::id()));
     std::fs::create_dir_all(cwd.join(".fno")).unwrap();
     std::fs::write(
@@ -1147,7 +1110,7 @@ fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
     assert_eq!(scope["data"]["scope"], json!("sandbox"));
     assert_eq!(common::count_events(&home, "daemon_fleet_scope"), 1);
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while last_event_of(&home, "daemon_shutting_down")
         .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
         != Some("idle".to_string())
@@ -1168,6 +1131,9 @@ fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
         0,
         "a sandbox home starts no active-backlog supervisor"
     );
+    let exited = last_event_of(&home, "daemon_exited").expect("daemon_exited emitted");
+    assert_eq!(exited["data"]["reason"], json!("idle"));
+    assert_eq!(exited["data"]["clean"], json!(true), "idle exit is clean");
     std::fs::remove_dir_all(home.root()).ok();
     std::fs::remove_dir_all(&cwd).ok();
 }
@@ -1214,6 +1180,10 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
 /// used to drop. Holds the mux ref INSTEAD of a transport key (mux XOR worker
 /// XOR bg), so `short_id` is empty and `harness_session_id` is the only id.
 fn seed_pane_row(home: &AgentsHome, name: &str) {
+    seed_pane_row_with_session(home, name, "e6f78b98-e594-47ed-ad81-84f8a78b8bb7");
+}
+
+fn seed_pane_row_with_session(home: &AgentsHome, name: &str, session_id: &str) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
             substrate: None,
@@ -1233,7 +1203,7 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             model_basis: None,
             effort: None,
             harness: Some("claude".into()),
-            harness_session_id: Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into()),
+            harness_session_id: Some(session_id.into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             route_provider_id: None,
@@ -1558,17 +1528,25 @@ exit 2
 // list, stderr-only so --json stdout stays clean).
 // ---------------------------------------------------------------------------
 
-/// A pane-hosted row must never be answered by `agent.stop` with a success:
-/// stop reaches no pane (the row's one live ref is the mux ref), so a success
-/// receipt would report work it did not perform over a live pane. The refusal
-/// names the row's own session:pane and the clearing verb, and the registry
-/// row stays live. Keys on `entry.mux`, never the harness, so it covers
-/// claude, codex, opencode, and agy pane rows in one branch.
+/// `agent.stop` refuses a pane row without hiding the non-pane no-op receipt:
+/// the refusal names the row's session:pane and clearing verb, while a codex
+/// ask row with an empty short id remains a successful no-op.
 #[tokio::test]
 async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     let home = short_home();
     home.ensure_root().unwrap();
     seed_pane_row(&home, "pane-worker-stop");
+    seed_pane_row_with_session(
+        &home,
+        "codex-ask-row",
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    );
+    state::update_registry(&home.registry_json(), |registry| {
+        let row = registry.find_mut("codex-ask-row").unwrap();
+        row.mux = None;
+        row.harness = Some("codex".into());
+    })
+    .unwrap();
     // An empty FNO_MUX_DIR strands the probe's `fno mux pane read`: it cannot
     // reach the session there, which mux_pane_is_absent reads as Absent, so
     // this test never probes a developer's live `main` mux server. Whether
@@ -1576,7 +1554,13 @@ async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     // today's text), so assert only markers both outcomes print; the
     // pane-kill wording is pinned on the builder's unit tests.
     let mux_dir = home.root().join("empty-mux");
-    let _daemon = start_daemon_env(&home, &[("FNO_MUX_DIR", mux_dir.to_str().unwrap())]);
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("FNO_MUX_DIR", mux_dir.to_str().unwrap()),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+        ],
+    );
 
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
@@ -1604,36 +1588,10 @@ async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
         fno_agents::AgentStatus::Live,
         "nothing was reported stopped that was not"
     );
-}
-
-/// A non-pane row with an empty short_id keeps its existing no-op receipt:
-/// the mux refusal must not swallow the genuine codex/gemini arm.
-#[tokio::test]
-async fn stop_keeps_non_pane_noop_receipt() {
-    let home = short_home();
-    home.ensure_root().unwrap();
-    // Seed the pane row, then reshape it in place: a codex ask row is the pane
-    // row with no mux ref and the codex harness. Reusing the helper (rather
-    // than a second full RegistryEntry literal) keeps this file's axis-guard
-    // binding counts unchanged.
-    seed_pane_row(&home, "codex-ask-row");
-    state::update_registry(&home.registry_json(), |r| {
-        let row = r.find_mut("codex-ask-row").unwrap();
-        row.mux = None;
-        row.harness = Some("codex".into());
-    })
-    .unwrap();
-    // The reshaped row (empty short_id, no pid, recorded live) is the stale-ask
-    // shape, and the startup reconcile sweep would settle it to Exited before
-    // the stop call lands - which answers `already_exited`, not the no-op arm
-    // under test. Hold the sweep, the documented lever for a seeded row.
-    let _daemon = start_daemon_env(&home, &[("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")]);
-
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
         &home,
         &daemon_bin,
-        &Request::new(1, "agent.stop", json!({"name": "codex-ask-row"})),
+        &Request::new(2, "agent.stop", json!({"name": "codex-ask-row"})),
     )
     .await
     .expect("stop call");
@@ -1645,6 +1603,11 @@ async fn stop_keeps_non_pane_noop_receipt() {
     let body = resp.result().unwrap().clone();
     assert_eq!(body["no_op"], json!(true), "receipt: {body}");
     assert_eq!(body["stopped"], json!(true), "receipt: {body}");
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 #[tokio::test]
@@ -2083,6 +2046,28 @@ async fn drift_warned_on_list_stderr_only() {
     assert!(
         stderr.contains("fno agents restart") && stderr.contains("build"),
         "expected drift warning on stderr, got: {stderr}"
+    );
+
+    let status = Command::new(CLIENT_BIN)
+        .args(["status", "--json"])
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_DAEMON_BIN", &dcopy)
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .output()
+        .expect("status client runs");
+    assert!(
+        status.status.success(),
+        "status exited {:?}: {}",
+        status.status,
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("status --json stdout is valid JSON");
+    assert_eq!(
+        status_json["drift"],
+        json!("drifted"),
+        "status --json reports the binary replacement"
     );
 
     unsafe {
@@ -2643,35 +2628,6 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
     }
     let _ = daemon.wait();
-    std::fs::remove_dir_all(home.root()).ok();
-}
-
-/// status --json carries the drift verdict as a field (x-f188 change 4,
-/// AC4-HP): the census reads it from JSON instead of regex-parsing the
-/// stderr sentence.
-#[tokio::test]
-async fn status_json_carries_the_drift_label() {
-    const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
-    let home = short_home();
-    home.ensure_root().unwrap();
-    let _daemon = start_daemon(&home);
-    let out = Command::new(CLIENT_BIN)
-        .args(["status", "--json"])
-        .envs(fno_agents::test_run::self_owner_env())
-        .env("FNO_AGENTS_HOME", home.root())
-        .output()
-        .expect("client runs");
-    assert!(
-        out.status.success(),
-        "status exits 0 against a live daemon: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
-    let label = v["drift"].as_str().unwrap_or("MISSING");
-    assert!(
-        matches!(label, "fresh" | "drifted" | "unknown"),
-        "a drift label rides status --json, got {label}"
-    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 

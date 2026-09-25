@@ -8,8 +8,34 @@ through to the fork rung so the mail is never dropped.
 """
 from types import SimpleNamespace
 
+import pytest
+
 import fno.agents.dispatch as dispatch
 from fno.agents.dispatch import DispatchAskError, wake_and_deliver
+
+
+@pytest.fixture(autouse=True)
+def _admitting_gate(monkeypatch, request):
+    """Every revival asks the spawn gate now, routed or not, so an unrouted
+    test that never stubbed the gate would reach the real Rust gate. A test's
+    own ``run_gate`` monkeypatch wins over this one."""
+    if "real_flight" in request.keywords:
+        return
+
+    class _Guard:
+        def retain_revived_worker(self, *a, **k):
+            return None
+
+        def release_gate_mutex(self):
+            return None
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: _Guard(),
+    )
 
 
 def _entry(
@@ -21,6 +47,7 @@ def _entry(
     provider=None,
     route_settings_path=None,
     node=None,
+    spawned_by=None,
 ):
     return SimpleNamespace(
         status=status,
@@ -30,6 +57,9 @@ def _entry(
         provider=provider,
         route_settings_path=route_settings_path,
         node=node,
+        spawned_by_session=spawned_by[0] if spawned_by else None,
+        spawned_by_harness=spawned_by[1] if spawned_by else None,
+        spawned_by_cwd=spawned_by[2] if spawned_by else None,
     )
 
 
@@ -166,6 +196,7 @@ def test_unrostered_falls_through_to_fork(monkeypatch):
     ok, detail = wake_and_deliver("uuid-full", "wake")
     assert ok is True and detail == "FORK"
     assert spawned and spawned[0]["resume_session_id"] == "uuid-full"
+    assert spawned[0]["parent_edge"] == (None, None, None)
 
 
 def test_respawn_failure_falls_through_to_fork(monkeypatch):
@@ -423,7 +454,10 @@ def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
 
     assert ok is True and detail == "FORK"
     assert events[0][0] == "gate"
-    assert events[0][2:] == ("bg", {"route_provider": "zai", "account": None})
+    assert events[0][2:] == (
+        "bg",
+        {"route_provider": "zai", "account": None, "caller": None},
+    )
     assert events[1][0] == "dispatch"
     assert events[1][1]["route_provider"] == "zai"
     assert events[2] == "release"
@@ -716,7 +750,10 @@ def test_rowless_wake_rebuilds_the_lost_route(monkeypatch):
     ok, detail = wake_and_deliver("uuid-full", "wake")
 
     assert ok is True and detail == "FORK"
-    assert events[0][2:] == ("bg", {"route_provider": "zai", "account": None})
+    assert events[0][2:] == (
+        "bg",
+        {"route_provider": "zai", "account": None, "caller": None},
+    )
     assert events[1][1]["route_provider"] == "zai"
     assert events[1][1]["route_env"].provider == "zai"
     assert events[2] == "release"
@@ -724,8 +761,8 @@ def test_rowless_wake_rebuilds_the_lost_route(monkeypatch):
 
 def test_keyless_lost_route_launches_nothing_and_refuses_as_today(monkeypatch):
     # AC2-ERR: resolve_explicit_route answers None (a keyless or unknown
-    # provider): no gate runs, and the fork's refusal reaches the receipt as
-    # wake-unpinned(...) exactly as today.
+    # provider): the revival still passes the gate (no route_provider), and the
+    # fork's refusal reaches the receipt as wake-unpinned(...) exactly as today.
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
     import fno.agents.fork_lineage as fork_lineage
 
@@ -733,11 +770,16 @@ def test_keyless_lost_route_launches_nothing_and_refuses_as_today(monkeypatch):
     monkeypatch.setattr(
         "fno.agents.model_routing.resolve_explicit_route", lambda *a, **k: None
     )
+    events = []
 
-    def _no_gate(*args, **kwargs):
-        raise AssertionError("no gate must run for a keyless lost route")
+    class _Guard:
+        def release(self):
+            events.append("release")
 
-    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", _no_gate)
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: events.append(kwargs) or _Guard(),
+    )
 
     def _unpinned(**kwargs):
         raise fork_lineage.ResumeUnpinned(
@@ -749,6 +791,8 @@ def test_keyless_lost_route_launches_nothing_and_refuses_as_today(monkeypatch):
     ok, reason = wake_and_deliver("uuid-full", "wake")
     assert ok is False and reason.startswith("wake-unpinned(")
     assert "route zai serves" in reason
+    assert events[0].get("route_provider") is None
+    assert events[-1] == "release"
 
 
 def test_recorded_route_wake_asks_spawn_axes_nothing(monkeypatch):
@@ -783,7 +827,8 @@ def test_recorded_route_wake_asks_spawn_axes_nothing(monkeypatch):
 
 def test_stale_binary_without_lost_route_keeps_todays_refusal(monkeypatch):
     # AC2-EDGE: a spawn-axes answer with no lost_route key (a binary older
-    # than the change) reads as today: no gate, the refusal rides the fork.
+    # than the change) reads as today for the fork: the refusal rides the fork,
+    # and the revival still passes the gate ungated by any route.
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
     import fno.agents.fork_lineage as fork_lineage
 
@@ -792,11 +837,16 @@ def test_stale_binary_without_lost_route_keeps_todays_refusal(monkeypatch):
         "spawn_axes_call",
         lambda payload: {"refusal": "session u last ran glm, which only route zai serves"},
     )
+    events = []
 
-    def _no_gate(*args, **kwargs):
-        raise AssertionError("no gate without a rebuilt route")
+    class _Guard:
+        def release(self):
+            events.append("release")
 
-    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", _no_gate)
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: events.append(kwargs) or _Guard(),
+    )
 
     def _unpinned(**kwargs):
         raise fork_lineage.ResumeUnpinned("session u last ran glm", exit_code=2)
@@ -804,3 +854,188 @@ def test_stale_binary_without_lost_route_keeps_todays_refusal(monkeypatch):
     monkeypatch.setattr(dispatch, "dispatch_spawn", _unpinned)
     ok, reason = wake_and_deliver("uuid-full", "wake")
     assert ok is False and reason.startswith("wake-unpinned(")
+    assert events[0].get("route_provider") is None
+    assert events[-1] == "release"
+
+
+# every revival is gated and charged to the woken row's parent (x-a876) ------- #
+def test_unrouted_exited_row_under_refusing_gate_never_respawns(monkeypatch):
+    # AC1-ERR: an unrouted exited row asks the gate before rung 2; a refusal
+    # stops the revival before any respawn or fork.
+    from fno.agents.spawn_gate import GateRefused
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GateRefused(83)),
+    )
+    respawned = []
+    monkeypatch.setattr(
+        dispatch, "_respawn_claude_session", lambda s: respawned.append(s) or 0
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("spawned past refusal")),
+    )
+
+    assert wake_and_deliver("uuid-full", "wake") == (False, "spawn-exit-83")
+    assert respawned == []
+
+
+def test_unrouted_fork_under_refusing_gate_launches_nothing(monkeypatch):
+    # AC1-ERR: rung 3 for an unrouted row is gated too, not only rung 2.
+    from fno.agents.spawn_gate import GateRefused
+
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("live"))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GateRefused(83)),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("spawned past refusal")),
+    )
+
+    assert wake_and_deliver("uuid-full", "wake") == (False, "spawn-exit-83")
+
+
+def test_unrouted_revival_holds_one_admission_and_releases_it(monkeypatch):
+    # AC2-HP: the unrouted admission is asked once with no route_provider,
+    # never reserved against a provider, and released once after the revived
+    # row is stamped live.
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    events = []
+
+    class _Gate:
+        def retain_revived_worker(self, *a, **k):
+            events.append("retain")
+
+        def release_gate_mutex(self):
+            events.append("release-mutex")
+
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: events.append(kwargs) or _Gate(),
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(
+        dispatch, "_stamp_revived_live", lambda entry: events.append("stamp-live")
+    )
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **k: True)
+
+    assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
+    assert len(events) == 3
+    assert isinstance(events[0], dict) and events[0].get("route_provider") is None
+    assert events[1] == "stamp-live"
+    assert events[2] == "release"
+
+
+@pytest.mark.parametrize(
+    "route_setup",
+    [
+        {"provider": "zai", "route_settings_path": "/route.json", "row": True},
+        {"provider": None, "route_settings_path": None, "row": True},
+        {"provider": None, "route_settings_path": None, "row": False},
+    ],
+    ids=["routed", "unrouted", "rowless"],
+)
+def test_the_gate_is_charged_to_the_woken_rows_parent(monkeypatch, route_setup):
+    # AC3-HP / AC4-EDGE: the gate's caller is the woken row's own parent, never
+    # the sender; a row the registry no longer holds names no parent at all.
+    import fno.agents.registry as registry_mod
+
+    if route_setup["row"]:
+        monkeypatch.setattr(
+            dispatch,
+            "_roster_entry_for_session",
+            lambda u: _entry(
+                "exited",
+                provider=route_setup["provider"],
+                route_settings_path=route_setup["route_settings_path"],
+                spawned_by=("k1-parent", "claude", "/k1"),
+            ),
+        )
+        _allow_rung2_claim(monkeypatch)
+        monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+        monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
+        monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **k: True)
+    else:
+        monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *a, **k: [])
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: SimpleNamespace(short_id="FORK"),
+    )
+    gate_kwargs: dict = {}
+
+    class _Gate:
+        def retain_revived_worker(self, *a, **k):
+            return None
+
+        def release_gate_mutex(self):
+            return None
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: gate_kwargs.update(kwargs) or _Gate(),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True
+    assert gate_kwargs.get("caller") == ("k1-parent" if route_setup["row"] else None)
+
+
+def test_the_fork_carries_the_woken_rows_parent_not_the_sender(monkeypatch):
+    # AC3-HP: a rung-3 fork is handed the woken row's parent triple, never the
+    # sender's ambient identity.
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("live", spawned_by=("k1-parent", "claude", "/k1")),
+    )
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True and detail == "FORK"
+    assert spawned[0]["parent_edge"] == ("k1-parent", "claude", "/k1")
+
+
+@pytest.mark.real_flight
+def test_run_gate_sends_the_named_caller(monkeypatch):
+    # AC6-EDGE: an explicit caller rides the payload verbatim (None included);
+    # no caller resolves the ambient identity, as every existing caller sees.
+    import fno.agents.spawn_gate as spawn_gate
+    from fno.claims.self_identity import resolve_self_identity
+
+    payloads = []
+
+    def _fake_verb(payload):
+        payloads.append(payload)
+        return {"status": "admitted"}
+
+    monkeypatch.setattr(spawn_gate, "_call_gate_verb", _fake_verb)
+
+    spawn_gate.run_gate("n", "bg", caller="k1")
+    assert payloads[-1]["caller_session"] == "k1"
+
+    spawn_gate.run_gate("n", "bg", caller=None)
+    assert payloads[-1]["caller_session"] is None
+
+    spawn_gate.run_gate("n", "bg")
+    assert payloads[-1]["caller_session"] == resolve_self_identity().session_id
