@@ -158,6 +158,18 @@ pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
     })
 }
 
+/// Read one key path from the global config only, when an action requires a
+/// global-scope value rather than the normal project-to-global fallback.
+pub(crate) fn config_lookup_global(keys: &[&str]) -> Option<toml::Value> {
+    let content = std::fs::read_to_string(global_config_path()?).ok()?;
+    let table = parse_config(&content)?;
+    let mut cur = table.get(*keys.first()?)?;
+    for key in &keys[1..] {
+        cur = cur.get(key)?;
+    }
+    Some(cur.clone())
+}
+
 /// Per-field merged table across the candidates, the way Python's loader
 /// deep-merges candidate files: the highest-priority candidate that defines a
 /// field wins that field, and a lower candidate's other fields still fill in.
@@ -1192,6 +1204,17 @@ pub fn active_backlog_enabled(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.
+pub fn slot_cutover_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("slot_cutover")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
 /// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
 /// safe repairs (dead flight holds, the launchd refresh, the install from
 /// main) before it pages. Off, the rows still name the repair verb.
@@ -1380,6 +1403,54 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
         assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    #[test]
+    fn slot_cutover_is_opt_in_and_rejects_non_booleans() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("slot-cutover-default", "schema_version = 1\n");
+        assert!(!slot_cutover_enabled(&cwd));
+
+        let cwd =
+            write_project_settings("slot-cutover-enabled", "[slot_cutover]\nenabled = true\n");
+        assert!(slot_cutover_enabled(&cwd));
+
+        let cwd = write_project_settings(
+            "slot-cutover-invalid",
+            "[slot_cutover]\nenabled = \"yes\"\n",
+        );
+        assert!(!slot_cutover_enabled(&cwd));
+        clear_config_env();
+    }
+
+    #[test]
+    fn global_config_lookup_ignores_project_values() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let global = std::env::temp_dir().join(format!("fno-global-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&global).unwrap();
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", global.join("settings.json"));
+        std::fs::write(
+            global.join("config.toml"),
+            "[[accounts.records]]\nid = \"global-account\"\n",
+        )
+        .unwrap();
+        let project = write_project_settings(
+            "global-lookup-project",
+            "[[accounts.records]]\nid = \"local-account\"\n",
+        );
+
+        assert_eq!(
+            config_lookup(&project, &["accounts", "records"]).unwrap()[0]["id"].as_str(),
+            Some("local-account")
+        );
+        assert_eq!(
+            config_lookup_global(&["accounts", "records"]).unwrap()[0]["id"].as_str(),
+            Some("global-account")
+        );
+        std::fs::remove_dir_all(global).ok();
         clear_config_env();
     }
 
