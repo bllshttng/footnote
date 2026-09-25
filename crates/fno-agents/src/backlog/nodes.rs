@@ -126,7 +126,10 @@ fn claims_directory() -> Result<std::path::PathBuf, String> {
 
 fn list_node_claims(prefix: Option<&str>) -> Result<Vec<crate::claims::ClaimRecord>, String> {
     let directory = claims_directory()?;
-    crate::claims::list_in_strict(&[directory], prefix, true)
+    // The in-window listing, not the liveness-filtered one: a pid-less lease
+    // inside its window classifies Free and would otherwise vanish from the
+    // projection, leaving the node's holder of record unreadable.
+    crate::claims::list_in_window(&[directory], prefix)
         .map_err(|error| format!("claim state is unavailable: {error}"))
 }
 

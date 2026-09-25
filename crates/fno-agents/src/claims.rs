@@ -364,7 +364,19 @@ pub fn list_in_strict(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
-    list_in_result_with_policy(dirs, prefix, include_stale, true).map(|(records, _)| records)
+    list_in_result_with_policy(dirs, prefix, include_stale, true, false).map(|(records, _)| records)
+}
+
+/// The projection listing: every record whose lease window has not lapsed,
+/// INCLUDING the pid-less TTL leases a liveness classify reads Free. The node
+/// projection wants the holder of record while the lease is contractually
+/// held; liveness signalling belongs to the read-time recompute, not a
+/// filter here.
+pub(crate) fn list_in_window(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_result_with_policy(dirs, prefix, true, true, true).map(|(records, _)| records)
 }
 
 /// Ok carries the records plus the directories whose `read_dir` succeeded,
@@ -374,7 +386,7 @@ pub(crate) fn list_in_result(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
-    list_in_result_with_policy(dirs, prefix, include_stale, false)
+    list_in_result_with_policy(dirs, prefix, include_stale, false, false)
 }
 
 fn list_in_result_with_policy(
@@ -382,6 +394,7 @@ fn list_in_result_with_policy(
     prefix: Option<&str>,
     include_stale: bool,
     fail_on_corrupted: bool,
+    keep_leased_free: bool,
 ) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
     let encoded_prefix = prefix.map(encode_key);
     let mut seen_dirs = std::collections::BTreeSet::new();
@@ -462,6 +475,12 @@ fn list_in_result_with_policy(
                 ClaimState::Live => 0,
                 ClaimState::Suspect => 1,
                 ClaimState::Stale => 2,
+                ClaimState::Free
+                    if keep_leased_free
+                        && rec.expires_at.is_some_and(|expiry| expiry > now_ms()) =>
+                {
+                    1
+                }
                 ClaimState::Free | ClaimState::Corrupted => continue,
             };
             if !include_stale && priority > 1 {

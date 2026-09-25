@@ -32,7 +32,21 @@ NODE_ID = "ab-deadbeef"  # matches ^ab-[0-9a-f]{8}$
 MOCK_ABI = """#!/usr/bin/env bash
 # Mock `fno`: log argv + the claims-root env, control claim-acquire exit code.
 echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
+if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "session-pid" ]]; then
+  # The identity walk fronts this verb; the launcher-stamped proof pair is
+  # the answer a real binary would derive, so say it instead of silence.
+  if [[ -n "${FNO_SESSION_PID:-}" && -n "${FNO_SESSION_HARNESS:-}" ]]; then
+    printf '{"session_pid": %s, "harness": "%s"}\n' "$FNO_SESSION_PID" "$FNO_SESSION_HARNESS"
+  fi
+  exit 0
+fi
 if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "acquire" ]]; then
+  # Opt-in REAL acquire: the claim projection is the graph's only session_id
+  # source since the mirror writers left, so tests asserting the graph leg
+  # need a lockfile the mock alone never writes.
+  if [[ "${MOCK_ABI_REAL_ACQUIRE:-0}" == "1" && "${MOCK_ABI_ACQUIRE_RC:-0}" == "0" ]]; then
+    exec python3 "$MOCK_ABI_CLAIMS_CLI" acquire "${@:4}"
+  fi
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
 # `backlog get` is how the node guard establishes that a token IS a graph node.
@@ -204,7 +218,7 @@ def test_self_blind_refusal_says_the_session_cannot_see_itself(tmp_path):
     assert "claim acquire" not in log.read_text()
 
 
-def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
+def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path, monkeypatch):
     repo, home, log, env = _sandbox(tmp_path)
     (repo / "scripts").symlink_to(REPO_ROOT / "scripts", target_is_directory=True)
     thread_id = "019f48e4-codex-owner"
@@ -217,10 +231,26 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     )
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env.pop("TARGET_SESSION_ID", None)
+    # A real codex thread PROVES its identity through the process tree; the
+    # mock world has no codex ancestor, so hand the delegated real acquire
+    # the launcher-stamped proof pair the production init path honors.
+    env["FNO_SESSION_PID"] = str(os.getpid())
+    env["FNO_SESSION_HARNESS"] = "codex"
+
+    # The graph leg of this alignment reads through the claim projection, so
+    # the mock's acquire must write a REAL lockfile (opt-in) and the reader
+    # must resolve the SAME root the init script pinned for the acquire.
+    helper = tmp_path / "real_acquire.py"
+    helper.write_text(
+        "import sys\nfrom fno.claims.cli import cli\nsys.exit(cli())\n"
+    )
+    env["MOCK_ABI_CLAIMS_CLI"] = str(helper)
+    env["MOCK_ABI_REAL_ACQUIRE"] = "1"
 
     result = _run_init(repo, env)
     state = _state(repo)
     assert state, result.stderr
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(home))
     # The store owns state; the json mirror can lag the last write.
     from fno.graph.store import read_graph_strict
 

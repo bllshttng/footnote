@@ -2609,6 +2609,11 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         }
     };
     apply_defaults(&mut rows, false);
+    // The claim projection landed locked_by AFTER the last write-time
+    // recompute, so a lockfile-only claim (acquire without a graph write)
+    // otherwise reads with its stored status. Re-derive here; plan-derived
+    // statuses keep their stored values (plan_rungs None).
+    recompute_statuses_with_plan_rungs(&mut rows, None);
     Ok(rows)
 }
 
@@ -2622,6 +2627,7 @@ pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreErr
     }
     let mut rows = crate::backlog::read_pr_entries(path, pr).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
+    recompute_statuses_with_plan_rungs(&mut rows, None);
     Ok(rows)
 }
 

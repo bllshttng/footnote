@@ -332,11 +332,19 @@ def test_reoffering_done_task_keeps_suspect_pidless_claim(
     assert claim["state"] == "suspect"
     assert claim.get("session_id") in (None, "")
 
-    graph = json.loads(tmp_graph.read_text(encoding="utf-8"))
-    node = next(entry for entry in graph["entries"] if entry["id"] == "x-t1")
-    row = next(task for task in node["tasks"] if task["id"] == "1.1")
-    row["status"] = "done"
-    tmp_graph.write_text(json.dumps(graph) + "\n", encoding="utf-8")
+    def _mark_done(entries):
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == "x-t1":
+                for task in entry.get("tasks") or []:
+                    if isinstance(task, dict) and task.get("id") == "1.1":
+                        task["status"] = "done"
+                        break
+                break
+        return entries
+
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(tmp_graph, _mark_done)
 
     refused = _task_update(
         monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
