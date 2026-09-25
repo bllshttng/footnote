@@ -688,7 +688,7 @@ def test_decider_slot_table_covers_every_readout_verb(tmp_path):
     now iterates slot_verbs, so the two sets are equal by construction. This
     test covers both failure modes: a configured verb outside the tuple
     (fix here) and a dispatched verb whose profile an operator removed
-    (pr-create here) - the latter must appear in the table with an empty
+    (review here) - the latter must appear in the table with an empty
     lane list, which is exactly what the Rust None arm builds.
     """
     from fno.config import settings_from_files
@@ -704,7 +704,7 @@ def test_decider_slot_table_covers_every_readout_verb(tmp_path):
     )
     settings = settings_from_files([cfg])
     assert "fix" in rr.slot_verbs(settings=settings)
-    assert "pr-create" in rr.slot_verbs(settings=settings)
+    assert "review" in rr.slot_verbs(settings=settings)
     table = rr._slot_profiles_table(settings)
     assert set(rr.slot_verbs(settings=settings)) == set(table)
     assert table["fix"]["lanes_raw"], "the fix row must carry its lanes, not only its key"

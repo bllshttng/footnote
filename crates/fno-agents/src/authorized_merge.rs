@@ -2976,7 +2976,7 @@ mod tests {
             let fake = Fake {
                 node_binding: Some(ProbeOutcome::Refused(
                     "PR 7 is unbound: branch names no node; no node carries this PR; \
-                     body carries no Backlog-Closure trailer. A merge the graph cannot \
+                     body carries no closure line. A merge the graph cannot \
                      see is refused. Bind it: pick or file the node (fno backlog idea \
                      \"...\"), run fno do pr closure-trailer <id>, append the printed \
                      line to the PR body, then retry."
