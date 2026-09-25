@@ -697,11 +697,11 @@ mod tests {
 
     #[test]
     fn quiet_reading_names_the_failure_instead_of_blanking() {
-        let ids = ids(&["x-1"]);
+        let ids = ids(&["x-1111"]);
         let err = quiet_reading(None, &ids).unwrap_err();
         assert!(err.contains("unreadable"), "err: {err}");
         let payload = json!({"workers": [
-            {"name": "t-x-1-glm", "handle": "abc", "status": "quiet", "node": null},
+            {"name": "t-x-1111-glm", "handle": "abc", "status": "quiet", "node": null},
         ]});
         // No peek in tests: the reading itself shells out only per row, so
         // assert the fold shape through quiet_scope_workers above; here the
