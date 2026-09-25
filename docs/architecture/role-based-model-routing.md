@@ -125,7 +125,7 @@ For a one-off "just this node on GLM" without flipping the lane default, `dispat
 
 ## PR creation runs inline
 
-`/fno:pr create` loads `skills/pr/references/create.md` in the invoking context. It does not dispatch the `pr-create` role. A configured `config.model_routing.roles.pr-create` value does not affect the PR lifecycle.
+`/fno:pr create` loads `skills/pr/references/create.md` in the invoking context. It dispatches no role and no model lane: PR creation is ordinary tool calls in the session that asks for it.
 
 ## The stage table: per-verb profile overlay
 

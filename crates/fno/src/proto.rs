@@ -330,9 +330,11 @@ fn default_true() -> bool {
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
 /// v88: `AgentLaunchRequest.node` (serde default), the board's target key
 /// binds the launch to its node; floor stays 58.
-/// v89: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
+/// v89: `AgentRow.crown_name` (serde default), the crown's display name from
+/// the crown-name store file; floor stays 58.
+/// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
-pub const PROTO_VERSION: u32 = 89;
+pub const PROTO_VERSION: u32 = 90;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1261,6 +1263,12 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
+    /// (v89) The crown's display name (`Barnaby II`), read from the mux's
+    /// crown-name store file (`crown_names.json` beside the registry).
+    /// `None` = unnamed or no store file. Additive, `#[serde(default)]`,
+    /// so the floor stays put.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_name: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
@@ -1498,7 +1506,7 @@ pub enum Command {
     SplitH,
     SplitV,
     ClosePane,
-    /// (v89) Close ONLY the portal seat `seat` - the viewer pane - never the
+    /// (v90) Close ONLY the portal seat `seat` - the viewer pane - never the
     /// row it shows: removing a row is not removing a pane, and closing a
     /// portal is its own gesture. Fail-closed: a pane that is no live portal
     /// seat, or the session's last pane, gets a notice and stays open.
@@ -4046,7 +4054,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 89);
+        assert_eq!(PROTO_VERSION, 90);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4386,6 +4394,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
@@ -4428,6 +4437,7 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,

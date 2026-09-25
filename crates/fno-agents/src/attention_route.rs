@@ -305,11 +305,13 @@ mod tests {
                 scope: "x-b".into(),
                 level: 2,
                 holder: "king-b".into(),
+                holder_session: None,
             },
             Crown {
                 scope: "fno".into(),
                 level: 1,
                 holder: "king-fno".into(),
+                holder_session: None,
             },
         ]
     }

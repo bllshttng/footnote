@@ -36,16 +36,16 @@ ERR=$(mktemp)
 if run_err $'Backlog-Closure: x-aaaa\nBacklog-Closure: x-bbbb' "feature/x-aaaa" "$ERR"; then
   fail "two-line body should fail"
 fi
-for want in "2 Backlog-Closure lines" "x-bbbb" "x-aaaa" "--extra"; do
+for want in "2 closure lines" "x-bbbb" "x-aaaa" "--extra"; do
   grep -q -e "$want" "$ERR" || fail "two-line refusal should name '$want'"
 done
 pass "two-line refusal names the count, the id read, the id wanted, and --extra"
 
-# run_err fails: a body with no trailer still says how many lines it read.
-if run_err "Fixes the thing." "feature/x-aaaa" "$ERR"; then
+# run_err fails: a body with no closure line still says how many lines it read.
+if run_err "no closure line here at all." "feature/x-aaaa" "$ERR"; then
   fail "no-trailer body should fail"
 fi
-grep -q "0 Backlog-Closure lines" "$ERR" || fail "no-trailer refusal should say '0 Backlog-Closure lines'"
+grep -q "0 closure lines" "$ERR" || fail "no-trailer refusal should say '0 closure lines'"
 pass "no-trailer refusal names the zero count"
 
 # The shipped workflow's remedy must name --extra, or a reader steered to it
@@ -112,6 +112,16 @@ run "no trailer here" "feat/cafe" \
 run "Backlog-Closure:x-aaaa" "feature/x-aaaa" \
   && pass "no space after colon still passes" \
   || fail "no space after colon should still pass"
+
+# colonless new spelling: `Fixes <id>` with no colon is the writer's form now.
+run "Fixes x-aaaa" "feature/x-aaaa" \
+  && pass "colonless Fixes line passes" \
+  || fail "colonless Fixes line should pass"
+
+# lowercase keyword with colon: `fixes: <id>` reads the same.
+run "fixes: x-aaaa" "feature/x-aaaa" \
+  && pass "lowercase colonless-spelled fixes line passes" \
+  || fail "lowercase fixes line should pass"
 
 # no-space-after-comma: the runtime parser treats a comma as equivalent to a
 # space (round-8 review fix: a second id right after a comma, with no space,

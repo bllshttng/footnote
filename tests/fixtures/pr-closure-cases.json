@@ -1,0 +1,12 @@
+{
+  "_reading": "The one corpus both legs read: the Rust parser in king_board/pr_closure.rs and the Python tests that pin the forwarder. claims is the exact list parse() must return for body. Node ids are hex after the hyphen, per the id grammar. Writers emit only the Fixes spelling; readers accept Backlog-Closure: during the transition.",
+  "cases": [
+    { "body": "Fixes x-aaaa, x-bbbb", "claims": ["x-aaaa", "x-bbbb"] },
+    { "body": "fixes: x-aaaa x-bbbb", "claims": ["x-aaaa", "x-bbbb"] },
+    { "body": "Backlog-Closure: x-cafe", "claims": ["x-cafe"] },
+    { "body": "Backlog-Closure: x-cafe\nFixes x-beef", "claims": ["x-beef"] },
+    { "body": "Fixes the thing.", "claims": [] },
+    { "body": "Summary paragraph.\nthis also fixes x-dead", "claims": [] },
+    { "body": "Fixes x-aaaa not-an-id", "claims": [] }
+  ]
+}

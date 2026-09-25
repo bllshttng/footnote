@@ -3072,7 +3072,7 @@ impl Core {
                         .unwrap_or_default(),
                     forked_from_session_id: joined_row
                         .and_then(|a| a.forked_from_session_id.clone()),
-                    // (v89) The seat's portal index, under the same one-row
+                    // (v90) The seat's portal index, under the same one-row
                     // rule the sideline marker wears.
                     portal: self.portal_marker(Some(pid)),
                 }
