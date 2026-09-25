@@ -1609,21 +1609,21 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
     from fno.claims.core import claim_status
     from fno.graph.store import read_graph_strict
 
-    g = _make_graph(tmp_path, [{"id": "x-open010", "title": "t"}])
+    g = _make_graph(tmp_path, [{"id": "x-0be3010", "title": "t"}])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open10")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
 
-    opened = CliRunner().invoke(C.cli, ["session", "open", "x-open010", "--json"])
+    opened = CliRunner().invoke(C.cli, ["session", "open", "x-0be3010", "--json"])
     assert opened.exit_code == 0, opened.output
     acquired_at = json.loads(opened.output)["acquired_at"]
     expected_start = datetime.fromtimestamp(
         acquired_at / 1000, tz=timezone.utc
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    plan = tmp_path / "x-open010.md"
+    plan = tmp_path / "x-0be3010.md"
     plan.write_text(
         "---\ncreated: 2026-09-23T04:35\ndifficulty: low\n---\n"
         "# Plan for the held node\n\n## Files to Modify\n\n"
@@ -1633,7 +1633,7 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
 
     intake = CliRunner().invoke(
         app,
-        ["backlog", "intake", str(plan), "--claims", "x-open010"],
+        ["backlog", "intake", str(plan), "--claims", "x-0be3010"],
     )
     assert intake.exit_code == 0, intake.output
     held = read_graph_strict(g)[0]
@@ -1642,9 +1642,9 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
     assert held["plan_path"] == str(plan)
 
     closed = CliRunner().invoke(C.cli, [
-        "session", "close", "x-open010",
+        "session", "close", "x-0be3010",
         "--summary", "plan is ready",
-        "--launch", "/fno:target x-open010",
+        "--launch", "/fno:target x-0be3010",
         "--json",
     ])
 
@@ -1652,7 +1652,7 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
     out = json.loads(closed.output)
     assert out["claim_released"] is True
     assert out["claim_holder"] == "blueprint-session:sess-open10"
-    assert claim_status("node:x-open010")["state"] == "free"
+    assert claim_status("node:x-0be3010")["state"] == "free"
     row = read_graph_strict(g)[0]["sessions"][0]
     assert row["phase"] == "blueprint"
     assert row["started_at"] == expected_start

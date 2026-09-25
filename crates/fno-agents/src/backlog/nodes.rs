@@ -1208,6 +1208,8 @@ pub(crate) type ProvenanceParts = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 /// The supersessions row read as parts.
@@ -1245,6 +1247,8 @@ fn map_provenance_parts(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProvenanceP
         row.get::<_, Option<String>>(11)?,
         row.get::<_, Option<String>>(12)?,
         row.get::<_, Option<String>>(13)?,
+        row.get::<_, Option<String>>(14)?,
+        row.get::<_, Option<String>>(15)?,
     ))
 }
 
@@ -1277,10 +1281,14 @@ fn apply_provenance(node: &mut Node, parts: Option<ProvenanceParts>) {
         spawned_by_cwd,
         think_session_id,
         think_output_path,
+        request_origin,
+        origin_evidence,
     )) = parts
     {
-        let origin_evidence = node.provenance.origin_evidence.clone();
-        let request_origin = node.provenance.request_origin.clone();
+        // The columns are authoritative; a legacy row keeps whatever the
+        // extras fold already planted on the model.
+        let origin_evidence = origin_evidence.or(node.provenance.origin_evidence.take());
+        let request_origin = request_origin.or(node.provenance.request_origin.take());
         node.provenance = Provenance {
             source,
             source_kind,

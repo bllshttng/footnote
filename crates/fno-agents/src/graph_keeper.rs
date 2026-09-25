@@ -1008,7 +1008,7 @@ fn read_graph_gated(state: &StoreState, _strict: bool) -> Result<GraphRead, Stor
         // last write-time recompute, so a lockfile-only claim (acquire with
         // no graph write) otherwise reads with its stored status. Re-derive;
         // plan-derived statuses keep their stored values (plan_rungs None).
-        graph_store::recompute_statuses_with_plan_rungs(&mut entries, None);
+        graph_store::derive_entry_statuses(&mut entries, None);
         let entries = Arc::new(entries);
         let post = crate::backlog::version(&state.graph)
             .map_err(|error| sqlite_unreadable(state, error))?;

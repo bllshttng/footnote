@@ -287,10 +287,9 @@ pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// The single-flight RECORD directory, beside the claims dir the latch locks
-/// in. It lives here, not in [`crate::single_flight`], for the reason the
-/// state-roots ratchet exists: this file is the one resolver that knows the
-/// `.fno/<store>` layout, and a path hand-built anywhere else is one no guard
-/// and no `$FNO_CLAIMS_ROOT` can reach.
+/// in. This file is the one resolver that knows the `.fno/<store>` layout, so
+/// a path hand-built elsewhere is one no guard and no `$FNO_CLAIMS_ROOT` can
+/// reach.
 pub(crate) fn flight_dir(root: &Path) -> PathBuf {
     root.join(FLIGHT_DIRNAME)
 }
@@ -368,10 +367,8 @@ pub fn list_in_strict(
 }
 
 /// The projection listing: every record whose lease window has not lapsed,
-/// INCLUDING the pid-less TTL leases a liveness classify reads Free. The node
-/// projection wants the holder of record while the lease is contractually
-/// held; liveness signalling belongs to the read-time recompute, not a
-/// filter here.
+/// including the pid-less TTL leases a liveness classify reads Free. Liveness
+/// signalling belongs to the read-time recompute, not a filter here.
 pub(crate) fn list_in_window(
     dirs: &[PathBuf],
     prefix: Option<&str>,
@@ -1286,21 +1283,14 @@ fn denied_state_root(path: &Path) -> String {
 
 /// Path of the breadcrumb a mute worker leaves for the operator.
 ///
-/// `<repo>/.fno/` is chosen because it is the ONE place a denied worker can
-/// still write: the sandbox that took the state root left the repo writable.
-/// Everything else it normally speaks through - the claim store, the mail bus,
-/// the spawn mutex - lives under the root it just lost.
-///
-/// THIS WORKTREE, never the canonical checkout. A sandboxed worker runs in a
-/// linked worktree and is granted THAT directory; `canonical_repo_root` names
-/// the main worktree, which is outside the worker's sandbox, so a breadcrumb
-/// aimed there is dropped by the very failure it is reporting. It also has to
-/// match the Python twin, which resolves the current worktree; two different
-/// paths means two files and neither clearing the other.
-///
-/// Cached: `clear_state_root_breadcrumb` runs on EVERY successful claim
-/// create, including inside `recover_stale_locked` while that holds a
-/// cross-process mutex. Resolving a repo root there forks `git` each time.
+/// `<repo>/.fno/` is the ONE place a denied worker can still write: the
+/// sandbox that took the state root left the repo writable, while the claim
+/// store, mail bus, and spawn mutex all live under the root it just lost.
+/// THIS WORKTREE, never the canonical checkout: the sandbox granted the
+/// linked worktree, and the Python twin resolves the current worktree, so two
+/// different paths would mean two files neither clearing the other. Cached:
+/// the clear runs on EVERY successful claim create, and a resolve there
+/// forks `git` while recover_stale_locked holds a cross-process mutex.
 fn state_root_breadcrumb_path() -> Option<&'static Path> {
     static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
