@@ -101,6 +101,44 @@ case " $* " in
         ;;
 esac
 
+# An env-less cargo build lands in the fallback base ~/.cargo/build (the
+# tracked .cargo/config.toml's build-dir template). The wrapper is the one
+# door every such compile passes, so it names the offender: once per cargo,
+# one tab-separated line in ~/.fno/logs/cargo-fallback-writers.log naming
+# the cargo pid and argv, the parent pid and argv, the cwd and the manifest
+# dir. The compiler always runs.
+name_fallback_writer() {
+    if [[ -n "${CARGO_BUILD_BUILD_DIR:-}" || -n "${CI:-}" ]]; then
+        return 0
+    fi
+    # Same once-per-cargo shape as the unadmitted marker above: fresh under
+    # 60 minutes, so a marker from an earlier cargo with this pid goes stale.
+    local marker="${TMPDIR:-/tmp}/fno-build-fallback.$PPID"
+    if [[ -e "$marker" && -n "$(find "$marker" -mmin -60 2>/dev/null)" ]]; then
+        return 0
+    fi
+    : >"$marker" 2>/dev/null || true
+    local logged=1
+    {
+        local log="$HOME/.fno/logs/cargo-fallback-writers.log"
+        mkdir -p "$(dirname "$log")"
+        local cargo_argv parent_pid parent_argv
+        cargo_argv="$(ps -o command= -p "$PPID" 2>/dev/null || true)"
+        parent_pid="$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')"
+        parent_argv="$(ps -o command= -p "${parent_pid:-0}" 2>/dev/null || true)"
+        printf '%s\tcargo_pid=%s\tcargo=%s\tparent=%s %s\tcwd=%s\tmanifest_dir=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PPID" "$cargo_argv" \
+            "${parent_pid:-0}" "$parent_argv" "$PWD" "${CARGO_MANIFEST_DIR:-}" >>"$log"
+        if [[ "$(wc -l <"$log")" -gt 1000 ]]; then
+            tail -n 500 "$log" >"$log.tmp" && mv "$log.tmp" "$log"
+        fi
+        logged=0
+    } 2>/dev/null || true
+    if [[ "$logged" -eq 0 ]]; then
+        echo "cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. Run: fno config plugin install" >&2
+    fi
+}
+
 case " $* " in
     *" -vV "* | *" --print"*) ;;
     *)
@@ -110,6 +148,7 @@ case " $* " in
         # cargo is already admitted; a probe that asked again waited on it
         # for 1h49m on 2026-09-23.
         [[ -n "${CARGO_CFG_TARGET_ARCH:-}" ]] || admit build
+        name_fallback_writer
         ;;
 esac
 
