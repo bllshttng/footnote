@@ -163,17 +163,32 @@ const MARKETPLACE_REL: &str = ".claude-plugin/marketplace.json";
 /// pointed at the stage root (`source: "./"`), so `claude plugin install
 /// fno@footnote` resolves in place and never clones a GitHub ref: the public
 /// pins (`stable`, `nightly`) are release-side refs a dev machine cannot rely
-/// on. The repo file stays verbatim. Unparseable JSON is Err: a verbatim copy
-/// would silently resurrect the clone trap.
+/// on. The repo file stays verbatim. Anything that would leave the fno entry
+/// unserved is Err: a verbatim copy would silently resurrect the clone trap.
 fn staged_marketplace_bytes(source_bytes: &str) -> Result<String, String> {
     let mut manifest: Value =
         serde_json::from_str(source_bytes).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))?;
-    if let Some(entries) = manifest.get_mut("plugins").and_then(Value::as_array_mut) {
-        for entry in entries.iter_mut() {
-            if entry.get("name").and_then(Value::as_str) == Some("fno") && entry.is_object() {
-                entry["source"] = json!("./");
+    let Some(entries) = manifest.get_mut("plugins").and_then(Value::as_array_mut) else {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no plugins array; cannot serve the fno entry locally"
+        ));
+    };
+    let mut rewritten = false;
+    for entry in entries.iter_mut() {
+        if entry.get("name").and_then(Value::as_str) == Some("fno") {
+            if !entry.is_object() {
+                return Err(format!(
+                    "{MARKETPLACE_REL}: the fno entry is not an object; cannot serve it locally"
+                ));
             }
+            entry["source"] = json!("./");
+            rewritten = true;
         }
+    }
+    if !rewritten {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no fno entry; cannot serve the plugin locally"
+        ));
     }
     serde_json::to_string_pretty(&manifest).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
 }
@@ -2040,6 +2055,28 @@ mod tests {
         let report = check_stage_report(&stage, &source);
         assert_eq!(report.status, "stale");
         assert_eq!(report.sample, vec![MARKETPLACE_REL.to_string()]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A manifest that cannot serve the fno entry (entry renamed away) fails
+    /// the build loud instead of silently shipping the github pin back.
+    #[test]
+    fn build_refuses_manifest_without_fno_entry() {
+        let base = std::env::temp_dir().join(format!("pi-mkt3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("source");
+        new_repo(&source);
+        fs::write(
+            source.join(MARKETPLACE_REL),
+            r#"{"name":"footnote","plugins":[{"name":"fno-nightly","source":{"source":"github","repo":"bllshttng/footnote","ref":"nightly"}}]}"#,
+        )
+        .unwrap();
+        git_in(&source, &["add", "-A"]);
+        git_in(&source, &["commit", "-q", "-m", "c2"]);
+        let stage_parent = base.join("stage-parent");
+        fs::create_dir_all(&stage_parent).unwrap();
+        let err = build_stage(&source, &stage_parent).unwrap_err();
+        assert!(err.contains("no fno entry"), "err: {err}");
         let _ = fs::remove_dir_all(&base);
     }
 
