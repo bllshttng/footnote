@@ -633,7 +633,9 @@ def test_worktree_overlap_observed_rejects_observer_as_its_own_peer() -> None:
 # here is constructed into the tmp repo the cap helper reads.
 
 
-def _attestation_event(verdict: str, branch: str, *, dispositions=None) -> dict:
+def _attestation_event(
+    verdict: str, branch: str, *, dispositions=None, findings=None
+) -> dict:
     data = {
         "reviewer": "code-review",
         "head_sha": "0" * 39 + "1",
@@ -647,6 +649,8 @@ def _attestation_event(verdict: str, branch: str, *, dispositions=None) -> dict:
     }
     if dispositions is not None:
         data["dispositions"] = dispositions
+    if findings is not None:
+        data["findings"] = findings
     return {
         "ts": "2026-08-31T19:00:00Z",
         "type": "review_attestation",
@@ -681,6 +685,22 @@ _OB_HARD = {
     "finding_key": "cli/src/fake.py:779:correctness",
 }
 
+_OB_EFF = {
+    "category": "efficiency",
+    "verdict": "CONFIRMED",
+    "blocking": True,
+    "has_required_fields": True,
+    "finding_key": "crates/fno-agents/src/cargo_build_dirs.rs:208:efficiency",
+}
+
+_OB_COVERAGE = {
+    "category": "test-coverage",
+    "verdict": "CONFIRMED",
+    "blocking": False,
+    "has_required_fields": True,
+    "finding_key": "cli/tests/fake.py:10:test-coverage",
+}
+
 
 def _seed_obligation_chain(tmp_path, events) -> None:
     (tmp_path / ".fno").mkdir(exist_ok=True)
@@ -698,6 +718,64 @@ def test_a_findings_free_pass_over_an_undisposed_fail_is_refused_by_key(
         validate(_attestation_event("pass", "feature/x-ob"))
     assert "cli/src/fake.py:779:correctness" in str(exc.value)
     assert "disposition" in str(exc.value)
+
+
+def test_a_pass_carrying_only_nonblocking_findings_still_disposes_the_open_fail(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_EFF])])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValidationError) as exc:
+        validate(_attestation_event("pass", "feature/x-ob", findings=[_OB_COVERAGE]))
+    assert "crates/fno-agents/src/cargo_build_dirs.rs:208:efficiency" in str(exc.value)
+
+
+def test_a_pass_carrying_the_declined_disposition_is_emitted_unchanged(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_EFF])])
+    monkeypatch.chdir(tmp_path)
+    event = _attestation_event(
+        "pass",
+        "feature/x-ob",
+        findings=[_OB_COVERAGE],
+        dispositions=[
+            {
+                "finding_key": "crates/fno-agents/src/cargo_build_dirs.rs:208:efficiency",
+                "disposition": "declined",
+                "reason": "Design, not defect: the sweep already names every member",
+            }
+        ],
+    )
+    assert validate(event) is None
+    assert event["data"]["dispositions"][0]["disposition"] == "declined"
+
+
+def test_a_nonblocking_disposition_on_a_blocking_finding_stays_outstanding(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(
+        tmp_path,
+        [
+            _obligation_chain_event(0, "fail", [_OB_EFF]),
+            _obligation_chain_event(
+                1,
+                "fail",
+                [_OB_EFF],
+                dispositions=[
+                    {
+                        "finding_key": "crates/fno-agents/src/cargo_build_dirs.rs:208:efficiency",
+                        "disposition": "nonblocking",
+                        "reason": "Crown ruled the reason is a disposition",
+                    }
+                ],
+            ),
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValidationError) as exc:
+        validate(_attestation_event("pass", "feature/x-ob", findings=[_OB_COVERAGE]))
+    assert "crates/fno-agents/src/cargo_build_dirs.rs:208:efficiency" in str(exc.value)
 
 
 def test_a_pass_carrying_the_fixed_disposition_is_emitted_unchanged(
