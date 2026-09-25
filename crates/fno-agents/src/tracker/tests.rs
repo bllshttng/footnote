@@ -136,7 +136,9 @@ fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
     let dir = tempfile::tempdir().unwrap();
     // hermetic_env mutates process-global env; hold the crate's env lock so
     // parallel env-holding tests (ac2, a_scope_switch) cannot interleave.
-    let _lock = crate::claims::test_env_lock();
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     // Sidecar file for o/r#1 with plan_path, cwd and two sessions.
     let sidecar_dir = dir.path().join(".fno/sidecar");

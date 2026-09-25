@@ -100,14 +100,18 @@ impl View {
         } else {
             self.display_rows_with_depths()
         };
-        // The docked new-agent composer takes the bottom rows while open,
-        // and the passive court block yields to it: an active editor
-        // outranks glance chrome.
+        // The docked new-agent composer takes the bottom rows while open in
+        // BOTTOM mode; in sheet mode the sideline paints untouched (the
+        // sheet is an overlay drawn by the client's overlay chain), and the
+        // passive court block yields to an active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
-        let dock_len = self
-            .launcher
-            .as_ref()
-            .map_or(0, |l| l.dock_layout(rows - chrome_rows, text_w).0);
+        let dock_len = if agent_launcher::form_mode(self) == agent_launcher::Mode::Bottom {
+            self.launcher
+                .as_ref()
+                .map_or(0, |l| l.dock_layout(rows - chrome_rows, text_w).0)
+        } else {
+            0
+        };
         let (block_rows, block_lines) = if dock_len > 0 {
             (0, Vec::new())
         } else {
@@ -933,6 +937,10 @@ pub(super) async fn route_launcher_keys(
     passthrough: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
+    // The composer owns every key while open: a bare H/J/K/L must be text
+    // for the draft, never a pane resize, so the repeat window a prefix
+    // chord armed closes the moment the composer takes the byte.
+    scanner.disarm_repeat();
     for event in scanner.scan(passthrough, std::time::Instant::now()) {
         match event {
             Event::Forward(chunk) => {
@@ -948,10 +956,9 @@ pub(super) async fn route_launcher_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Toggle the composer: close retains the draft, as Esc does. Opening shows
-/// the sideline first when hidden, so the composer is never open and
-/// unpainted; a terminal too narrow to admit the rail opens nothing and
-/// says so.
+/// Toggle the composer: close retains the draft, as Esc does. Opening never
+/// touches the sideline or the pane's size - the sheet is an overlay; a
+/// terminal too short to admit it opens nothing and says so.
 pub(super) async fn toggle_composer(
     view: &mut View,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
@@ -965,29 +972,27 @@ pub(super) async fn toggle_composer(
 }
 
 /// The show half of [`toggle_composer`], shared with the board's `t` key:
-/// turn the sideline on, refuse a too-narrow terminal (notice + `false`),
-/// send the Resize when the sideline was hidden, then open the dock.
-/// `true` when the dock is open.
+/// open the composer under the width rule. The sheet needs no sideline and
+/// sends NO Resize - the sheet is an overlay, so no pane changes width; the
+/// bottom form is only reachable from the full-screen sideline, which also
+/// needs no Resize. `true` when the composer is open.
 pub(super) async fn show_composer(
     show: &mut View,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<bool, String> {
-    let was_on = show.panel_on;
-    show.panel_on = true;
-    if show.panel_w() == 0 {
-        show.panel_on = was_on;
-        show.set_notice("terminal too narrow for the composer".into());
-        return Ok(false);
-    }
-    if !was_on {
-        let (r, c) = show.content_dims();
-        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-            .await
-            .map_err(|e| format!("resize send failed: {e}"))?;
-    }
+    let was_none = show.launcher.is_none();
     // An already-open dock keeps its held draft; open() replaces it.
-    if show.launcher.is_none() {
+    if was_none {
         agent_launcher::open(show);
+    }
+    // The sheet's minimum is 12 rows; nothing opens and the bottom row says
+    // why - the refusal the too-narrow sidebar used to give.
+    if agent_launcher::form_mode(show) == agent_launcher::Mode::Sheet && show.term.0 < 12 {
+        if was_none {
+            agent_launcher::close(show);
+        }
+        show.set_notice("terminal too short for the composer".into());
+        return Ok(false);
     }
     Ok(true)
 }

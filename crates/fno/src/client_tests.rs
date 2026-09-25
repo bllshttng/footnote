@@ -4047,7 +4047,7 @@ fn client_status_row_shows_focus_node_provenance() {
         .last()
         .unwrap()
         .to_string();
-    assert!(bottom.contains("hjkl focus"), "hint takeover: {bottom:?}");
+    assert!(bottom.contains("esc cancel"), "hint takeover: {bottom:?}");
     assert!(!bottom.contains('⚑'), "hint hides the cell: {bottom:?}");
 }
 
@@ -4086,7 +4086,7 @@ fn client_status_off_leaves_bottom_row_as_content() {
     // A pending hint still transiently paints over that content row.
     view.hint = true;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
@@ -4098,11 +4098,11 @@ fn client_compose_hint_paints_over_bottom_row() {
     view.hint = true;
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
-    assert!(bottom.contains("hjkl focus"), "{bottom:?}");
+    assert!(bottom.contains("esc cancel"), "{bottom:?}");
     assert!(!bottom.contains("? for keys"), "{bottom:?}");
     view.status_on = false;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
