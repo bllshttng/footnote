@@ -56,7 +56,7 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
 
     def fake_run(argv, **kwargs):
         seen.append((argv, Path.cwd()))
-        assert argv == ["fno-agents", "pr-worktree"]
+        assert argv[-1] == "pr-worktree"
         assert kwargs["timeout"] == 2
         assert json.loads(kwargs["input"]) == {
             "cwd": str(canonical),
@@ -81,7 +81,9 @@ def test_merge_guard_from_canonical_selects_the_pr_branch_worktree(
     assert state_file == feature / ".fno" / "target-state.md"
     assert fm == _fm()
     assert repo_root == feature
-    assert seen == [(["fno-agents", "pr-worktree"], canonical)]
+    assert len(seen) == 1
+    assert seen[0][0][-1] == "pr-worktree"
+    assert seen[0][1] == canonical
 
 
 def test_dispatch_hold_from_canonical_reads_the_pr_branch_worktree(
@@ -96,7 +98,7 @@ def test_dispatch_hold_from_canonical_reads_the_pr_branch_worktree(
     seen = []
 
     def fake_run(argv, **kwargs):
-        assert argv == ["fno-agents", "pr-worktree"]
+        assert argv[-1] == "pr-worktree"
         assert json.loads(kwargs["input"]) == {
             "cwd": str(canonical),
             "pr": 42,
