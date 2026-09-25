@@ -74,7 +74,7 @@ fn now_ts() -> String {
 }
 
 fn append(store: &Path, kind: &str, data: Value) {
-    crate::provider_cap::append_questions_row(
+    let _ = crate::provider_cap::append_questions_row(
         store,
         &json!({"ts": now_ts(), "type": kind, "source": "daemon", "data": data}),
     );
@@ -101,14 +101,12 @@ fn task_from(data: &Value, ts: &str) -> Option<Task> {
 }
 
 fn read_store(store: &Path) -> Result<String, String> {
-    match std::fs::read_to_string(store) {
-        Ok(raw) => Ok(raw),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!(
-            "fleet task store unreadable at {}: {e}",
-            store.display()
-        )),
-    }
+    // Writers commit to the event store; the checked journal read covers
+    // committed rows plus the live tail and still errors when unreadable.
+    crate::event_store::journal_text_checked(
+        store,
+        &crate::event_store::EventQuery::of_types(&["fleet_task", "fleet_task_closed"]),
+    )
 }
 
 fn fold_open_tasks(raw: &str) -> Vec<Task> {
@@ -476,7 +474,9 @@ mod tests {
         let missing = temp_store("ac3-missing");
         let filed = file_once(&missing, "heal", "k", "/r", "t", None, None).unwrap();
         assert!(matches!(filed, Filed::New(_)));
-        assert!(missing.is_file());
+        // Writers commit to the event store; the journal sidecar is what
+        // gets created, not a live text file.
+        assert!(crate::event_store::store_path(&missing).is_file());
     }
 
     #[test]

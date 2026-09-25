@@ -48,7 +48,7 @@ Verbs that exist only for a crowned session. One reign ran a whole territory wit
 
 | You are trying to | Verb | The gotcha |
 |---|---|---|
-| Move the operator's view to a pane | `fno mux pane focus <n>` | The only pane verb that acts on the OPERATOR's view. Every other pane verb acts FOR an agent. This is the one that answers "show me that". |
+| Move the user's view to a pane | `fno mux pane focus <n>` | The only pane verb that acts on the USER's view. Every other pane verb acts FOR an agent. This is the one that answers "show me that". |
 | Find where a handle lives | `fno mux where <handle>` | Pane-only. Any thread agent answers `hosts no live pane` (exit 17). That is a true answer, not an error. |
 | Read a worker that has no pane | `fno agents peek <handle> --follow` | Tails the transcript. This is the read that works after `where` says there is no pane. |
 | Read a worker's output log | `fno agents logs <name> --tail <n>` | Registry-scoped output log, distinct from `peek` (a transcript tail through the mux ref). |
@@ -98,7 +98,7 @@ Never follow `rm` with a bare `claude rm <id>`. `rm` already made that call itse
 Measured on a live registry: `fno agents rm` lands the registry removal, then hangs on harness teardown. A timeout is not a failed removal. Re-read the registry before you believe the receipt.
 
 <!-- retired-ok: states why driving these directly fails, as the reason to reach for the fno verbs instead. -->
-Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the operator sees.
+Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the user sees.
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.
 
@@ -130,10 +130,11 @@ Everywhere else, resume first and deliver the instruction with `fno agents mail 
 
 ## Blueprint retask
 
-Close blueprint provenance before clearing its pane:
+Close blueprint provenance under the worker's identity before clearing its pane:
 
 ```bash
-fno backlog session close <node> --summary "<summary>" --launch "/fno:target <node>"
+read -r WORKER_HARNESS WORKER_SESSION < <(fno agents list --json | jq -r '.agents[] | select(.name == "<blueprint-worker>") | "\(.harness) \(.harness_session_id)"')
+fno backlog session close <node> --harness "$WORKER_HARNESS" --session-id "$WORKER_SESSION" --summary "<summary>" --launch "/fno:target <node>"
 fno agents retask <blueprint-worker> --node <node>
 ```
 
@@ -147,7 +148,7 @@ Answer a message with `fno agents mail reply --to <msg-id>`. It threads the repl
 
 | Receipt reads | What it means |
 |---|---|
-| `delivered (hosted)` | Confirmed. |
+| `delivered (hosted)` | Inject accepted. It does not prove it was read. Check `landed` in `fno agents mail sent`. |
 | `queued (durable)` | Can sit undrained. No receipt is no coordination. |
 | `[bus-only]` | Drains by design at the recipient's turn boundary. The receipt IS coordination. |
 
@@ -172,7 +173,7 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 
 ## Backlog
 
-`fno backlog done` takes no `--note`. Write the detail first with `fno backlog update <id> --details <text>`, then run `done`.
+A close needs a record of why. For work that shipped without a PR, pass it: `fno backlog done <id> --note "<why>"`. A bare close on a node with no `--pr-number`, `--note` or `--link` is refused by the store. Nothing is written. For a forced close, write the note first with `fno backlog update <id> --completion-note "<why>"`.
 
 Its `--reason` flag pairs with `--force` only, to explain bypassing the merged-PR cross-check. It does not carry a completion note.
 

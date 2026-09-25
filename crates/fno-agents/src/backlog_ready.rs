@@ -88,6 +88,11 @@ pub struct ReadyOpts {
     /// the claims store (`claims::list` + liveness) so the decision stays a
     /// pure function of entries + options.
     pub claimed: BTreeSet<String>,
+    /// node id -> the open question id that holds it, resolved by the caller
+    /// (`needs::held_map` over the question journals) so the decision stays a
+    /// pure function of entries + options. An entry named here drops with
+    /// reason `held:<qid>`, the receipt word the drain already uses.
+    pub held: std::collections::BTreeMap<String, String>,
     /// `config.backlog.staleness_days`, resolved by the caller. `None` (or a
     /// non-positive value) means "no config surface reached me" and the
     /// selection degrades to [`DEFAULT_STALENESS_DAYS`], the same fail-open
@@ -96,6 +101,51 @@ pub struct ReadyOpts {
     /// The selection instant, epoch milliseconds UTC. now()-stamps never
     /// reach the projection; this only drives staleness and encounter age.
     pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateKey {
+    Created,
+    Touched,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DateFilter {
+    created_before: Option<i64>,
+    created_after: Option<i64>,
+    touched_before: Option<i64>,
+    touched_after: Option<i64>,
+    sort: Option<DateKey>,
+}
+
+impl DateFilter {
+    pub fn apply(&self, rows: &mut Vec<Value>) {
+        rows.retain(|entry| {
+            let created = entry.get("created_at").and_then(parse_iso_ms);
+            let touched = touched_ms(entry);
+            Self::within(created, self.created_before, self.created_after)
+                && Self::within(touched, self.touched_before, self.touched_after)
+        });
+        if let Some(key) = self.sort {
+            rows.sort_by_key(|entry| {
+                let stamp = match key {
+                    DateKey::Created => entry.get("created_at").and_then(parse_iso_ms),
+                    DateKey::Touched => touched_ms(entry),
+                };
+                (stamp.is_none(), stamp.unwrap_or_default())
+            });
+        }
+    }
+
+    fn within(stamp: Option<i64>, before: Option<i64>, after: Option<i64>) -> bool {
+        if before.is_none() && after.is_none() {
+            return true;
+        }
+        let Some(stamp) = stamp else {
+            return false;
+        };
+        before.map_or(true, |limit| stamp < limit) && after.map_or(true, |limit| stamp >= limit)
+    }
 }
 
 /// One narrowed-out candidate: the first cascade filter that removed it plus
@@ -207,6 +257,111 @@ fn parse_iso_str(s: &str) -> Option<i64> {
         return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis());
     }
     None
+}
+
+const DATE_FILTER_USAGE: &str = "accepted: --created-before, --created-after, --touched-before, --touched-after <Nd|YYYY-MM-DD[THH:MM:SSZ]>, --sort created|touched";
+
+fn date_filter_error(reason: impl std::fmt::Display) -> String {
+    format!("ready filter: {reason}; {DATE_FILTER_USAGE}")
+}
+
+fn parse_filter_cutoff(value: &str, now_ms: i64) -> Result<i64, String> {
+    if let Some(days) = value.strip_suffix('d') {
+        if days.is_empty() || !days.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(date_filter_error(format!("invalid date {value:?}")));
+        }
+        let days = days
+            .parse::<i64>()
+            .map_err(|_| date_filter_error(format!("invalid date {value:?}")))?;
+        return days
+            .checked_mul(86_400_000)
+            .and_then(|delta| now_ms.checked_sub(delta))
+            .ok_or_else(|| date_filter_error(format!("invalid date {value:?}")));
+    }
+    parse_iso_str(value).ok_or_else(|| date_filter_error(format!("invalid date {value:?}")))
+}
+
+pub fn parse_date_filter(args: &[String], now_ms: i64) -> Result<DateFilter, String> {
+    let mut filter = DateFilter::default();
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, inline_value) = args[index]
+            .split_once('=')
+            .map(|(flag, value)| (flag, Some(value)))
+            .unwrap_or((args[index].as_str(), None));
+        if !matches!(
+            flag,
+            "--created-before"
+                | "--created-after"
+                | "--touched-before"
+                | "--touched-after"
+                | "--sort"
+        ) {
+            return Err(date_filter_error(format!("unknown flag {flag}")));
+        }
+        let value = match inline_value {
+            Some(value) => value,
+            None => {
+                index += 1;
+                args.get(index)
+                    .map(String::as_str)
+                    .ok_or_else(|| date_filter_error(format!("{flag} needs a value")))?
+            }
+        };
+        match flag {
+            "--created-before" => {
+                filter.created_before = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--created-after" => {
+                filter.created_after = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--touched-before" => {
+                filter.touched_before = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--touched-after" => {
+                filter.touched_after = Some(parse_filter_cutoff(value, now_ms)?);
+            }
+            "--sort" => {
+                filter.sort = Some(match value {
+                    "created" => DateKey::Created,
+                    "touched" => DateKey::Touched,
+                    _ => return Err(date_filter_error(format!("invalid sort {value:?}"))),
+                });
+            }
+            _ => unreachable!("flags were validated above"),
+        }
+        index += 1;
+    }
+    Ok(filter)
+}
+
+pub fn date_filter_from_params(params: &Value, now_ms: i64) -> Result<DateFilter, String> {
+    let Some(value) = params.get("filter_args") else {
+        return Ok(DateFilter::default());
+    };
+    let args = value
+        .as_array()
+        .ok_or_else(|| date_filter_error("filter_args must be an array of strings"))?;
+    if args.is_empty() {
+        return Ok(DateFilter::default());
+    }
+    let args = args
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| date_filter_error("filter_args must be an array of strings"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    parse_date_filter(&args, now_ms)
+}
+
+fn touched_ms(entry: &Value) -> Option<i64> {
+    entry
+        .get("touched_at")
+        .and_then(parse_iso_ms)
+        .or_else(|| entry.get("created_at").and_then(parse_iso_ms))
 }
 
 /// Whole days from `ts` to `now`, flooring like Python's `timedelta.days`.
@@ -392,13 +547,57 @@ pub fn is_blueprint_doc(entry: &Value) -> bool {
     }
 }
 
+/// The lean-dispatch blueprint floor's default: a plan-less node routes to
+/// /blueprint only when its difficulty is high, its size is L, or an open
+/// premise question blocks it. Every other plan-less node goes straight to
+/// /target, which states its own scope (it derives its deliverables count
+/// from the node's details at init). Difficulty picks the VERB; the separate
+/// ruling on which model runs a /blueprint only applies once blueprint IS the
+/// verb, so a node routed straight to target owes no blueprint lane. The
+/// `config.dispatch.blueprint_floor` knob carries "high" (this default) or
+/// "medium" (blueprint for medium and up, the pre-lean table); anything else
+/// degrades to the default on both the Python and the Rust side.
+pub const DEFAULT_BLUEPRINT_FLOOR: &str = "high";
+
+/// The node tag that marks an open premise question blocking dispatch - the
+/// third blueprint clause. Set with `fno backlog update <id> --tag
+/// premise-question` when the node's premise itself is what is in doubt.
+pub const PREMISE_QUESTION_TAG: &str = "premise-question";
+
+/// Whether the row carries the open-premise-question tag.
+fn has_premise_question(entry: &Value) -> bool {
+    entry
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .any(|t| t.as_str().map(str::trim) == Some(PREMISE_QUESTION_TAG))
+        })
+        .unwrap_or(false)
+}
+
 /// The ported lifecycle table (`harness_map.resolve_effective_verb`):
 /// `(verb, note)` per node row, or a refusal string. Order: refusals fire
 /// BEFORE the declared verb; a declared target-family verb WINS and is
-/// returned as declared (d-834b6ff1); an out-of-family verb abstains
-/// (`None`) to declared precedence, so the command still routes through the
-/// allowlist-checked `verb` rung. The word "reconciled" never appears.
+/// returned as declared; an out-of-family verb abstains (`None`) to declared
+/// precedence, so the command still routes through the allowlist-checked
+/// `verb` rung. The word "reconciled" never appears.
 pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String> {
+    effective_verb_with_floor(entry, DEFAULT_BLUEPRINT_FLOOR)
+}
+
+/// [`effective_verb`] with the operator's blueprint floor. `floor` reads
+/// "high" (lean default) or "medium" (pre-lean: blueprint for medium and up);
+/// any other value degrades to the default.
+pub fn effective_verb_with_floor(
+    entry: &Value,
+    floor: &str,
+) -> Result<(Option<String>, String), String> {
+    let floor = if floor.trim().eq_ignore_ascii_case("medium") {
+        "medium"
+    } else {
+        DEFAULT_BLUEPRINT_FLOOR
+    };
     let node_id = get_str(entry, "id").unwrap_or("unknown");
     let raw = get_str(entry, "dispatch_verb")
         .map(str::trim)
@@ -428,12 +627,34 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
         .map(|d| d.trim().to_lowercase())
         .unwrap_or_default();
     let answer = match rung {
-        "none" => match difficulty.as_str() {
-            "low" => ("/target", format!("intake difficulty=low")),
-            "medium" => ("/blueprint", format!("intake difficulty=medium")),
-            "high" => ("/blueprint", format!("intake difficulty=high")),
-            _ => return Err(refusal(rung, &difficulty)),
-        },
+        "none" => {
+            // A row whose difficulty answers no band still refuses (fail
+            // closed): the verb is derivable only from a stated intake.
+            if !matches!(difficulty.as_str(), "low" | "medium" | "high") {
+                return Err(refusal(rung, &difficulty));
+            }
+            let size = get_str(entry, "size")
+                .map(|s| s.trim().to_ascii_uppercase())
+                .unwrap_or_default();
+            let premise = has_premise_question(entry);
+            let wants_blueprint = if floor == "medium" {
+                matches!(difficulty.as_str(), "medium" | "high")
+            } else {
+                difficulty == "high" || size == "L" || premise
+            };
+            if wants_blueprint {
+                ("/blueprint", format!("intake difficulty={difficulty}"))
+            } else {
+                (
+                    "/target",
+                    format!(
+                        "lean dispatch: planless {difficulty} node plans inline \
+                         at target; blueprint waits for high difficulty, size L, \
+                         or an open premise question, so no blueprint lane is owed"
+                    ),
+                )
+            }
+        }
         "idea" | "design" => ("/blueprint", format!("plan {rung}")),
         "ready" | "in_progress" | "in_review" => {
             if is_blueprint_doc(entry) {
@@ -465,14 +686,19 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
 /// verb decision out (`{"verb", "note"}`), the refusal as the error so the
 /// Python client raises without an unwrapping layer. Pure over the shipped
 /// row and its linked plan doc. Kept beside the table so the decision and
-/// its serving live in one file.
+/// its serving live in one file. `blueprint_floor` rides in params from the
+/// dispatch doors; its absence answers the lean default.
 pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
     let entry = params
         .get("entries")
         .and_then(Value::as_array)
         .and_then(|entries| entries.first())
         .ok_or_else(|| "effective_verb needs entries[0]".to_string())?;
-    let (verb, note) = effective_verb(entry)?;
+    let floor = params
+        .get("blueprint_floor")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_BLUEPRINT_FLOOR);
+    let (verb, note) = effective_verb_with_floor(entry, floor)?;
     Ok(json!({ "verb": verb, "note": note }))
 }
 
@@ -648,7 +874,8 @@ fn node_has_movement(entry: &Value, now_ms: i64, staleness_days: i64) -> bool {
     // time recently (`demand.recent_encounter`).
     if let Some(encounters) = entry.get("encounters").and_then(Value::as_array) {
         for r in encounters {
-            if let Some(ts) = r.get("ts").and_then(parse_iso_ms) {
+            let stamp = r.get("created_at").or_else(|| r.get("ts"));
+            if let Some(ts) = stamp.and_then(parse_iso_ms) {
                 if days_between(now_ms, ts) <= staleness_days {
                     return true;
                 }
@@ -706,9 +933,16 @@ fn selection_guards(
     by_id: &BTreeMap<String, Value>,
     now_ms: i64,
     staleness_days: i64,
+    held: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
     if let Some(hold) = dispatch_hold_verdict(entry, by_id) {
         return Some(hold.guard_reason);
+    }
+    // A question the operator has not answered outranks every selector
+    // signal: the node leaves ready the moment it is named in blocks, so a
+    // dispatcher never spends a lane on the same ruling twice.
+    if let Some(qid) = entry_id(entry).and_then(|id| held.get(id)) {
+        return Some(format!("held:{qid}"));
     }
     if let Some(owner) = get_str(entry, "contained_in") {
         if !owner.is_empty() {
@@ -987,10 +1221,7 @@ fn importance_score(entry: &Value, effective_priority: &str, now_ms: i64) -> f64
         weight
     };
     let divergence = voters.len() as f64 * weight;
-    let stamp = entry
-        .get("touched_at")
-        .and_then(parse_iso_ms)
-        .or_else(|| entry.get("created_at").and_then(parse_iso_ms));
+    let stamp = touched_ms(entry);
     let Some(stamp) = stamp else {
         return divergence;
     };
@@ -1363,7 +1594,14 @@ fn drops_for_filter(
             }
         }
         FILTER_SELECTION_GUARD => {
-            selection_guards(e, &ctx.by_id, ctx.opts.now_ms, ctx.staleness_days).or_else(|| {
+            selection_guards(
+                e,
+                &ctx.by_id,
+                ctx.opts.now_ms,
+                ctx.staleness_days,
+                &ctx.opts.held,
+            )
+            .or_else(|| {
                 // A cold idea the verb derivation is certain to refuse must
                 // not spend a drain tick: drop it where every autonomous
                 // dispatcher reads, attributed for `advance --explain`.
@@ -1506,36 +1744,104 @@ pub fn select(entries: &[Value], opts: &ReadyOpts) -> Result<ReadyReply, NoSuchP
 
     // Epics-first, then flat priority: the key is built from the FULL graph
     // so epic parents resolve even when filtered out of the candidate set.
-    let child_progress = epics_with_child_progress(&by_id);
+    let (ordered, _tables) =
+        order_by_selection_key(survivors, entries, &by_id, &opts.claimed, opts.now_ms);
+
+    Ok(ReadyReply {
+        rows: ordered.iter().map(|e| dispatch_node_summary(e)).collect(),
+        drops,
+    })
+}
+
+/// The sort tables the board mode reads, built once per read from the full
+/// graph. The key's other three inputs (child progress, fan-out, orphans)
+/// stay local to [`order_by_selection_key`]: nothing reads them back.
+struct KeyTables {
+    effective_priority: BTreeMap<String, String>,
+    epic_in_progress: BTreeSet<String>,
+}
+
+/// The one selection order: `rows` sorted by [`selection_sort_key`], with the
+/// tables it was built from handed back so the board mode answers from the
+/// same facts instead of rebuilding them.
+fn order_by_selection_key(
+    rows: Vec<Value>,
+    entries: &[Value],
+    by_id: &BTreeMap<String, Value>,
+    claimed: &BTreeSet<String>,
+    now_ms: i64,
+) -> (Vec<Value>, KeyTables) {
+    let child_progress = epics_with_child_progress(by_id);
     let dependents = dependents_fanout(entries);
-    let effective_priority = make_effective_priority(&by_id, &child_progress);
-    let orphans = orphan_ids(entries, &by_id);
-    let epic_in_progress = in_progress_epic_ids(entries, &by_id, &child_progress, &opts.claimed);
-    let mut keyed: Vec<(Vec<Term>, Value)> = survivors
+    let effective_priority = make_effective_priority(by_id, &child_progress);
+    let orphans = orphan_ids(entries, by_id);
+    let epic_in_progress = in_progress_epic_ids(entries, by_id, &child_progress, claimed);
+    let mut keyed: Vec<(Vec<Term>, Value)> = rows
         .into_iter()
         .map(|e| {
             let key = selection_sort_key(
                 &e,
-                &by_id,
+                by_id,
                 &child_progress,
                 &dependents,
                 &effective_priority,
                 &orphans,
                 &epic_in_progress,
-                opts.now_ms,
+                now_ms,
             );
             (key, e)
         })
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let tables = KeyTables {
+        effective_priority,
+        epic_in_progress,
+    };
+    let ordered = keyed.into_iter().map(|(_, e)| e).collect();
+    (ordered, tables)
+}
 
-    Ok(ReadyReply {
-        rows: keyed
-            .into_iter()
-            .map(|(_, e)| dispatch_node_summary(&e))
-            .collect(),
-        drops,
-    })
+/// The board's whole-graph facts, from the tables the ready order uses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoardFacts {
+    /// Every entry id, in selection-key order, no admission, no cascade.
+    pub ids: Vec<String>,
+    /// Epics whose work is underway (in_progress_epic_ids).
+    pub underway: BTreeSet<String>,
+    /// Ids whose live epic promotes their priority, to the promoted value.
+    pub effective_priority: BTreeMap<String, String>,
+}
+
+/// Whole-graph board facts: every dict entry with an id, in selection-key
+/// order. No admission and no cascade - the board lists everything and its
+/// renderer filters. `effective_priority` keeps only ids whose live epic
+/// actually promotes them, so the reply stays small.
+pub fn board_facts(entries: &[Value], claimed: &BTreeSet<String>, now_ms: i64) -> BoardFacts {
+    let by_id: BTreeMap<String, Value> = entries
+        .iter()
+        .filter(|e| is_dict(e))
+        .filter_map(|e| entry_id(e).map(|id| (id.to_string(), e.clone())))
+        .collect();
+    let sortables: Vec<Value> = by_id.values().cloned().collect();
+    let (ordered, tables) = order_by_selection_key(sortables, entries, &by_id, claimed, now_ms);
+    let ids = ordered
+        .iter()
+        .filter_map(|e| entry_id(e).map(str::to_string))
+        .collect();
+    let effective_priority: BTreeMap<String, String> = tables
+        .effective_priority
+        .into_iter()
+        .filter(|(id, effective)| {
+            by_id
+                .get(id)
+                .is_some_and(|e| &priority_name(e) != effective)
+        })
+        .collect();
+    BoardFacts {
+        ids,
+        underway: tables.epic_in_progress,
+        effective_priority,
+    }
 }
 
 /// Ids of nodes that are some other node's `parent` (`cli._container_ids`):
@@ -1642,6 +1948,59 @@ mod tests {
     }
 
     #[test]
+    fn held_question_drops_the_node_with_the_question_reason() {
+        let entries = vec![json!({"id": "x-hold", "status": "ready", "priority": "p1"})];
+        let mut held_opts = opts(false);
+        held_opts
+            .held
+            .insert("x-hold".to_string(), "q-1".to_string());
+        let reply = select(&entries, &held_opts).unwrap();
+        assert!(reply.rows.is_empty());
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-hold")
+            .expect("x-hold dropped");
+        assert_eq!(drop.filter, "selection-guard");
+        assert_eq!(drop.reason, "held:q-1");
+    }
+
+    #[test]
+    fn empty_held_map_selects_normally() {
+        // Positive control: no open question, no drop.
+        let entries = vec![json!({"id": "x-hold", "status": "ready", "priority": "p1"})];
+        let reply = select(&entries, &opts(false)).unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert!(reply.drops.is_empty());
+    }
+
+    #[test]
+    fn scoped_parent_call_still_drops_a_held_child() {
+        // The epic fan-out dispatches children one at a time; a held child
+        // must leave that path too (the 2026-09-15 specimen route).
+        let entries = vec![
+            json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
+            json!({"id": "x-hold", "status": "ready", "priority": "p2", "parent": "x-e"}),
+        ];
+        let mut held_opts = opts(false);
+        held_opts.parent = Some("x-e".to_string());
+        held_opts
+            .held
+            .insert("x-hold".to_string(), "q-1".to_string());
+        let reply = select(&entries, &held_opts).unwrap();
+        assert!(reply
+            .rows
+            .iter()
+            .all(|r| r.get("id") != Some(&json!("x-hold"))));
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-hold")
+            .expect("x-hold dropped");
+        assert_eq!(drop.reason, "held:q-1");
+    }
+
+    #[test]
     fn scoped_parent_call_still_enumerates_cold_ideas_without_difficulty() {
         let entries = vec![
             json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
@@ -1659,6 +2018,43 @@ mod tests {
         assert_eq!(reply.rows.len(), 1);
         assert_eq!(reply.rows[0].get("id"), Some(&json!("x-c")));
         assert!(reply.drops.iter().all(|d| d.reason != "no-difficulty"));
+    }
+
+    // -- the board mode: whole-graph facts in selection order --
+
+    #[test]
+    fn board_mode_orders_every_entry_like_selection() {
+        let entries = vec![
+            json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
+            json!({"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"}),
+            json!({"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
+                   "completed_at": "2026-09-01T00:00:00Z"}),
+            json!({"id": "x-loose", "status": "ready", "priority": "p1"}),
+        ];
+        let reply = select(&entries, &opts(true)).unwrap();
+        let facts = board_facts(&entries, &Default::default(), 0);
+        // The board lists everything; the admitted subsequence must match
+        // selection's own order exactly.
+        let admitted: Vec<&str> = reply
+            .rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .collect();
+        let in_board_order: Vec<&str> = facts
+            .ids
+            .iter()
+            .filter(|id| admitted.contains(&id.as_str()))
+            .map(|id| id.as_str())
+            .collect();
+        assert_eq!(in_board_order, admitted);
+        assert!(facts.ids.contains(&"x-e".to_string()));
+        assert!(facts.ids.contains(&"x-c2".to_string()));
+        assert!(facts.underway.contains("x-e"));
+        assert_eq!(
+            facts.effective_priority.get("x-c1"),
+            Some(&"p1".to_string())
+        );
+        assert_eq!(facts.effective_priority.get("x-loose"), None);
     }
 
     // -- the ported lifecycle table (effective_verb) + is_blueprint_doc --
@@ -1830,6 +2226,79 @@ mod tests {
     }
 
     #[test]
+    fn planless_medium_derives_target_under_the_lean_floor() {
+        let row = json!({"id": "x-lean", "difficulty": "medium"});
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert_eq!(verb.as_deref(), Some("/target"));
+        assert!(note.contains("lean dispatch"), "{note}");
+        assert!(note.contains("plans inline"), "{note}");
+    }
+
+    #[test]
+    fn planless_low_keeps_deriving_target() {
+        let row = json!({"id": "x-lo", "difficulty": "low"});
+        assert_eq!(effective_verb(&row).unwrap().0.as_deref(), Some("/target"));
+    }
+
+    #[test]
+    fn planless_high_still_derives_blueprint() {
+        let row = json!({"id": "x-hard", "difficulty": "high"});
+        assert_eq!(
+            effective_verb(&row).unwrap().0.as_deref(),
+            Some("/blueprint")
+        );
+    }
+
+    #[test]
+    fn planless_large_size_derives_blueprint_even_at_medium() {
+        for size in ["L", "l"] {
+            let row = json!({"id": "x-big", "difficulty": "medium", "size": size});
+            assert_eq!(
+                effective_verb(&row).unwrap().0.as_deref(),
+                Some("/blueprint"),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn planless_premise_question_tag_derives_blueprint() {
+        let row = json!({"id": "x-q", "difficulty": "low", "tags": ["premise-question"]});
+        assert_eq!(
+            effective_verb(&row).unwrap().0.as_deref(),
+            Some("/blueprint")
+        );
+        // A row with no tags array, or an unrelated tag, stays on target.
+        let plain = json!({"id": "x-q", "difficulty": "low"});
+        assert_eq!(
+            effective_verb(&plain).unwrap().0.as_deref(),
+            Some("/target")
+        );
+        let other = json!({"id": "x-q", "difficulty": "low", "tags": ["infra"]});
+        assert_eq!(
+            effective_verb(&other).unwrap().0.as_deref(),
+            Some("/target")
+        );
+    }
+
+    #[test]
+    fn medium_floor_restores_blueprint_for_medium_and_degrades_on_typo() {
+        let row = json!({"id": "x-med", "difficulty": "medium"});
+        let (verb, _) = effective_verb_with_floor(&row, "medium").unwrap();
+        assert_eq!(verb.as_deref(), Some("/blueprint"));
+        let (verb, _) = effective_verb_with_floor(&row, "spicy").unwrap();
+        assert_eq!(verb.as_deref(), Some("/target"));
+    }
+
+    #[test]
+    fn serve_effective_verb_honors_the_floor_param() {
+        let row = json!({"id": "x-med", "difficulty": "medium"});
+        let reply =
+            serve_effective_verb(&json!({"entries": [row], "blueprint_floor": "medium"})).unwrap();
+        assert_eq!(reply["verb"], json!("/blueprint"));
+    }
+
+    #[test]
     fn dollar_namespaced_declared_verb_canonicalizes_like_the_slash_spelling() {
         let dir = tempfile::tempdir().unwrap();
         let probe = plan_at(dir.path(), "idea.md", "---\nstatus: idea\n---\n# idea\n");
@@ -1882,5 +2351,120 @@ mod tests {
             refusal.starts_with("dispatch verb cannot be derived for node x-planless:"),
             "{refusal}"
         );
+    }
+
+    #[test]
+    fn touched_before_keeps_only_old_rows_and_falls_back_to_created() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut rows = vec![
+            json!({
+                "id": "x-10",
+                "created_at": "2026-09-13T00:00:00Z",
+                "touched_at": "2026-09-13T00:00:00Z"
+            }),
+            json!({
+                "id": "x-45",
+                "created_at": "2026-08-09T00:00:00Z",
+                "touched_at": "2026-08-09T00:00:00Z"
+            }),
+            json!({
+                "id": "x-90",
+                "created_at": "2026-06-25T00:00:00Z",
+                "touched_at": null
+            }),
+        ];
+        let filter = parse_date_filter(&["--touched-before".into(), "60d".into()], now_ms).unwrap();
+
+        filter.apply(&mut rows);
+
+        assert_eq!(
+            rows.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-90")]
+        );
+    }
+
+    #[test]
+    fn created_sort_orders_oldest_first() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut rows = vec![
+            json!({"id": "x-10", "created_at": "2026-09-13T00:00:00Z"}),
+            json!({"id": "x-90", "created_at": "2026-06-25T00:00:00Z"}),
+            json!({"id": "x-45", "created_at": "2026-08-09T00:00:00Z"}),
+        ];
+        let filter = parse_date_filter(&["--sort".into(), "created".into()], now_ms).unwrap();
+
+        filter.apply(&mut rows);
+
+        assert_eq!(
+            rows.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-90"), Some("x-45"), Some("x-10")]
+        );
+    }
+
+    #[test]
+    fn invalid_date_has_prefix_value_and_usage() {
+        let error = parse_date_filter(
+            &["--touched-before".into(), "soon".into()],
+            1_800_000_000_000,
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("ready filter: "), "{error}");
+        assert!(error.contains("soon"), "{error}");
+        assert!(error.ends_with(DATE_FILTER_USAGE), "{error}");
+    }
+
+    #[test]
+    fn unknown_sort_and_missing_values_are_refused() {
+        for args in [
+            vec!["--bogus".to_string()],
+            vec!["--sort".to_string(), "priority".to_string()],
+            vec!["--created-after".to_string()],
+        ] {
+            let error = parse_date_filter(&args, 1_800_000_000_000).unwrap_err();
+            assert!(error.starts_with("ready filter: "), "{error}");
+            assert!(error.ends_with(DATE_FILTER_USAGE), "{error}");
+        }
+    }
+
+    #[test]
+    fn missing_touched_stamp_drops_for_filter_but_sorts_last() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let mut filtered = vec![
+            json!({"id": "x-missing"}),
+            json!({"id": "x-recent", "created_at": "2026-09-13T00:00:00Z"}),
+        ];
+        parse_date_filter(&["--touched-after".into(), "30d".into()], now_ms)
+            .unwrap()
+            .apply(&mut filtered);
+        assert_eq!(
+            filtered.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-recent")]
+        );
+
+        let mut sorted = vec![
+            json!({"id": "x-missing"}),
+            json!({
+                "id": "x-recent", "created_at": "2026-09-13T00:00:00Z"
+            }),
+        ];
+        parse_date_filter(&["--sort=touched".into()], now_ms)
+            .unwrap()
+            .apply(&mut sorted);
+        assert_eq!(
+            sorted.iter().map(entry_id).collect::<Vec<_>>(),
+            vec![Some("x-recent"), Some("x-missing")]
+        );
+    }
+
+    #[test]
+    fn split_and_inline_iso_dates_parse_to_the_same_cutoff() {
+        let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
+        let split =
+            parse_date_filter(&["--created-after".into(), "2026-09-01".into()], now_ms).unwrap();
+        let inline =
+            parse_date_filter(&["--created-after=2026-09-01T00:00:00Z".into()], now_ms).unwrap();
+
+        assert_eq!(split.created_after, inline.created_after);
     }
 }

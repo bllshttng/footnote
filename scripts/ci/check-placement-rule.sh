@@ -65,6 +65,10 @@
 #      Claude Code's own file store, so the memory carveout must name that
 #      root to allow exactly it and nothing wider. Comparison only; no
 #      footnote state lands there.
+#      scripts/metrics/port-order.sh reads the same transcripts: a 30-day
+#      scan counts `fno <verb-group>` occurrences for the port-order
+#      table's use column. Read-only; footnote stores nothing there, and a
+#      missing root leaves use at zero rather than creating anything.
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
 #      The inherited-model-env remedy strings (model_routing.py,
@@ -88,6 +92,9 @@
 #      because a worker pinned to another account exports that variable and
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
+#      slot_cutover.rs compares `accounts.records[].config_dir` to the exact
+#      `~/.claude` config value to distinguish shared-slot records from
+#      per-config-dir accounts. It constructs and reads no path from the value.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
 #      binding.py is the shared effective-account read those callers now go
 #      through, and test_account_binding.py is its test: it builds a canonical
@@ -236,6 +243,8 @@ cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
+crates/fno-agents/src/claude_vault.rs
+crates/fno-agents/src/slot_cutover.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
@@ -336,6 +345,7 @@ scripts/lib/worktree-lifecycle.sh
 scripts/lib/worktree-manager.sh
 scripts/lib/worktree_occupancy.py
 scripts/lint/no-invalid-events.sh
+scripts/metrics/port-order.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
 scripts/diagnostics/token-diagnose.py

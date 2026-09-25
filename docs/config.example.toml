@@ -25,8 +25,6 @@ done_probes = []
 loops = {}
 # Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}.
 status_sinks = []
-# Questions-file sinks: list of {name, type (md), path, tag, settle_secs, ready_only}. The daemon's attention arm writes open questions there; see docs/architecture/attention-items.md. The retired [[reach_me]] name reads for one release.
-attention = []
 # Settings schema version; managed by fno, not hand-set.
 schema_version = 1
 
@@ -389,18 +387,24 @@ auto_merge = false
 on_exhaustion = "defer"
 # Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.
 cutover_low_after_minutes = 0
+# The blueprint floor for a plan-less node (lean dispatch). 'high' (the default) routes a plan-less node to /blueprint only when its difficulty is high, its size is L, or an open premise question blocks it (the premise-question tag); every other plan-less node goes straight to /target, which states its own scope. 'medium' restores the pre-lean table (blueprint for medium and up). Any unknown value degrades to 'high'.
+blueprint_floor = "high"
 
 [routing]
 # How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.
 objective = "cheapest-that-clears"
 # The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.
 prefer_harness = ""
-# The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.
+# The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context, context_measured_at, context_source} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. A row's context counts as a measured window only beside a context_measured_at date; an unmeasured model falls back to the id-based default. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.
 models = []
 # Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only, and an unresolvable request is a named refusal. A typed --model, -P, or --route is an operator pin and outranks the declared lanes; every axis the operator did not name still qualifies against them. Default off.
 enforce_inventory = false
 # The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.
 operator_access = "unknown"
+
+[sideline]
+# The sideline's row shape: "card" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); "list" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.
+layout = "card"
 
 [sideline.colors]
 # Lane colors keyed by harness name (e.g. codex = "cyan"). The cascade's coarsest config key; see sideline.colors.route.

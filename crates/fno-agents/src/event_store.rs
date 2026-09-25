@@ -239,6 +239,7 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
 /// an acknowledged ingest survives a crash. The schema is ensured (v2
 /// created, or v1 migrated) before the connection is handed out.
 fn open_store(store: &Path) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(store)?;
     let mut conn = Connection::open(store).map_err(|e| format!("{}: {e}", store.display()))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
@@ -673,12 +674,10 @@ fn map_row(line: &str, now_ms: i64) -> (i64, String, String, Option<String>, Opt
         Some(ms) => ms,
         None => return reject(now_ms, ty, source, "unparseable ts"),
     };
-    let scope = obj
-        .get("data")
-        .and_then(|d| d.get("scope"))
-        .and_then(|s| s.as_str());
+    let data = obj.get("data").unwrap_or(&serde_json::Value::Null);
+    let scope = data.get("scope").and_then(|s| s.as_str());
     if let Some(s) = scope {
-        if !is_canonical_crown_scope(s) {
+        if !is_valid_event_scope(ty, data, s) {
             return reject(ts_ms, ty, source, "scope is not a canonical crown scope");
         }
     }
@@ -699,6 +698,22 @@ fn is_canonical_crown_scope(s: &str) -> bool {
         && canonical_scope(s) == s
         && s.split(',')
             .all(|m| !m.is_empty() && !m.chars().any(char::is_whitespace))
+}
+
+fn is_valid_event_scope(event_type: &str, data: &serde_json::Value, scope: &str) -> bool {
+    if !scope.is_empty() {
+        return is_canonical_crown_scope(scope);
+    }
+    // An unowned visitor Stop has no crown scope but remains an auditable event.
+    event_type == "stop_decision"
+        && data.get("class").and_then(serde_json::Value::as_str) == Some("visitor")
+        && data.get("decision").and_then(serde_json::Value::as_str) == Some("allow")
+        && data
+            .get("continuation_owner")
+            .and_then(serde_json::Value::as_str)
+            == Some("none")
+        && data.get("manifest").and_then(serde_json::Value::as_str) == Some("")
+        && data.get("node_id").and_then(serde_json::Value::as_str) == Some("")
 }
 
 /// The canonical comma-joined form of a raw scope spelling: members split on
@@ -836,7 +851,7 @@ pub fn append_envelope(
         .and_then(|d| d.get("scope"))
         .and_then(|s| s.as_str())
     {
-        if !is_canonical_crown_scope(s) {
+        if !is_valid_event_scope(&ty, obj.get("data").expect("data object checked above"), s) {
             return Err(format!(
                 "{}: data.scope is not a canonical crown scope: {s}",
                 store.display()

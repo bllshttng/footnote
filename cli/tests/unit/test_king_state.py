@@ -301,7 +301,7 @@ def test_a_missing_manifest_without_the_flag_skips_the_flag_advice(monkeypatch, 
     stops there instead of advising a flag the caller never used."""
     import fno.king.state as state
 
-    monkeypatch.setattr(state, "king_state_root", lambda: tmp_path)
+    monkeypatch.setattr(state, "king_state_root", lambda cwd=None: tmp_path)
     row = SimpleNamespace(
         status="live",
         crown_scope="x-f3d0",
@@ -476,14 +476,31 @@ def test_an_unparseable_window_is_refused():
 # --- the two refusals that make a crown real -------------------------------
 
 
-def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1", scopes=("drain",)):
+def _init(
+    monkeypatch,
+    tmp_path,
+    *,
+    enabled=True,
+    harness_id="sess-1",
+    scopes=("drain",),
+    readiness_error=None,
+    readiness_calls=None,
+):
     """Run `fno agents king init` in tmp_path and return (exit_code, stderr)."""
     import fno.king.state as state
     from typer.testing import CliRunner
 
     from fno.king.cli import king_app
 
+    def readiness(verb, args):
+        if readiness_calls is not None:
+            readiness_calls.append((verb, args))
+        if readiness_error:
+            return readiness_error, None
+        return None, {"ready": True}
+
     monkeypatch.setattr(state, "king_loop_enabled", lambda: enabled)
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", readiness)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".fno").mkdir(exist_ok=True)
     result = CliRunner().invoke(
@@ -532,6 +549,29 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     manifest = state.king_manifest_path("drain")
     assert manifest.exists()
     assert "harness_session_id: sess-1" in manifest.read_text()
+
+
+def test_rust_readiness_refusal_writes_no_crown_manifest(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    calls = []
+    monkeypatch.setenv("FNO_HARNESS", "codex")
+    code, out = _init(
+        monkeypatch,
+        tmp_path,
+        readiness_error="Stop readiness is blocked: session-refresh-unverified",
+        readiness_calls=calls,
+    )
+
+    assert code == 2
+    assert "session-refresh-unverified" in out
+    assert calls == [
+        (
+            "loop",
+            ["readiness", "--scope", "drain", "--session", "sess-1", "--ensure-goal"],
+        )
+    ]
+    assert not state.king_manifest_path("drain", state_root=tmp_path / ".fno").exists()
 
 
 def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):

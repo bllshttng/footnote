@@ -144,6 +144,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("question-intake") {
         std::process::exit(fno_agents::question_intake::run_question_intake());
     }
+    if args.first().map(String::as_str) == Some("question-clear") {
+        std::process::exit(fno_agents::question_clear::run_question_clear());
+    }
     // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
     if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
         std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
@@ -164,6 +167,11 @@ fn main() {
         std::process::exit(fno_agents::sync_canonical::run_sync_canonical_verb(
             &args[1..],
         ));
+    }
+    // PR-scoped callers resolve the local checkout from the head branch;
+    // transport-only, so this adds no client action to the curated menu.
+    if args.first().map(String::as_str) == Some("pr-worktree") {
+        std::process::exit(fno_agents::pr_worktree::run());
     }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
     // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
@@ -258,6 +266,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
+    // Binary-direct mail transport for the events and note Python adapters.
+    // It is intentionally not a routable `fno agents` verb.
+    if matches!(verb, "machine-mail-send") {
+        return fno_agents::machine_mail::run(&args[1..]).await;
+    }
+
     if matches!(verb, "manifest-eval") {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
     }
@@ -308,6 +322,10 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if matches!(verb, "name-codes") {
         return fno_agents::naming::run_name_codes(&args[1..]);
+    }
+
+    if matches!(verb, "claude-birth-exec") {
+        return fno_agents::claude_supervisor::run_birth_exec(&args[1..]);
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:
@@ -597,25 +615,28 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
     }
-
-    // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct
-    // dispatch; no daemon RPC.
+    // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc); no daemon RPC.
     if verb == "finalize" {
         return fno_agents::finalize::run_finalize(&args[1..]);
     }
 
-    // `kill-check`: Rust port of scripts/lib/kill-criteria.sh (see
-    // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
+    // `kill-check`: the Rust port of scripts/lib/kill-criteria.sh; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
     // `authorized-merge`: the one merge/arm authorization (see
-    // authorized_merge.rs doc). Direct dispatch; no daemon RPC. `fno do pr
-    // merge` sends one JSON payload and reads one receipt back, so the merge
-    // verb and finalize cannot answer "may this head merge?" differently.
+    // authorized_merge.rs doc). One payload in, one receipt out, one verdict.
     if verb == "authorized-merge" {
         return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
+    }
+
+    // `rename` with no argv is the retask payload door: the Python
+    // `fno agents retask` front sends one JSON payload and reads the receipt
+    // back. No action added (the shrink law); the transaction's contract
+    // lives in retask.rs.
+    if verb == "rename" && args.len() == 1 {
+        return fno_agents::retask::transport::run_payload();
     }
 
     // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct
@@ -789,6 +810,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
+    if verb == "session-backfill" {
+        return fno_agents::session_backfill::run(&args[1..]);
+    }
     // `intel`: the session-provenance fold, daemon-free read, == dispatch
     // like board/reclaim: never registered in ALL_CLIENT_ACTIONS (the action
     // list is shrink-only, d-fe66560a) and never routed by `fno agents`;
@@ -873,9 +897,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_trace(&args[1..], &AgentsHome::from_env());
     }
     // registry-json: the daemon-free registry projection the hooks read.
-    // Reads the registry file client-side and derives the served liveness
-    // pair with the vendored freshness rule; starts nothing, so the Stop
-    // hook's never-lazy-start promise still holds.
+    // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
     }
@@ -884,9 +906,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
     // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
     // re-entry: it falls through to build_request, which routes it to the
-    // daemon's agent.convert. The daemon owns it because the agent lock
-    // serializes it and a mid-move claim must be pinned to a process that
-    // outlives the client.
+    // daemon's agent.convert, whose agent lock outlives the client.
     if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
@@ -935,6 +955,12 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
+    }
+    // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
+    // the PR-body closure line; the Python readers forward here (JSON payload
+    // in, JSON answer out, binary-direct like `pr-body-check`).
+    if matches!(verb, "pr-closure-parse" | "pr-closure-render") {
+        return fno_agents::king_board::pr_closure::run(&args);
     }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
@@ -1472,6 +1498,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
     let daemon_gate_flags = gate_flags_from_params(&params);
+    let daemon_gate_seed = fno_agents::spawn_phase::params_seed(&params);
     // Same snapshot for the portal placement: it rides the
     // daemon's response, after the receipt.
     let thread_portal_params = if method == "agent.spawn"
@@ -1492,6 +1519,7 @@ async fn run(args: Vec<String>) -> i32 {
                 name: agent_name.clone(),
                 substrate: "bg".into(),
                 flags: daemon_gate_flags,
+                seed: daemon_gate_seed,
                 ..Default::default()
             },
         ) {
@@ -1968,12 +1996,6 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
     params.get("defaults_applied").is_none()
 }
 
-/// Exec the Python front door with the given spawn argv. `fno` is the entry
-/// point on a deployed machine; a bare venv install (CI runners included)
-/// only ships `fno-py`, so a NotFound on the first candidate falls through
-/// to the PATH-robust resolver ([`fno_agents::scrape::fno_py`]) - a bare
-/// name here failed whenever the wheel bin was off PATH. Returns
-/// the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(fno_agents::scrape::fno_bin())
@@ -2350,6 +2372,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 name: name.to_string(),
                 substrate: substrate.to_string(),
                 flags,
+                seed: fno_agents::spawn_phase::params_seed(&params),
                 ..Default::default()
             },
         ) {

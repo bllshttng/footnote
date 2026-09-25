@@ -13,6 +13,7 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
 
 ## The cycle
 
+0. **Authoring gate:** answer the four questions in [test-audit](../test-audit/SKILL.md) before writing the test. They cover the behavior protected, the regression that fails it, the coverage gap, and any test-only production seam. A test matching a junk pattern there does not get written. The gate is cheaper than a bad test.
 1. **RED:** write ONE minimal test for the next acceptance criterion (one behavior per test, clear name, real assertions). Only a change with those surfaces carries database and UI assertions.
 2. **Verify RED (mandatory):** run the test. It must FAIL - not error - because the behavior is missing, with the expected failure message. A test that passes immediately tests existing behavior: write a different test. A test that errors: fix the error until it fails correctly.
 3. **GREEN:** write the simplest code that passes. Nothing beyond what the test requires.

@@ -785,6 +785,20 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // deliberately not returned into `failed`.
     if !delivery_ship {
         stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+        // ── held-findings backstop ────────────────────────────────────
+        // A create flow that died between `gh pr create` and its
+        // publish-review step still owes the PR its pre-PR review comment.
+        // Idempotent by marker inside publish_held; log-only, never fatal.
+        // Reads the caller-pinned journal: events_path() migrates the
+        // checkout journal on read, and a backstop must not re-home the
+        // session's rows mid-finalize.
+        let held = held_findings_backstop(&cwd, &project_events);
+        if held.status != "skipped" {
+            eprintln!(
+                "finalize: held review findings: {} ({})",
+                held.status, held.reason
+            );
+        }
     }
 
     // ── guarded do-provenance backstop ────────────────────────────
@@ -1850,7 +1864,7 @@ fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
 }
 
 /// Deterministic node<->PR `pr_number` backstop: the create-time skill
-/// stamp (pr-creator §5.5) is best-effort and was skipped for /#358,
+/// stamp (the create flow's bind step) is best-effort and was skipped for /#358,
 /// leaving `pr_number` null so the derived `in_review` status never engaged.
 /// Gated on node-presence + PR-exists (NOT `ship`) so `DoneAwaitingMerge` - the
 /// exact terminal `in_review` covers - is included. Best-effort + non-fatal +
@@ -2122,6 +2136,30 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// reviewed, mergeable PR for a human, which is the safe direction.
 fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Option<String>) {
     use crate::authorized_merge::{Effect, Outcome, Request};
+
+    // The merges hold gates this door too: arming is a merge effect (the
+    // queue merges when checks pass). Best-effort like everything here, and
+    // the safe direction - a held arm leaves the green PR for a human.
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => {}
+        crate::fleet_incident::Verdict::Stopped(r) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident stop holds merges (generation {}, reason: {})",
+                    r.generation, r.reason
+                )),
+            );
+        }
+        crate::fleet_incident::Verdict::Unavailable(d) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident state is unreadable ({d}); arm fails closed"
+                )),
+            );
+        }
+    }
 
     let outcome = crate::authorized_merge::run(
         &crate::authorized_merge::RealProbes,
@@ -2712,8 +2750,18 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 
 fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
     let mut cmd = Command::new("fno");
-    cmd.current_dir(cwd)
-        .args(["inbox", "outstanding", "ask", question]);
+    cmd.current_dir(cwd).args([
+        "inbox",
+        "outstanding",
+        "ask",
+        question,
+        // A rescued question records as a pin: the asker is gone, so the
+        // page carries the action, not a question (the ask port refuses a
+        // question with no context). Wording never says the session ended:
+        // a session has no terminal state.
+        "--ask",
+        "the asker went quiet on this question; resume its session or re-dispatch its node, then clear this with done",
+    ]);
     if let Some(n) = node {
         cmd.args(["--node", n]);
     }
@@ -3010,6 +3058,19 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
     }
 }
 
+/// The held-findings read for finalize: the caller-pinned journal only.
+/// `events_path` would migrate the checkout journal on read and re-home
+/// the session's rows mid-finalize; a finalize backstop scans for held
+/// attestations without mutating path state as a side effect.
+fn held_findings_backstop(cwd: &Path, journal: &Path) -> crate::publish_review::HeldAnswer {
+    let payload = serde_json::json!({ "cwd": cwd.to_string_lossy() });
+    crate::publish_review::publish_held(
+        &payload,
+        &crate::publish_review::GhReal,
+        &[journal.to_path_buf()],
+    )
+}
+
 // ── unit tests (process-free) ────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3019,6 +3080,37 @@ mod finalize_pointer_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_backstop_reads_the_pinned_journal_and_never_migrates_it() {
+        let base = std::env::temp_dir().join(format!("fno-held-backstop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let checkout_events = base.join("checkout").join(".fno").join("events.jsonl");
+        std::fs::create_dir_all(checkout_events.parent().unwrap()).unwrap();
+        std::fs::write(
+            &checkout_events,
+            "{\"ts\":\"t\",\"type\":\"delegated\",\"data\":{}}\n",
+        )
+        .unwrap();
+        let pinned = base.join("pinned-journal.jsonl");
+        std::fs::write(&pinned, "").unwrap();
+        let cwd = checkout_events
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let answer = held_findings_backstop(&cwd, &pinned);
+        assert_eq!(answer.status, "skipped");
+        // A read must not re-home the checkout journal into the space dir;
+        // the pre-backstop regression moved it as a side effect of resolving
+        // the path through events_path.
+        assert!(
+            checkout_events.exists(),
+            "checkout journal was migrated by a read"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parse_args_required_and_optional() {
@@ -4075,77 +4167,6 @@ mod tests {
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn corrections_pointer_refuses_temp_dir_postmortem() {
-        // AC1-EDGE: the 360-fixture-row shape. A postmortem under a per-test
-        // temp dir with the log resolved through a real home appends NOTHING;
-        // the log must be byte-identical afterwards. Uses a sibling of the
-        // accepted root, not a /tmp name match (AC1-ERR).
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let fno_home = std::env::temp_dir().join(format!("fin-corr-fx-{}", std::process::id()));
-        let home = std::env::temp_dir().join(format!("fin-corr-fxh-{}", std::process::id()));
-        let _ = fs::create_dir_all(&fno_home);
-        let _ = fs::create_dir_all(&home);
-        let log_path = fno_home.join("corrections.log");
-        fs::write(&log_path, "").unwrap();
-        let fixture_pm = fno_home.join("pm-sibling-not-postmortems").join("pm.md");
-
-        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
-        std::env::set_var("FNO_HOME", &fno_home);
-        append_corrections_pointer(Some(&home), &fixture_pm, "NoProgress", "d");
-        std::env::remove_var("FNO_HOME");
-
-        let contents = fs::read_to_string(&log_path).unwrap();
-        assert!(
-            contents.is_empty(),
-            "fixture postmortem must not append: {contents}"
-        );
-        let _ = fs::remove_dir_all(&fno_home);
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn corrections_pointer_creates_absent_log_at_0600() {
-        // A termination against a home with no corrections.log yields a
-        // one-row log at 0600 instead of a dropped row; a second
-        // termination appends without rewriting the mode. The postmortem
-        // sits under the real postmortems root so the fixture guard lets
-        // it through.
-        use std::os::unix::fs::PermissionsExt;
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("fin-corr-create-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        let fno_dir = home.join(".fno");
-        let pm_dir = fno_dir.join("postmortems");
-        fs::create_dir_all(&pm_dir).unwrap();
-        let real_pm = pm_dir.join("pm-x.md");
-        fs::write(&real_pm, "postmortem").unwrap();
-        let log_path = fno_dir.join("corrections.log");
-
-        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
-        std::env::remove_var("FNO_HOME");
-        append_corrections_pointer(Some(&home), &real_pm, "NoProgress", "s");
-
-        let contents = fs::read_to_string(&log_path).unwrap();
-        assert!(contents.contains("target-postmortem"), "{contents}");
-        assert!(contents.contains("pm-x.md"), "{contents}");
-        let mode = fs::metadata(&log_path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode);
-
-        let real_pm2 = pm_dir.join("pm-y.md");
-        fs::write(&real_pm2, "postmortem").unwrap();
-        append_corrections_pointer(Some(&home), &real_pm2, "Budget", "d");
-        let contents = fs::read_to_string(&log_path).unwrap();
-        assert_eq!(contents.lines().count(), 2, "{contents}");
-        let mode = fs::metadata(&log_path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode);
         let _ = fs::remove_dir_all(&home);
     }
 

@@ -24,12 +24,18 @@
 //! repository allows. Scripts that call pytest internally, and pytest fed
 //! to `xargs`, are known fail-opens, the accepted shape for this class of
 //! guard. Shell shim: `hooks/test-run-guard.sh`.
+//!
+//! A whole crate suite through a blessed door is still a whole suite:
+//! `fno doctor test rust` and the `fno-agents test-run -- cargo test` door
+//! are refused too when the argv selects a whole crate, unless the command
+//! carries the literal `FNO_TEST_FULL=1`.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::king_guard::lex;
+use crate::test_run::cargo_test_selects_whole_suite;
 
 /// Wrappers that are transparent to command position: `sudo pytest ...`
 /// still runs the pytest. Shell keywords that open a body are here too, so
@@ -98,15 +104,18 @@ const UV_VALUE_FLAGS: &[&str] = &[
     "-p",
 ];
 
-const PYTEST_REASON: &str = "[fno test-run guard] `{cmd}` runs pytest outside the suite admission. A raw suite takes no test:suite slot, waits behind no live cargo build, and imports whichever fno is first on PYTHONPATH - on this machine two raw suites at once are the measured crush behind this guard.\n\nRun `fno doctor test [paths...]` instead: it takes the test:suite claim, holds while another suite or cargo build is live, and pins PYTHONPATH to this worktree.";
+const PYTEST_REASON: &str = "[fno test-run guard] `{cmd}` runs pytest outside the suite admission. A raw suite takes no test:suite slot, waits behind no live cargo build, and imports whichever fno is first on PYTHONPATH - on this machine two raw suites at once are the measured crush behind this guard.\n\nRun `fno doctor test <test files>` instead, for example `fno doctor test cli/tests/unit/test_x.py`. It takes the one machine-wide test:suite slot, holds while another suite or cargo build is live, and pins PYTHONPATH to this worktree. A bare `fno doctor test` runs the whole cli/tests tree while it holds that slot.";
 
-const CARGO_REASON: &str = "[fno test-run guard] `{cmd}` runs the crates suite unadmitted. Raw `cargo test` takes no test:suite slot and waits behind no live cargo build.\n\nRun `fno doctor test rust` instead: it admits the crates suite under the same claim and bounds it to one run on this machine.";
+const CARGO_REASON: &str = "[fno test-run guard] `{cmd}` runs the crates suite unadmitted. Raw `cargo test` takes no test:suite slot and waits behind no live cargo build.\n\nRun the narrowest target through the door instead: `fno doctor test rust --manifest-path crates/<crate>/Cargo.toml --lib <module>::` for unit tests, or `--test <file stem>` for one integration file. A whole-crate run is refused here too; CI runs every suite on every PR.";
+
+const WHOLE_RUST_REASON: &str = "[fno test-run guard] `{cmd}` runs a whole crate test suite. CI runs every suite on every PR. Here a whole run holds the one machine-wide test:suite slot for many minutes while one-test runs queue behind it.\n\nRun the narrowest target instead: `fno doctor test rust --manifest-path crates/<crate>/Cargo.toml --lib <module>::` for unit tests, or `--test <file stem>` for one integration file. To run the whole suite anyway, prefix the command with `FNO_TEST_FULL=1`; it then waits while targeted runs are queued.";
 
 /// Which blessed door the refusal names.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Pytest,
     Cargo,
+    WholeRust,
 }
 
 /// Entry: read the payload once, decide, print, always exit 0.
@@ -164,7 +173,7 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     let Some(tokens) = lex(command) else {
         return None; // unbalanced quotes: cannot tell command position, allow
     };
-    let (kind, shown) = refused_segment(&tokens, 0)?;
+    let (kind, shown) = refused_segment(&tokens, 0, false)?;
     let root = root?;
     if !is_footnote_checkout(root) {
         return None;
@@ -172,6 +181,7 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     let reason = match kind {
         Kind::Pytest => PYTEST_REASON,
         Kind::Cargo => CARGO_REASON,
+        Kind::WholeRust => WHOLE_RUST_REASON,
     };
     Some(reason.replace("{cmd}", &shown))
 }
@@ -300,7 +310,65 @@ fn refused_head(head: &str, argv: &[String]) -> Option<Kind> {
     if head == "cargo" && cargo_runs_tests(argv) {
         return Some(Kind::Cargo);
     }
+    if matches!(head, "fno" | "fno-py") {
+        if let Some(cargo_argv) = doctor_test_rust_cargo_argv(argv) {
+            if cargo_test_selects_whole_suite(&cargo_argv) {
+                return Some(Kind::WholeRust);
+            }
+        }
+    }
+    if head == "fno-agents" && argv.first().map(String::as_str) == Some("test-run") {
+        if let Some(dd) = argv.iter().position(|t| t == "--") {
+            let inner = &argv[dd + 1..];
+            if let Some((inner_head, inner_argv, _)) = head_of(inner, false) {
+                if inner_head == "cargo" {
+                    let mut full = vec!["cargo".to_string()];
+                    full.extend(inner_argv);
+                    if cargo_test_selects_whole_suite(&full) {
+                        return Some(Kind::WholeRust);
+                    }
+                }
+            }
+        }
+    }
     None
+}
+
+/// The cargo argv an `fno doctor test rust` invocation forwards, when `argv`
+/// is that door's shape: `doctor test`, then `rust`, with the transport
+/// flags `--stream` and `--log`/`--log=<path>` dropped wherever they sit.
+/// None for any other shape - the classifier is never fed a guessed argv.
+fn doctor_test_rust_cargo_argv(argv: &[String]) -> Option<Vec<String>> {
+    let mut rest = argv;
+    for expected in ["doctor", "test"] {
+        if rest.first().map(String::as_str) != Some(expected) {
+            return None;
+        }
+        rest = &rest[1..];
+    }
+    let mut tail: Vec<String> = Vec::new();
+    let mut saw_rust = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = &rest[i];
+        if tok == "--stream" || tok == "--log" || tok.starts_with("--log=") {
+            i += if tok == "--log" { 2 } else { 1 };
+            continue;
+        }
+        if tok == "rust" && !saw_rust {
+            saw_rust = true;
+            i += 1;
+            continue;
+        }
+        tail.push(tok.clone());
+        i += 1;
+    }
+    if !saw_rust {
+        return None;
+    }
+    let mut out = vec!["cargo".to_string(), "test".to_string()];
+    out.extend(tail);
+    Some(out)
 }
 
 /// True when this token ends one command and starts the next. Redirect
@@ -440,24 +508,36 @@ pub(super) fn stages(segment: &[String]) -> Vec<Vec<String>> {
 /// payload recurses as its own command text, bounded by depth. A pytest fed
 /// to `xargs` is a known fail-open: it is not in this shell's command
 /// position.
-fn refused_segment(tokens: &[String], depth: usize) -> Option<(Kind, String)> {
+fn refused_segment(
+    tokens: &[String],
+    depth: usize,
+    inherited_escape: bool,
+) -> Option<(Kind, String)> {
     if depth > 2 {
         return None;
     }
     for segment in segments(tokens) {
         for part in stages(&segment) {
+            // The whole-suite escape rides the stage text: a `WholeRust`
+            // verdict is skipped when this stage carries the literal prefix
+            // (or inherited one from a wrapper shell, whose env reaches the
+            // payload), and the raw pytest/cargo refusals ignore the prefix.
+            let full_escape = inherited_escape || part.iter().any(|t| t == "FNO_TEST_FULL=1");
             for reading in [head_of(&part, false), head_of(&part, true)] {
                 let Some((head, argv, _wrappers)) = reading else {
                     continue;
                 };
                 if let Some(kind) = refused_head(&head, &argv) {
+                    if kind == Kind::WholeRust && full_escape {
+                        continue;
+                    }
                     return Some((kind, part.join(" ")));
                 }
                 if let Some(payload) = shell_payload(&head, &argv) {
                     let Some(sub) = lex(&payload) else {
                         continue;
                     };
-                    if let Some(found) = refused_segment(&sub, depth + 1) {
+                    if let Some(found) = refused_segment(&sub, depth + 1, full_escape) {
                         return Some(found);
                     }
                 }
@@ -599,7 +679,11 @@ mod tests {
     fn cargo_test_refused_names_doctor_test_rust() {
         let root = footnote_root();
         let refusal = decide("cargo test -p fno", root.path());
-        assert!(refusal.unwrap().contains("fno doctor test rust"));
+        let refusal = refusal.unwrap();
+        assert!(refusal.contains("fno doctor test rust"));
+        assert!(refusal.contains("--manifest-path crates/<crate>/Cargo.toml"));
+        assert!(refusal.contains("--lib"));
+        assert!(refusal.contains("--test"));
     }
 
     #[test]
@@ -619,7 +703,11 @@ mod tests {
     fn doctor_test_allows() {
         let root = footnote_root();
         assert!(decide("fno doctor test cli/tests/unit/x.py", root.path()).is_none());
-        assert!(decide("fno doctor test rust", root.path()).is_none());
+        assert!(decide(
+            "fno doctor test rust --manifest-path crates/fno-agents/Cargo.toml --lib test_run::",
+            root.path()
+        )
+        .is_none());
     }
 
     #[test]
@@ -771,5 +859,133 @@ mod tests {
         // `cargo nextest run` never spells the word test as a bare token.
         let root = footnote_root();
         assert!(decide("cargo nextest run", root.path()).is_none());
+    }
+
+    /// AC9-HP, AC10-HP: a whole crate suite is refused through both blessed
+    /// doors, in every transport-flag spelling, and names the narrowest
+    /// target plus the escape prefix.
+    #[test]
+    fn whole_rust_suite_refused_at_both_doors() {
+        let root = footnote_root();
+        let refusal = decide("fno doctor test rust", root.path()).expect("bare rust refuses");
+        assert!(refusal.contains("--lib"), "{refusal}");
+        assert!(refusal.contains("--test"), "{refusal}");
+        assert!(refusal.contains("CI"), "{refusal}");
+        assert!(refusal.contains("FNO_TEST_FULL=1"), "{refusal}");
+        assert!(
+            decide(
+                "fno doctor test --stream rust --manifest-path crates/fno/Cargo.toml",
+                root.path()
+            )
+            .is_some(),
+            "--stream before rust refuses"
+        );
+        assert!(
+            decide(
+                "fno doctor test --log=/tmp/x.log rust --manifest-path crates/fno/Cargo.toml",
+                root.path()
+            )
+            .is_some(),
+            "--log= before rust refuses"
+        );
+        assert!(
+            decide(
+                "fno-agents test-run --timeout 1800 -- cargo test -q --manifest-path crates/fno/Cargo.toml -- --test-threads 4",
+                root.path()
+            )
+            .is_some(),
+            "the direct owner door refuses a whole suite"
+        );
+    }
+
+    /// The transport flags `--stream` and `--log` are dropped wherever they
+    /// sit, so `rust` is found behind them and its cargo tail classified.
+    #[test]
+    fn doctor_test_transport_flags_are_dropped() {
+        let root = footnote_root();
+        assert!(
+            decide(
+                "fno doctor test rust --manifest-path crates/fno/Cargo.toml --stream",
+                root.path()
+            )
+            .is_some(),
+            "a trailing --stream never hides the whole-suite run"
+        );
+        assert!(
+            decide(
+                "fno doctor test --log /tmp/x.log rust --manifest-path crates/fno/Cargo.toml",
+                root.path()
+            )
+            .is_some(),
+            "a leading --log <path> never hides the whole-suite run"
+        );
+    }
+
+    /// AC11-EDGE: the commands the refusal teaches are never themselves
+    /// refused, at either door.
+    #[test]
+    fn targeted_rust_runs_allow_at_both_doors() {
+        let root = footnote_root();
+        assert!(decide(
+            "fno doctor test rust --manifest-path crates/fno-agents/Cargo.toml --lib test_run::",
+            root.path()
+        )
+        .is_none());
+        assert!(decide(
+            "fno doctor test rust --manifest-path crates/fno-agents/Cargo.toml --test test_run_lifecycle",
+            root.path()
+        ).is_none());
+        assert!(decide(
+            "fno-agents test-run -- cargo test --manifest-path crates/fno-agents/Cargo.toml --lib -- session_activity",
+            root.path()
+        ).is_none());
+    }
+
+    /// AC12-EDGE: the escape prefix opens the whole-suite door, a non-
+    /// footnote repository is out of scope, and a raw cargo run with the
+    /// prefix is still refused.
+    #[test]
+    fn whole_rust_suite_with_the_prefix_allows() {
+        let root = footnote_root();
+        assert!(
+            decide("FNO_TEST_FULL=1 fno doctor test rust", root.path()).is_none(),
+            "the prefix opens the blessed door"
+        );
+        assert!(
+            decide(
+                "FNO_TEST_FULL=1 bash -c 'fno doctor test rust'",
+                root.path()
+            )
+            .is_none(),
+            "the prefix on a wrapper shell reaches the payload"
+        );
+        let other = TempDir::new().expect("tempdir");
+        assert!(
+            decide("FNO_TEST_FULL=1 fno doctor test rust", other.path()).is_none(),
+            "a non-footnote repository allows"
+        );
+        assert!(
+            decide("FNO_TEST_FULL=1 cargo test -q", root.path()).is_some(),
+            "the prefix never opens the raw cargo door"
+        );
+    }
+
+    /// AC13-HP: the pytest refusal names a test-file target and the bare
+    /// tree cost; the cargo refusal names the narrowest rust form.
+    #[test]
+    fn pytest_refusal_names_a_test_file_target() {
+        let root = footnote_root();
+        let refusal = decide("pytest -q", root.path()).expect("pytest refuses");
+        assert!(refusal.contains("fno doctor test cli/tests/"), "{refusal}");
+        assert!(refusal.contains("test_x.py"), "{refusal}");
+        assert!(refusal.contains("whole cli/tests tree"), "{refusal}");
+        let refusal = decide("cargo test -p fno-agents foo", root.path())
+            .expect("cargo with a filter refuses");
+        assert!(
+            refusal.contains("--manifest-path crates/<crate>/Cargo.toml"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("--lib"), "{refusal}");
+        assert!(refusal.contains("--test"), "{refusal}");
     }
 }

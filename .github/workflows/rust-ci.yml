@@ -5,12 +5,12 @@ name: rust-ci
 # is not a duplicate heavy suite: formatting, the warnings ratchet, the PR
 # stress trials, and dependency audit.
 
-# Cancel a PR's superseded runs on re-push (Actions minute conservation). Keyed by head_ref so PR re-pushes share a
-# group; non-PR events use a unique run_id, so every main commit keeps its own
-# run.
+# PR re-pushes share a group keyed by head_ref and cancel their own running
+# run. Main pushes share a group keyed by ref, so a new main push supersedes
+# only the queued main run and never cancels the running one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
   workflow_dispatch:
@@ -114,6 +114,23 @@ jobs:
       - name: cargo check --all-targets (fno)
         working-directory: crates/fno
         run: cargo check --all-targets --locked
+
+  release-version-math:
+    name: release version math (sync-version + release-version)
+    # The nightly stamps a .devN version through these scripts; a PEP 440
+    # spelling reaching a Cargo.toml kills every release build. This table
+    # test is the gate that keeps the conversion honest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run the release version table test
+        run: bash tests/ci/test_release_version.sh
 
   stress:
     name: rust e2e concurrency stress (20 trials)

@@ -125,7 +125,7 @@ The loop-check verb (`fno-agents loop-check`) will verify the world independentl
 fno config accounts required-bot-check
 ```
 
-It prints nothing when every required bot's provider has headroom (or none are configured), and emits one `quota_required_bot_exhausted` decision event per exhausted bot. If it prints a warning, in attended mode surface the same facts so the operator can act (swap accounts / wait for the reset) rather than discovering the wedge later:
+When every required bot's provider has headroom or none are configured, print nothing. Emit one `quota_required_bot_exhausted` decision event per exhausted bot. If there is a warning, surface its facts in attended mode. The user can swap accounts or wait for reset instead of discovering the block later.
 
 ```
 <help reason="required-bot-quota-exhausted" evidence="<the required-bot-check output>">a required review bot's provider is out of quota; the review gate will wedge until its reset. Consider swapping the account or waiting.</help>

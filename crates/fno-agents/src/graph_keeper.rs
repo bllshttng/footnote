@@ -309,7 +309,6 @@ pub(crate) struct StoreState {
     /// counter is the cache's honest receipt (AC4's positive marker, and
     /// the PR's before/after evidence).
     pub(crate) file_opens: AtomicU64,
-    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>, u64)>>,
     pub(crate) write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
     pub(crate) gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
@@ -707,6 +706,12 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     if let Some(parent) = cfg.sock.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    // Open the store before the seat serves: first contact takes the
+    // creation lock, and a request paying it flattens a busy lock into an
+    // unreadable answer instead of lock_timeout.
+    if let Err(error) = crate::backlog::version(&cfg.graph) {
+        eprintln!("store keeper: store not opened at startup: {error}");
     }
     let listener = match UnixListener::bind(&cfg.sock) {
         Ok(l) => l,
@@ -1295,13 +1300,6 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read_strict" => handle_read(state, &params),
         "read_ids" => handle_read_ids(state, &params),
         "plan_refs" => handle_plan_refs(state),
-        // Per-row digests for a client-shipped snapshot: the Python tx cycle
-        // ships its base rows and verifies each against these before commit.
-        "row_digests" => Ok(json!({
-            "digests": canonical_row_digests(
-                &params.get("entries").and_then(Value::as_array).cloned().unwrap_or_default(),
-            )
-        })),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "write_status" => handle_write_status(state, &params),
@@ -1384,7 +1382,7 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     reply
 }
 
-fn is_write_method(method: &str) -> bool {
+pub(crate) fn is_write_method(method: &str) -> bool {
     matches!(method, "commit" | "commit_rows" | "op" | "api")
 }
 
@@ -1473,9 +1471,10 @@ fn handle_write_status(state: &StoreState, params: &Value) -> Result<Value, Stor
 /// Params: `project`, `all`, `roadmap_id`, `parent`, `mission`,
 /// `include_ideas`, `include_deferred`, `repo_root`, `entries` (optional -
 /// the external-backend path), `claimed` (optional - live claim ids; when
-/// absent the keeper resolves them from the claims store itself).
+/// absent the keeper resolves them from the claims store itself),
+/// `board` (optional - the whole-graph order and column facts, no admission).
 fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    use crate::backlog_ready::{select, NoSuchParent, ReadyOpts};
+    use crate::backlog_ready::{date_filter_from_params, select, NoSuchParent, ReadyOpts};
     use std::collections::BTreeSet;
 
     let opt_str_owned = |k: &str| -> Option<String> {
@@ -1485,6 +1484,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    let repo_root = opt_str_owned("repo_root");
     let opts = ReadyOpts {
         project: opt_str_owned("project"),
         all: params.get("all").and_then(Value::as_bool).unwrap_or(false),
@@ -1499,7 +1499,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .get("include_deferred")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        repo_root: opt_str_owned("repo_root"),
+        repo_root: repo_root.clone(),
         claimed: match params.get("claimed") {
             Some(Value::Array(ids)) => ids
                 .iter()
@@ -1533,6 +1533,14 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .get("now_ms")
             .and_then(Value::as_i64)
             .unwrap_or_else(|| crate::claims::now_ms()),
+        // The held fold: one read of the question journals beside the graph,
+        // resolved once per call so the admission decision cannot pick a node
+        // an open operator question blocks. repo_root anchors the cwd when
+        // the client passed it; the keeper's own cwd otherwise.
+        held: crate::needs::held_map(
+            state.graph.parent().unwrap_or(Path::new("")),
+            Path::new(repo_root.as_deref().unwrap_or(".")),
+        ),
     };
     // Borrowed in both arms: a deep clone of the owned graph per ready call
     // would re-spend most of the cache just saved.
@@ -1544,15 +1552,28 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             &cached
         }
     };
+    // The board mode: every entry in selection order plus the column
+    // facts, on the same fail-closed claim read as selection itself. The
+    // date filter below narrows the selection reply, not the whole-graph
+    // facts: the board's contract is every entry, no admission.
+    if matches!(params.get("board").and_then(Value::as_bool), Some(true)) {
+        let f = crate::backlog_ready::board_facts(entries, &opts.claimed, opts.now_ms);
+        let reply = json!({"ids": f.ids, "underway": f.underway, "effective_priority": f.effective_priority});
+        return Ok(reply);
+    }
+    let window = date_filter_from_params(params, opts.now_ms).map_err(StoreError::Invalid)?;
     match select(entries, &opts) {
-        Ok(reply) => Ok(json!({
-            "rows": reply.rows,
-            "drops": reply
-                .drops
-                .iter()
-                .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
-                .collect::<Vec<_>>(),
-        })),
+        Ok(mut reply) => {
+            window.apply(&mut reply.rows);
+            Ok(json!({
+                "rows": reply.rows,
+                "drops": reply
+                    .drops
+                    .iter()
+                    .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
         Err(NoSuchParent(parent)) => Err(StoreError::Invalid(format!("no such node '{parent}'"))),
     }
 }
@@ -1727,61 +1748,35 @@ fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
-    // One gate-held window for entries and digest both (cached_snapshot): a
-    // commit publishing mid-begin waits, so a retrying writer's version never
-    // names a file its entries did not come from. Both backends through the
-    // cache: on sqlite the returned version is the pre-read graph_meta
-    // version, so an interleave degrades to a commit conflict.
+    // Row versions first, then one gate-held window for entries and digest
+    // both (cached_snapshot). A writer landing between the two reads leaves
+    // the versions older than the entries: a spurious conflict at worst,
+    // never a lost update, the same rule as the pre-read version.
+    let versions = begin_versions(state)?;
     let (version, entries) = cached_snapshot(state)?;
-    remember_snapshot(state, &version, &entries);
-    Ok(json!({
+    let mut reply = json!({
         "version": version,
         "entries": entries,
-    }))
+    });
+    if let Some(versions) = versions {
+        reply["base_digests"] = json!(versions);
+    }
+    Ok(reply)
 }
 
-fn remember_snapshot(state: &StoreState, version: &str, entries: &Arc<Vec<Value>>) {
-    let bytes = graph_store::serialize_graph_file(entries).len() as u64;
-    remember_snapshot_with_bytes(state, version, entries, bytes);
-}
-
-/// `bytes` is the snapshot's serialized size, handed in by the publish path,
-/// which already serialized the entries for its gate metric.
-fn remember_snapshot_with_bytes(
+/// Begin's per-row version map (`nodes.version`), which commit_rows gets
+/// back under the historical key `base_digests`. None on the json rollback
+/// backend, which has no row versions. A store with no graph.db yet is
+/// sqlite from birth: this read folds the seed, so it is not json.
+pub(super) fn begin_versions(
     state: &StoreState,
-    version: &str,
-    entries: &Arc<Vec<Value>>,
-    bytes: u64,
-) {
-    const SNAPSHOT_RING_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
-    let mut snapshots = state
-        .snapshots
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if snapshots.iter().any(|(stored, _, _)| stored == version) {
-        return;
+) -> Result<Option<std::collections::BTreeMap<String, i64>>, StoreError> {
+    if crate::backlog::database_path(&state.graph).exists() && state.backend() != Backend::Sqlite {
+        return Ok(None);
     }
-    snapshots.push_back((version.to_string(), Arc::clone(entries), bytes));
-    // Bound the ring by serialized bytes, not a count: depth adapts to
-    // graph size. 64 MB holds four 16 MB snapshots today; tune from the
-    // attributable graph_tx_conflict events, never from a guess.
-    while snapshots.len() > 1 {
-        let total: u64 = snapshots.iter().map(|(_, _, size)| *size).sum();
-        if total <= SNAPSHOT_RING_BUDGET_BYTES {
-            break;
-        }
-        snapshots.pop_front();
-    }
-}
-
-fn stored_snapshot(state: &StoreState, version: &str) -> Option<Arc<Vec<Value>>> {
-    state
-        .snapshots
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .find(|(stored, _, _)| stored == version)
-        .map(|(_, entries, _)| Arc::clone(entries))
+    crate::backlog::row_versions(&state.graph, None)
+        .map(Some)
+        .map_err(StoreError::Sqlite)
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
@@ -1915,14 +1910,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
     let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
-        let (graph, total) = outcome_parts(value);
-        remember_snapshot_with_bytes(
-            state,
-            &value.version,
-            &Arc::new(value.entries.clone()),
-            graph,
-        );
-        gate_bytes = total;
+        gate_bytes = outcome_gate_bytes(value);
     }
     drop(gate);
     record_gate(
@@ -1962,30 +1950,6 @@ fn handle_commit_rows_reply(id: u64, state: &StoreState, params: &Value) -> Valu
             err_reply(id, store_err_kind(&error), error.to_string())
         }
     }
-}
-
-fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
-    canonical_row_digests_with_rungs(entries, None)
-}
-
-fn canonical_row_digests_with_rungs(
-    entries: &[Value],
-    plan_rungs: Option<&std::collections::BTreeMap<String, String>>,
-) -> std::collections::BTreeMap<String, String> {
-    use sha2::Digest as _;
-
-    let mut canonical = entries.to_vec();
-    graph_store::ensure_slugs(&mut canonical);
-    graph_store::recompute_statuses_with_plan_rungs(&mut canonical, plan_rungs);
-    graph_store::canonicalize_entries(&mut canonical);
-    canonical
-        .iter()
-        .filter_map(|row| {
-            let id = graph_store::entry_id(row)?.to_string();
-            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
-            Some((id, format!("{digest:x}")[..16].to_string()))
-        })
-        .collect()
 }
 
 fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, CommitRowsError> {
@@ -2038,32 +2002,36 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     let waited = waiting.elapsed();
     let current_version = state_version(state)?;
     let current = read_state(state, false, true)?;
-    if current_version != base_version {
-        let Some(base_entries) = stored_snapshot(state, base_version) else {
-            return Err(CommitRowsError::Conflict(touched.into_iter().collect()));
-        };
-        let base_rungs = plan_rung_map_field(params, "base_plan_rungs");
-        let normalized_base = canonical_row_digests_with_rungs(&base_entries, base_rungs.as_ref());
-        let current_digests = canonical_row_digests_with_rungs(&current, base_rungs.as_ref());
-        let ids: std::collections::BTreeSet<String> = normalized_base
-            .keys()
-            .chain(current_digests.keys())
-            .cloned()
-            .collect();
-        let conflicts: Vec<String> = ids
-            .into_iter()
-            .filter(|id| normalized_base.get(id) != current_digests.get(id) && touched.contains(id))
-            .collect();
-        if !conflicts.is_empty() {
-            drop(gate);
-            record_gate(
-                state,
-                waited,
-                0,
-                params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
-            );
-            return Err(CommitRowsError::Conflict(conflicts));
+    // A touched row conflicts when its stored version moved since begin.
+    // Absent on both sides is a node new since begin; present now and
+    // absent from the map is one another writer created. The json backend,
+    // or a client that sends no map, falls back to the whole-graph version.
+    // The publish below still fences on current_version against writers
+    // outside this keeper.
+    let expected = params.get("base_digests").and_then(Value::as_object);
+    let conflicts: Vec<String> = match expected {
+        Some(expected) if state.backend() == Backend::Sqlite => {
+            let ids: Vec<&str> = touched.iter().map(String::as_str).collect();
+            let stored = crate::backlog::row_versions(&state.graph, Some(&ids))
+                .map_err(StoreError::Sqlite)?;
+            touched
+                .iter()
+                .filter(|id| stored.get(*id).copied() != expected.get(*id).and_then(Value::as_i64))
+                .cloned()
+                .collect()
         }
+        _ if current_version == base_version => Vec::new(),
+        _ => touched.iter().cloned().collect(),
+    };
+    if !conflicts.is_empty() {
+        drop(gate);
+        record_gate(
+            state,
+            waited,
+            0,
+            params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+        );
+        return Err(CommitRowsError::Conflict(conflicts));
     }
 
     let changed_by_id: std::collections::BTreeMap<String, Value> =
@@ -2104,14 +2072,7 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
-        let (graph, total) = outcome_parts(value);
-        remember_snapshot_with_bytes(
-            state,
-            &value.version,
-            &Arc::new(value.entries.clone()),
-            graph,
-        );
-        gate_bytes = total;
+        gate_bytes = outcome_gate_bytes(value);
     }
     drop(gate);
     record_gate(
@@ -2124,9 +2085,9 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     Ok(outcome_json(&outcome))
 }
 
-/// (serialized graph bytes, total gate bytes) from one serialize: the ring
-/// budgets on the graph alone, the gate metric adds the backup.
-fn outcome_parts(outcome: &graph_store::MutateOutcome) -> (u64, u64) {
+/// The gate metric's bytes for one publish: the serialized graph plus the
+/// backup it wrote.
+fn outcome_gate_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
     let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
     let backup = outcome
         .backup
@@ -2134,7 +2095,7 @@ fn outcome_parts(outcome: &graph_store::MutateOutcome) -> (u64, u64) {
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|meta| meta.len())
         .unwrap_or(0);
-    (graph, graph.saturating_add(backup))
+    graph.saturating_add(backup)
 }
 
 /// The client-supplied node id -> plan rung map (see
@@ -2142,14 +2103,7 @@ fn outcome_parts(outcome: &graph_store::MutateOutcome) -> (u64, u64) {
 /// on the Python side, so the map crosses as data. Absent key = the caller
 /// is not re-deriving from plans, and stored statuses stay.
 fn plan_rung_map(params: &Value) -> Option<std::collections::BTreeMap<String, String>> {
-    plan_rung_map_field(params, "plan_rungs")
-}
-
-fn plan_rung_map_field(
-    params: &Value,
-    field: &str,
-) -> Option<std::collections::BTreeMap<String, String>> {
-    let obj = params.get(field)?.as_object()?;
+    let obj = params.get("plan_rungs")?.as_object()?;
     Some(
         obj.iter()
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
@@ -2301,8 +2255,12 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
                             "voter {key} already recorded an encounter on {} at {}",
                             obj.get("id").and_then(Value::as_str).unwrap_or(node_id),
                             // Python's f-string prints the None of a missing
-                            // ts as "None"; byte parity keeps that spelling.
-                            prior.get("ts").and_then(Value::as_str).unwrap_or("None")
+                            // stamp as "None"; byte parity keeps that spelling.
+                            prior
+                                .get("created_at")
+                                .or_else(|| prior.get("ts"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("None")
                         ),
                         "reason": "duplicate"}));
                 }
@@ -3401,6 +3359,38 @@ fn api_mutation(
                 "version": payload.version,
             }))
         }
+        "finding_create" => {
+            let input: api::FindingInput = input_of(params, "input")?;
+            let receipt = api::finding_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "finding_id": receipt.finding_id,
+                "node_id": receipt.node_id,
+                "version": receipt.version,
+            }))
+        }
+        "finding_resolve" => {
+            let session = params.get("session").and_then(Value::as_str);
+            let receipt = api::finding_resolve(store, id.unwrap_or_default(), session)?;
+            Ok(json!({
+                "finding_id": receipt.finding_id,
+                "status": receipt.status,
+                "resolved_at": receipt.resolved_at,
+                "version": receipt.version,
+            }))
+        }
+        "findings_list" => {
+            let open_only = params
+                .get("open_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let list = api::findings(store, id.as_deref(), open_only)?;
+            Ok(json!({
+                "findings": list
+                    .iter()
+                    .map(crate::backlog::model::finding_to_json)
+                    .collect::<Vec<_>>(),
+            }))
+        }
         "pull_request_attach" => {
             let input: api::PullRequestInput = input_of(params, "input")?;
             let payload = api::pull_request_attach(store, id.unwrap_or_default(), input)?;
@@ -3538,48 +3528,47 @@ mod tests {
     use serde_json::json;
 
     fn row_commit_state(graph: PathBuf) -> StoreState {
-        StoreState {
-            graph,
-            canonical: false,
-            lock_timeout: Duration::from_secs(2),
-            gate: RwLock::new(()),
-            inflight: RwLock::new(()),
-            cache: RwLock::new(None),
-            fill: Mutex::new(()),
-            file_opens: AtomicU64::new(0),
-            snapshots: Mutex::new(std::collections::VecDeque::new()),
-            write_ledger: Mutex::new(std::collections::VecDeque::new()),
-            gate_metrics: Mutex::new(GateMetrics::new()),
-            last_write: Mutex::new(None),
-            render_in_flight: std::sync::atomic::AtomicBool::new(false),
-            render_failures: std::sync::atomic::AtomicU32::new(0),
-            last_render_attempt: Mutex::new(None),
-            events: None,
-            sock_ino: None,
-            startup_fp: None,
-        }
+        crate::store_exec::fresh_store_state(graph, false, Duration::from_secs(2), None, None, None)
     }
 
+    /// begin's row versions ride back under `base_digests`. A fixture that
+    /// fell to the json leg has no map and fails here, not on the fallback.
     fn row_commit_params(begin: &Value, row: Value) -> Value {
+        assert!(begin["base_digests"].is_object(), "{begin}");
         json!({
             "base_version": begin["version"],
-            "base_plan_rungs": {},
+            "base_digests": begin["base_digests"],
             "changed": [row],
             "removed": [],
             "plan_rungs": {},
         })
     }
 
+    /// Seed graph.json, then publish once. The first publish writes each
+    /// seeded row in its full form (default lists, derived status), and a
+    /// row it rewrites really moved underneath a second writer.
+    fn seeded(dir: &tempfile::TempDir, entries: &str) -> PathBuf {
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, entries).unwrap();
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let noop = json!({
+            "base_version": begin["version"],
+            "changed": [],
+            "removed": [],
+            "plan_rungs": {},
+        });
+        handle_commit_rows(&state, &noop).unwrap();
+        graph
+    }
+
     #[test]
-    #[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            r#"{"entries":[{"id":"x-left","title":"left"},{"id":"x-right","title":"right"}]}"#,
-        )
-        .unwrap();
+        let graph = seeded(
+            &dir,
+            r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
+        );
         let state = row_commit_state(graph.clone());
         let begin = handle_begin(&state).unwrap();
         let mut left = begin["entries"][0].clone();
@@ -3590,9 +3579,43 @@ mod tests {
         handle_commit_rows(&state, &row_commit_params(&begin, left)).unwrap();
         handle_commit_rows(&state, &row_commit_params(&begin, right)).unwrap();
 
-        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        let rows = graph_store::read_rows(&graph).unwrap();
         assert_eq!(rows[0]["title"], json!("left changed"));
         assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn commit_rows_disjoint_from_a_publish_seeded_snapshot_no_conflict() {
+        // A begin right after a publish reads the published row versions.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
+        )
+        .unwrap();
+        let state = row_commit_state(graph.clone());
+        let first = handle_begin(&state).unwrap();
+        let mut a = first["entries"][0].clone();
+        a["title"] = json!("a changed");
+        handle_commit_rows(&state, &row_commit_params(&first, a)).unwrap();
+
+        let begin = handle_begin(&state).unwrap();
+        let mut b = begin["entries"][1].clone();
+        b["title"] = json!("b changed");
+        let mut c = begin["entries"][2].clone();
+        c["title"] = json!("c changed");
+        handle_commit_rows(&state, &row_commit_params(&begin, b)).unwrap();
+        handle_commit_rows(&state, &row_commit_params(&begin, c)).unwrap();
+
+        let rows = graph_store::read_rows(&graph).unwrap();
+        let title = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == json!(id))
+                .map(|row| row["title"].clone())
+        };
+        assert_eq!(title("x-b"), Some(json!("b changed")));
+        assert_eq!(title("x-c"), Some(json!("c changed")));
     }
 
     #[test]
@@ -3636,6 +3659,9 @@ mod tests {
         );
     }
 
+    /// The seed row has no status, so it rides the raw carry until the
+    /// first commit moves it into nodes. The move must not restart the
+    /// row's version at the value the second writer's begin saw.
     #[test]
     fn commit_rows_same_row_conflicts_and_names_the_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -3653,6 +3679,64 @@ mod tests {
             Err(CommitRowsError::Conflict(ids)) => assert_eq!(ids, vec!["x-left"]),
             _ => panic!("same-row commit must conflict"),
         }
+    }
+
+    fn three_rows(dir: &tempfile::TempDir) -> PathBuf {
+        seeded(
+            dir,
+            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
+        )
+    }
+
+    /// The exec lane's shape: every request builds a fresh StoreState. The
+    /// versions live in graph.db, so a writer whose begin came from another
+    /// state still lands a disjoint row, and an untouched row keeps the
+    /// version it had at begin.
+    #[test]
+    fn commit_rows_across_fresh_states_checks_stored_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = three_rows(&dir);
+        let begin = handle_begin(&row_commit_state(graph.clone())).unwrap();
+        let mut b = begin["entries"][1].clone();
+        b["title"] = json!("b changed");
+        let second = row_commit_state(graph.clone());
+        handle_commit_rows(&second, &row_commit_params(&begin, b)).unwrap();
+        let mut a = begin["entries"][0].clone();
+        a["title"] = json!("a changed");
+        let third = row_commit_state(graph.clone());
+        handle_commit_rows(&third, &row_commit_params(&begin, a)).unwrap();
+
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows[0]["title"], json!("a changed"));
+        assert_eq!(rows[1]["title"], json!("b changed"));
+        let versions = crate::backlog::row_versions(&graph, None).unwrap();
+        assert_eq!(json!(versions["x-c"]), begin["base_digests"]["x-c"]);
+    }
+
+    /// A node begin never saw lands with no conflict; removing a row whose
+    /// version moved since begin conflicts and keeps the row.
+    #[test]
+    fn commit_rows_new_node_lands_and_a_moved_removal_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = three_rows(&dir);
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let fresh = json!({"id": "x-new", "title": "new", "status": "idea"});
+        handle_commit_rows(&state, &row_commit_params(&begin, fresh)).unwrap();
+        let mut b = begin["entries"][1].clone();
+        b["title"] = json!("b moved");
+        handle_commit_rows(&state, &row_commit_params(&begin, b)).unwrap();
+
+        let mut removal = row_commit_params(&begin, json!({}));
+        removal["changed"] = json!([]);
+        removal["removed"] = json!(["x-b"]);
+        match handle_commit_rows(&state, &removal) {
+            Err(CommitRowsError::Conflict(ids)) => assert_eq!(ids, vec!["x-b"]),
+            other => panic!("a moved removal must conflict: {other:?}"),
+        }
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert!(rows.iter().any(|row| row["id"] == json!("x-b")));
+        assert!(rows.iter().any(|row| row["id"] == json!("x-new")));
     }
 
     #[test]
@@ -3686,7 +3770,7 @@ mod tests {
             status["result"]["reply"]["result"]["entries_elided"],
             json!(true)
         );
-        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        let rows = graph_store::read_rows(&graph).unwrap();
         assert_eq!(rows[0]["id"], json!("x-written"));
     }
 
@@ -3742,26 +3826,14 @@ mod tests {
     }
 
     fn read_state(graph: &std::path::Path) -> StoreState {
-        StoreState {
-            graph: graph.to_path_buf(),
-            canonical: false,
-            lock_timeout: Duration::from_secs(2),
-            gate: RwLock::new(()),
-            inflight: RwLock::new(()),
-            cache: RwLock::new(None),
-            fill: Mutex::new(()),
-            file_opens: AtomicU64::new(0),
-            snapshots: Mutex::new(std::collections::VecDeque::new()),
-            write_ledger: Mutex::new(std::collections::VecDeque::new()),
-            gate_metrics: Mutex::new(GateMetrics::new()),
-            last_write: Mutex::new(None),
-            render_in_flight: std::sync::atomic::AtomicBool::new(false),
-            render_failures: std::sync::atomic::AtomicU32::new(0),
-            last_render_attempt: Mutex::new(None),
-            events: None,
-            sock_ino: None,
-            startup_fp: None,
-        }
+        crate::store_exec::fresh_store_state(
+            graph.to_path_buf(),
+            false,
+            Duration::from_secs(2),
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -4075,6 +4147,66 @@ mod tests {
     }
 
     #[test]
+    fn ready_drops_a_node_an_open_question_blocks() {
+        // AC6: the keeper fills the held map from the journals beside the
+        // graph; a blocked node is no row and its drop reads held:<qid>.
+        let (dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-hold", "slug": "hold", "title": "held work", "status": "ready", "priority": "p1"},
+                {"id": "x-free", "slug": "free", "title": "free work", "status": "ready", "priority": "p1"},
+            ]
+        }));
+        let ask = json!({
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
+        });
+        std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n")).unwrap();
+        let reply = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids: Vec<&str> = reply["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&"x-hold"), "{reply}");
+        assert!(ids.contains(&"x-free"), "{reply}");
+        let drops = reply["drops"].as_array().unwrap();
+        assert!(
+            drops
+                .iter()
+                .any(|d| d["id"] == "x-hold" && d["reason"] == "held:q-1"),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn ready_releases_the_node_once_the_question_closes() {
+        // AC7: the close releases the node; nothing else moves.
+        let (dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-hold", "slug": "hold", "title": "held work", "status": "ready", "priority": "p1"},
+            ]
+        }));
+        let ask = json!({
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
+        });
+        let close = json!({
+            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "data": {"question_id": "q-1"}
+        });
+        std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n{close}\n")).unwrap();
+        let reply = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids: Vec<&str> = reply["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"x-hold"), "{reply}");
+    }
+
+    #[test]
     fn eight_concurrent_sqlite_reads_parse_once_and_agree() {
         // AC1-HP: the single-flight fill - 8 cold readers, one real parse
         // (file_opens 1), every reply ok and byte-equal.
@@ -4328,6 +4460,9 @@ mod tests {
         let sock = dir.path().join("backend.store.sock");
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        // The keeper opens the store before it serves, and an unnamed store
+        // is sqlite from birth: the json leg answers only the explicit name.
+        crate::backlog::set_backend(&graph, Backend::Json).unwrap();
         let cfg = KeeperConfig {
             sock: sock.clone(),
             graph: graph.clone(),
@@ -4347,7 +4482,11 @@ mod tests {
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
         };
-        assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
+        assert_eq!(
+            identify_backend(&mut stream),
+            "json",
+            "named json reads json"
+        );
         crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
         assert_eq!(
             identify_backend(&mut stream),
@@ -4403,26 +4542,14 @@ mod tests {
             "{\"entries\": [{\"id\": \"ab-a\", \"title\": \"a\", \"rank\": 5.0}]}",
         )
         .unwrap();
-        let state = StoreState {
-            graph: graph.clone(),
-            canonical: false,
-            lock_timeout: Duration::from_secs(2),
-            gate: RwLock::new(()),
-            inflight: RwLock::new(()),
-            cache: RwLock::new(None),
-            fill: Mutex::new(()),
-            file_opens: AtomicU64::new(0),
-            snapshots: Mutex::new(std::collections::VecDeque::new()),
-            write_ledger: Mutex::new(std::collections::VecDeque::new()),
-            gate_metrics: Mutex::new(GateMetrics::new()),
-            last_write: Mutex::new(None),
-            render_in_flight: std::sync::atomic::AtomicBool::new(false),
-            render_failures: std::sync::atomic::AtomicU32::new(0),
-            last_render_attempt: Mutex::new(None),
-            events: None,
-            sock_ino: None,
-            startup_fp: None,
-        };
+        let state = crate::store_exec::fresh_store_state(
+            graph.clone(),
+            false,
+            Duration::from_secs(2),
+            None,
+            None,
+            None,
+        );
         let stale = json!({
             "name": "update_fields",
             "params": {"node_id": "ab-a", "fields": {"rank": 1.0}},
@@ -4599,26 +4726,14 @@ mod tests {
     }
 
     fn render_trigger_state(graph: PathBuf, events: Option<PathBuf>) -> StoreState {
-        StoreState {
+        crate::store_exec::fresh_store_state(
             graph,
-            canonical: true,
-            lock_timeout: Duration::from_secs(2),
-            gate: RwLock::new(()),
-            inflight: RwLock::new(()),
-            cache: RwLock::new(None),
-            fill: Mutex::new(()),
-            file_opens: AtomicU64::new(0),
-            snapshots: Mutex::new(std::collections::VecDeque::new()),
-            write_ledger: Mutex::new(std::collections::VecDeque::new()),
-            gate_metrics: Mutex::new(GateMetrics::new()),
-            last_write: Mutex::new(None),
-            render_in_flight: std::sync::atomic::AtomicBool::new(false),
-            render_failures: std::sync::atomic::AtomicU32::new(0),
-            last_render_attempt: Mutex::new(None),
+            true,
+            Duration::from_secs(2),
             events,
-            sock_ino: None,
-            startup_fp: None,
-        }
+            None,
+            None,
+        )
     }
 
     fn seed_render_store(graph: &Path) -> String {

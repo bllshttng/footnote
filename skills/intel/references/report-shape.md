@@ -83,7 +83,17 @@ Rules the renderer holds to:
 - Every number in the report traces to the saved fold JSON named in `fold:`. Every number names its population: `scanned` for fold counters, Usage over time, and Activity. `judged` is the population for the Executive summary, Categories, and the facet-derived sections. A line never mixes two.
 - Anchors are `s-` plus the first 8 characters of the session id. Only sessions named in the run file get a Sessions line.
 - The new sections carry no transcript text beyond the one-line summaries.
-- The tag `#agent-correction` appears only in the Operator corrections section. The corrections line grammar does not change.
+- The tag `#agent-correction` appears only in the User corrections section. The corrections line grammar does not change.
 - A section that cannot be written still appears, with one line `not written: <reason>`. It is never left out.
-- Unattended sessions (zero operator and zero relay turns) stay out of every section except the fold counters. They are machinery runs.
+- Unattended sessions (zero user and zero relay turns) stay out of every section except the fold counters. They are machinery runs.
 - The corrections lines must survive `bash scripts/corrections-insights-tag.sh --insights-file <report>` untouched: the tag is ` #agent-correction` at end of line, the `signal=` pair inside it.
+
+## HTML copy
+
+`fno-agents intel --render <report.md>` renders this contract into one self-contained HTML file beside the markdown, plus a `latest.html` copy. The renderer reads the section skeleton above and the fold JSON named in `fold:`. It writes no markdown. The HTML is a derived copy: never edit it, re-run `--render` instead. The markdown stays the machine-read source, byte for byte.
+
+The scrub runs before anything renders. Secret shapes become `[redacted]`: the known token prefixes (sk-, gh_, github_pat_, AKIA, xox), PEM key headers, JWTs, bearer values, and any unbroken 40-character base64-shaped run. Key/value pairs (`password=`, `secret=`, `token=`, `api key=`) keep the key name and redact the value. Home paths (`/Users/<name>`, `/home/<name>`) become `~`. Fenced code blocks and `>` blockquotes drop whole as `[omitted: quoted block]`. Double-quoted spans outside `Operator corrections` become `[quote omitted]`. Inside `Operator corrections`, those quotes remain as user corrections.
+
+Each chart reads its series from the fold keys the counter sections above name. The per-day charts read `daily` (sessions and user turns, split by harness). The hour chart reads `hours` (`operator_turns` and `utc_offset`). The response-time chart reads `response_time` (`buckets`). The tool-error chart reads `activity` (`tool_errors`). The renderer defines no series and computes no bucket. A missing key drops that one chart and names it on stderr. Exit stays 0.
+
+The stamped file is `<report stem>.html` and pairs with its markdown by name. The retention rule keeps the 12 newest stamped HTML files in the intel directory. The markdown and JSON are never pruned, so `--render` re-renders any pruned copy.

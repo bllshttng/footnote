@@ -19,6 +19,12 @@ use crate::distress;
 use crate::manifest_lookup::{git_worktree_paths, parse_manifest_identity, paths_eq};
 use crate::paths::{events_path, worktree_repo_root, worktree_space_dir};
 
+mod goal_arbitration;
+use goal_arbitration::{
+    arbitrate_codex_continuation, arbitrate_continuation, emit_stop_decision, goal_payload,
+    GoalArbitration,
+};
+
 /// Consecutive checker-unavailable fires tolerated for an active session
 /// before a loud give-up allow (the shim's `MAX_UNAVAIL_RETRIES`).
 const MAX_UNAVAIL_RETRIES: u64 = 3;
@@ -44,6 +50,8 @@ pub fn run(args: &[String]) -> i32 {
             .unwrap_or_default()
     };
     let session_id = str_field("session_id");
+    let turn_id = str_field("turn_id");
+    let goal_payload = parsed.as_ref().and_then(goal_payload).cloned();
     let transport_path = str_field("transcript_path");
     let payload_cwd = str_field("cwd");
     let last_assistant_message = parsed.as_ref().and_then(|v| {
@@ -100,11 +108,20 @@ pub fn run(args: &[String]) -> i32 {
         std::fs::canonicalize(&payload_cwd).unwrap_or(PathBuf::from(&payload_cwd))
     };
 
-    let fire = collect_fire(&session_id, &transcript_path, last_assistant_message);
+    let fire = collect_fire(
+        &session_id,
+        &transcript_path,
+        last_assistant_message,
+        turn_id,
+        goal_payload,
+    );
 
     // ── Ownership (the salvaged stop-gate evaluation) ─────────────────────────
     match evaluate(&cwd, &fire) {
-        Verdict::NoOwner => return 0,
+        Verdict::NoOwner => {
+            emit_stop_decision(&cwd, &fire, None, "visitor", "none", "allow", "visitor", "");
+            return 0;
+        }
         Verdict::Broken(kind) => return broken_block(&cwd, &fire, &kind),
         Verdict::Owner {
             state,
@@ -238,10 +255,47 @@ fn run_owned(
     if !transcript_ok {
         return unavailable_block(
             hook_cwd,
-            &state_node_id_content(&manifest),
+            fire,
             driver,
             "no transcript for an active session",
         );
+    }
+
+    let codex_owner = fire.harness.as_deref() == Some("codex")
+        || first_raw_field(&manifest, &["harness"]).as_deref() == Some("codex");
+    let arbitration = if codex_owner {
+        arbitrate_codex_continuation(driver, fire, &manifest)
+    } else {
+        arbitrate_continuation(driver, fire, &manifest)
+    };
+    match arbitration {
+        GoalArbitration::Delegated => {
+            emit_stop_decision(
+                hook_cwd,
+                fire,
+                Some(&state),
+                driver,
+                "goal",
+                "allow",
+                "delegated-to-goal",
+                &manifest,
+            );
+            return 0;
+        }
+        GoalArbitration::Refusal(reason) => {
+            emit_stop_decision(
+                hook_cwd,
+                fire,
+                Some(&state),
+                driver,
+                "refusal",
+                "refuse",
+                "refusal",
+                &manifest,
+            );
+            return emit_block_for_harness(&reason);
+        }
+        GoalArbitration::None => {}
     }
 
     // ── done_probes inherit the session cargo build-dir env ───────────
@@ -277,7 +331,7 @@ fn run_owned(
         Ok(p) => p,
         Err(e) => {
             eprintln!("target stop-hook: loop-check args rejected: {e}");
-            return unavailable_block(hook_cwd, &fire.hook_harness_id, driver, "argument error");
+            return unavailable_block(hook_cwd, fire, driver, "argument error");
         }
     };
     let (verb_rc, decision_json) = crate::loopcheck::decide_with_payload(&parsed, Some(payload));
@@ -301,12 +355,7 @@ fn run_owned(
             eprintln!("target stop-hook: loop-check output: {decision_json}");
         }
         tail_stderr_log(hook_cwd);
-        return unavailable_block(
-            hook_cwd,
-            &state_node_id_content(&manifest),
-            driver,
-            "checker produced no verdict",
-        );
+        return unavailable_block(hook_cwd, fire, driver, "checker produced no verdict");
     }
 
     translate(
@@ -351,7 +400,35 @@ fn translate(
     let _ = std::fs::remove_file(&counter);
 
     // One control-plane arm row for this fire.
-    emit_tick(hook_cwd, decision, &termination_reason, driver);
+    super::emit_tick(
+        hook_cwd,
+        decision,
+        &termination_reason,
+        driver,
+        &fire.hook_harness_id,
+    );
+
+    let event_decision = match decision {
+        "block" | "allow" => decision,
+        _ => "refuse",
+    };
+    let event_class = if decision == "block" {
+        "actionable-block"
+    } else if !termination_reason.is_empty() {
+        "terminal"
+    } else {
+        "live-allow"
+    };
+    emit_stop_decision(
+        hook_cwd,
+        fire,
+        Some(state),
+        driver,
+        "loop_check",
+        event_decision,
+        event_class,
+        manifest,
+    );
 
     // ── Block ─────────────────────────────────────────────────────────────────
     if decision == "block" {
@@ -491,6 +568,16 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
         } else {
             format!("checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running")
         };
+        emit_stop_decision(
+            cwd,
+            fire,
+            None,
+            "unknown",
+            "refusal",
+            "block",
+            "unavailable",
+            "",
+        );
         return emit_block_for_harness(&msg);
     }
     if kind == "king" {
@@ -504,22 +591,42 @@ fn broken_block(cwd: &Path, fire: &Fire, kind: &str) -> i32 {
             "target stop-hook: manifest resolver unavailable {count} times; allowing visitor stop"
         );
     }
+    emit_stop_decision(
+        cwd,
+        fire,
+        None,
+        "unknown",
+        "refusal",
+        "allow",
+        "unavailable",
+        "",
+    );
     0
 }
 
 /// The checker-unavailable bounded block for an active session.
-fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i32 {
+fn unavailable_block(cwd: &Path, fire: &Fire, driver: &str, why: &str) -> i32 {
     let space = super::events_space(cwd);
     let _ = std::fs::create_dir_all(&space);
-    let counter = space.join(format!(".loop-check-unavail-{session_id}"));
+    let counter = space.join(format!(".loop-check-unavail-{}", fire.hook_harness_id));
     let count = std::fs::read_to_string(&counter)
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0)
         + 1;
     let _ = std::fs::write(&counter, count.to_string());
-    emit_tick(cwd, "blocked", "unavailable", driver);
+    super::emit_tick(cwd, "blocked", "unavailable", driver, &fire.hook_harness_id);
     if count <= MAX_UNAVAIL_RETRIES {
+        emit_stop_decision(
+            cwd,
+            fire,
+            None,
+            driver,
+            "refusal",
+            "block",
+            "unavailable",
+            "",
+        );
         return emit_block_for_harness(&format!(
             "checker unavailable ({count}/{MAX_UNAVAIL_RETRIES}), keeping session running"
         ));
@@ -527,12 +634,17 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
     eprintln!(
         "target stop-hook: {why}; checker unavailable {count} times; allowing stop (ship gate off for this stop)"
     );
+    emit_stop_decision(
+        cwd,
+        fire,
+        None,
+        driver,
+        "refusal",
+        "allow",
+        "unavailable",
+        "",
+    );
     0
-}
-
-/// The manifest's node/session identity for diagnostics (first field wins).
-fn state_node_id_content(content: &str) -> String {
-    first_raw_field(content, &["fno_id", "session_id"]).unwrap_or_else(|| "unknown".to_string())
 }
 
 fn tail_stderr_log(cwd: &Path) {
@@ -571,71 +683,12 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     2
 }
 
-/// One control-plane arm row for this fire.
-fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
-    let project_events = events_path(cwd);
-    let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno/events.jsonl")))
-        .unwrap_or_else(|| project_events.clone());
-    let detail = format!(
-        "driver={driver} decision={decision} reason={}",
-        if reason.is_empty() { "live" } else { reason }
-    );
-    let data = serde_json::json!({
-        "arm": "stop_hook",
-        "scheduler": "hook:target-stop-hook",
-        "acted": 1,
-        "skip_reason": Value::Null,
-        "detail": detail,
-        "interval_s": 0,
-    });
-    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
-}
-
-///: the CARGO_BUILD_BUILD_DIR value, ported from
-/// `cli/src/fno/paths.py cargo_build_dir_value`: config
-/// `paths.cargo_targets_base`, else `<state_dir>/cargo-build`, then
-/// `/{workspace-path-hash}` - cargo expands the template itself.
-fn cargo_build_dir_value(cwd: &Path) -> String {
-    let base = crate::agents_config::config_lookup(cwd, &["paths", "cargo_targets_base"])
-        .and_then(|v| v.as_str().map(str::to_string))
-        .map(|raw| {
-            let p = PathBuf::from(shellexpand_home(&raw));
-            if p.is_absolute() {
-                p
-            } else {
-                cwd.join(p)
-            }
-        })
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|d| d.join("cargo-build")))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".fno").join("cargo-build"))
-                .unwrap_or_else(|| PathBuf::from(".fno/cargo-build"))
-        });
-    format!("{}/{{workspace-path-hash}}", base.display())
-}
-
-fn shellexpand_home(raw: &str) -> String {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest).display().to_string();
-        }
-    }
-    raw.to_string()
-}
-
 /// The bash hook exported this for its loop-check child; the native handler IS
 /// that process, so it sets the env in place and every done_probe it spawns
-/// inherits it. A session preset wins, and a value that does not carry the
-/// cargo template is never exported (it cannot be a build-dir answer).
+/// inherits it. A session preset wins; the shared resolver answers the value.
 fn export_session_build_dir(driver: &str, owner_cwd: &Path) {
-    if driver == "target" && std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none() {
-        let v = cargo_build_dir_value(owner_cwd);
-        if v.ends_with("/{workspace-path-hash}") {
-            std::env::set_var("CARGO_BUILD_BUILD_DIR", v);
-        }
+    if driver == "target" {
+        crate::cargo_build_dirs::fill_build_dir_env(owner_cwd);
     }
 }
 
@@ -655,18 +708,23 @@ enum Verdict {
 /// The payload-derived identity of the stopping session, collected exactly
 /// the way the shim collected it (most authoritative first).
 struct Fire {
+    session_id: String,
     transcript_path: PathBuf,
     hook_harness_id: String,
     resolve_ids: Vec<String>,
     resolve_harness_id: String,
     harness: Option<String>,
     last_assistant_message: Option<String>,
+    turn_id: String,
+    goal_payload: Option<Value>,
 }
 
 fn collect_fire(
     session_id: &str,
     transcript_path: &str,
     last_assistant_message: Option<String>,
+    turn_id: String,
+    goal_payload: Option<Value>,
 ) -> Fire {
     let hook_harness_id = transcript_basename(transcript_path).unwrap_or_default();
     let hook_harness_id = if hook_harness_id.is_empty() {
@@ -697,12 +755,15 @@ fn collect_fire(
     }
     let resolve_harness_id = resolve_ids.first().cloned().unwrap_or_default();
     Fire {
+        session_id: session_id.to_string(),
         transcript_path: PathBuf::from(transcript_path),
         hook_harness_id,
         resolve_ids,
         resolve_harness_id,
-        harness: detect_harness(transcript_path),
+        harness: detect_harness(transcript_path, !turn_id.is_empty()),
         last_assistant_message,
+        turn_id,
+        goal_payload,
     }
 }
 
@@ -740,7 +801,7 @@ fn uuid_suffix(s: &str) -> Option<String> {
 
 /// The shim's harness markers: the transcript location is proof, env markers
 /// are claims, and two disagreeing markers claim nothing.
-fn detect_harness(transcript_path: &str) -> Option<String> {
+fn detect_harness(transcript_path: &str, has_codex_turn: bool) -> Option<String> {
     if let Ok(h) = std::env::var("FNO_HARNESS") {
         if !h.is_empty() {
             return Some(h);
@@ -763,6 +824,7 @@ fn detect_harness(transcript_path: &str) -> Option<String> {
     .collect();
     match present[..] {
         [one] => Some(one.to_string()),
+        [] if has_codex_turn => Some("codex".to_string()),
         _ => None,
     }
 }
@@ -934,24 +996,13 @@ enum KingResolve {
 }
 
 /// The king manifest resolution: the registry row - not file presence -
-/// proves authority, the scope names the manifest under the space's kings
-/// dir, and any unreadable step answers None (the same fail-open the Python
+/// proves authority, and the manifest is read through the row's own cwd, so
+/// a shell or Stop payload outside the repo still resolves the court it
+/// declared. Any unreadable step answers None (the same fail-open the Python
 /// resolver's catch-all ships). The row lookup is the ONE matcher,
 /// `loop_reign::find_by_session`.
 fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
     if fire.hook_harness_id.is_empty() {
-        return KingResolve::None;
-    }
-    let kings_dir = super::events_space(cwd).join("kings");
-    let has_manifests = std::fs::read_dir(&kings_dir)
-        .map(|mut it| {
-            it.any(|e| {
-                e.map(|e| e.path().extension().is_some_and(|x| x == "md"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !has_manifests {
         return KingResolve::None;
     }
     let sid = if fire.resolve_harness_id.is_empty() {
@@ -964,9 +1015,24 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             Ok(r) => r.entries,
             Err(_) => return KingResolve::None,
         };
-    let Some(row) = crate::loop_reign::find_by_session(&rows, sid, fire.harness.as_deref()) else {
-        return KingResolve::None;
-    };
+    match king_manifest_in(&rows, sid, fire.harness.as_deref(), cwd) {
+        Some(path) => KingResolve::Found(path),
+        None => KingResolve::None,
+    }
+}
+
+/// The manifest through the crown row: the row's cwd names the space, and a
+/// row whose cwd names a since-removed directory (a deleted linked worktree
+/// keys its own dead slug) falls back to the payload cwd's space before
+/// answering None. `loop_reign::manifest_path` carries the unsafe-scope
+/// refusal.
+fn king_manifest_in(
+    rows: &[crate::state::RegistryEntry],
+    sid: &str,
+    harness: Option<&str>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    let row = crate::loop_reign::find_by_session(rows, sid, harness)?;
     use crate::AgentStatus;
     if matches!(
         row.status,
@@ -975,25 +1041,27 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             | AgentStatus::Failed
             | AgentStatus::PermanentDead
     ) {
-        return KingResolve::None;
+        return None;
     }
-    let Some(scope) = row
+    let scope = row
         .crown_scope
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return KingResolve::None;
-    };
-    if scope.contains("..") || scope.contains('/') || scope.contains('\\') {
-        return KingResolve::None;
+        .filter(|s| !s.is_empty())?;
+    let mut roots = Vec::with_capacity(2);
+    if !row.cwd.is_empty() {
+        roots.push(PathBuf::from(&row.cwd));
     }
-    let path = kings_dir.join(format!("{scope}.md"));
-    if path.is_file() {
-        KingResolve::Found(path)
-    } else {
-        KingResolve::None
-    }
+    roots.push(cwd.to_path_buf());
+    roots
+        .iter()
+        .map(|root| {
+            crate::loop_reign::manifest_path(&super::events_space(root), scope)
+                .ok()
+                .filter(|path| path.is_file())
+        })
+        .find(Option::is_some)
+        .flatten()
 }
 
 /// The pending-delivery retry file this session would resume, if any. With a
@@ -1164,7 +1232,27 @@ fn git_delivery_prefix(repo_root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::goal_arbitration::{arbitrate_codex_continuation_from_reading, StopDecisionEvent};
     use super::*;
+
+    struct EventsPathRestore(Option<std::ffi::OsString>);
+
+    impl EventsPathRestore {
+        fn clear() -> Self {
+            let saved = std::env::var_os("FNO_EVENTS_PATH");
+            std::env::remove_var("FNO_EVENTS_PATH");
+            Self(saved)
+        }
+    }
+
+    impl Drop for EventsPathRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_EVENTS_PATH", value),
+                None => std::env::remove_var("FNO_EVENTS_PATH"),
+            }
+        }
+    }
 
     #[test]
     fn uuid_suffix_takes_a_rollout_tail() {
@@ -1230,15 +1318,6 @@ mod tests {
         assert!(!T::DonePlanned.releases_claim());
     }
 
-    #[test]
-    fn cargo_build_dir_value_ends_with_the_cargo_template() {
-        let dir = std::env::temp_dir().join(format!("stop-gate-cargo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let v = cargo_build_dir_value(&dir);
-        assert!(v.ends_with("/{workspace-path-hash}"), "{v}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// The shell contract, native now: an unset env is resolved from
     /// config and set in place; a session preset survives untouched. The env
     /// pin holds the same lock the other env-pinning suites hold.
@@ -1282,5 +1361,357 @@ mod tests {
             None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn fire_with_goal(goal: Value) -> Fire {
+        collect_fire(
+            "session-full",
+            "/tmp/rollout-session-full.jsonl",
+            None,
+            "turn-42".to_string(),
+            Some(goal),
+        )
+    }
+
+    #[test]
+    fn active_verified_goal_is_the_single_continuation_owner() {
+        let fire = fire_with_goal(serde_json::json!({
+            "objective": "finish the target",
+            "status": "active",
+            "continuation_owner": "target:node-42"
+        }));
+        let manifest = "fno_id: node-42\n";
+        assert_eq!(
+            arbitrate_continuation("target", &fire, manifest),
+            GoalArbitration::Delegated
+        );
+    }
+
+    #[test]
+    fn codex_stop_uses_live_goal_and_ignores_stale_cached_goal_truth() {
+        let fire = collect_fire(
+            "session-full",
+            "/tmp/rollout-session-full.jsonl",
+            None,
+            "turn-42".to_string(),
+            None,
+        );
+        let manifest =
+            "scope: scope-a\nfno_id: scope-a\nharness_session_id: session-full\nharness: codex\n";
+        let active = crate::codex_thread::NativeGoal {
+            thread_id: "session-full".to_string(),
+            objective: "$fno:reign scope-a".to_string(),
+            status: crate::codex_thread::GoalStatus::Active,
+            usage: crate::codex_thread::GoalUsage::default(),
+        };
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::Delegated
+        );
+        let conflicting_owner = format!("{manifest}continuation_owner: king:scope-b\n");
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                &conflicting_owner,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("derive from crown scope")
+        ));
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading("king", &fire, manifest, Ok(None)),
+            GoalArbitration::None
+        );
+        let mut wrong_thread = active.clone();
+        wrong_thread.thread_id = "other-thread".to_string();
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Ok(Some(wrong_thread))
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("thread mismatch")
+        ));
+        assert_eq!(
+            arbitrate_codex_continuation_from_reading(
+                "target",
+                &fire,
+                manifest,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::None
+        );
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                manifest,
+                Err("timeout".to_string())
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("provider goal unreadable")
+        ));
+
+        let stale_manifest = format!(
+            "{manifest}goal_objective: {}\ngoal_status: active\ngoal_owner: king:scope-a\n",
+            active.objective
+        );
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading("king", &fire, &stale_manifest, Ok(None)),
+            GoalArbitration::None
+        ));
+    }
+
+    #[test]
+    fn no_goal_preserves_the_loop_check_owner() {
+        let fire = collect_fire(
+            "session-full",
+            "/tmp/rollout-session-full.jsonl",
+            None,
+            "turn-42".to_string(),
+            None,
+        );
+        assert_eq!(
+            arbitrate_continuation("target", &fire, "fno_id: node-42\n"),
+            GoalArbitration::None
+        );
+    }
+
+    #[test]
+    fn missing_goal_owner_is_a_named_refusal() {
+        let fire = fire_with_goal(serde_json::json!({
+            "objective": "finish the target",
+            "status": "active"
+        }));
+        let refusal = arbitrate_continuation("target", &fire, "fno_id: node-42\n");
+        assert!(
+            matches!(refusal, GoalArbitration::Refusal(reason) if reason.contains("missing continuation owner"))
+        );
+    }
+
+    #[test]
+    fn conflicting_goal_owner_is_a_named_refusal() {
+        let fire = fire_with_goal(serde_json::json!({
+            "objective": "finish the target",
+            "status": "active",
+            "continuation_owner": "target:other"
+        }));
+        let refusal = arbitrate_continuation("target", &fire, "fno_id: node-42\n");
+        assert!(
+            matches!(refusal, GoalArbitration::Refusal(reason) if reason.contains("conflicting goal truth"))
+        );
+    }
+
+    #[test]
+    fn stop_decision_event_serializes_the_full_correlation_contract() {
+        let fire = fire_with_goal(serde_json::json!({
+            "objective": "finish the target",
+            "status": "active",
+            "continuation_owner": "target:node-42"
+        }));
+        let event = StopDecisionEvent {
+            session_id: fire.session_id.clone(),
+            raw_identity_candidates: fire.resolve_ids.clone(),
+            turn_id: fire.turn_id.clone(),
+            manifest: "/work/.fno/target-state.md".to_string(),
+            scope: "scope-42".to_string(),
+            node_id: "node-42".to_string(),
+            driver: "target".to_string(),
+            continuation_owner: "goal".to_string(),
+            decision: "allow".to_string(),
+            class: "delegated-to-goal".to_string(),
+            correlation_id: "stop:session-full:turn-42".to_string(),
+            harness_output_contract: "empty".to_string(),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        for field in [
+            "session_id",
+            "raw_identity_candidates",
+            "turn_id",
+            "manifest",
+            "scope",
+            "node_id",
+            "driver",
+            "continuation_owner",
+            "decision",
+            "class",
+            "correlation_id",
+            "harness_output_contract",
+        ] {
+            assert!(value.get(field).is_some(), "missing event field {field}");
+        }
+        assert_eq!(value["turn_id"], "turn-42");
+        assert_eq!(value["class"], "delegated-to-goal");
+    }
+
+    /// The tick row names the fire's session so a reader of `fno agents
+    /// status` can tell a king's own fire from its newest neighbor.
+    #[test]
+    fn the_tick_row_names_its_session_and_an_empty_one_omits_the_field() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
+
+        super::super::emit_tick(
+            dir.path(),
+            "block",
+            "live",
+            "king",
+            "41725e5f-1c20-4b81-824e",
+        );
+        let tick_row = || {
+            crate::event_store::query_events(
+                &crate::paths::events_path(dir.path()),
+                &crate::event_store::EventQuery::of_types(&["control_plane_tick"]),
+            )
+            .unwrap()
+            .pop()
+            .map(|r| r.line)
+            .unwrap_or_default()
+        };
+        let row = tick_row();
+        assert!(
+            row.contains("driver=king decision=block reason=live session=41725e5f"),
+            "{row}"
+        );
+
+        super::super::emit_tick(dir.path(), "allow", "", "target", "");
+        let last = tick_row();
+        assert!(
+            last.contains("driver=target decision=allow reason=live"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("session="),
+            "an empty session omits the field: {last}"
+        );
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("GLOBAL_EVENTS_PATH");
+    }
+
+    /// The manifest resolves through the crown ROW's cwd, not the Stop
+    /// payload's: a king whose shell sits outside the repo still resolves its
+    /// court. Every unreadable reading answers None, the fail-open
+    /// the hook ships.
+    #[test]
+    fn king_manifest_in_keys_on_the_crown_row_cwd() {
+        use crate::paths::DeclaredRoot;
+        use crate::state::RegistryEntry;
+
+        let _root = DeclaredRoot::declare("stop-king-row");
+        let _events_path = EventsPathRestore::clear();
+        let repo = _root.path().join("repo");
+        let elsewhere = _root.path().join("elsewhere");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert_ne!(
+            crate::hook::events_space(&repo),
+            crate::hook::events_space(&elsewhere),
+            "positive control: the row cwd and the payload cwd must key different spaces"
+        );
+        let scope = "x-test-epic";
+        let kings = crate::hook::events_space(&repo).join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        let manifest = kings.join(format!("{scope}.md"));
+        std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: court\n---\n").unwrap();
+        let sid = "0c1f2f9a-7777-4000-8000-000000000007";
+        let crowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some(sid.into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        let rows = vec![crowned];
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest.clone()),
+            "the row's cwd, not the payload cwd, names the space"
+        );
+        let terminal = RegistryEntry {
+            status: crate::AgentStatus::Exited,
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("gone-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[terminal], "gone-session", None, &elsewhere),
+            None
+        );
+        let uncrowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("plain-session".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
+            None
+        );
+        let unsafe_scope = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("sneaky-session".into()),
+            crown_scope: Some("../escape".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[unsafe_scope], "sneaky-session", None, &elsewhere),
+            None
+        );
+        let no_file = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("bare-session".into()),
+            crown_scope: Some("x-no-file".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[no_file], "bare-session", None, &elsewhere),
+            None
+        );
+        assert_eq!(
+            super::king_manifest_in(&rows, "no-such-session", None, &elsewhere),
+            None
+        );
+
+        // A row whose cwd names a removed directory (a deleted linked
+        // worktree keys its own dead slug) falls back to the payload cwd's
+        // space before answering None.
+        let payload_kings = crate::hook::events_space(&elsewhere).join("kings");
+        std::fs::create_dir_all(&payload_kings).unwrap();
+        std::fs::write(payload_kings.join(format!("{scope}.md")), "fallback").unwrap();
+        let dead_cwd = RegistryEntry {
+            cwd: _root
+                .path()
+                .join("removed-worktree")
+                .join("deleted-subdir")
+                .to_string_lossy()
+                .into_owned(),
+            harness_session_id: Some("ghost-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[dead_cwd], "ghost-session", None, &elsewhere),
+            Some(payload_kings.join(format!("{scope}.md"))),
+            "a dead row-cwd falls back to the payload cwd's space"
+        );
+        // With BOTH spaces holding a manifest, the row's own still wins.
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest),
+            "the row's cwd keeps precedence over the payload fallback"
+        );
     }
 }

@@ -784,8 +784,6 @@ def mint_agent_entry(
 # Exactly eight lowercase hex characters, used only when deciding whether a
 # Claude restamp may safely refresh a derived transport short id.
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
-_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
 _ACCEPTED_FORMS = "accepted forms: name, canonical handle, transport short id, or full session id"
 
 
@@ -2308,6 +2306,24 @@ def _mint_branch_row(
     return branch
 
 
+def _arm_crown_after_identification(entry: AgentEntry, session_id: str) -> None:
+    """Arm the king manifest the moment a crowned row first names the session
+    id it can be woken through: spawn-time succession has no id to arm with,
+    so the SessionStart restamp is the arm point, and manifest_session stops
+    naming the abdicating session. Fail-soft like its callers."""
+    if entry.crown_level is None or not entry.crown_scope:
+        return
+    try:
+        from fno.king.state import arm_king_manifest
+
+        arm_king_manifest(entry.crown_scope, session_id, row=entry)
+    except (OSError, ValueError) as exc:
+        from fno.agents import events
+
+        events.emit("crown_manifest_arm_failed", name=entry.name,
+                    scope=entry.crown_scope, session_id=session_id, error=str(exc))
+
+
 def restamp_harness_session_id(
     *,
     name: str,
@@ -2449,6 +2465,8 @@ def restamp_harness_session_id(
         return entries
 
     update_registry(_updater, path=registry_path)
+    for entry in restamped:
+        _arm_crown_after_identification(entry, session_id)
     for filled in first_filled:
         _flush_pending_session_row(filled, session_id)
     return restamped[0] if restamped else None
@@ -2789,6 +2807,8 @@ def record_session_observation(
         return row, "refused-cap"
     if classified:
         outcome, written = classified[0]
+        if outcome == "succession":
+            _arm_crown_after_identification(written, session_id)
         return written, outcome
     if not observed:
         # A concurrent observation won the slot between the pre-read and the
@@ -2798,6 +2818,7 @@ def record_session_observation(
         "primary" if observed[0].harness_session_id == session_id else "related"
     )
     if outcome == "primary":
+        _arm_crown_after_identification(observed[0], session_id)
         _flush_pending_session_row(observed[0], session_id)
     return observed[0], outcome
 
@@ -2965,56 +2986,6 @@ def update_registry(
         return new_entries
 
 
-def rename_agent(
-    token: str,
-    new_name: str,
-    *,
-    node: Optional[str] = None,
-    registry_path: Optional[Path] = None,
-) -> AgentEntry:
-    """Change a row's label and, for retask, its node in one transaction."""
-    new_name = new_name.strip()
-    if not _REGISTRY_NAME_RE.fullmatch(new_name):
-        raise ValueError(
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens"
-        )
-    if node is not None:
-        node = node.strip()
-        if not node:
-            raise ValueError("registry node must be non-empty when provided")
-    resolved = resolve_agent(token, path=registry_path)
-    source = resolved.entry
-    identity = (source.harness, source.harness_session_id, source.short_id)
-    result: list[AgentEntry] = []
-
-    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        target = next(
-            (
-                entry
-                for entry in entries
-                if (entry.harness, entry.harness_session_id, entry.short_id) == identity
-                and entry.name == source.name
-            ),
-            None,
-        )
-        if target is None:
-            raise AgentResolutionError(
-                f"agent {source.name!r} changed before rename; retry with its full session id"
-            )
-        if any(entry is not target and entry.name == new_name for entry in entries):
-            raise ValueError(f"registry label {new_name!r} already names another worker")
-        if source.name != new_name and source.name not in target.aliases:
-            target.aliases.append(source.name)
-        target.name = new_name
-        if node is not None:
-            target.node = node
-        result.append(target)
-        return entries
-
-    update_registry(_updater, path=registry_path)
-    return result[0]
-
-
 def append_row_alias(
     token: str,
     alias: str,
@@ -3058,40 +3029,6 @@ def append_row_alias(
 
     update_registry(_updater, path=registry_path)
     return bool(appended)
-
-def project_verified_tier(
-    name: str,
-    session_id: str,
-    *,
-    model: str,
-    effort: str,
-    registry_path: Optional[Path] = None,
-) -> AgentEntry:
-    """Persist model and effort read from the same verified pane status."""
-    result: list[AgentEntry] = []
-
-    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        target = next(
-            (
-                entry
-                for entry in entries
-                if entry.name == name and entry.harness_session_id == session_id
-            ),
-            None,
-        )
-        if target is None:
-            raise AgentResolutionError(
-                f"registry row {name!r} was not restamped to session {session_id!r}"
-            )
-        target.model = model
-        target.model_basis = "verified"
-        target.effort = effort
-        result.append(target)
-        return entries
-
-    update_registry(_updater, path=registry_path)
-    return result[0]
-
 
 def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
     """Fields whose mutation can change what token addresses a registry row."""

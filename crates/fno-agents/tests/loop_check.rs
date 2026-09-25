@@ -24,14 +24,11 @@ use tempfile::TempDir;
 /// Write an executable shell script to `dir/<name>` that prints `body` to
 /// stdout and exits 0.  Returns the path.
 ///
-/// Published atomically: the body is written to a temp sibling, chmod'd,
-/// then renamed onto the final path. Rename is atomic within a directory,
-/// so the published path is complete and closed from birth - it never has a
-/// write-open fd (which is what makes an exec fail ETXTBSY, including via a
-/// parallel test's fork inheriting the fd) and never exists as a partial
-/// file (the ENOEXEC variant PR 650 showed). That is why no probe-exec or
-/// retry loop is needed here: the flake family this used to paper over is
-/// unreachable at the source.
+/// The temp sibling plus rename does NOT make ETXTBSY unreachable: a sibling
+/// thread that forks while the temp fd is open copies it, and the copied fd
+/// follows the inode the rename publishes. CI runs these integration
+/// binaries with `--test-threads=1` (cli-ci.yml), so the window has no
+/// sibling fork; that single-threaded condition is why no retry is needed.
 fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
@@ -2555,13 +2552,17 @@ fn operator_review_finding_blocks_until_resolved() {
     fs::write(&manifest_path, &manifest).unwrap();
     fs::write(cwd.join("transcript.jsonl"), transcript_with_promise()).unwrap();
 
-    // Seed one OPEN finding for x-gate.
-    let events = project_events(&cwd);
-    fs::write(
-        &events,
-        "{\"ts\":\"t\",\"type\":\"review_finding\",\"source\":\"observer\",\"data\":{\"finding_id\":\"f9\",\"node\":\"x-gate\",\"text\":\"operator says fix the retry\"}}\n",
-    )
-    .unwrap();
+    // Seed through the store the gate reads; the tail restores FNO_HOME (CI is single-threaded).
+    let restore_home = std::env::var_os("FNO_HOME").unwrap_or_default();
+    let home = TempDir::new().unwrap();
+    std::env::set_var("FNO_HOME", home.path());
+    fs::write(home.path().join("graph.json"), serde_json::json!({"entries": [{"id": "x-gate", "slug": "x-gate", "title": "n", "type": "feature", "status": "ready", "priority": "p1"}]}).to_string()).unwrap();
+    let store = fno_agents::backlog::api::Store::new(&home.path().join("graph.json"));
+    let input = fno_agents::backlog::api::FindingInput {
+        body: "operator says fix the retry".into(),
+        ..Default::default()
+    };
+    let receipt = fno_agents::backlog::api::finding_create(&store, "x-gate", input).unwrap();
 
     let mock = MockBins::green();
     let manifest_before = fs::read(&manifest_path).unwrap();
@@ -2574,8 +2575,9 @@ fn operator_review_finding_blocks_until_resolved() {
         d.message
     );
     assert!(d.termination_reason.is_none());
+    let remedy = format!("fno backlog note --resolve {}", receipt.finding_id);
     assert!(
-        d.message.contains("f9") && d.message.contains("fno backlog annotate resolve f9"),
+        d.message.contains(&receipt.finding_id) && d.message.contains(&remedy),
         "reason must quote the finding id + resolve remedy; got: {}",
         d.message
     );
@@ -2586,16 +2588,11 @@ fn operator_review_finding_blocks_until_resolved() {
     );
 
     // Resolve it -> the gate clears and the promise terminates DonePRGreen.
-    use std::io::Write;
-    let mut f = fs::OpenOptions::new().append(true).open(&events).unwrap();
-    writeln!(
-        f,
-        "{{\"ts\":\"t2\",\"type\":\"review_finding_resolved\",\"source\":\"observer\",\"data\":{{\"finding_id\":\"f9\"}}}}"
-    )
-    .unwrap();
-    drop(f);
+    fno_agents::backlog::api::finding_resolve(&store, &receipt.finding_id, Some("sess-finding"))
+        .unwrap();
 
     let (_, d2) = fire_findings(cwd, &mock);
+    std::env::set_var("FNO_HOME", restore_home);
     assert_eq!(
         d2.decision, "allow",
         "a resolved finding must no longer block: {}",
@@ -7343,7 +7340,7 @@ fn coverage_legacy_no_attester_byte_identical_to_name_key() {
 /// the peer's fail touches only the peer's own `(name, peer)` slot, which never
 /// held a pass; the author's `(name, author)` pass still counts. Coverage counts
 /// reviews performed, not approvals granted - the hold on a bad peer review
-/// lives on `open_review_findings` and on `unattested_reviewers_scan`'s name key
+/// lives on the findings store gate and on `unattested_reviewers_scan`'s name key
 /// (unchanged), which is the deliberate divergence this design calls for.
 #[test]
 fn coverage_peer_fail_does_not_revoke_author_pass() {

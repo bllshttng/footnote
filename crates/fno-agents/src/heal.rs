@@ -203,6 +203,20 @@ const PINNED_FMT: &str = "+1.94.1";
 /// otherwise swallow anything a guard printed alongside a real failure.
 const SIGNATURES: &[Signature] = &[
     Signature {
+        name: "timed_out",
+        plan: "escalate: the job hit its timeout-minutes cap; cut or split the work",
+        matches: |c| c.log.contains("exceeded the maximum execution time"),
+        resolve: |c| {
+            Remedy::Escalate {
+                repro: format!(
+                    "{}: the job hit its timeout-minutes cap, so a rerun hits it again; cut or split the work",
+                    c.log
+                ),
+            }
+        },
+        rerunnable: false,
+    },
+    Signature {
         name: "cancelled",
         plan: "rerun: gh run rerun <run>, at most once per head sha",
         matches: |c| c.bucket == "cancel",
@@ -243,7 +257,7 @@ const SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "closure-trailer",
-        plan: "edit-body: write ONE Backlog-Closure line naming every node the branch names",
+        plan: "edit-body: write ONE Fixes line naming every node the branch names",
         matches: |c| {
             c.check.contains("check-pr-node-closure")
                 && c.log.contains("the exact trailer claims none")
@@ -914,17 +928,21 @@ fn findings_for(
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
-        let log = match job_id(row["link"].as_str().unwrap_or("")) {
-            Some(id) => gh_api(
-                a,
-                &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
-                &[],
-            )
-            // A log the API cannot serve (expired retention, a commit status
-            // with no job) is REPORTED as unreadable, never dropped: a check
-            // heal cannot read is still red.
-            .unwrap_or_else(|e| format!("log unavailable: {e}")),
-            None => "log unavailable: not an Actions job".to_string(),
+        let log = if let Some(timeout) = row.get("timeout").and_then(|v| v.as_str()) {
+            timeout.to_string()
+        } else {
+            match job_id(row["link"].as_str().unwrap_or("")) {
+                Some(id) => gh_api(
+                    a,
+                    &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
+                    &[],
+                )
+                // A log the API cannot serve (expired retention, a commit status
+                // with no job) is REPORTED as unreadable, never dropped: a check
+                // heal cannot read is still red.
+                .unwrap_or_else(|e| format!("log unavailable: {e}")),
+                None => "log unavailable: not an Actions job".to_string(),
+            }
         };
         let stripped = strip_timestamps(&log);
         let bucket = row["bucket"].as_str().unwrap_or("").to_string();
@@ -1023,28 +1041,11 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
     healed
 }
 
-/// True when the line IS a `Backlog-Closure:` trailer line (anchored at the
-/// line start, case-insensitive - the same match the gate's grep makes).
-fn is_trailer_line(line: &str) -> bool {
-    let prefix = "backlog-closure:";
-    line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
-}
-
-/// The ids one `Backlog-Closure:` line claims: the label's own colon
-/// stripped, tokens split on whitespace and comma - the grammar
-/// `parse_closure_trailer` reads.
+/// The ids one closure line claims: the keyword and its optional colon
+/// stripped, tokens split on whitespace and comma, malformed tokens making
+/// the line prose. The grammar `pr_closure::parse` reads.
 fn closure_line_ids(line: &str) -> Vec<String> {
-    let Some((label, rest)) = line.split_once(':') else {
-        return Vec::new();
-    };
-    if !label.eq_ignore_ascii_case("backlog-closure") {
-        return Vec::new();
-    }
-    rest.split([' ', '\t', ','])
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::king_board::pr_closure::line_ids(line)
 }
 
 /// The remedy's own node ids, across every EditBody finding, in order.
@@ -1065,11 +1066,7 @@ fn edit_body_nodes(findings: &[Finding]) -> Vec<String> {
 /// where append-per-node lost every id but the last to the last-line rule.
 fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     let mut union = edit_body_nodes(findings);
-    for id in body
-        .lines()
-        .filter(|line| is_trailer_line(line))
-        .flat_map(closure_line_ids)
-    {
+    for id in body.lines().flat_map(closure_line_ids) {
         if !union.contains(&id) {
             union.push(id);
         }
@@ -1077,11 +1074,12 @@ fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     union
 }
 
-/// The body with every trailer line removed - the base the one new line is
-/// appended to, so no stale line can outrank it.
+/// The body with every CLAIMING closure line removed - the base the one new
+/// line is appended to, so no stale line can outrank it. A keyword-led line
+/// whose tokens void it ("Fixes the thing.") is prose: the sweep leaves it.
 fn body_without_trailer_lines(body: &str) -> String {
     body.lines()
-        .filter(|line| !is_trailer_line(line))
+        .filter(|line| closure_line_ids(line).is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1103,8 +1101,8 @@ fn edit_body_cmd(nodes: &[String]) -> String {
     }
 }
 
-/// Edit the PR body so exactly ONE Backlog-Closure line names every node the
-/// heal covers plus every id the body's existing trailer lines held. No
+/// Edit the PR body so exactly ONE closure line names every node the
+/// heal covers plus every id the body's existing closure lines held. No
 /// commit and no push: the closure workflow re-fires on an `edited` event.
 fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Result<bool, String> {
     let union = closure_union(findings, body);
@@ -3213,16 +3211,7 @@ mod tests {
     // remote, so the two properties that matter (exactly one push, and never
     // a push over a run in flight) are provable rather than argued.
 
-    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     /// A stub `gh` answering the four reads heal makes. `pending` decides
     /// whether the SECOND check-runs read (the pre-push one) reports a run in
@@ -3721,13 +3710,14 @@ exit 0
         );
         let gh = log_of(d, "gh.log");
         assert_eq!(gh.matches("run rerun 1 --failed").count(), 1, "{gh}");
-        let store_before = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store_before =
+            crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert!(
             !store_before.contains("fleet_task"),
             "no task before the rerun answers: {store_before}"
         );
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,
@@ -3740,7 +3730,7 @@ exit 0
         assert!(store.contains(r#""run":"fno do pr heal 1""#), "{store}");
         // The next tick re-files nothing: the open task dedups on its key.
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,
@@ -4434,6 +4424,7 @@ echo '[]'
         let armed = || crate::loops_pause::DispatchPause::FleetIncident {
             generation: 9,
             reason: "rustc storm".to_string(),
+            holds: vec!["spawns".to_string(), "tests".to_string()],
         };
         let code = run_detached(&a, &detach_args(d), &armed, &spawn);
         assert_eq!(code, EXIT_CLEAN);

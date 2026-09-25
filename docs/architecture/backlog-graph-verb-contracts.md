@@ -47,6 +47,10 @@ The delivery lives in the VERB, not in ``append_progress_note``. The status-fano
 
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 
+``--blocking`` turns the record into a review finding. The body lands in the findings store, its own aggregate and table, never a journal line. Loop-check denies the session's success terminal while the finding stays open. If a reader is live, delivery shrinks to the finding pointer: node, id, resolve command. With nobody bound, the write still lands and the receipt says it gates the next worker. The nobody-bound refusal is a note-only rule.
+
+``note --resolve <finding-id>`` stamps ``resolved_at``. An unknown id exits 1. A second resolve exits 0 and names the prior resolution. ``fno backlog notes findings [<id>] [--open]`` is the reader. A count line prints even at zero. A store read error exits 1 rather than reading as clean. The retired ``fno backlog annotate`` spellings refuse, naming these replacements.
+
 Every outcome prints. A delivery prints ``notified <address> (<why>): <transport> <msg-id>``. When the author is the only bound reader, the note is written and one line names the binding: ``notify: you are the only reader bound to <id> (<why>); nobody else to tell``, exit 0. When nobody is bound, or a fault makes the bindings unreadable, the verb REFUSES BEFORE the append: nothing is written, stderr carries the refusal with every arm reading, and it exits 3 (a node that resolves to nothing stays exit 1). A resolution fault refuses for the same reason a vacant one does: neither can prove anyone would be told, and a note no reader would hear is a silent drop wearing a receipt. ``--quiet`` is the acknowledgment: it skips resolution, writes the note, and mails nobody. After the sends, exit 0 needs at least one ``notified`` receipt; when every receipt is ``notify FAILED`` or ``notify UNCONFIRMED``, the note stays written, one summary line goes to stderr, and the exit code is 4. A failed send - a budget refusal included - prints ``notify FAILED`` on stderr. Each send is bounded at 30 seconds because a live inject waits on the recipient's per-agent flock and one measured run wedged past 150; an unanswered recipient prints ``notify UNCONFIRMED`` on stderr, which says the delivery is unknown rather than done - so an UNCONFIRMED send is not a positive marker, and the exit-4 summary says to check before re-sending.
 
 ## cmd_encounter
@@ -234,6 +238,8 @@ Before mutation, a gh cross-check verifies that at least one referenced PR is ME
 The rich completion surface (--backfill, --force-overwrite, --pr-number, --pr-url, --link, --note, title/branch query) ported here from the retired root `fno done` spelling : those paths delegate to the implementation that already owned them, so the old spelling forwards argv-verbatim onto this one.
 
 Exit codes: 0 success (node closed) 1 validation error (bad id, node not found) 2 usage error (--force without --reason) 3 gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence (retryable when the PR merges; walker treats this as Parked) 4 gh outage: subprocess failure / timeout / parse error; retryable 5 awaiting merge: PR OPEN, not merged; node stays in_review (success-shaped; close lands via reconcile/advance at merge) 6 promise unmet: plan promised work that has not all shipped (multi-wave with no assertion, a failed close_probe, or fewer merged ships than expected_url_count). Use --force --reason to record a deliberate half-ship.
+
+A close records why, or the store refuses it. At the store's publication seam, every close meets one rule. The row must carry a PR ref, a completion note, an artifact link or a retired stamp. A close that leaves none writes nothing. A Python caller sees exit 1 with the refusal as the last stderr line. The repair flags are `--pr-number`, `--note` and `--link`, and a forced close writes the note first with `fno backlog update <id> --completion-note "<why>"`.
 
 ## cmd_reopen
 
@@ -517,7 +523,9 @@ Find open nodes whose PR has merged outside the ship gate.
     at all - a session that died before the node<->PR stamp - by matching the
     node id against merged branch names. ``list_merged`` is injected in tests.
 
-    Cost bound: both listing scans group candidates by resolved git common dir, so the worktrees of one repo share one ``gh pr list`` call, and the run's shared ``_ListingCache`` makes it one open and one merged listing per repo per sweep; merge drift resolves a stamped number from those listings and pays the per-node query only for a number in neither.
+    Cost bound: both listing scans group candidates by resolved git common dir, so the worktrees of one repo share one REST PR listing; the run's shared ``_ListingCache`` makes it one open and one closed listing per repo per sweep; merge drift resolves a stamped number from those listings and pays the per-node query only for a number in neither.
+
+    Each reconcile listing uses REST core (``gh api repos/{slug}/pulls``), never GraphQL ``gh pr list``; a normal listing is one page, while a full 100-row open page may fetch a second page to preserve the existing uniqueness refusal. The gh proxy brokers the GraphQL route under a machine-wide lock, and all sessions share that budget.
 
     Worst-case graph staleness is therefore the 900s reconcile throttle (``scripts/lib/reconcile-throttle.sh``), and it is a bound only while neither scan's 60s ``REVERSE_MAP_BUDGET_S`` fires: a firing budget defers the remaining repo groups to a later sweep, and nothing carries them forward until then. The daemon's ``merge_close`` arm (``crates/fno-agents/src/merge_close.rs``) runs the same bare sweep every 900s with no session alive, so the bound holds when no session starts.
 
@@ -563,10 +571,12 @@ Close open nodes with NO PR refs by matching the id in a merged branch.
     stamp leaves an open node with no ``pr_number`` - invisible to the forward
     ``scan_merge_drift`` (which needs a ref to query). The branch convention
     (``branch_name()``) still carries the full node id, so one
-    ``gh pr list --state merged`` per repo reverse-maps it. A unique headRef hit
+    REST closed-PR page per repo, filtered to merged, reverse-maps it. A unique headRef hit
     synthesizes the same MergeDriftRecord the stamped path emits (so the
     existing close path applies unchanged); an ambiguous hit (two merged PRs
     for one id) emits an ``error`` record naming both, never a guess.
+
+    Missing and non-checkout cwds are skipped and named in the warning until their repo can be resolved.
 
     ``list_merged`` is injected in tests to avoid shelling to gh.
 
@@ -677,6 +687,8 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 ## cmd_ready (the selection, served natively)
 
 Which backlog nodes may be dispatched right now, and in what order. The decision lives in `crates/fno-agents/src/backlog_ready.rs` (`backlog_ready::select`), served by the keeper's `ready` verb; `fno backlog ready` and `fno backlog next` are clients. The verb accepts the filter flags (`project`, `all`, `roadmap_id`, `parent`, `mission`, `include_ideas`, `include_deferred`, `repo_root`), an optional `staleness_days` override, and an optional `entries` array - rows ride IN, the one decision answers both backends (the external-tracker branch feeds `_joined_open_candidates` through it). Without the override the keeper reads `config.backlog.staleness_days` from the `config.toml` beside the graph, falling back to the 21-day default. With no `claimed` array the verb resolves live claims itself and FAILS CLOSED: an unreadable claims root refuses the whole selection (the same contract `live_claimed_node_ids(strict=True)` gave the Python leg), never an empty set read as "nothing is claimed". The reply carries survivors plus per-node drops, first-filter attribution, with guard drops naming `dead-ancestor:<id>`, `design-stage`, `idea-stage`, `stale-quarantine`, `contained:<id>`, `no-difficulty`, or the hold verdict's guard reason; `advance --explain` renders from them (AC4). A missing `--parent` node refuses (exit 1, `ReadyParentMissingError` client-side). An unreachable keeper refuses selection: `fno backlog ready` exits non-zero naming the keeper, never a locally recomputed fallback (AC6). The `next` observer merge (`_with_observer`) still re-verifies observer rows through the Python `selection_guards`: a divergence detector over the reply, not a second selection leg. Under `next --claim`, the lock fields land on the graph entry the winner id resolves to - the selection rows are serialized summaries, not references into the commit snapshot. The reply is a JSON array on stdout. Parse it as JSON, and see json-output-contract.md.
+
+A node an open operator question names in `blocks` drops with reason `held:<qid>`, the same word the drain receipt uses. The caller resolves the map from the question journals (`needs::held_map`), so the Rust admission leg and the Python guard read one fold.
 
 ## selection_guards
 

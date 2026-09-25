@@ -50,6 +50,7 @@ pub mod additional_prs;
 pub mod acp_stdio;
 mod agent_lock;
 pub mod agents_config;
+pub(crate) mod agents_event;
 pub mod agy_ask;
 pub mod agy_hooks;
 pub mod agy_launch;
@@ -60,6 +61,7 @@ pub mod attach;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
+pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
@@ -90,6 +92,7 @@ pub mod claude_roster;
 pub mod claude_sessions;
 pub mod claude_stream_entry;
 pub mod claude_supervisor;
+pub mod claude_vault;
 pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
@@ -113,10 +116,12 @@ pub mod compaction;
 mod completion_output;
 pub mod component_update;
 pub mod context_run;
+pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
 pub mod crown_alarm;
+pub mod crown_names;
 pub mod crown_reap;
 pub mod crown_settle;
 pub mod crown_split;
@@ -173,15 +178,20 @@ pub mod hook;
 mod identity;
 pub mod install_verify;
 pub mod intel;
+pub mod intel_html;
 pub mod intel_insights;
 pub mod interrupt_classify;
 pub mod json_output;
+pub(crate) mod keeper_revival;
 pub mod kill_criteria;
+pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
+pub mod king_mail;
+pub mod king_settle;
 pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
@@ -189,16 +199,19 @@ pub mod lane_heal;
 pub mod launch_workdir;
 pub mod law_match;
 mod lifecycle_child;
+pub mod live_store_fence;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
 pub mod loop_king;
+pub mod loop_readiness;
 pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_inject;
@@ -214,6 +227,7 @@ pub mod merge_reap;
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
 pub mod model_env_scrub;
+pub mod model_family;
 pub mod naming;
 pub mod needs;
 pub mod node_origin;
@@ -236,6 +250,7 @@ pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
 pub mod pending_session_row;
+pub mod phase_close;
 pub mod pi;
 pub mod planning_lane;
 pub mod plans_dirs;
@@ -246,6 +261,7 @@ pub mod pr_park;
 pub mod pr_push;
 pub mod pr_rebase;
 pub mod pr_status_facts;
+pub mod pr_worktree;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provenance;
@@ -254,6 +270,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod quarantine;
+pub mod question_clear;
 pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
@@ -266,19 +283,24 @@ pub mod reclaim;
 pub mod reentry;
 pub mod refusal_rate;
 pub mod registry_json;
+pub mod reign_goal;
+pub mod reign_hygiene;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
 pub mod resume_gate;
 pub mod resume_pin;
 pub mod resume_receipt;
+pub(crate) mod resume_route;
 pub mod resume_wake;
+pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
+pub mod route_inventory;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
@@ -291,10 +313,12 @@ pub mod screen;
 pub mod select_read;
 pub(crate) mod served_liveness;
 pub mod session_activity;
+pub mod session_backfill;
 pub mod session_cost;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
@@ -309,6 +333,7 @@ pub mod spawn_gate_verb;
 pub mod spawn_lineage;
 pub mod spawn_overlay;
 pub mod spawn_payload;
+pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
@@ -325,12 +350,14 @@ pub mod terminal_stop;
 pub mod territory;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod wake_meter;
 pub mod worktree_reapable;
 pub mod write_queue;
 
@@ -610,6 +637,45 @@ pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
         value.push(previous);
     }
     value
+}
+
+/// Write `body` to `dir/name` as a 0755 executable and return the path.
+///
+/// A child /bin/sh writes the bytes, never this process. A write fd held
+/// here is copied into the child of any sibling test thread that forks in
+/// that window, and an exec of the stub then fails with ETXTBSY until that
+/// child execs. A temp name plus rename does not help: the copied fd follows
+/// the inode. The writer has exited before this returns.
+#[cfg(test)]
+pub(crate) fn write_exec_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.join(name);
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"cat > "$1.tmp.$$" && chmod 755 "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1""#,
+            "sh",
+        ])
+        .arg(&path)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn /bin/sh to write an exec stub");
+    // A writer that fails early (a missing dir) closes its stdin first, so
+    // this write can see a broken pipe. The exit status below names the
+    // real failure, so the write error is not the one to report.
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(body.as_bytes());
+    let status = child.wait().expect("wait for the stub writer");
+    assert!(
+        status.success(),
+        "could not write exec stub {}: {status}",
+        path.display()
+    );
+    path
 }
 
 #[cfg(test)]
@@ -1037,11 +1103,171 @@ mod tests {
         kinds
     }
 
+    // The exec-stub guard: a lib test that writes an executable stub
+    // in-process holds a write fd, and a sibling test thread's fork copies it
+    // into a child; an exec of the stub then fails with ETXTBSY until that
+    // child reaches its own exec. The one writer is `write_exec_stub`, whose
+    // child /bin/sh exits before returning. ponytail: the regex matches only
+    // the literal-mode idiom; a mode built in a variable not named `mode`
+    // evades it.
+    #[test]
+    fn every_exec_stub_goes_through_write_exec_stub() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(!files.is_empty(), "found no .rs files under {src_root:?}");
+
+        // Byte-level scan, like the emit-kind guard: no regex crate here.
+        // Matches the plan regex `(from_mode|set_mode|\.mode)\((0o7[0-7]{2}|mode)\)`
+        // per line: after the needle, trimmed whitespace, either a 0o7xx octal
+        // literal closed by `)`, or the variable form `mode)`.
+        const NEEDLES: [&str; 3] = ["from_mode(", "set_mode(", ".mode("];
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read source file");
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let mut hit = false;
+                for needle in NEEDLES {
+                    let mut from = 0;
+                    while let Some(pos) = line[from..].find(needle) {
+                        let rest = line[from + pos + needle.len()..].trim_start();
+                        let octal = rest.as_bytes();
+                        let matched = (octal.len() >= 6
+                            && octal[..3] == *b"0o7"
+                            && (b'0'..=b'7').contains(&octal[3])
+                            && (b'0'..=b'7').contains(&octal[4])
+                            && octal[5] == b')')
+                            || rest.starts_with("mode)");
+                        if matched {
+                            hit = true;
+                            break;
+                        }
+                        from += pos + needle.len();
+                    }
+                    if hit {
+                        break;
+                    }
+                }
+                if hit {
+                    let name = file.strip_prefix(&src_root).unwrap_or(file);
+                    offenders.push(format!("{}:{}", name.display(), idx + 1));
+                }
+            }
+        }
+
+        // The five allowed files: production binary repair (install_verify),
+        // a production dir mode (paths), two dir-mode restores in tests
+        // (claims, operator_turns), and the bin test target that cannot see a
+        // cfg(test) lib fn (client_tests).
+        const ALLOWED: &[(&str, usize)] = &[
+            ("install_verify.rs", 1),
+            ("paths.rs", 1),
+            ("king_board/claims.rs", 1),
+            ("operator_turns.rs", 1),
+            ("client_tests.rs", 2),
+        ];
+        let allowed_counts: std::collections::HashMap<&str, usize> =
+            ALLOWED.iter().copied().collect();
+        let mut by_file: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for o in &offenders {
+            let file = o.rsplit_once(':').map(|(f, _)| f.to_string()).unwrap();
+            *by_file.entry(file).or_insert(0) += 1;
+        }
+        for (file, count) in &by_file {
+            let allowed = allowed_counts.get(file.as_str()).copied().unwrap_or(0);
+            assert!(
+                *count <= allowed,
+                "this test writes an executable stub from inside the test \
+                 process, where a sibling test's fork can hold the write fd \
+                 open and the exec fails with Text file busy. Write it with \
+                 crate::write_exec_stub. Offenders: {offenders:?}"
+            );
+        }
+        for (file, allowed) in ALLOWED {
+            let actual = by_file.get(*file).copied().unwrap_or(0);
+            assert!(
+                actual <= *allowed,
+                "{file} now matches {actual} times (allowance {allowed}); \
+                 the extra site must go through crate::write_exec_stub. {offenders:?}"
+            );
+        }
+    }
+
     fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         if needle.is_empty() || haystack.len() < needle.len() {
             return None;
         }
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    // AC1-HP / AC1-EDGE: the stub writer never holds the write fd in this
+    // process, so execs of its output survive sibling threads forking in a
+    // loop (darwin has no /bin/true, so the forking threads use
+    // /usr/bin/true). Each stub prints its own name and the exec asserts it.
+    #[test]
+    fn write_exec_stub_survives_sibling_forks() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut forkers = Vec::new();
+        for _ in 0..4 {
+            let stop = Arc::clone(&stop);
+            forkers.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/usr/bin/true").status();
+                }
+            }));
+        }
+        let mut writers = Vec::new();
+        for t in 0..4u32 {
+            let dir = dir.path().to_path_buf();
+            writers.push(std::thread::spawn(move || {
+                for i in 0..25u32 {
+                    let body = format!("#!/bin/sh\nprintf '%s' '{t}-{i}'\n");
+                    let stub = crate::write_exec_stub(&dir, &format!("s{t}-{i}"), &body);
+                    let out = std::process::Command::new(&stub)
+                        .output()
+                        .expect("exec stub");
+                    assert!(
+                        out.status.success(),
+                        "exec of {} failed: {out:?}",
+                        stub.display()
+                    );
+                    let mut text = String::new();
+                    std::io::Cursor::new(&out.stdout)
+                        .read_to_string(&mut text)
+                        .expect("stdout is utf-8");
+                    assert_eq!(text, format!("{t}-{i}"));
+                }
+            }));
+        }
+        for w in writers {
+            w.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for f in forkers {
+            f.join().expect("forker thread");
+        }
+        let mode = std::fs::metadata(dir.path().join("s0-0"))
+            .expect("stub exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "stub mode must be 0755");
+    }
+
+    // AC1-ERR: a missing destination dir surfaces as the writer's exit
+    // status, naming the path.
+    #[test]
+    #[should_panic(expected = "could not write exec stub")]
+    fn write_exec_stub_refuses_a_missing_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = crate::write_exec_stub(&dir.path().join("absent"), "fno", "#!/bin/sh\n");
     }
 }
 

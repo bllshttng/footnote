@@ -68,7 +68,6 @@ from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
-from fno.config.status_sinks import ReachMeRow as ReachMeRow
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
@@ -2030,6 +2029,20 @@ class SidelineBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     colors: SidelineColorsBlock = Field(default_factory=SidelineColorsBlock)
+    # The row-shape switch the Rust sideline reads. Mirrors the Rust reader's
+    # tolerance: the card is the default, and an unknown value reads as the
+    # card default (crates/fno sideline_color).
+    layout: Literal["card", "list"] = "card"
+
+    @field_validator("layout", mode="before")
+    @classmethod
+    def _coerce_layout(cls, v: object) -> object:
+        """Unknown or wrong-shaped values degrade to the card default, never error."""
+        if v is None:
+            return "card"
+        if isinstance(v, str) and v.strip().lower() == "list":
+            return "list"
+        return "card"
 
 
 class DispatchBlock(BaseModel):
@@ -2075,6 +2088,14 @@ class DispatchBlock(BaseModel):
     # Proactive LOW cutover, opt-in, default 0 = off. Deliberately inverted from
     # defer_horizon_minutes: a distant reset means leave now, not wait.
     cutover_low_after_minutes: int = 0
+    # The blueprint floor for a plan-less node (lean dispatch): "high" (the
+    # default) routes a plan-less node to /blueprint only when its difficulty
+    # is high, its size is L, or an open premise question blocks it (the
+    # `premise-question` tag). Every other plan-less node goes straight to
+    # /target, which states its own scope. "medium" restores the pre-lean
+    # table (blueprint for medium and up). Read by the lifecycle verb table
+    # (fno-agents effective_verb) through the dispatch doors.
+    blueprint_floor: str = "high"
 
     @field_validator("auto_merge", mode="before")
     @classmethod
@@ -2101,6 +2122,14 @@ class DispatchBlock(BaseModel):
         a string, or a negative degrades to 0 (off). Same stance as the two
         above: a config typo can never arm automatic rerouting."""
         return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+    @field_validator("blueprint_floor", mode="before")
+    @classmethod
+    def _coerce_blueprint_floor(cls, v: object) -> object:
+        """Only the two literals are honored; anything else degrades to "high",
+        the lean default. Same stance as the validators above: a typo can never
+        widen blueprint ceremony past the lean-dispatch ruling."""
+        return v if v in ("high", "medium") else "high"
 
 
 def _positive_int(v: object) -> bool:
@@ -3914,28 +3943,13 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
-    attention: list[ReachMeRow] = Field(default_factory=list)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
     @model_validator(mode="before")
     @classmethod
     def _lift_legacy_keys(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("reach_me"), list):
-            legacy = data.pop("reach_me")
-            _LOG.warning("[[reach_me]] is now [[attention]]; the old name reads one release")
-            data["attention"] = list(data.get("attention") or []) + legacy
         return _watchdog.lift_retire_grace(data)
-
-    @field_validator("attention", mode="before")
-    @classmethod
-    def _coerce_attention(cls, v: object) -> object:
-        """Fail-safe like ``status_sinks``: wrong shape degrades to [] with a warning."""
-        if isinstance(v, list):
-            return v
-        if v is not None:
-            _LOG.warning("config.attention is %s, not an array of tables", type(v).__name__)
-        return []
 
     @field_validator("status_sinks", mode="before")
     @classmethod

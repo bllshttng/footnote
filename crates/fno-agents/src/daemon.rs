@@ -125,7 +125,7 @@ impl Default for DaemonOptions {
     }
 }
 
-fn resolve_worker_bin() -> PathBuf {
+pub(crate) fn resolve_worker_bin() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
         return PathBuf::from(v);
     }
@@ -1662,6 +1662,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let fleet_page = crate::fleet_page::Arm::new(ctx.opts.agents_config_cwd.clone());
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
+    let slot_cutover = crate::slot_cutover::Arm::new(ctx.opts.agents_config_cwd.clone());
     let attention = crate::attention_arm::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
@@ -1827,11 +1828,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::reclaim::maybe_run_daily(&home);
                     });
                 }
-                // Orphaned-test-binary reap: the waitpid sweep above only ever
-                // sees the daemon's OWN children; a wedged deps/ test binary at
-                // ppid 1 holding zombie corpses is invisible to waitpid(-1), and
-                // this arm is what reaches that shape. The whole arm - cadence,
-                // gate, kill, events - lives in crate::orphan_reap.
                 crate::orphan_reap::maybe_sweep(
                     &mut last_orphan_sweep,
                     &orphan_sweep_in_flight,
@@ -1843,6 +1839,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 crate::fleet_page::maybe_tick(&fleet_page, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
+                crate::slot_cutover::maybe_tick(&slot_cutover, ctx.home.clone());
                 crate::attention_arm::maybe_tick(&attention, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
                 // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.
@@ -6295,7 +6292,7 @@ const KEEPER_SWEEP_BUDGET: Duration = Duration::from_secs(10);
 /// leftover to unlink, a live keeper is its socket's only address and is
 /// NEVER unlinked, and silence is named rather than interpreted.
 #[derive(Debug, PartialEq)]
-enum KeeperProbe {
+pub(crate) enum KeeperProbe {
     /// The socket file exists but nothing accepts behind it: a dead keeper's
     /// leftover (the keeper unlinks on exit, so this is a kill -9 remainder).
     NoListener,
@@ -6310,7 +6307,7 @@ enum KeeperProbe {
 /// `Identify` via [`crate::pane_keeper::encode`], read the reply via
 /// [`crate::pane_keeper::decode`]. Ring `Output` frames that share the burst
 /// are skipped (this probe never takes the pty; it is not the subscriber).
-fn probe_keeper_socket(sock: &Path, reply_timeout: Duration) -> KeeperProbe {
+pub(crate) fn probe_keeper_socket(sock: &Path, reply_timeout: Duration) -> KeeperProbe {
     use crate::pane_keeper::{decode, encode, Decode, Frame};
     use std::io::{Read, Write};
     let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
@@ -6705,33 +6702,14 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread, which carries neither a
-    // footnote pid nor a worker socket: claude's own daemon roster is the only
-    // truth. Read once per sweep, not per row. A MISSING roster parses as zero
-    // workers (no claude daemon ever ran) and reaps as before; an UNREADABLE one
-    // is unknown liveness, where we refuse to declare death -- a false `exited`
-    // on a working teammate costs a duplicate spawn, a stale `live` costs a
-    // waiter its timeout.
-    let roster = crate::claude_roster::ClaudeRoster::load_default();
-    // The zombie flip fires only when the roster read SUCCEEDED: an
-    // unreadable roster is unknown liveness (the fail-closed branch below),
-    // and orphaning a live worker on a transient instrumentation failure is
-    // the exact false positive the flip must not produce (codex P1, PR 1329).
-    let roster_readable = roster.is_ok();
-    let bg_live = |e: &RegistryEntry| -> bool {
-        if e.harness_name() != "claude" {
-            return false;
-        }
-        match &roster {
-            Ok(r) => {
-                r.find(&e.short_id).is_some()
-                    || e.harness_session_id
-                        .as_deref()
-                        .is_some_and(|sid| r.find(sid).is_some())
-            }
-            Err(_) => true,
-        }
-    };
+    // Liveness for a `claude --substrate bg` thread reads the daemon roster:
+    // presence for the zombie flip, a live-pid listing for the crown
+    // revival. See liveness_sweep::BgRoster - the witness moved there with
+    // the crown-revival work (this file is shrink-only). A MISSING roster
+    // parses as zero workers and reaps as before; an UNREADABLE one is
+    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    let witness = crate::liveness_sweep::BgRoster::load();
+    let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
     // (docs/architecture/codex-thread-driver.md); its existence is what makes
     // an unhosted thread Orphaned (resumable) instead of Exited.
@@ -6778,17 +6756,33 @@ pub(crate) fn run_reconcile_sweep(
     // (24s wall, 0 probed). The probe loop and the roster-progress loop
     // below share this one clock.
     let start = Instant::now();
-    let (changes, outcome) = plan_reconcile(
+    // The reboot arm plans FIRST, before `prober` moves into plan_reconcile:
+    // its changes append after the main plan's, so a revived row's Live is
+    // the last status the batch applies. Full sweeps only: the serve-only
+    // tick writes no probe inference, so planning revivals there is waste.
+    let (mut revivals, revived) = if matches!(mode, SweepMode::Full) {
+        crate::liveness_sweep::plan_crown_revivals(
+            &entries,
+            roster_readable,
+            |e| witness.crown_running(e),
+            &prober,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let (mut changes, mut outcome) = plan_reconcile(
         &entries,
         probe,
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
-        bg_live,
+        |e| witness.bg_live(e),
         thread_hosted,
         rollout_exists,
         prober,
         roster_readable,
     );
+    changes.append(&mut revivals);
+    outcome.recovered.extend(revived);
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
     // Exited that still carries an inside-leg report, publish its completion

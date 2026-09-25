@@ -37,11 +37,13 @@ use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod rename_overlay;
+mod row_menu;
 mod sweep_scope;
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
+use row_menu::build_row_menu;
 
 // The placement pickers (attach `p`, portal `P`) live in their own module;
 // client.rs is shrink-only under the file-budget gate.
@@ -69,6 +71,7 @@ use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
 use crate::vt::ShellActivity;
+use sideline::sideline_column_rects;
 
 mod row_stamp;
 // (v75) The sideline's density width rules, moved out under the file-budget
@@ -141,9 +144,9 @@ const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
 /// panel is wide enough (see [`View::footer_menu_range`]).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
 const FOOTER_MENU: &str = "☰ menu";
-/// How long a pending prefix chord waits before the which-key hint paints
-/// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
-const HINT_DELAY: Duration = Duration::from_millis(400);
+/// How long a pending prefix chord waits before the hint bar paints.
+/// Zero: the bar paints at once; `prefix+?` shows the full table.
+const HINT_DELAY: Duration = Duration::ZERO;
 /// (fix) How long a held global-chord candidate (a lone Esc so far)
 /// waits for the chord's remaining bytes before flushing to the pane - the
 /// tmux escape-time analog. A terminal delivers a whole CSI in one read, so
@@ -836,6 +839,10 @@ struct View {
     /// travels in either direction and the server keeps every pane at its
     /// size.
     sideline_full: bool,
+    /// The `[sideline] layout` switch, read once at startup from the same
+    /// palette read the lane colors use. A config change takes effect on the
+    /// next attach, not live.
+    sideline_layout: sideline_color::SidelineLayout,
     /// Sideline density, persisted by [`crate::view_store`]. Since
     /// it drives only the row set (via [`View::display_rows`]) and the
     /// preset width jump - the rendered width is [`View::sideline_width`], an
@@ -1068,6 +1075,14 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The experimental backlog board overlay, when open (one at a time).
+    backlog_board: Option<backlog_board::BoardView>,
+    /// The board's docked-sideline side (persisted in the view store).
+    board_dock: view_store::BoardDock,
+    /// The board's full-screen toggle (persisted in the view store).
+    board_full: bool,
+    /// The persisted experimental toggle for the backlog board view.
+    experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
@@ -1608,6 +1623,10 @@ enum MenuAction {
     BreakOut,
     /// Detach a pane-hosted worker while keeping its PTY live.
     Detach,
+    /// Close ONLY the portal seat showing this row (`Command::ClosePortal`)
+    /// - the viewer pane, never the row: the thread keeps running and can
+    /// be shown again anywhere. Built only when the row wears a portal.
+    ClosePortal,
     /// Relocate a pane-hosted row's live pane into ANOTHER workspace. Opens the
     /// move picker (the same numbered picker `m` uses for a tab); the chosen
     /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
@@ -1700,6 +1719,7 @@ impl MenuAction {
             MenuAction::Diff => Some("diff-row"),
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
+            MenuAction::ClosePortal => Some("close-portal"),
             _ => None,
         }
     }
@@ -1726,129 +1746,6 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
         label: label.into(),
         hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
-    }
-}
-
-/// Build the per-state row menu for the agent at `display_rows()` index `i`,
-/// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
-/// Entry sets mirror the row's state so no dead item ever renders: a paneless
-/// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
-/// focus plus the move/break-out grid that relocates its live pane; an exited
-/// row gets remove; peek/stop apply where they make sense.
-fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut actions: Vec<MenuAction> = Vec::new();
-    let mut add = |mut row: PopupRow, acts: &[MenuAction]| {
-        if let (PopupRow::Entry { hint, .. }, [action]) = (&mut row, acts) {
-            *hint = action
-                .accelerator_id()
-                .and_then(crate::keys::menu_key_for)
-                .unwrap_or_default();
-        }
-        rows.push(row);
-        actions.extend_from_slice(acts);
-    };
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
-    let cell = |glyph: &str, label: &str| GridCell {
-        glyph: glyph.into(),
-        label: label.into(),
-    };
-    add(PopupRow::Header(agent.name.clone()), &[]);
-    add(PopupRow::Rule, &[]);
-    if agent.exited {
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        // Resume above the rule (AC7): the menu twin of peek `r`, on the row
-        // state `r` accepts - an exited row.
-        add(entry("↻", "Resume"), &[MenuAction::Resume]);
-    } else if agent.pane_id.is_some() {
-        // Live pane row: already placed, so re-placement is a MOVE of the live
-        // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
-        // below, so the two menus read as one system; the verbs differ because
-        // the operations do (move a running pane vs. place a new one).
-        add(entry("→", "Focus"), &[MenuAction::Focus]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(PopupRow::Rule, &[]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::BreakOut],
-        );
-        add(entry("⇱", "Detach pane"), &[MenuAction::Detach]);
-        // Ungated by pane count. A row whose pane is on screen and has no
-        // neighbour `dir`-ward gets the server's "no pane in that direction"
-        // notice, the same fail-closed feedback the paneless branch relies on;
-        // a row whose pane is off screen always has somewhere to land (the
-        // current view), so gating on the source tab would be wrong anyway.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Move Left"), cell("◨", "Move Right")]),
-            &[
-                MenuAction::MoveDir(Dir::Left),
-                MenuAction::MoveDir(Dir::Right),
-            ],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Move Up"), cell("⬓", "Move Down")]),
-            &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else if agent.attach_id.is_some() {
-        // Paneless bg row: the motivating case - open as a tab or a split pane.
-        // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
-        // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
-        add(entry("⊙", "Open Here"), &[MenuAction::OpenHere]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::NewTab],
-        );
-        add(PopupRow::Rule, &[]);
-        // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
-        // IS the direction). Glyphs are half-block squares; a non-nerd-font
-        // terminal still shows the label beside them.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
-            &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
-            &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else {
-        // A live row that is neither pane-hosted nor attachable here.
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
-            add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
-        }
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    }
-    // Diff is common to every row state: it reads the row's worktree,
-    // which an exited or paneless row has just as much as a live pane-hosted
-    // one - and a finished worker's diff is the one you most want to read.
-    // Bound in menu scope now, so its hint is the live key.
-    add(PopupRow::Rule, &[]);
-    add(entry("±", "Diff"), &[MenuAction::Diff]);
-    // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
-    if !agent.external {
-        add(entry("✎", "Rename"), &[MenuAction::RenameAgent]);
-    }
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Agent(AgentIdent::of(agent)),
-        actions,
     }
 }
 
@@ -2025,6 +1922,16 @@ pub(crate) enum AuxAction {
     SweepSquads,
     Detach,
     ToggleHoverFocus,
+    /// The experimental backlog board: flip the persisted pref, then
+    /// rebuild the open sidebar menu so its rows track it.
+    ToggleBacklogView,
+    /// Open the backlog board overlay (off unless the pref is on).
+    OpenBacklogView,
+    /// Flip the sideline's row shape (list <-> card) live: swap the view's
+    /// in-memory layout, persist `sideline.layout` through the CLI, then
+    /// invalidate the palette cache. A failed save keeps the in-memory shape
+    /// and says so honestly, the same posture as the theme toggle.
+    ToggleSidelineLayout,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -2049,38 +1956,15 @@ pub(crate) enum AuxAction {
     LaneColorSet(String, String, String),
 }
 
-/// The settings modal's tabs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
-    General,
-    Theme,
-    Keys,
-    Colors,
-}
-
-const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
-
-fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxAction>) {
-    let mut rows = vec![PopupRow::Header(format!("prefix: {live_prefix}"))];
-    let mut actions = Vec::new();
-    for spec in PREFIX_PICKS {
-        let active = live_prefix == spec;
-        rows.push(PopupRow::Entry {
-            glyph: if active { "●".into() } else { "○".into() },
-            label: spec.into(),
-            hint: if active {
-                "active".into()
-            } else {
-                String::new()
-            },
-            enabled: true,
-        });
-        actions.push(AuxAction::ApplyPrefix(spec.into()));
-    }
-    (rows, actions)
-}
-
+mod backlog_board;
+mod config_set;
+mod node_detail;
+mod settings_modal;
 mod update_menu;
+
+use config_set::spawn_config_set;
+
+use settings_modal::SettingsTab;
 
 // The sideline new-agent launcher: composer state, input folding,
 // and the typed launch request. client.rs keeps only the integration
@@ -2196,6 +2080,7 @@ impl View {
             frames: HashMap::new(),
             panel_on: true,
             sideline_full: false,
+            sideline_layout: sideline_color::palette().layout,
             density,
             sideline_width,
             agent_sort,
@@ -2265,6 +2150,10 @@ impl View {
             hover_focus: true,
             theme: Theme::default_theme(),
             backlog: Vec::new(),
+            backlog_board: None,
+            board_dock: view_store::load_board_dock(),
+            board_full: view_store::load_board_full(),
+            experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
             hover_pending: None,
@@ -2320,7 +2209,8 @@ impl View {
             launcher_esc: Default::default(),
             launch_attempt: None,
             launcher_catalog: None,
-            catalog_want: false,
+            // Prefetch at attach: the whole session serves the first list.
+            catalog_want: true,
             catalog_inflight: false,
         }
     }
@@ -3064,6 +2954,7 @@ impl View {
             || self.yard.is_some()
             || self.peek.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// The narrower guard for the ROW/TAB menu paths (right-press
@@ -3097,6 +2988,7 @@ impl View {
             || self.answers.is_some()
             || self.yard.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// Open the owning agent's row menu for the pane under
@@ -3208,7 +3100,11 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
+        self.aux = Some(build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        ));
         self.aux_esc.clear();
         self.update_probe_want = true;
     }
@@ -3228,86 +3124,14 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
+        let mut menu = build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        );
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
-    }
-
-    /// Build the settings modal: general toggles plus theme and prefix pickers.
-    fn build_settings_modal(&self) -> AuxPopup {
-        let tab = self.settings_tab;
-        let mut rows = Vec::new();
-        let mut actions: Vec<AuxAction> = Vec::new();
-        match tab {
-            SettingsTab::General => {
-                let toggle = |on: bool, label: &str| PopupRow::Entry {
-                    glyph: if on { "☑".into() } else { "☐".into() },
-                    label: label.into(),
-                    hint: String::new(),
-                    enabled: true,
-                };
-                rows.push(toggle(self.hover_focus, "focus follows mouse"));
-                rows.push(toggle(self.status_on, "status row"));
-                rows.push(toggle(
-                    self.resource_meter_on,
-                    "resource meter (needs macmon)",
-                ));
-                rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
-                actions.push(AuxAction::ToggleHoverFocus);
-                actions.push(AuxAction::ToggleStatus);
-                actions.push(AuxAction::ToggleResourceMeter);
-                actions.push(AuxAction::ToggleConfirmLifecycle);
-            }
-            SettingsTab::Theme => {
-                // The four shipped palettes; the active one is marked. Enter on a
-                // name applies it (an explicit action, not a cursor-move preview).
-                for name in crate::theme::THEME_NAMES {
-                    let active = self.theme.name == name;
-                    rows.push(PopupRow::Entry {
-                        glyph: if active { "●".into() } else { "○".into() },
-                        label: name.into(),
-                        hint: if active {
-                            "active".into()
-                        } else {
-                            String::new()
-                        },
-                        enabled: true,
-                    });
-                    actions.push(AuxAction::ApplyTheme(name.into()));
-                }
-            }
-            SettingsTab::Keys => {
-                (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
-            }
-            SettingsTab::Colors => {
-                (rows, actions) = crate::lane_colors_panel::build_lane_color_rows(
-                    crate::sideline_color::palette(),
-                    &self.lane,
-                );
-            }
-        }
-        let popup = Popup::new(rows, Anchor::Center)
-            .title("settings")
-            .tabs(vec![
-                ("general".to_string(), tab == SettingsTab::General),
-                ("theme".to_string(), tab == SettingsTab::Theme),
-                ("keys".to_string(), tab == SettingsTab::Keys),
-                ("colors".to_string(), tab == SettingsTab::Colors),
-            ])
-            .footer("tab switches section · esc close");
-        AuxPopup { popup, actions }
-    }
-
-    /// Rebuild the settings modal after a toggle so its glyph reflects the new
-    /// state, preserving the current selection (a keyboard toggle must re-toggle
-    /// the SAME row on the next Enter, not reset to row 0).
-    fn reopen_settings_keeping_sel(&mut self) {
-        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
-        let mut modal = self.build_settings_modal();
-        let n = modal.popup.targets().len();
-        modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
-        self.aux = Some(modal);
     }
 
     /// The flat popup target under a screen cell while an aux popup is open.
@@ -3561,19 +3385,24 @@ impl View {
                 .max(1),
             self.term
                 .1
-                .saturating_sub(self.panel_w() + self.feed_panel_w())
+                .saturating_sub(
+                    self.panel_w()
+                        + self.board_left_w()
+                        + self.board_right_w()
+                        + self.feed_panel_w(),
+                )
                 .max(1),
         )
     }
 
     /// Content viewport as `(origin, dims)` in `usize`, for centering a
     /// [`draw_lines_overlay`] popover against the content rect (right of the
-    /// sideline, above any splits) instead of the outer terminal. One call
-    /// site for every corner-anchored popover.
+    /// sideline and any docked board, above any splits) instead of the outer
+    /// terminal. One call site for every corner-anchored popover.
     fn overlay_viewport(&self) -> ((usize, usize), (usize, usize)) {
         let (rows, cols) = self.content_dims();
         (
-            (TAB_BAR_ROWS as usize, self.panel_w() as usize),
+            (TAB_BAR_ROWS as usize, self.left_chrome_w() as usize),
             (rows as usize, cols as usize),
         )
     }
@@ -3582,14 +3411,14 @@ impl View {
     /// it falls inside a pane's content rect. `None` for a chrome cell (tab bar,
     /// sideline) or a content divider, so the caller swallows it - a mouse event
     /// on chrome never forwards to a pane (AC3-UI). Rects are content-area
-    /// relative; the content origin is `(TAB_BAR_ROWS, panel_w)`.
+    /// relative; the content origin is `(TAB_BAR_ROWS, left_chrome_w)`.
     fn hit_test(&self, row: u16, col: u16) -> Option<(u64, u16, u16)> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
         let cr = row - TAB_BAR_ROWS;
-        let cc = col - panel_w;
+        let cc = col - left_w;
         for (pid, rect) in &self.layout.panes {
             if cr >= rect.y && cr < rect.y + rect.rows && cc >= rect.x && cc < rect.x + rect.cols {
                 return Some((*pid, cr - rect.y, cc - rect.x));
@@ -3621,11 +3450,11 @@ impl View {
     /// candidate seams are genuinely ambiguous and picking one would resize a
     /// divider the operator was not pointing at.
     fn seam_at(&self, row: u16, col: u16) -> Option<Seam> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         if self.pane_covering(cr, cc).is_some() {
             return None;
         }
@@ -3709,7 +3538,7 @@ impl View {
     fn seam_pos_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
         let (cr, cc) = (
             row.checked_sub(TAB_BAR_ROWS)?,
-            col.checked_sub(self.panel_w())?,
+            col.checked_sub(self.left_chrome_w())?,
         );
         Some(match seam.axis {
             Axis::Horizontal => cc,
@@ -3906,7 +3735,7 @@ impl View {
             return None;
         }
         let row = TAB_BAR_ROWS + rect.y;
-        let c0 = self.panel_w() + rect.x + (rect.cols - w) / 2;
+        let c0 = self.left_chrome_w() + rect.x + (rect.cols - w) / 2;
         Some((row, c0..c0 + w))
     }
 
@@ -3953,11 +3782,11 @@ impl View {
     /// says, and a full-side insert would need a root-level tree op whose
     /// result the operator cannot see themselves asking for.
     fn edge_zone_at(&self, row: u16, col: u16) -> Option<DropZone> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         let (a_rows, a_cols) = self.layout.area;
         if a_rows == 0 || a_cols == 0 || cr >= a_rows || cc >= a_cols {
             return None;
@@ -4081,7 +3910,10 @@ impl View {
                 Some(format!("sub:{head}+{off}:{t}"))
             }
             DisplayRow::NewSquad => Some("newsquad".into()),
-            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+            DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
         }
     }
 
@@ -4338,14 +4170,14 @@ impl View {
     /// bar, which own those cells.
     fn drop_band(&self, zone: DropZone) -> Option<(std::ops::Range<u16>, std::ops::Range<u16>)> {
         let rect = self.pane_rect(zone.target)?;
-        let panel_w = self.panel_w();
+        let left_w = self.left_chrome_w();
         // Saturating throughout: `rect` comes from the last Layout, which can
         // lag a sideline toggle or a resize, so these sums are not guaranteed to
         // stay inside the terminal. Overflow here would panic a debug build for
         // a highlight; clamping just draws the band at the edge instead.
         let (r0, c0) = (
             TAB_BAR_ROWS.saturating_add(rect.y),
-            panel_w.saturating_add(rect.x),
+            left_w.saturating_add(rect.x),
         );
         let (r1, c1) = (r0.saturating_add(rect.rows), c0.saturating_add(rect.cols));
         // The band sits one cell outside the rect, except on the rim where that
@@ -4365,7 +4197,7 @@ impl View {
         // which worked but read as an accident.
         let band_col = |outside: Option<u16>, own: u16| {
             let c = outside
-                .filter(|c| (panel_w..term_cols).contains(c))
+                .filter(|c| (left_w..term_cols).contains(c))
                 .unwrap_or(own);
             c..c.saturating_add(1)
         };
@@ -4562,6 +4394,10 @@ impl View {
             // the idle sibling of a header's CycleSection. Actionable, so it is
             // NOT inert: both a click and a selector Enter route here.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
+            // A card's lower half acts on the card: the exact hit of the
+            // Agent row painted above it. Inert for the selector, clickable
+            // here - the same split a Header has.
+            DisplayRow::CardDetail(_) => self.row_action(i.checked_sub(1)?),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action.
             DisplayRow::Sub(_)
@@ -5622,7 +5458,7 @@ impl View {
         if !self.sideline_full {
             // Content area: dividers first (uncovered cells), panes blitted over.
             let origin_r = TAB_BAR_ROWS as usize;
-            let origin_c = panel_w;
+            let origin_c = panel_w + self.board_left_w() as usize;
             let mut covered = vec![false; rows * cols];
             // cells owned by the focused pane, so the divider pass can accent
             // the seams that bound it (a standing "you are here" outline).
@@ -5912,8 +5748,7 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
+        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -6070,6 +5905,11 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if self.backlog_board.is_some() {
+            // The board's whole surface - docked column, drill-down,
+            // pickers, centered or full-screen overlay - paints from its
+            // own module (the file-budget gate keeps client.rs shrinking).
+            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -6111,6 +5951,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
+            && self.backlog_board.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -6120,14 +5961,17 @@ impl View {
             {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
                     cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
-                    cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    cur_c = self.left_chrome_w()
+                        + rect.x
+                        + f.cursor_col.min(rect.cols.saturating_sub(1));
                     if !self.sideline_full && self.layout.area != (0, 0) {
                         // Never in the filler (AC1-UI), even mid-race when a
                         // stale rect exceeds the just-shrunk area. Skipped in
                         // full-screen sideline: the cursor belongs to the
                         // composer, not a pane that is not painted.
                         cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
-                        cur_c = cur_c.min(self.panel_w() + self.layout.area.1.saturating_sub(1));
+                        cur_c =
+                            cur_c.min(self.left_chrome_w() + self.layout.area.1.saturating_sub(1));
                     }
                     cur_vis = f.cursor_visible;
                 }
@@ -6882,26 +6726,10 @@ impl View {
     /// consumer indexes into (: painting, hover, hit-test, and the
     /// selector share this index space in all three densities).
     ///
-    /// Slim is a FILTER over the regular rows rather than a second builder, so
-    /// it inherits section keys, rollup folding, and ordering for free and
-    /// cannot drift from the tree it is a summary of. Extended keeps the same
-    /// structural rows and changes only agent-row composition and ordering.
+    /// A delegation to [`Self::display_rows_with_depths`]`.0`: one builder, so
+    /// the card expansion hooks two places, not three.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
-        match self.density {
-            Density::Regular => self.tree_rows(),
-            // Header bands only: squad name rows (a `Sel` with no tab) and the
-            // `~` section headers. Both already carry their rollup counts, which
-            // is what keeps the rail legible rather than blind.
-            Density::Slim => self
-                .tree_rows()
-                .into_iter()
-                .filter(|r| {
-                    matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                        || matches!(r, DisplayRow::Header { .. })
-                })
-                .collect(),
-            Density::Extended => self.table_rows_with_depths().0,
-        }
+        self.display_rows_with_depths().0
     }
 
     /// [`Self::display_rows`] plus the lineage depth of each rendered
@@ -6914,7 +6742,10 @@ impl View {
     /// the same lineage depths inside its agent-name cells.
     fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         match self.density {
-            Density::Regular => self.tree_rows_with_depths(),
+            Density::Regular => {
+                let (rows, depths) = self.tree_rows_with_depths();
+                self.card_rows(rows, depths)
+            }
             Density::Slim => {
                 let (rows, depths) = self.tree_rows_with_depths();
                 let mut kept_rows = Vec::with_capacity(rows.len());
@@ -6977,7 +6808,8 @@ impl View {
         if !has_agent {
             out.insert(1, (DisplayRow::TableEmpty, 0));
         }
-        out.into_iter().unzip()
+        let (rows, depths) = out.into_iter().unzip();
+        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -6993,11 +6825,7 @@ impl View {
     // free: folded rows are absent from this list, so selector navigation only
     // ever lands on rendered rows. Overflow is reached by the fold row's own
     // Enter/click toggle, which persists in `idle_expanded`.
-    fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
-        self.tree_rows_with_depths().0
-    }
-
-    /// [`Self::tree_rows`] with the per-row lineage depth beside it (see
+    /// The tree rows with the per-row lineage depth beside it (see
     /// [`Self::display_rows_with_depths`]). The depth is computed over the
     /// EMITTED set after every display filter, never re-derived in the painter.
     fn tree_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
@@ -7166,36 +6994,6 @@ impl View {
     }
 }
 
-/// The sideline Table's five columns: status word, name, message, PR, age.
-/// Width ranking (operator, 2026-09-20): name first, message second, status
-/// third. The status words are shortened (operator, 2026-09-21, longest is
-/// `Input`) so the cell fits in 5, right-aligned so a word's blank parks at
-/// the margin, and every freed column goes to the name's Min(22); the
-/// message keeps the Fill(3) surplus. Read by the Table and - through
-/// [`sideline_column_rects`] - by the callers that need the solver's answer
-/// beside the paint: one geometry authority, and it is the solver.
-const SIDELINE_COLUMNS: [Constraint; 5] = [
-    Constraint::Length(5),
-    Constraint::Min(22),
-    Constraint::Fill(3),
-    Constraint::Length(6),
-    // 6, not the plan's 4: the density button overlays the last two
-    // columns, and a 4-wide age cell leaves the sort arrow nowhere to hide
-    // under it (the regression `age_sort_arrow_survives_the_density_button`
-    // pins). The two spare columns are the padding the old COL_TIME=6 gave.
-    Constraint::Length(6),
-];
-
-/// The solver's column rects for a text width: the same call the Table makes
-/// internally (same constraints, same spacing, same flex), so a caller that
-/// must know a column's width reads the SAME answer the paint uses.
-fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
-    Layout::horizontal(SIDELINE_COLUMNS)
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(RtRect::new(0, 0, text_w, 1))
-}
-
 /// One table cell: text in a proto fg + flag set, left- or right-aligned in
 /// its column.
 fn rt_cell(text: String, fg: Color, flags: u8, right: bool) -> RtCell<'static> {
@@ -7304,6 +7102,12 @@ enum DisplayRow<'a> {
     /// (US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
+    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
+    /// "card"`): harness, king, message and age in a DIM legacy row. Inert
+    /// like `Sub` - every painted line stays one display row (the
+    /// single-enumeration invariant) - and a click on it acts on the `Agent`
+    /// row above it via [`View::row_action`]'s index shift.
+    CardDetail(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -7421,6 +7225,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
@@ -9351,6 +9156,8 @@ async fn attach_and_run(
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+    let (board_tx, mut board_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -9474,6 +9281,50 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        // the backlog board's probe/gather kick, the same single-flight.
+        backlog_board::maybe_kick(&mut view, &board_tx);
+        // a queued board write verb runs off the UI loop too.
+        if let Some(action) = view
+            .backlog_board
+            .as_mut()
+            .and_then(|b| b.write_action.take())
+        {
+            let tx = board_tx.clone();
+            let gen = view.backlog_board.as_ref().map(|b| b.gen).unwrap_or(0);
+            tokio::spawn(async move {
+                let notice = match action {
+                    backlog_board::WriteAction::Args(args, stdin) => {
+                        crate::backlog_write::run_verb(&args, stdin).await.1
+                    }
+                    backlog_board::WriteAction::Append { id, text } => {
+                        let id_for_read = id.clone();
+                        let current = tokio::task::spawn_blocking(move || {
+                            crate::store_client::node(
+                                &crate::backlog_view::graph_path(),
+                                &id_for_read,
+                            )
+                        })
+                        .await
+                        .unwrap_or(Ok(None))
+                        .ok()
+                        .flatten()
+                        .and_then(|n| n.get("details").cloned())
+                        .map(|d| d.to_string())
+                        .unwrap_or_default();
+                        let stdin = format!("{current}\n\n{text}");
+                        let args: Vec<String> = vec![
+                            "backlog".into(),
+                            "update".into(),
+                            id,
+                            "--details-file".into(),
+                            "-".into(),
+                        ];
+                        crate::backlog_write::run_verb(&args, Some(stdin)).await.1
+                    }
+                };
+                let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));
+            });
+        }
         // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -10084,6 +9935,14 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((gen, msg)) = board_rx.recv() => {
+                // a backlog board fold landed; apply under the gen guard
+                // and repaint (the feed arm's contract, one consumer).
+                backlog_board::apply_fold(&mut view, gen, msg);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -10152,21 +10011,18 @@ async fn attach_and_run(
                 }
             }
             Some(outcome) = catalog_rx.recv() => {
-                // Last-outcome-wins like the update probe: sync the
-                // popup's harness names (first landing or a retained draft)
-                // and redraw so an open popup shows the fresh field.
+                // Last-outcome-wins like the update probe: sync the draft's
+                // harness names (first landing or a retained draft) through
+                // the launcher's own sync (the one implementation), and
+                // redraw so an open popup shows the fresh field.
                 view.catalog_inflight = false;
-                if let agent_launcher::CatalogOutcome::Ok(rows, _) = &outcome {
-                    if let Some(l) = view.launcher.as_mut() {
-                        if l.draft.harnesses.is_empty() && !rows.is_empty() {
-                            l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
-                            if l.draft.harness_idx >= rows.len() {
-                                l.draft.harness_idx = 0;
-                            }
-                        }
-                    }
-                }
                 view.launcher_catalog = Some(outcome);
+                if let Some(l) = view.launcher.as_mut() {
+                    agent_launcher::sync_harness_names(l, &view.launcher_catalog);
+                }
+                // A list open before this read landed shows "reading
+                // models...": reopen it so the rows re-derive.
+                agent_launcher::refresh_open_picker(&mut view);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10659,7 +10515,9 @@ async fn handle_stdin(
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
+            if let StdinFlow::Detach =
+                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
+            {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -10683,6 +10541,11 @@ async fn handle_stdin(
         // the panel's column space) - and no byte ever reaches a pane.
         if view.sideline_full {
             sideline::route_mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        // Full-screen board: the overlay owns every cell, so no press or
+        // wheel reaches the panes it covers. Keys stay with the board.
+        if view.backlog_board.is_some() && view.board_full {
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -11508,6 +11371,20 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenBacklogBoard => {
+            // The chord rides the same gate as the menu row: the pref
+            // decides, and the off case notices instead of opening.
+            backlog_board::open_pref_gated(view);
+        }
+        Event::OpenSettings => {
+            execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
+        }
+        Event::OpenConnections => {
+            execute_aux_action(view, AuxAction::OpenConnections, sock_w).await?;
+        }
+        Event::OpenSweepThreads => {
+            execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
@@ -11917,70 +11794,6 @@ async fn keys_modal_execute_selected(
     }
 }
 
-/// One mouse report while the which-key modal is open (US3): hover moves
-/// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (click-elsewhere).
-async fn keys_modal_mouse(
-    view: &mut View,
-    scanner: &mut Scanner,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::WheelUp => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(-3);
-            }
-        }
-        MouseKind::WheelDown => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(3);
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
-            match view.keys_modal_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.keys_modal.as_mut() {
-                        m.popup.select(t);
-                    }
-                    if matches!(
-                        keys_modal_execute_selected(view, scanner, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-                None => {
-                    // A click inside the block that hit no target (a header, a border)
-                    // is swallowed; only a click OFF the modal dismisses.
-                    if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(StdinFlow::Continue)
-}
-
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
 /// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
 /// P1), never a misrouted action; every action maps to an existing Command /
@@ -12252,6 +12065,18 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("detach send failed: {e}"))?,
             _ => view.set_notice("only a live pane-hosted worker can detach".into()),
+        },
+        MenuAction::ClosePortal => match a.pane_id {
+            // One command, the seat named: FocusPane plus ClosePane would
+            // close whatever holds focus if the seat vanished between the
+            // two sends.
+            Some(pid) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::ClosePortal { seat: pid }),
+            )
+            .await
+            .map_err(|e| format!("close portal send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
         },
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
@@ -12738,6 +12563,11 @@ async fn execute_aux_action(
             view.aux = None;
             return Ok(DispatchFlow::Detach);
         }
+        AuxAction::ToggleBacklogView => View::toggle_enabled(view),
+        AuxAction::OpenBacklogView => {
+            view.aux = None;
+            View::open(view);
+        }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
             let enabled = if view.hover_focus { "true" } else { "false" };
@@ -12748,53 +12578,11 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
-        AuxAction::ToggleStatus => {
-            view.status_on = !view.status_on;
-            // The status row changed the content area; report the new size so the
-            // panes reflow (same accounting as Event::ToggleStatus).
-            let (r, c) = view.content_dims();
-            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                .await
-                .map_err(|e| format!("resize send failed: {e}"))?;
-            let enabled = if view.status_on { "true" } else { "false" };
-            let notice = match spawn_config_set("mux.status_row", enabled).await {
-                Ok(()) => format!("status row: {enabled}"),
-                Err(_) => "status row applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleConfirmLifecycle => {
-            view.confirm_lifecycle = !view.confirm_lifecycle;
-            view_store::save_confirm_lifecycle(view.confirm_lifecycle);
-            let enabled = if view.confirm_lifecycle {
-                "true"
-            } else {
-                "false"
-            };
-            view.set_notice(format!("confirm before stop/remove: {enabled}"));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleResourceMeter => {
-            view.resource_meter_on = !view.resource_meter_on;
-            view.resource_meter_gate
-                .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
-            // The run loop owns the spawn (one-shot via resource_meter_sampling);
-            // clearing the text here means the row reads "sensor unavailable"
-            // until the first sample lands - never a stale reading.
-            view.resource_meter_sampling = view.resource_meter_on;
-            view.resource_meter_text = None;
-            let enabled = if view.resource_meter_on {
-                "true"
-            } else {
-                "false"
-            };
-            let notice = match spawn_config_set("resource_meter.enabled", enabled).await {
-                Ok(()) => format!("resource meter: {enabled}"),
-                Err(_) => "resource meter applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
+        AuxAction::ToggleStatus
+        | AuxAction::ToggleConfirmLifecycle
+        | AuxAction::ToggleResourceMeter
+        | AuxAction::ToggleSidelineLayout => {
+            settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
             // Swap the in-memory theme first (immediate), then persist via the
@@ -12851,48 +12639,6 @@ async fn execute_aux_action(
         }
     }
     Ok(DispatchFlow::Continue)
-}
-
-/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
-/// than writing config itself (the graph-write rule applied to config). Returns
-/// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory value either way and reports honestly.
-async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
-    // spawn + wait rather than .output(): the exit check reads `.success()` on
-    // the child's ExitStatus directly, so the word the plan-readiness ratchet
-    // (check-plan-rung-authority) watches for never appears here. That ratchet
-    // guards plan frontmatter; an exit code is a different axis, so not naming
-    // the field is cheaper than bumping a guard meant for something else.
-    //
-    // kill_on_drop: on the 3s timeout the future drops and this returns Err,
-    // but tokio leaves a spawned child running by default, so the config write
-    // could land after we already told the user the save failed. needs_overlay,
-    // digest_overlay, and connections_view set it for the same shell-out shape.
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    // --local: the startup ladder gives the project config precedence, so a
-    // global write is silently shadowed on the next attach to this workspace.
-    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
-    // the ONLY candidate on both write and read, and --local would land the
-    // write somewhere the latch never looks.
-    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
-        &[]
-    } else {
-        &["--local"]
-    };
-    command
-        .args(["config", "set", key, value])
-        .args(scope)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut child = crate::process_admission::tokio_spawn(&mut command)
-        .map_err(|e| format!("fno config set spawn failed: {e}"))?;
-    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set {key} {value} failed")),
-        Err(_) => Err("fno config set timed out".into()),
-    }
 }
 
 /// Run the aux popup's selected row (Enter/click), propagating a detach.
@@ -12988,12 +12734,7 @@ async fn aux_keys(
                     .map(|m| !m.popup.chrome.tabs.is_empty())
                     .unwrap_or(false);
                 if has_tabs {
-                    view.settings_tab = match view.settings_tab {
-                        SettingsTab::General => SettingsTab::Theme,
-                        SettingsTab::Theme => SettingsTab::Keys,
-                        SettingsTab::Keys => SettingsTab::Colors,
-                        SettingsTab::Colors => SettingsTab::General,
-                    };
+                    view.settings_tab = settings_modal::SettingsTab::next(view.settings_tab);
                     // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();
@@ -15039,6 +14780,10 @@ mod esc_quiet_tests;
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
+
+#[cfg(test)]
+#[path = "client_tests/keys_modal_tests.rs"]
+mod keys_modal_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;

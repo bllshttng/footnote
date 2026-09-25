@@ -63,6 +63,7 @@ fn arm_key_value(cwd: &Path, key: &str) -> String {
     let answered = match key {
         "auto_heal.enabled" => crate::agents_config::auto_heal_enabled(cwd),
         "active_backlog.enabled" => crate::agents_config::active_backlog_enabled(cwd),
+        "slot_cutover.enabled" => crate::agents_config::slot_cutover_enabled(cwd),
         _ => return "unreadable".to_string(),
     };
     if answered { "true" } else { "false" }.to_string()
@@ -181,11 +182,27 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: Some("fno agents loops table"),
     },
     ArmSpec {
+        arm: "king_settle",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno agents court --nodes"),
+    },
+    ArmSpec {
         arm: "provider_cap",
         default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
         scheduler: SCHED_DAEMON,
         upstream: None,
         arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "slot_cutover",
+        default_interval_s: crate::slot_cutover::SLOT_CUTOVER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: Some("slot_cutover.enabled"),
         reader: None,
     },
     ArmSpec {
@@ -719,7 +736,11 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
-/// action failed, has not skipped - it has failed. `select-unmeasured` is a
+/// action failed, has not skipped - it has failed. `budget_spent` fails
+/// because the arm stopped before it covered every unit it enumerated (the
+/// king wake's `budget spent after k of N crowns`, the watchdog's skipped
+/// leg, a merge queue whose grant budget spent with nothing merged); its
+/// detail carries the count. `select-unmeasured` is a
 /// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
@@ -732,6 +753,7 @@ const FAILURE_SKIPS: &[&str] = &[
     "select-unmeasured",
     "spawn-failed",
     "env_broken",
+    "budget_spent",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -1467,7 +1489,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 18);
+        assert_eq!(KNOWN_ARMS.len(), 20);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")
@@ -1519,6 +1541,63 @@ mod tests {
             crate::king_ledger::CROWN_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
+        let settle = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "king_settle")
+            .expect("king_settle row");
+        assert_eq!(settle.default_interval_s, 300);
+        assert_eq!(settle.scheduler, SCHED_DAEMON);
+    }
+
+    #[test]
+    fn slot_cutover_readout_tracks_opt_in_and_defaults_unarmed() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_config = std::env::var_os("FNO_CONFIG");
+        let old_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::remove_var("FNO_CONFIG");
+        let isolated_global = temp_dir();
+        std::fs::create_dir_all(&isolated_global).unwrap();
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            isolated_global.join("settings.json"),
+        );
+
+        let dir = temp_dir();
+        let settings = dir.join(".fno/config.toml");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "schema_version = 1\n").unwrap();
+        let journal = dir.join("events.jsonl");
+        std::fs::write(&journal, "").unwrap();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        fill_arm_values(&mut rows, &dir);
+        let row = rows.iter().find(|row| row.arm == "slot_cutover").unwrap();
+        assert_eq!(row.arm_key.as_deref(), Some("slot_cutover.enabled"));
+        assert_eq!(row.arm_value.as_deref(), Some("false"));
+        assert!(row_is_unarmed(row));
+
+        std::fs::write(&settings, "[slot_cutover]\nenabled = true\n").unwrap();
+        fill_arm_values(&mut rows, &dir);
+        let row = rows.iter().find(|row| row.arm == "slot_cutover").unwrap();
+        assert_eq!(row.arm_value.as_deref(), Some("true"));
+        assert!(!row_is_unarmed(row));
+
+        if let Some(value) = old_config {
+            std::env::set_var("FNO_CONFIG", value);
+        } else {
+            std::env::remove_var("FNO_CONFIG");
+        }
+        if let Some(value) = old_global {
+            std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value);
+            std::fs::remove_dir_all(isolated_global).ok();
+        } else {
+            std::env::set_var(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                isolated_global.join("settings.json"),
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {
@@ -2271,6 +2350,64 @@ mod tests {
         let line = render_row(ab);
         assert!(line.contains(" ok"), "line: {line}");
         assert!(line.contains("skip=degraded"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn budget_spent_short_pass_reads_fail_with_its_count() {
+        // A king_wake pass that ran out of its slice before covering every
+        // crown it enumerated is a failure, not an ok skip: the detail
+        // carries the shortfall count (evaluated=0/5).
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        let mut short = tick_envelope(
+            "2026-09-04T11:58:00Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("budget_spent"),
+            900,
+        );
+        short["data"]["detail"] =
+            json!("crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "king_wake",
+                    SCHED_DAEMON,
+                    0,
+                    json!("no_trigger"),
+                    900,
+                ),
+                short.clone(),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal.clone()], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        assert!(needs_attention(kw));
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=budget_spent"), "line: {line}");
+        assert!(line.contains("evaluated=0/5"), "line: {line}");
+        assert!(line.contains("failing_for="), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
+
+        // No earlier non-failure row for the arm: still FAIL, and the line
+        // names the missing baseline instead of a failing_for count.
+        let bare = dir.join("bare.jsonl");
+        write_rows(&bare, &[short]);
+        let rows = read_arms(&[bare], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("no_ok_in_journal"), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3676,6 +3813,7 @@ mod tests {
             pause: Some(crate::loops_pause::DispatchPause::FleetIncident {
                 generation: 5,
                 reason: "two cargo runs".to_string(),
+                holds: vec!["spawns".to_string(), "tests".to_string()],
             }),
             ..TickTrace::default()
         };

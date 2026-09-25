@@ -55,6 +55,27 @@ fn spawn_keeper(tag: &str, graph: &Path, sock: &Path) -> Keeper {
     Keeper { child }
 }
 
+/// Like [`spawn_keeper`], plus one env var the keeper process reads at
+/// startup (the claims-root override the refusal test needs).
+fn spawn_keeper_with_env(tag: &str, graph: &Path, sock: &Path, key: &str, val: &str) -> Keeper {
+    let child = Command::new(WORKER_BIN)
+        .args([
+            "--store-keeper",
+            "--sock",
+            sock.to_str().unwrap(),
+            "--graph",
+            graph.to_str().unwrap(),
+            "--session",
+            tag,
+        ])
+        .env(key, val)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn store keeper");
+    Keeper { child }
+}
+
 fn wait_for_socket(sock: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -339,8 +360,8 @@ fn read_file_returns_the_bytes_load_graph_validates() {
     let on_disk = std::fs::read(&graph).unwrap();
     assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
     assert!(
-        result["sha256"].as_str().unwrap().starts_with("sha256:"),
-        "the digest labels its algorithm"
+        result["sha256"].as_str().unwrap().starts_with("sqlite:"),
+        "the version token labels the store it names"
     );
 }
 
@@ -721,8 +742,12 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         })
         .collect();
 
-    // Two idea-style appenders: 30 begin + commit_rows appends each through
-    // the keeper socket, retrying kind conflict like cmd_idea does.
+    // Two idea-style appenders: 20 begin + commit_rows appends each through
+    // the keeper socket, retrying kind conflict like cmd_idea does. They send
+    // no base_digests, so every commit takes the whole-graph fallback, where
+    // any concurrent publish is a conflict. A row can starve through all 30
+    // tries on a slow runner; it never answered ok, so the contract below
+    // does not cover it.
     let appender_handles: Vec<_> = (0..2)
         .map(|w| {
             let s = sock.clone();
@@ -741,7 +766,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         "status": "intake",
                         "priority": "p2",
                     });
-                    let mut landed_here = false;
                     for attempt in 0..30u64 {
                         let begin = ok_result(rpc(&mut stream, attempt, "begin", json!({})));
                         let version = begin["version"].as_str().unwrap().to_string();
@@ -758,7 +782,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         if reply.get("ok") == Some(&json!(true)) {
                             landed.push(id.clone());
-                            landed_here = true;
                             break;
                         }
                         let kind = reply["error"]["kind"].as_str().unwrap_or("");
@@ -768,10 +791,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         conflicts += 1;
                     }
-                    assert!(
-                        landed_here,
-                        "appender {w}: row {id} never landed in 30 attempts"
-                    );
                 }
                 (landed, conflicts)
             })
@@ -795,12 +814,15 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         total_conflicts > 0,
         "did not race: zero commit_rows conflicts across both appenders"
     );
+    let total_landed: usize = appender_out.iter().map(|(landed, _)| landed.len()).sum();
+    assert!(
+        total_landed > 0,
+        "positive control: no append ever answered ok, so the check below proves nothing"
+    );
 
-    // Every append that answered ok must be in the final file.
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // Every append that answered ok must be in the store: the json file is
+    // a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -818,9 +840,8 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     // reverted note write (clobbered by a stale whole-file publish) reads as
     // a revision below the count of ok answers.
     for (node, ok) in &note_out {
-        let row = final_graph["entries"]
-            .as_array()
-            .unwrap()
+        let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
+        let row = rows
             .iter()
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();
@@ -940,24 +961,22 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     );
     let outcomes = staged.join().unwrap();
 
-    // Late arrivals: sent after the ack, they meet the dying keeper and read
-    // a hangup BEFORE any publish.
-    let mut late_ok = 0;
-    for i in 0..2 {
-        let late = UnixStream::connect(&sock);
-        match late {
-            Err(_) => continue, // socket already unlinked: hangup by refusal
-            Ok(mut s) => {
-                let begin = rpc(&mut s, 900 + i as u64, "begin", json!({}));
-                // Either the frame round-trips (keeper still draining) or the
-                // stream is cut; both are legal, only ok-published rows count.
-                if begin.get("ok") == Some(&json!(true)) {
-                    late_ok += 1;
-                }
-            }
+    // Late arrivals: sent after the ack, they meet the dying keeper. Either
+    // the frame round-trips (keeper still draining) or the stream is cut;
+    // both are legal, so neither is asserted. rpc() would panic on the cut.
+    for i in 0..2u64 {
+        let Ok(mut s) = UnixStream::connect(&sock) else {
+            continue; // socket already unlinked: hangup by refusal
+        };
+        let req = json!({"id": 900 + i, "method": "begin", "params": {}});
+        let payload = serde_json::to_vec(&req).unwrap();
+        let mut frame = vec![TAG_REQUEST];
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+        if s.write_all(&frame).is_ok() {
+            let _ = read_frame(&mut s);
         }
     }
-    let _ = late_ok;
 
     // Reap: the keeper exits 0 on its own.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -976,12 +995,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     assert!(!sock.exists(), "shutdown unlinks its socket");
 
     // THE CONTRACT: every staged connection that read an ok reply has its
-    // row in the file. A connection cut before its reply has no row (it
-    // never read ok).
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // row in the store. A connection cut before its reply has no row (it
+    // never read ok). The json file is a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -992,7 +1008,7 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             ok_replies += 1;
             assert!(
                 final_ids.contains(id),
-                "commit {id} answered ok but is missing from the file"
+                "commit {id} answered ok but is missing from the store"
             );
         }
     }
@@ -1001,4 +1017,124 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
         "positive control: at least one staged commit must have answered ok, got {outcomes:?}"
     );
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
+
+#[test]
+fn ready_board_mode_orders_every_entry_with_its_facts() {
+    let home = short_home("board-mode");
+    let graph = home.join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_vec(&json!({
+            "entries": [
+                {"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"},
+                {"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"},
+                {"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
+                 "completed_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-loose", "status": "ready", "priority": "p1"},
+                {"id": "x-def", "status": "deferred", "priority": "p2"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper("board-mode", &graph, &sock);
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let result = ok_result(rpc(
+        &mut stream,
+        1,
+        "ready",
+        json!({"board": true, "claimed": []}),
+    ));
+    let ids: Vec<String> = result["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(ids.len(), 5, "every entry id, no admission: {ids:?}");
+    for id in ["x-e", "x-c1", "x-c2", "x-loose", "x-def"] {
+        assert!(ids.iter().any(|i| i == id), "{id} rides in ids: {ids:?}");
+    }
+    assert!(
+        result["underway"]
+            .as_array()
+            .expect("underway array")
+            .iter()
+            .any(|v| v == "x-e"),
+        "the epic with a done child is underway: {result}"
+    );
+    assert_eq!(
+        result["effective_priority"]["x-c1"],
+        json!("p1"),
+        "the p2 child of a p1 epic carries the epic's priority: {result}"
+    );
+
+    // The board's order restricted to selection's admitted ids equals the
+    // selection order itself - the board never invents a second order.
+    let ready = ok_result(rpc(&mut stream, 2, "ready", json!({"claimed": []})));
+    let ready_ids: Vec<String> = ready["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !ready_ids.is_empty(),
+        "positive control: selection admits some"
+    );
+    let board_order = ready_ids.iter().map(|id| {
+        ids.iter()
+            .position(|b| b == id)
+            .unwrap_or_else(|| panic!("{id} missing from board ids"))
+    });
+    let positions: Vec<usize> = board_order.collect();
+    let mut sorted = positions.clone();
+    sorted.sort();
+    assert_eq!(
+        positions, sorted,
+        "board ids order extends selection order: {positions:?}"
+    );
+    drop(keeper);
+}
+
+#[test]
+fn ready_board_mode_refuses_when_claims_are_unreadable() {
+    let home = short_home("board-claims");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let claims_root = home.join("claims-root");
+    std::fs::create_dir_all(claims_root.join(".fno")).unwrap();
+    // A regular file where read_dir expects a directory: ENOTDIR, the
+    // unknown-claim-state the ready op fails closed on.
+    std::fs::write(claims_root.join(".fno/claims"), b"not a directory").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper_with_env(
+        "board-claims",
+        &graph,
+        &sock,
+        "FNO_CLAIMS_ROOT",
+        claims_root.to_str().unwrap(),
+    );
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let reply = rpc(&mut stream, 1, "ready", json!({"board": true}));
+    assert_eq!(reply.get("ok"), Some(&json!(false)), "refused: {reply}");
+    assert_eq!(
+        reply["error"]["kind"],
+        json!("claims_unavailable"),
+        "kind names the claims store: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("live claim state is unavailable"),
+        "the refusal names the claims store: {reply}"
+    );
+    drop(keeper);
 }

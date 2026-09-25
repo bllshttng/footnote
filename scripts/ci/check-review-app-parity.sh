@@ -6,7 +6,7 @@
 # The set of GitHub review Apps footnote recognizes is declared THREE times in
 # two languages:
 #
-#   - Rust: BOT_PROFILES              in crates/fno-agents/src/loopcheck.rs
+#   - Rust: BOT_PROFILES              in crates/fno-agents/src/loopcheck/bot_nudge.rs
 #             (the gate's review classifier, refusal detection, nudging)
 #   - Python: DEFAULT_OPTIONAL_APPS            in cli/src/fno/pr/_reviews.py
 #             (the optional-review signal on `fno do pr status`)
@@ -45,7 +45,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-RUST_FILE="${REPO_ROOT}/crates/fno-agents/src/loopcheck.rs"
+RUST_FILE="${REPO_ROOT}/crates/fno-agents/src/loopcheck/bot_nudge.rs"
 OPTIONAL_FILE="${REPO_ROOT}/cli/src/fno/config/__init__.py"
 CAPABILITY_FILE="${REPO_ROOT}/cli/src/fno/review_capability.py"
 SELFTEST=0

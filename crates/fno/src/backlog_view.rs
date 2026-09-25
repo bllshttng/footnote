@@ -137,22 +137,37 @@ pub fn external_backend_selected() -> bool {
 /// clock instead - a backend outage must not become a hot exec loop).
 pub const SNAPSHOT_REFRESH_SECS: u64 = 10;
 
-/// Execute the backend-neutral snapshot verb (`fno backlog status --snapshot`)
-/// and return its stdout. `None` on any failure - missing binary, non-zero
-/// exit, unparseable stdout - so the caller's last-good/stale machinery treats
-/// a failed snapshot exactly like a failed file read.
+/// Execute the tracker snapshot door (`fno-agents graph-get`'s stdin form,
+/// `{"tracker":"snapshot","stale_ok":true}`) and return its stdout. `None` on
+/// any failure - missing binary, non-zero exit, unparseable stdout - so the
+/// caller's last-good/stale machinery treats a failed snapshot exactly like a
+/// failed file read.
 ///
 /// The snapshot document is the SAME shape `derive_queue` consumes
 /// (`{"backend": ..., "entries": [...]}` with graph-compatible entry fields),
 /// so both reader modes feed the same pure derivation functions; the mux
 /// classification, lanes, and read-time dependency readiness are unchanged.
 pub fn read_snapshot() -> Option<String> {
-    // fno_bin (FNO_BIN override, else the running binary) - the same resolver
-    // every other fno-subprocess site in the crate uses, so the snapshot is
-    // read from the binary version that owns this document's schema.
-    let mut command = crate::process_admission::std_command(crate::server::fno_bin());
-    command.args(["backlog", "status", "--snapshot"]);
-    let out = crate::process_admission::std_output(&mut command).ok()?;
+    use std::io::Write;
+    // fno_agents_bin (FNO_AGENTS_BIN override, else the paired dev binary) -
+    // the snapshot now lives in the fno-agents binary, so the paired-binary
+    // resolver that every other fno-agents subprocess site uses is the one
+    // that owns this document's schema.
+    let mut command =
+        crate::process_admission::std_command(crate::digest_overlay::fno_agents_bin());
+    command.arg("graph-get");
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut command).ok()?;
+    child
+        .stdin
+        .as_mut()?
+        .write_all(br#"{"tracker":"snapshot","stale_ok":true}"#)
+        .ok()?;
+    drop(child.stdin.take());
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -165,7 +180,7 @@ pub fn read_snapshot() -> Option<String> {
 
 /// Read a node's derived status, tolerating the pre-rename `_status` key so a
 /// graph.json not yet re-written by the Python side still classifies.
-fn node_status(e: &serde_json::Value) -> Option<&str> {
+pub(crate) fn node_status(e: &serde_json::Value) -> Option<&str> {
     e.get("status")
         .or_else(|| e.get("_status"))
         .and_then(|v| v.as_str())
@@ -245,7 +260,7 @@ pub enum BoardScope {
 impl BoardScope {
     /// Whether a card carrying `project` (already trimmed; `None` = unscoped)
     /// belongs on this board.
-    fn keeps(&self, project: Option<&str>) -> bool {
+    pub(crate) fn keeps(&self, project: Option<&str>) -> bool {
         match (self, project) {
             (BoardScope::All, _) => true,
             (_, None) => true,
@@ -481,7 +496,8 @@ pub const UNLANED: &str = "unlaned";
 /// Canonical board column order, mirroring `KANBAN_COLUMNS` in
 /// `graph/render.py`: Now leads (genuine today-work), Triage holds the
 /// awaiting-ack queue, Done is terminal.
-const KANBAN_COLUMNS: [&str; 5] = ["Now", "Next", "Later", "Triage", "Done"];
+pub(crate) const KANBAN_COLUMNS: [&str; 6] =
+    ["In Progress", "Now", "Next", "Later", "Triage", "Done"];
 
 /// A lane's position in [`KANBAN_COLUMNS`]; anything unrecognized sorts last.
 fn lane_rank(lane: &str) -> usize {
@@ -501,13 +517,20 @@ fn lane_rank(lane: &str) -> usize {
 /// sits. Kept deliberately close to the Python, ordering included, so a change
 /// there is easy to mirror here.
 ///
+/// One named difference: a live claim puts the card in In Progress here,
+/// while `_kanban_column` accepts `live_claimed` and never reads it.
+///
 /// `claimed` folds the graph `status` and the live-lockfile claim together (a
 /// node another session drives may never write a graph status -);
-/// `underway` is [`in_progress_epics`] membership.
+/// `underway` is [`in_progress_epics`] membership; `effective_priority` is
+/// the epic-promoted priority the backlog read model feeds from the keeper
+/// (`None` keeps the node's own priority, what `derive_queue` and the mux
+/// `--top` door still do).
 pub(crate) fn kanban_column(
     e: &serde_json::Value,
     claimed: bool,
     underway: bool,
+    effective_priority: Option<&str>,
 ) -> Option<&'static str> {
     if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
         return None;
@@ -516,18 +539,24 @@ pub(crate) fn kanban_column(
         return Some("Done");
     }
     let status = node_status(e).unwrap_or("ready");
+    if status == "done" {
+        return Some("Done");
+    }
     if matches!(status, "deferred" | "superseded") {
         return None; // off-board until reactivated
     }
-    if claimed || underway {
-        return Some("Now");
+    if status == "in_progress" || claimed || underway {
+        return Some("In Progress");
     }
     // Queued is orthogonal to `status`: a node awaiting human ack is not active
-    // work, so it must not inflate Now - but a claimed node stays in Now.
+    // work, so it must not inflate the active lanes.
     if has_stamp(e, "queued_at") {
         return Some("Triage");
     }
-    match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
+    match effective_priority
+        .or_else(|| e.get("priority").and_then(|v| v.as_str()))
+        .unwrap_or("p2")
+    {
         "p0" | "p1" => Some("Now"),
         "p3" => Some("Later"),
         _ => Some("Next"),
@@ -551,7 +580,7 @@ fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
 /// write time, so this reader must derive it itself rather than trust the
 /// raw `status` field. Fails closed like the Python: a `blocked_by` id absent
 /// from `id_to_entry` counts as blocked, never as satisfied.
-fn has_open_dependency(
+pub(crate) fn has_open_dependency(
     e: &serde_json::Value,
     id_to_entry: &HashMap<&str, &serde_json::Value>,
 ) -> bool {
@@ -674,7 +703,7 @@ pub fn derive_queue(
         // unlaned keeps the two boards agreeing on what is even on the board -
         // an excluded node rendered as an actionable card would be a row the
         // canonical board says does not exist.
-        let Some(lane) = kanban_column(e, claimed, underway.contains(id)) else {
+        let Some(lane) = kanban_column(e, claimed, underway.contains(id), None) else {
             continue;
         };
         rows.push((
@@ -1595,7 +1624,7 @@ mod tests {
 
     #[test]
     fn snapshot_document_feeds_the_same_derivation() {
-        // The backend-neutral snapshot (`fno backlog status --snapshot`) is the
+        // The backend-neutral snapshot (the graph-get stdin door) is the
         // same document shape the graph file is: entries[] with graph-compatible
         // fields plus an extra `backend` key the reader must tolerate. Readiness
         // stays derived: a closed blocker arrives as a tombstone row, and an
@@ -1860,7 +1889,7 @@ mod tests {
             "Triage",
             "queued awaits ack, never inflates Now"
         );
-        assert_eq!(lane("x-held"), "Now", "a claimed node is underway");
+        assert_eq!(lane("x-held"), "In Progress", "a claimed node is underway");
         // The project half is the node's own, absent when unscoped.
         let project = |id: &str| cards.iter().find(|c| c.id == id).unwrap().project.clone();
         assert_eq!(project("x-now").as_deref(), Some("fno"));
@@ -1887,7 +1916,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hot.lanes,
-            vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
+            vec![("In Progress".to_string(), 1), ("Later".to_string(), 1)],
             "the claimed node moves lanes, count and all"
         );
         assert_eq!(hot.cards[0].state, CardState::InFlight);
@@ -1937,7 +1966,7 @@ mod tests {
         let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
         assert_eq!(
             epic.lane.as_deref(),
-            Some("Now"),
+            Some("In Progress"),
             "a p3 epic with a claimed child is underway, not long-tail"
         );
     }

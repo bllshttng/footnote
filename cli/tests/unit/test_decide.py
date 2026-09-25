@@ -1055,7 +1055,7 @@ def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
 ):
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?", "--ask", "finish the lane"])
     question_id = asked.stdout.strip().splitlines()[-1]
     cleared = runner.invoke(
         outstanding_app,
@@ -1609,7 +1609,7 @@ def test_a_subjectless_decision_is_reachable_only_without_a_subject(
     decision with subject=None. A subject-less list is the only way to it."""
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -2148,30 +2148,23 @@ def test_an_unreachable_index_is_a_failed_read_not_an_empty_one(
     assert "cannot read the decision index" in listed.output
 
 
-def test_the_second_producer_also_refuses_to_ask_for_a_retry(
-    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_second_producer_surfaces_decision_index_failure(
+    root: Path, tmp_graph: Path, index: Path
 ):
     """`fno outstanding clear --answer` is the other operator_decision writer.
-    A guard on one of two producer paths is decorative."""
-    import fno.events as events_mod
+    Its store failure must be reported with the safe retry path."""
     from fno.outstanding.cli import outstanding_app
+    from fno.events.store_client import store_db_path
 
     qid = runner.invoke(
-        outstanding_app, ["ask", "which lane owns the retry?"]
+        outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"]
     ).stdout.strip().splitlines()[-1]
 
-    real = events_mod.append_event
-
-    def boom(event, events_path=None, **kw):
-        if events_path is not None and Path(events_path) == index:
-            raise OSError("read-only file system")
-        return real(event, events_path=events_path, **kw)
-
-    monkeypatch.setattr(events_mod, "append_event", boom)
+    store_db_path(index).mkdir(parents=True)
     res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
     assert res.exit_code == 1
-    assert "fno backlog decide-reindex" in res.output
-    assert "records the same ruling a second time" in res.output
+    assert "decision index mirror failed" in res.output
+    assert "rerun the same clear to finish" in res.output
 
 
 def test_equal_timestamps_do_not_invert_newest_first(

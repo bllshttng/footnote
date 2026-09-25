@@ -2,7 +2,10 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
-use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
+use crate::client::{
+    input_folds::MAX_ESC_CARRY,
+    keys_modal::{build_keys_modal, keys_modal_mouse},
+};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
@@ -406,6 +409,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -610,6 +614,10 @@ pub(super) fn two_pane_view() -> View {
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
     view.frames.insert(11, text_frame(29, 36, 'b'));
+    // Pin the row shape: these helpers assert display-row geometry, and the
+    // card default (ambient config or no config at all) inserts a detail
+    // line per agent and moves every row index.
+    view.sideline_layout = sideline_color::SidelineLayout::List;
     view
 }
 
@@ -647,92 +655,8 @@ fn client_compose_places_panes_divider_and_chrome() {
 #[path = "client_tests/pane_id_reveal_tests.rs"]
 mod pane_id_reveal_tests;
 
-#[test]
-fn focus_outline_accents_focused_pane_seams_and_moves_with_focus() {
-    // x-5a52 US1 / AC1-HP: the divider cells bounding the focused pane render
-    // in the lattice accent at full brightness; a seam between two unfocused
-    // panes stays DIM. Moving focus moves the accent in the same compose.
-    let view = three_pane_view(); // focus = pane 10
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let seam_10_11 = 28 + 23; // divider left of pane 11: borders focused 10
-    let seam_11_12 = 28 + 47; // divider between unfocused 11 and 12
-    let row = 5;
-    let accented = frame.cells[row * cols + seam_10_11];
-    assert_eq!(
-        accented.c, '│',
-        "the accented cell is still a divider glyph"
-    );
-    assert_eq!(accented.fg, LATTICE_ACCENT, "focused-pane seam is amber");
-    assert_eq!(
-        accented.flags & cell_flags::DIM,
-        0,
-        "focus outline is full-bright, never dimmed"
-    );
-    let dim = frame.cells[row * cols + seam_11_12];
-    assert_eq!(
-        dim.fg,
-        Color::Default,
-        "unfocused seam keeps the default fg"
-    );
-    assert_eq!(
-        dim.flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "unfocused seam stays the DIM chrome"
-    );
-
-    // Move focus to pane 12: the accent follows to its seam in the same
-    // frame, and the old seam reverts to DIM (AC1-HP "in the same frame").
-    let mut moved = three_pane_view();
-    moved.layout.focus = 12;
-    let frame = moved.compose();
-    assert_eq!(
-        frame.cells[row * cols + seam_11_12].fg,
-        LATTICE_ACCENT,
-        "accent follows focus to pane 12"
-    );
-    assert_eq!(
-        frame.cells[row * cols + seam_10_11].flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "the previously-focused seam reverts to DIM"
-    );
-}
-
-#[test]
-fn single_pane_tab_paints_no_focus_outline() {
-    // x-5a52 AC5-EDGE: one pane fills the content area, so there are no
-    // interior seams and nothing paints the accent - the sideline markers
-    // alone carry the "you are here" state.
-    let mut view = three_pane_view();
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            10,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 10,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-    });
-    let frame = view.compose();
-    // The sideline still marks the active squad, so scope the check to the
-    // content area (col >= panel_w) where the outline would live.
-    let cols = frame.cols as usize;
-    let panel_w = view.panel_w() as usize;
-    let outline_in_content = (0..frame.rows as usize)
-        .any(|r| (panel_w..cols).any(|c| frame.cells[r * cols + c].fg == LATTICE_ACCENT));
-    assert!(
-        !outline_in_content,
-        "a single-pane tab paints no accent outline in the content area"
-    );
-}
+#[path = "client/tests/focus_outline_tests.rs"]
+mod focus_outline_tests;
 
 // A 2x2 grid over two_pane_view's geometry: A|B on top, C|D below, meeting
 // at a `┼` junction. focus = A (pane 10).
@@ -859,6 +783,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -937,50 +862,43 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
     // Display row 1 -> outer row 1: the focused agent row is a full-width
-    // INVERSE band, and the `▎` gutter glyph is gone.
+    // accent band, and the `▎` gutter glyph is gone.
     let lead = frame.cells[cols]; // outer row 1, col 0
     assert_ne!(
         lead.c, '▎',
         "the ▎ gutter is retired; the band is the signal"
     );
     assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row carries the standing INVERSE band"
+        lead.bg, LATTICE_ACCENT,
+        "the focused row carries the standing accent band"
     );
-    // The band fills the panel width (a right-edge text cell is still INVERSE).
+    // The band fills the panel width (a right-edge text cell is still banded).
     assert_eq!(
-        frame.cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        frame.cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "the focus band fills the panel width"
     );
 }
 
 #[test]
-fn active_marker_composes_with_selection_inverse() {
-    // x-4374 / AC3-UI: when the selector sits on the focused row, the XOR
-    // de-inverts its standing band so the selection reads under the cursor -
-    // the same grammar the old header bands used - instead of band and cursor
-    // masking each other.
+fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
+    // x-4374 / AC3-UI, restated for explicit bands: when the selector sits on
+    // the focused row, the chosen accent band wins - the cursor never masks
+    // the "you are here" signal (the card contract, list mode too).
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11));
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
     let lead = frame.cells[cols]; // outer row 1, col 0
-    assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        0,
-        "the selector de-inverts the focused row's band so the cursor reads"
-    );
+    assert_eq!(lead.bg, LATTICE_ACCENT, "the chosen band wins on selection");
 }
 
 #[test]
 fn xf331_focus_band_and_selector_are_distinct_treatments() {
     // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
-    // selector parked on a DIFFERENT row is a plain-INVERSE bar in the default
-    // colour - three-distinguishable, and the distinction is colour (survives
-    // weak-BOLD themes), not weight.
+    // selector parked on a DIFFERENT row is the palette-following hover band -
+    // the distinction is colour (survives weak-BOLD themes), not weight.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
     view.selector = Some(3); // notes squad header, a different actionable row
@@ -990,24 +908,19 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
 
     let focus_cell = frame.cells[cols]; // display row 1: the focus band
     assert_eq!(
-        focus_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focus row still wears a band"
-    );
-    assert_eq!(
-        focus_cell.fg, LATTICE_ACCENT,
-        "the focus band wears the accent colour"
+        focus_cell.bg, LATTICE_ACCENT,
+        "the focus row still wears the accent band"
     );
 
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
-        sel_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selector row is an inverse bar"
+        sel_cell.bg,
+        Color::Indexed(7),
+        "the selector row is the palette-following hover band"
     );
     assert_ne!(
-        sel_cell.fg, LATTICE_ACCENT,
-        "the selector bar is NOT the focus accent - the two read as distinct"
+        sel_cell.bg, LATTICE_ACCENT,
+        "the selector band is NOT the focus accent - the two read as distinct"
     );
 }
 
@@ -2640,6 +2553,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3247,6 +3161,7 @@ fn view_with_dead_interleaved() -> View {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3397,6 +3312,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3657,6 +3573,7 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3726,6 +3643,7 @@ fn section_header_caret_tracks_all_three_states() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3850,6 +3768,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3895,6 +3814,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3939,6 +3859,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4027,6 +3948,7 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -4125,7 +4047,7 @@ fn client_status_row_shows_focus_node_provenance() {
         .last()
         .unwrap()
         .to_string();
-    assert!(bottom.contains("hjkl focus"), "hint takeover: {bottom:?}");
+    assert!(bottom.contains("esc cancel"), "hint takeover: {bottom:?}");
     assert!(!bottom.contains('⚑'), "hint hides the cell: {bottom:?}");
 }
 
@@ -4164,7 +4086,7 @@ fn client_status_off_leaves_bottom_row_as_content() {
     // A pending hint still transiently paints over that content row.
     view.hint = true;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
@@ -4176,36 +4098,11 @@ fn client_compose_hint_paints_over_bottom_row() {
     view.hint = true;
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
-    assert!(bottom.contains("hjkl focus"), "{bottom:?}");
+    assert!(bottom.contains("esc cancel"), "{bottom:?}");
     assert!(!bottom.contains("? for keys"), "{bottom:?}");
     view.status_on = false;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
-}
-
-#[test]
-fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // prefix+? opens the centered which-key modal, built from the single-source binding table.
-    let mut view = two_pane_view();
-    view.term = (40, 80);
-    view.open_keys_modal();
-    let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "modal title present");
-    assert!(text.contains("esc close"), "dismiss affordance present");
-    // Section headers + a sampling of bindings the table advertises.
-    assert!(text.contains("panes"), "section header");
-    assert!(text.contains("detach"), "the d binding's action");
-    assert!(
-        text.contains("find: goto squad/tab/pane/agent"),
-        "the f binding's action names every row class nav_rows emits"
-    );
-    // The digit row names the gesture and its resolve doors: an honest description of an input path the scanner really runs.
-    assert!(
-        text.contains("jump to tab by number")
-            && text.contains("Enter")
-            && text.contains("Alt works too"),
-        "the digit row names the gesture and its resolve doors"
-    );
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
@@ -4587,6 +4484,7 @@ fn row_menu_entries_gate_by_agent_state() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -5499,6 +5397,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -7299,6 +7198,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -7667,7 +7567,7 @@ fn settings_theme_tab_lists_the_shipped_palettes() {
 
 #[test]
 fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
-    let (rows, actions) = build_prefix_settings_rows("C-b");
+    let (rows, actions) = settings_modal::build_prefix_settings_rows("C-b");
     assert!(matches!(
         rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-b"
@@ -7679,13 +7579,13 @@ fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(specs, PREFIX_PICKS.map(String::from));
+    assert_eq!(specs, settings_modal::PREFIX_PICKS.map(String::from));
     assert!(rows.iter().any(|row| matches!(
         row,
         PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
     )));
 
-    let (custom_rows, _) = build_prefix_settings_rows("C-q");
+    let (custom_rows, _) = settings_modal::build_prefix_settings_rows("C-q");
     assert!(matches!(
         custom_rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-q"
@@ -7913,7 +7813,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // Centered (Full): keys modal, sideline MENU, settings.
     assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
     assert_chrome(
-        &build_sideline_menu(Anchor::Center, None).popup,
+        &build_sideline_menu(Anchor::Center, None, false).popup,
         chrome::Level::Full,
     );
     let v = two_pane_view();
@@ -7926,41 +7826,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     );
 }
 
-#[test]
-fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None);
-    let i = menu
-        .popup
-        .rows
-        .iter()
-        .position(|row| {
-            matches!(
-                row,
-                PopupRow::Entry { glyph, label, .. }
-                    if glyph == "♺" && label == "sweep threads"
-            )
-        })
-        .expect("sweep threads entry");
-    let action_i = menu
-        .popup
-        .rows
-        .iter()
-        .take(i + 1)
-        .filter(|row| matches!(row, PopupRow::Entry { .. }))
-        .count()
-        - 1;
-    assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
-    assert!(crate::popup::menu_glyph_is_bmp("♺"));
-    assert!(!crate::popup::menu_glyph_is_bmp("📄"));
-    assert_eq!(
-        menu.actions
-            .iter()
-            .filter(|action| **action == AuxAction::Detach)
-            .count(),
-        1,
-        "the global detach slot remains distinct"
-    );
-}
+#[path = "client/tests/backlog_pref_tests.rs"]
+mod backlog_pref_tests;
 
 #[tokio::test]
 async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {
@@ -8363,6 +8230,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8405,6 +8273,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8447,6 +8316,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8496,14 +8366,14 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
     sel_view.selector = Some(4);
     let sel_frame = sel_view.compose();
     let sel_cell = sel_frame.cells[notes_row * cols + 2];
-    // (x-4374) The notes squad is a demoted header (no standing INVERSE); the
-    // selector TOGGLES INVERSE, so selecting it ADDS the band and the cursor
-    // row renders DIFFERENTLY from the unselected header.
+    // (x-4374) The notes squad is a demoted header (no standing band); the
+    // selector paints the explicit hover band, so the cursor row renders
+    // DIFFERENTLY from the unselected header.
     assert_ne!(
-        sel_cell.flags & cell_flags::INVERSE,
-        unsel_cell.flags & cell_flags::INVERSE,
+        sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
+    assert_eq!(sel_cell.bg, Color::Indexed(7), "hover band bg");
 }
 
 #[test]
@@ -8568,6 +8438,7 @@ fn squad_header_rollup_counts_in_every_view_state() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -8708,14 +8579,13 @@ fn headers_demoted_and_focused_row_wears_the_band() {
     assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
     // Row 1 = the agent row owning the focused pane: the sole standing band.
     assert_eq!(
-        cells[cols].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row wears the full-width band"
+        cells[cols].bg, LATTICE_ACCENT,
+        "the focused row wears the full-width accent band"
     );
-    // The band spans the full width (a right-edge text cell is still INVERSE).
+    // The band spans the full width (a right-edge text cell is still banded).
     assert_eq!(
-        cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "band fills the panel width"
     );
     // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
@@ -8899,27 +8769,28 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     let at = |v: &View| {
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_sideline(&mut cells, rows, cols, panel_w);
-        cells[(footer - v.sideline_offset()) * cols].flags
+        cells[(footer - v.sideline_offset()) * cols]
     };
 
     let rest = at(&view);
-    assert_eq!(rest & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(rest & cell_flags::DIM, 0, "DIM reads as disabled");
-    assert_eq!(rest & cell_flags::INVERSE, 0);
+    assert_eq!(rest.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(rest.flags & cell_flags::DIM, 0, "DIM reads as disabled");
+    assert_eq!(rest.flags & cell_flags::INVERSE, 0);
 
     // The `N marked ·R` variant rides the same row and the same style.
     let mut marked = two_pane_view();
     marked.term = (29, 72);
     marked.marks.insert("a1".to_string());
-    let marked_flags = at(&marked);
-    assert_eq!(marked_flags & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(marked_flags & cell_flags::DIM, 0);
+    let marked_cell = at(&marked);
+    assert_eq!(marked_cell.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(marked_cell.flags & cell_flags::DIM, 0);
 
-    // Hover still toggles INVERSE on top of BOLD (the row is not inert).
+    // Hover paints the explicit hover band on the footer row (the row is
+    // actionable, not inert); the band's own pair replaces BOLD.
     view.hover_row = Some(footer);
     let hovered = at(&view);
-    assert_eq!(hovered & cell_flags::INVERSE, cell_flags::INVERSE);
-    assert_eq!(hovered & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(hovered.bg, Color::Indexed(7));
+    assert_eq!(hovered.flags & cell_flags::INVERSE, 0);
 }
 
 #[test]
@@ -8994,6 +8865,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9036,6 +8908,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9078,6 +8951,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9123,6 +8997,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9266,14 +9141,14 @@ fn client_compose_agents_first_omits_tab_rows_and_highlights_squad() {
         "no active-tab row renders in the sideline"
     );
     // The selector row (squad 2, display index 2 -> frame row 2). squad 2 is
-    // an inactive header band (INVERSE+DIM); the selector TOGGLES INVERSE
-    // (x-6851 US1), so it must render DIFFERENTLY from the same row
-    // unselected rather than simply carrying INVERSE.
+    // an inactive header with no standing highlight; the selector paints the
+    // explicit hover band (x-6851 US1), so it must render DIFFERENTLY from
+    // the same row unselected.
     let cols = frame.cols as usize;
     let unsel_frame = two_pane_view().compose();
     assert_ne!(
-        frame.cells[2 * cols].flags & cell_flags::INVERSE,
-        unsel_frame.cells[2 * cols].flags & cell_flags::INVERSE,
+        frame.cells[2 * cols].bg,
+        unsel_frame.cells[2 * cols].bg,
         "selector cursor row must be visibly toggled"
     );
     // While the selector is open the terminal cursor hides.
@@ -9638,6 +9513,7 @@ fn unified_rows_view() -> View {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -9973,6 +9849,7 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10428,6 +10305,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10491,6 +10369,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11516,6 +11395,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -11558,6 +11438,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -11639,6 +11520,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11825,6 +11707,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12308,6 +12191,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12522,6 +12406,7 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -13561,14 +13446,17 @@ fn foreign_cwd_agent_gets_dim_inert_subline() {
     // The sub row paints DIM.
     let sub_cell = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(sub_cell.flags & cell_flags::DIM, cell_flags::DIM);
-    // AC1-UI: hover on the sub index paints no INVERSE bar.
+    // AC1-UI, restated for explicit bands: hovering the sub row paints the
+    // hover band, never an INVERSE bar.
     v.hover_row = Some(ai + 1);
     let frame = v.compose();
+    let hovered = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(
-        frame.cells[(ai + 1) * cols + 4].flags & cell_flags::INVERSE,
+        hovered.flags & cell_flags::INVERSE,
         0,
-        "an inert sub row is never highlighted"
+        "never an INVERSE bar"
     );
+    assert_eq!(hovered.bg, Color::Indexed(7), "the hover band is explicit");
 }
 
 // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and

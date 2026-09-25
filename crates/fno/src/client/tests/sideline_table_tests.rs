@@ -7,6 +7,37 @@ use super::*;
 #[path = "sideline_name_fit_tests.rs"]
 mod sideline_name_fit_tests;
 
+#[path = "sideline_card_tests.rs"]
+mod sideline_card_tests;
+
+#[test]
+fn list_layout_paints_the_same_cells_as_an_untouched_view() {
+    // AC4/AC10: list mode is byte-identical to a view that never set the
+    // field (both read the same startup default).
+    let agents = vec![
+        {
+            let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
+            king.harness_session_id = Some("sess-king".into());
+            king
+        },
+        {
+            let mut w1 = agent_row("w1", 5, Some(AgentBadge::Working), false);
+            w1.lineage_kind = Some("child".into());
+            w1.spawned_by_session = Some("sess-king".into());
+            w1.harness_session_id = Some("sess-w1".into());
+            w1
+        },
+    ];
+    let mut a = wide_view(agents.clone());
+    set_density(&mut a, Density::Extended);
+    let mut b = wide_view(agents);
+    set_density(&mut b, Density::Extended);
+    b.sideline_layout = sideline_color::SidelineLayout::List;
+    let fa = a.compose();
+    let fb = b.compose();
+    assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
+}
+
 // ---------------------------------------------------------------------------
 // the table rewrite: the sideline is a Table (status word, name, message, PR, age)
 // ---------------------------------------------------------------------------
@@ -92,10 +123,10 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
 }
 
 #[test]
-fn sideline_selection_scrolls_into_view_and_paints_inverse() {
+fn sideline_selection_scrolls_into_view_and_paints_the_band() {
     // acceptance: 80 rows on a short panel with the selection past
     // the bottom -> the Table's offset scrolls the selected row into view
-    // and that row paints INVERSE.
+    // and that row paints the explicit hover band.
     let mut view = two_pane_view();
     let agents = (0..80)
         .map(|i| {
@@ -112,11 +143,10 @@ fn sideline_selection_scrolls_into_view_and_paints_inverse() {
     let cols = frame.cols as usize;
     let visible = view.sideline_visible_rows();
     let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
-    let flags = frame.cells[sel_row * cols].flags;
     assert_eq!(
-        flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selected row scrolls into view and paints inverse"
+        frame.cells[sel_row * cols].bg,
+        Color::Indexed(7),
+        "the selected row scrolls into view and paints the hover band"
     );
     assert_ne!(
         frame.cells[0].c, '\u{25be}',
@@ -253,5 +283,71 @@ fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
             1,
             "{label}: one column between the status word and the name cell"
         );
+    }
+}
+
+#[test]
+fn list_hover_band_is_one_color_across_every_column_gap() {
+    // The list hover band paints ONE explicit bg across the whole row, the
+    // column gaps included. The striped band - lane-colored cells against
+    // lighter gaps - was per-cell inversion: a lane fg inverted into a
+    // colored background, a Default fg into the terminal's own, so the row
+    // read two colors.
+    let mut view = two_pane_view();
+    let mut worker = tab_agent(None, Some(AgentBadge::Working), false);
+    worker.harness = Some("codex".into()); // a lane-colored row: the stripe source
+    worker.name = "worker".into();
+    view.layout.agents = vec![worker];
+    let agent_i = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(_)))
+        .expect("an agent row renders");
+    view.hover_row = Some(agent_i);
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = view.sideline_paint_w().saturating_sub(1);
+    let row = agent_i - view.sideline_offset();
+    let cells = &frame.cells[row * cols..row * cols + text_w];
+    assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
+    for cell in cells {
+        assert_eq!(cell.bg, Color::Indexed(7), "one band bg, gaps included");
+        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "one band text color");
+        assert_eq!(cell.flags, 0, "no INVERSE inside the band");
+    }
+}
+
+#[test]
+fn composed_list_bands_hold_contrast_on_dark_and_light_frames() {
+    // The list layout's hover band, judged by the same lens as the card
+    // bands: the REAL painter's cells clear the 3:1 hover floor on a dark
+    // and a light terminal.
+    let mut view = two_pane_view();
+    let mut worker = tab_agent(None, Some(AgentBadge::Working), false);
+    worker.harness = Some("codex".into());
+    worker.name = "worker".into();
+    view.layout.agents = vec![worker];
+    view.term = (30, 140);
+    view.sideline_width = 80;
+    let agent_i = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(_)))
+        .expect("an agent row renders");
+    view.hover_row = Some(agent_i);
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = view.sideline_paint_w().saturating_sub(1);
+    let row = agent_i - view.sideline_offset();
+    let cells = &frame.cells[row * cols..row * cols + text_w];
+    for lens in crate::frame_html::THEMES {
+        for cell in cells.iter().filter(|c| c.c != ' ') {
+            let ratio = crate::frame_html::contrast_ratio(cell, lens);
+            assert!(
+                ratio >= 3.0,
+                "list hover band on {}: {ratio:.2}:1",
+                lens.name
+            );
+        }
     }
 }

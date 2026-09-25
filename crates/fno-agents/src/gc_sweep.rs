@@ -3391,6 +3391,15 @@ pub(crate) fn commit_retirements(
                     }
                 }
             }
+            let retired = entries
+                .iter()
+                .filter(|e| report.retired_names.contains(&e.name));
+            for (node, error) in crate::phase_close::close_retired_rows(home, retired) {
+                let _ = emitter.emit(
+                    "daemon_recovery_error",
+                    &json!({"op": "close_retired_rows", "node": node, "error": error}),
+                );
+            }
         }
         Err(err) => {
             let _ = emitter.emit(
@@ -4894,17 +4903,20 @@ mod tests {
         assert!(ids.contains(&"x-live".to_string()));
         assert!(ids.contains(&"x-gone".to_string()));
 
-        // An unparseable archive never blinds the working store.
+        // An unparseable archive never blinds the working store: the sweep
+        // still answers from the store rows, and the advisory fold may
+        // already carry the archived copy from the first open.
         std::fs::write(base.join("graph-archive.json"), b"{broken").unwrap();
         let ids: Vec<String> = read_graph_rows(&home)
             .unwrap()
             .iter()
             .filter_map(|row| graph_store::entry_id(row).map(str::to_string))
             .collect();
-        assert_eq!(ids, vec!["x-live".to_string()]);
+        assert!(ids.contains(&"x-live".to_string()), "{ids:?}");
 
-        // An unreadable store reads None: every consumer keeps its rows.
-        std::fs::write(graph_path(&home), b"{broken").unwrap();
+        // An unreadable STORE reads None: every consumer keeps its rows.
+        // The store is graph.db; the json file is only the frozen mirror.
+        std::fs::write(graph_path(&home).with_extension("db"), b"not a database").unwrap();
         assert!(read_graph_rows(&home).is_none());
         std::fs::remove_dir_all(&base).ok();
     }

@@ -3,7 +3,26 @@
 
 Create a PR using `gh` CLI.
 
-**Model routing:** This worker runs on the declared `pr-create` role, resolved through `config.model_routing` (`config.model_routing.roles.pr-create`). An explicit configured route wins; with no route configured it runs on the invoking harness's primary model - no tier or model literal is hardcoded. Declare the role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override so the resolved route selects the model). Do NOT use `context: fork` - forking passes the parent's full context into the worker; instead spawn a fresh agent with only the gathered context from Step 1 below.
+This create flow runs inline in the invoking session. It does not dispatch a worker, use a routed model lane, or call another skill at runtime.
+
+**Draft first, then act.** The flow composes the title and body from local history. It does this before any step that can fail on the network, the remote, or the tree. Both drafts land in `.fno/pr-title.txt` and `.fno/pr-body.md` early. Every later stop prints the failed step, the reason, the title and the full body, says no PR was created, and ends:
+
+```
+RESULT: BLOCKED step=<step-name> reason=<one line> draft=.fno/pr-body.md
+```
+
+`RESULT: FAILED` stays only for a failure after `gh pr create` opened a PR (the unbound-PR case).
+
+## Failure table
+
+| Failure | Detected by | Action |
+|---|---|---|
+| no upstream | nothing; `fno do pr push` sets it | proceed |
+| no remote | `git remote` prints nothing, or push exit 4 naming fetch | draft, `BLOCKED step=push`, name `git remote add origin <url>` then re-run `/pr create` |
+| dirty tree | `git status --short` non-empty | draft from committed work only, list dirty paths, `BLOCKED step=clean-tree` |
+| detached HEAD | `git rev-parse --abbrev-ref HEAD` prints `HEAD` | draft, `BLOCKED step=branch`, name one `git switch -c <name>` from the first commit subject |
+| no base ref | `origin/main` does not resolve | base = first of `origin/HEAD`, `main`, `master` that resolves, else the root commit; the draft names it |
+| git cannot run | a git call fails to exec | draft from file reads and the request, `BLOCKED step=git` |
 
 ## Process
 
@@ -13,27 +32,93 @@ Create a PR using `gh` CLI.
 # Get branch name (rev-parse works on older Git and in detached HEAD)
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-# Get commits since main (these tell the story)
-COMMITS=$(git log origin/main..HEAD --oneline)
+# Resolve the base: $BASE if set and resolvable, else the first that resolves
+if [ -z "${BASE:-}" ] || ! git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+  for cand in origin/main "$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)" main master; do
+    if git rev-parse --verify --quiet "$cand" >/dev/null 2>&1; then BASE="$cand"; break; fi
+  done
+fi
+# An empty BASE means no base ref at all: the draft is built from the whole
+# history (the root commit), and the reply names that.
+if [ -n "${BASE:-}" ]; then
+  COMMITS=$(git log "$BASE"..HEAD --oneline)
+else
+  COMMITS=$(git log --oneline | tail -5)
+  BASE="<root commit; no base ref resolved>"
+fi
 
 # Check for any related plan files
 ls -la .fno/*.md 2>/dev/null || echo "No plan files"
 ```
 
-### 2. Pre-PR Checks
+If a git call fails to execute at all (sandbox, missing binary), do not stop: draft from file reads and the request, and end `RESULT: BLOCKED step=git reason=<the git failure> draft=.fno/pr-body.md`.
+
+### 2. Draft the Title and Body FIRST
+
+Analyze the commits to build the PR title and description, and write both draft files. This happens before the pre-PR checks, local CI and the push, so a failed git step still leaves the user something to read and reuse.
 
 ```bash
-# Ensure we have commits to push
+# Get detailed commit messages for context
+git log ${BASE:+$BASE..}HEAD --pretty=format:"- %s%n%b" | head -50
+```
+
+**Build the description from what the commits say:**
+- Group related commits into summary bullets
+- Use commit messages as the source of truth
+- Do not invent features not in commits
+
+**Write both drafts:**
+
+```bash
+TITLE="[type]: [description based on commits]"
+printf '%s\n' "$TITLE" > .fno/pr-title.txt
+
+BODY="$(cat <<'EOF'
+## Summary
+
+[2-4 bullets derived from commit messages]
+
+## Changes
+
+[List key files/components changed based on commits]
+
+## Test Plan
+
+- [ ] [How to verify - based on what commits touched]
+
+## Linear
+
+[{TEAM}-XXX](https://linear.app/{workspace}/issue/{TEAM}-XXX) (only if Linear configured and ticket exists in commits)
+EOF
+)"
+# The quoted heredoc above is a literal template (bracket placeholders, no
+# expansion). The closure trailer and the reviewed-at line are appended later,
+# at the create step, since they matter only for a real PR.
+printf '%s\n' "$BODY" > .fno/pr-body.md
+```
+
+`.fno/pr-title.txt` and `.fno/pr-body.md` are the draft of record. Every later step reuses them.
+
+### 3. Pre-PR Checks
+
+```bash
+# Ensure we have commits to include
 echo "Commits to include:"
-git log origin/main..HEAD --oneline
+git log ${BASE:+$BASE..}HEAD --oneline
 
 # Ensure working tree is clean
 git status --short
 ```
 
-If uncommitted changes exist, stop and report - don't create incomplete PR. Emit `RESULT: FAILED uncommitted changes in working tree` as your final line so a dispatcher does not report a PR that was never opened.
+If uncommitted changes exist, do not stop empty: the draft already exists. List the dirty paths, and end:
 
-### 2.5 Run CI Validation (REQUIRED)
+```
+RESULT: BLOCKED step=clean-tree reason=<dirty paths> draft=.fno/pr-body.md
+```
+
+Commit or stash nothing yourself - the draft comes from committed work only.
+
+### 4. Run CI Validation (REQUIRED)
 
 **Purpose:** Run the same checks CI will run to catch failures before push.
 
@@ -92,27 +177,13 @@ Running CI validation...
 
 #### Step D: Handle Results
 
-**If any command fails:**
+On a failed command, the draft already exists. Show the failed command and its error, then end:
+
 ```
-❌ CI validation failed
-
-Command: npm run build
-Exit code: 2
-Error: [actual error output]
-
-Fix the issues before creating PR.
+RESULT: BLOCKED step=ci reason=<command> failed draft=.fno/pr-body.md
 ```
 
-**STOP here - do not push or create PR until CI passes locally.** Emit `RESULT: FAILED CI validation failed: <command>` as your final line so a dispatcher does not report a PR that was never opened.
-
-**If all commands succeed:**
-```
-✅ CI validation passed (2/2 commands)
-   ✓ npm run build
-   ✓ npm run test
-
-Proceeding to push...
-```
+On success, proceed to push.
 
 #### Step E: No CI Workflows Found
 
@@ -122,45 +193,32 @@ Proceeding to push...
 ⚠️ No CI workflows found in .github/workflows/
 
 Skipping CI validation - no automated checks configured.
-Consider adding CI workflows to catch issues early.
 ```
 
-Proceed to push (user has chosen not to have CI).
+Proceed to push.
 
 ---
 
-### 3. Push Branch
+### 5. Push Branch
 
 ```bash
-# Fetch, bring in origin/main (rebase, or merge when the branch holds merges), preflight, push once
+# Fetch, bring in origin/main (rebase, or merge when the branch holds merges), push once
 fno do pr push
 ```
 
-Handle the verb's refusals like any other refusal here. Exit 3 names the thing to fix: a protected branch, a dirty tree, or a conflict. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. A branch that already merges origin/main uses merge, not rebase. If that merge conflicts, abort it. Merge origin/main by hand, commit, then re-run the push. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red. Do not open the PR yet.
+Handle the verb's refusals like any other refusal here. **Every push refusal keeps the draft.** Report it instead of stopping empty. Exit 3 names the fix: a protected branch, a dirty tree, or a conflict. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. A branch that already merges origin/main uses merge, not rebase. If that merge conflicts, abort it. Merge origin/main by hand, commit, then re-run the push. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red. A failed fetch (exit 4) names the missing remote. The reply then names `git remote add origin <url>` and ends `RESULT: BLOCKED step=push reason=<verb refusal> draft=.fno/pr-body.md`. Do not open the PR yet.
 
-### 4. Generate PR Description from Commits
+If `git rev-parse --abbrev-ref HEAD` printed `HEAD` (detached), the draft already exists. Name one `git switch -c <name>` from the first commit subject and end `RESULT: BLOCKED step=branch reason=detached HEAD draft=.fno/pr-body.md`. Never create the branch yourself.
 
-Analyze the commits to build the PR description:
+### 6. Out-of-scope items are born tracked
 
-```bash
-# Get detailed commit messages for context
-git log origin/main..HEAD --pretty=format:"- %s%n%b" | head -50
-```
+**Purpose:** the CI gate `check-oos-tracked.sh` reds any PR whose body has an "Out of scope" / "Not touched here" / "Not in this PR" section containing an item with no tracked reference. This step makes every such item born tracked so the PR lands gate-green. It is advisory and best-effort, with the same error posture as the body check. A tracking failure degrades to today's behavior: a red gate for a human to resolve. It NEVER blocks or fails the PR.
 
-**Build the description from what the commits say:**
-- Group related commits into summary bullets
-- Use commit messages as the source of truth
-- Don't invent features not in commits
-
-### 4.5 Out-of-scope items are born tracked
-
-**Purpose:** the CI gate `check-oos-tracked.sh` reds any PR whose body has an "Out of scope" / "Not touched here" / "Not in this PR" section containing an item with no tracked reference. This step makes every such item born tracked so the PR lands gate-green. It is advisory and best-effort, with the same error posture as step 5.5. A tracking failure degrades to today's behavior: a red gate for a human to resolve. It NEVER blocks or fails the PR.
-
-**Trigger:** the description you just composed already contains a matching ATX heading. The match is case-insensitive: `Out of scope`, `Out-of-scope`, `Not touched here`, or `(Explicitly) not in this PR`. Never invent such a section. Never invent items. The section exists only for genuinely deferred work grounded in the commits, the plan, or the dispatch context.
+**Trigger:** the draft body you composed already contains a matching ATX heading. The match is case-insensitive: `Out of scope`, `Out-of-scope`, `Not touched here`, or `(Explicitly) not in this PR`. Never invent such a section. Never invent items. The section exists only for genuinely deferred work grounded in the commits, the plan, or the dispatch context.
 
 When the plan frontmatter says `carveouts: forbidden`, filing a node for an exclusion does not make the PR mergeable. The plan fidelity gate refuses any PR that declares an exclusion section.
 
-Read the graph node id once (the same value step 5.5 reads):
+Read the graph node id once (the same value the closure step reads):
 
 ```bash
 NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | tr -d "\"'")
@@ -187,18 +245,18 @@ For each item line under that heading, in order:
      ```bash
      NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
      ```
-     If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to step 3 - never append an empty ` - tracked as `.
-3. If `fno backlog idea` fails or yields no usable id, leave it untracked and print a `warn:` line naming it. State that no tracking object was created and name the failure mode (lock contention, missing CLI). Degrade loud, not silent, and continue. Do NOT mint a carveout to repair the citation: `fno backlog carveout add` records an operator's deliberate decision to defer substantial work. Filing one because a command failed mutates graph state purely to make prose pass validation. The CI gate is the backstop and will red the check for a human. That human fixes the work inline, cuts the line, or creates and cites tracking deliberately. NEVER write an `oos-ok:` waiver to route around a tooling failure. A waiver asserts "nothing to track" - a judgment a tooling error cannot establish. That call is a human's, never the worker's.
+     If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to the next step - never append an empty ` - tracked as `.
+3. If `fno backlog idea` fails or yields no usable id, leave it untracked and print a `warn:` line naming it. State that no tracking object was created and name the failure mode (lock contention, missing CLI). Degrade loud, not silent, and continue. Do NOT mint a carveout to repair the citation: `fno backlog carveout add` records a superuser's deliberate decision to defer substantial work. Filing one because a command failed mutates graph state purely to make prose pass validation. The CI gate is the backstop and will red the check for a human. That human fixes the work inline, cuts the line, or creates and cites tracking deliberately. NEVER write an `oos-ok:` waiver to route around a tooling failure. A waiver asserts "nothing to track" - a judgment a tooling error cannot establish. That call is a human's, never the worker's.
 
 **Idempotent by construction:** step 1 skips any item that already carries a tracked reference, so a re-run over a body whose items already read `- tracked as <id>` files nothing.
 
-**Report** each action as `item -> <id>` (and any `warn:` lines) so the dispatcher transcript shows exactly what was filed. Then continue to step 5 with the rewritten body.
+**Report** each action as `item -> <id>` (and any `warn:` lines) so the dispatcher transcript shows exactly what was filed. Then continue to the next step with the rewritten `.fno/pr-body.md`.
 
-### 4.6 Add the exact Backlog-Closure trailer
+### 7. Add the exact Fixes closure line
 
-**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever. The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
+**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in the bind step. Every other named node stayed open forever. The exact closure line (`Fixes <id> [<id>...]`) is what the merge-time reconcile binds. Free-text mentions never count.
 
-Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph - and separate the two failures by exit code:
+Reuse `$NODE_ID` from the previous step (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph - and separate the two failures by exit code:
 
 ```bash
 if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
@@ -215,37 +273,16 @@ elif [[ $RC -ne 0 ]]; then
 fi
 ```
 
-When `$NODE_ID` is empty or unresolvable, the bare verb resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. An empty `$CLOSURE_TRAILER` now means exactly one thing: a readable graph that carries no matching node, which is why the empty case stays safe to append unconditionally. Exit 4 is different: the graph read itself failed. A dead reader once answered exactly like a missing node and three PRs shipped red on the closure gate with no named cause (measured 2026-09-16). On exit 4 STOP: do not create the PR. Emit `RESULT: FAILED closure trailer: graph reader dead (exit 4)` as your final line so a dispatcher does not report a PR that was never opened. Any other nonzero prints the `warn:` and continues. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
+When `$NODE_ID` is empty or unresolvable, the bare verb resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. An empty `$CLOSURE_TRAILER` now means exactly one thing: a readable graph that carries no matching node. That is why the empty case stays safe to append unconditionally. Exit 4 is different: the graph read itself failed. A dead reader once answered exactly like a missing node and three PRs shipped red on the closure gate with no named cause (measured 2026-09-16). On exit 4 STOP: do not create the PR. The draft exists, so end `RESULT: BLOCKED step=closure-trailer reason=graph reader dead (exit 4) draft=.fno/pr-body.md`. Any other nonzero prints the `warn:` and continues. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
 
-Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
+Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of `.fno/pr-body.md`, before calling `gh pr create`. Never hand-write the trailer. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
 
-### 5. Create PR
+### 8. Create PR
 
 ```bash
-# Build title from branch name or primary commit
-TITLE="[type]: [description based on commits]"
-
-BODY="$(cat <<'EOF'
-## Summary
-
-[2-4 bullets derived from commit messages]
-
-## Changes
-
-[List key files/components changed based on commits]
-
-## Test Plan
-
-- [ ] [How to verify - based on what commits touched]
-
-## Linear
-
-[{TEAM}-XXX](https://linear.app/{workspace}/issue/{TEAM}-XXX) (only if Linear configured and ticket exists in commits)
-EOF
-)"
-# The quoted heredoc above is a literal template (bracket placeholders, no
-# expansion) - $CLOSURE_TRAILER never belongs inside it. Append it as its own
-# paragraph afterward, with a real (unquoted) variable expansion instead.
+# Reuse the drafts written at step 2
+TITLE="$(cat .fno/pr-title.txt)"
+BODY="$(cat .fno/pr-body.md)"
 
 # The reviewed-at line: the one claim a worker appends to the body, and only
 # this verb authors it. It prints the line only when the attestation journal
@@ -291,22 +328,22 @@ gh pr create \
   --body-file .fno/pr-body.md
 ```
 
-On exit 1, follow the guard's own fix text and rerun the check. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure. The session-URL guard also scans commit messages, so a commit hit needs a reword, not a body edit.
+On body-check exit 1, follow the guard's own fix text and rerun the check. If the guard still refuses, end `RESULT: BLOCKED step=body-check reason=<the guard's fix text> draft=.fno/pr-body.md`. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure. The session-URL guard also scans commit messages, so a commit hit needs a reword, not a body edit.
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
-**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as step 4.5. A mismatch here means the body `gh pr create` actually wrote differs from what was composed. Merge-time binding then misses a claim silently.
+**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as the OOS step. A mismatch here means the body `gh pr create` actually wrote differs from what was composed. Merge-time binding then misses a claim silently.
 
 ```bash
 if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
   ACTUAL_BODY=$(gh pr view "$PR_NUMBER" --json body -q .body)
   if ! printf '%s' "$ACTUAL_BODY" | grep -qF "$CLOSURE_TRAILER"; then
-    echo "warn: PR #$PR_NUMBER body does not contain the composed Backlog-Closure trailer verbatim - merge-time closure may miss a claim" >&2
+    echo "warn: PR #$PR_NUMBER body does not contain the composed trailer verbatim - merge-time closure may miss a claim" >&2
   fi
 fi
 ```
 
-### 5.5 Bind the created PR to its backlog node
+### 9. Bind the created PR to its backlog node
 
 Bind the just-opened PR to its node through the one shared binder. That makes the dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog reconcile` see the in-flight PR. Otherwise the node's `pr_number` stays null through the whole review window. A lapsed claim then lets the 5-min dispatcher re-spawn a finished node.
 
@@ -324,7 +361,7 @@ if [[ -n "${PR_NUMBER:-}" ]]; then
   else
     # The PR EXISTS. An unbound PR is incomplete delivery, not a failed create:
     # name the PR and the one exact repair command (idempotent, safe to rerun
-    # as-is), then take step 6's failure contract - never the success line.
+    # as-is). This is the one case that stays RESULT: FAILED - a PR was opened.
     echo "PR #$PR_NUMBER created but UNBOUND: $PR_URL" >&2
     echo "repair: ${BIND_ARGS[*]}" >&2
   fi
@@ -333,9 +370,9 @@ fi
 
 This is the *fast path* only: it engages `in_review` mid-session, before the next dispatch selection. `fno-agents finalize` re-runs the same link at every terminal loop decision as a deterministic backstop (`stamp_node_pr` in crates/fno-agents/src/finalize.rs). A skipped step here still gets stamped at session end. Idempotent.
 
-### 6. Report the result (RESULT contract)
+### 10. Report the result (RESULT contract)
 
-After creating the PR, state the human-readable line AND emit the machine-readable `RESULT:` contract as your FINAL line. A dispatcher (e.g. `/pr create`) parses the `RESULT:` line to decide success vs failure; without it, a successfully-opened PR can be misread as a failed worker.
+After creating the PR, state the human-readable line AND emit the machine-readable `RESULT:` contract as your final line. The invoking workflow uses it to distinguish success from failure.
 
 On success:
 
@@ -347,7 +384,7 @@ Next step: Run /pr check [NUMBER] to wait for external review
 RESULT: SUCCESS pr=#[NUMBER] url=https://github.com/[owner]/[repo]/pull/[NUMBER]
 ```
 
-If PR creation did not complete, do NOT print a success line. The causes are uncommitted changes, CI validation failure, a `gh pr create` error, or a refused node link in step 5.5. Emit the failure contract as your final line instead, so the dispatcher does not report an undelivered or unbound PR as complete:
+If PR creation did not complete, do NOT print a success line. A stop before `gh pr create` is BLOCKED (the draft exists - see the failure table). `RESULT: FAILED` stays only for a failure after a PR opened. That means an unbound PR in the bind step, or a `gh pr create` error that left a half-open PR:
 
 ```
 RESULT: FAILED <one-line reason>
@@ -369,16 +406,16 @@ Derive from commits:
 
 ### Create PR
 ```bash
-# The body must carry the exact `Backlog-Closure:` trailer when the branch names
-# a node, or check-pr-node-closure reds the PR. Compose it into a file (see the
-# step-5 block above) rather than passing a bare --body.
+# The body must carry the exact closure trailer when the branch names a node,
+# or check-pr-node-closure reds the PR. Compose it into a file (see the
+# create step above) rather than passing a bare --body.
 fno-agents pr-body-check --body-file .fno/pr-body.md --title "title" --base "${BASE:-main}"
 gh pr create --title "title" --body-file .fno/pr-body.md
 ```
 
 ### Get Detailed Commit Log
 ```bash
-git log origin/main..HEAD --pretty=format:"- %s%n%b"
+git log ${BASE:+$BASE..}HEAD --pretty=format:"- %s%n%b"
 ```
 
 ### Check Existing PR
@@ -395,7 +432,7 @@ gh pr view --json number,url
 ```
 
 **Flow:**
-1. `/pr create` runs as a fresh, role-routed `pr-create` worker with targeted context (branch, commits, plan summary)
+1. `/pr create` runs this flow inline in the invoking session
 2. `/pr check` polls for external review and processes feedback
 3. Human reviewer merges
 
@@ -403,8 +440,8 @@ gh pr view --json number,url
 
 ## Key Principles
 
+- **Draft first** - the title and body exist before any step that can fail. A blocked create still hands the user something to read and reuse
 - **Commits tell the story** - PR description comes from `git log`, not imagination
-- **Always push first** - Can't create PR without commits on remote
 - **Clear PR titles** - Start with type based on commit types
 - **Meaningful descriptions** - Derived from actual changes made
 - **Reference Linear tickets** - Extract from commits if present (only when `config.linear.enabled`)

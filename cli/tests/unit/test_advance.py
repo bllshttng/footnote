@@ -1119,6 +1119,23 @@ def test_direct_dependents_admit_plan_less_idea(monkeypatch):
     assert "ab-block01" not in ids
 
 
+def test_direct_dependents_omits_held_node(monkeypatch):
+    """x-40b2 AC9 (dependents path): a dependent an open operator question
+    names in blocks is skipped; its unheld sibling still dispatches."""
+    graph = [
+        {"id": "ab-closed11", "project": "fno"},
+        {"id": "ab-hold001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "ready", "cwd": "/w"},
+        {"id": "ab-free0001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "ready", "cwd": "/w"},
+    ]
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: graph)
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", lambda kind, args: {"ab-hold001": "q-1"})
+    ids = [d["id"] for d in adv._direct_dependents("ab-closed11", "fno")]
+    assert ids == ["ab-free0001"]
+
+
 def test_advance_model_tier_only_resolves_no_model(iso, monkeypatch):
     """AC4-HP negative half (x-baef): a node carrying only the retired
     model_tier key resolves nothing at the advance spawn; the compat read is
@@ -3353,6 +3370,28 @@ def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
     assert adv.selection_guards(node, {"c": node}, now) == "dispatch-hold-invalid:c"
 
 
+def test_selection_guards_held_question_names_the_question(monkeypatch):
+    """x-40b2 AC9: an open operator question whose blocks list names the node
+    holds it out of selection with reason held:<qid>."""
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", lambda kind, args: {"x-hold": "q-1"})
+    now = _gnow()
+    node = {"id": "x-hold", "status": "ready", "created_at": now.isoformat()}
+    assert adv.selection_guards(node, {"x-hold": node}, now) == "held:q-1"
+
+
+def test_selection_guards_held_read_fail_open(monkeypatch):
+    """x-40b2 AC10: a failed held read never starves selection."""
+    def boom(kind, args):
+        raise RuntimeError("select-read down")
+
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", boom)
+    now = _gnow()
+    node = {"id": "c", "status": "ready", "created_at": now.isoformat()}
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
 def test_selection_guards_dead_ancestor_via_field_not_status():
     # Robust to read_graph NOT recomputing status: an ancestor carrying only
     # the underlying superseded_by / deferred_at field is still a dead ancestor.
@@ -3535,7 +3574,7 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint", node=_node_row(node_id, difficulty="medium"))
+    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint", node=_node_row(node_id, difficulty="high"))
 
     assert sid == "abc12345"
     assert len(calls) == 1  # exactly one worker launch requested
@@ -3913,9 +3952,16 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
             {"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
             "/target --no-merge x-low", "t", "/target", "none-declared",
         ),
+        # Lean floor: a planless medium node goes straight to target; only
+        # high difficulty, size L, or an open premise question earns
+        # blueprint.
         (
             {"difficulty": "medium", "priority": "p1", "dispatch_verb": ""},
-            "/blueprint x-med", "bp", "/blueprint", "none-declared",
+            "/target --no-merge x-med", "t", "/target", "none-declared",
+        ),
+        (
+            {"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
+            "/blueprint x-high", "bp", "/blueprint", "none-declared",
         ),
         (
             {

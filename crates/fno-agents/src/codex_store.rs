@@ -24,6 +24,20 @@ pub(crate) fn codex_rollout_matches(name: &str, session_id: &str) -> bool {
     name.starts_with("rollout-") && name.contains(session_id)
 }
 
+/// Find one rollout for a session without reading or indexing unrelated files.
+pub(crate) fn codex_rollout_path(
+    root: Option<&std::path::Path>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let root = root
+        .map(std::borrow::Cow::Borrowed)
+        .or_else(|| codex_home().map(|home| std::borrow::Cow::Owned(home.join("sessions"))))?;
+    crate::daemon::index_tree(root.as_ref(), 0)
+        .ok()?
+        .into_iter()
+        .find_map(|(name, path)| codex_rollout_matches(&name, session_id).then_some(path))
+}
+
 /// One walk of the codex store, as `(filename, mtime secs)` for every rollout
 /// file - the sweep-shaped input to rung 4, built ONCE per sweep by
 /// `live_liveness_prober` the same way the claude slug dirs are.
@@ -117,4 +131,25 @@ pub(crate) fn codex_sessions(root: Option<&std::path::Path>, days: u64) -> Vec<C
         .collect();
     out.sort_by(|a, b| b.mtime_secs.cmp(&a.mtime_secs));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_rollout_path_finds_only_matching_session() {
+        let root = std::env::temp_dir().join(format!(
+            "fno-codex-rollout-path-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let wanted = root.join("rollout-2026-09-24-session-123.jsonl");
+        std::fs::write(&wanted, "{}").unwrap();
+        std::fs::write(root.join("other-session.jsonl"), "{}").unwrap();
+        assert_eq!(codex_rollout_path(Some(&root), "session-123"), Some(wanted));
+        assert_eq!(codex_rollout_path(Some(&root), "absent"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

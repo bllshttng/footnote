@@ -79,6 +79,8 @@ Two modes, mutually exclusive per claim:
 
 **Hybrid arm (TTL claims that also record a pid).** A TTL claim past its clock is not unconditionally stale. A recorded pid that is live on this host (same host + `create_time` guards as PID-liveness) keeps the claim LIVE. This protects an idle or SIGSTOP-suspended session from peer reclaim past its TTL. A suspended process cannot run its own refresh, and plain TTL semantics cannot cover it. The arm is purely additive: it only ever extends liveness. A TTL claim with a transient, dead, missing, or off-host pid falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>` target claims opt in by recording a durable session pid (see below). The retired megawalk walker recorded a transient pid, so the arm never fired for it. Its TTL park-exclusion is unchanged.
 
+**Blueprint-session claims are clock-only leases.** A `blueprint-session:` claim is a 60-minute lease. It runs from `acquired_at`, or from its explicit `expires_at`. Past the clock it reads STALE like a `review:branch:` hold, whatever the pid or session witness says. A native subagent planner shares its parent's pid and session id. Both outlive a planner stopped mid-close and hold the node for the parent's whole life. The manual `fno agents claim release --holder` is the fast path. The lease is the backstop that caps the strand at one hour.
+
 **Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
 This is the respawned-worker case: a bg `/target` supervisor pid dies and the
@@ -503,9 +505,8 @@ into a registry row someone would have to go read.
 Reach for **`fno agents spawn`** when any of these hold: the work must
 outlive its spawner; someone other than the spawner must observe, message,
 or drive it; it must be handed to a successor king; it holds a `node:`
-claim, since the registry row is what makes the claim attributable; it must
-join king-mediated review, which is mail-shaped and therefore needs a
-handle; or it needs its own worktree or branch.
+claim, since the registry row is what makes the claim attributable; or it
+needs its own worktree or branch. Review does not require a spawned session.
 
 Neither primitive is always correct.
 "Always spawn" discards the limb's real advantages; "always subagent"
@@ -583,6 +584,6 @@ Three facts worth recording, because an earlier dispatch brief planned against a
 
 Every miss names its source. Ledger coverage measured 2026-09-01 over 3647 rows: `session_id` on 3526, `model` on 800, `provider` on about 130, `harness` on none. An explicit `node_id_unrecoverable: true` marks 11 more. The uuid write path never backfilled, so a lookup against an old row legitimately finds nothing. The verb prints `not recorded` with the reason. An empty answer reads, to a stranger, as an absence of work.
 
-## The whole-graph write names its base with base_version alone
+## commit_rows compares per-row versions
 
-The whole-graph write names its base with `base_version` alone. The keeper recomputes the per-row digests from its own stored snapshot of that version. It conflicts only on touched rows whose digest moved. The caller echoes no digest map. The `base_digests` parameter is deleted (2026-09-21). It was a required-then-discarded client echo, a gate on nothing. Trusting it can let a stale client suppress a real conflict. What still crosses is `base_plan_rungs`, the plan-rung map repo law keeps Python-side. The normalized digest needs it. The snapshot ring is filled at commit and bounded by serialized bytes. The budget is 64 MB, four whole-graph snapshots today. Tune it from the attributable `graph_tx_conflict` events. The sqlite publish takes its write lock IMMEDIATE, so a deferred read window cannot refuse it. A busy store retries through one shared helper. Its refusal names attempts, elapsed, and the read-back command.
+The whole-graph write names its base with `base_version` and the per-row versions its begin returned. Every graph.db `nodes` and `nodes_raw` row carries a `version` column. The statement that writes the row bumps it, and nothing else writes it. `begin` returns the map `{id: version}` under the historical key `base_digests`. The client sends the touched ids back to `commit_rows` under the same key. Under its write gate the keeper reads `nodes.version` for the touched ids and conflicts on each one whose version moved. A row absent at begin and absent now is a new node, and it never conflicts. A row present now and absent from the map is one another writer created, and it conflicts. The json rollback backend has no row versions, and a client can send no map. Both fall back to the whole-graph compare: `base_version` must equal the current version, or every touched id conflicts. The publish then runs through `locked_mutate` with the current version as its fence, which covers writers outside this keeper. The trust model changed. The old keeper refused a client digest echo and recomputed digests from its own in-memory snapshot ring. The exec lane builds a fresh keeper state per request, so that ring missed on every exec-lane commit. A version stored in graph.db is the only base the keeper has across processes. A client that sends a false version can suppress a real conflict, the same trust `base_version` already carries. The ring, the digests and `base_plan_rungs` on `commit_rows` are gone (2026-09-24). The sqlite publish takes its write lock IMMEDIATE, so a deferred read window cannot refuse it. A busy store retries through one shared helper. Its refusal names attempts, elapsed, and the read-back command.

@@ -170,6 +170,9 @@ pub struct StateReceipt {
     /// The state this write replaced, from the attempt that published.
     /// `None` when the node had no current state.
     pub replaced: Option<CurrentStateView>,
+    /// The row's `encounters` as committed by this write, read under the
+    /// same publication lock: `Null` when the row carries none.
+    pub encounters: Value,
 }
 
 fn read_rows_for(graph: &Path) -> Result<Vec<Value>, StateError> {
@@ -228,6 +231,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
     let seen = std::cell::Cell::new(None::<(usize, u64)>);
     let expected_cell = std::cell::Cell::new(0u64);
     let prior = std::cell::Cell::new(None::<CurrentStateView>);
+    let encounters = std::cell::Cell::new(Value::Null);
     // Under the publication lock: re-verify the row revision, journal the
     // exact pre-image, then allow publication. Any history failure refuses
     // the whole mutation. (The old details/status snapshot check is
@@ -289,6 +293,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
             }
             let expected = row_revision(row);
             prior.set(read_state(row));
+            encounters.set(row.get("encounters").cloned().unwrap_or(Value::Null));
             let obj = row.as_object_mut().unwrap();
             let mut state_obj = json!({
                 "body": body,
@@ -316,6 +321,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
         total_prose: details + body.chars().count(),
         journaled,
         replaced: prior.take(),
+        encounters: encounters.into_inner(),
     })
 }
 

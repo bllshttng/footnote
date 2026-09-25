@@ -2381,11 +2381,21 @@ where
 /// (`find_name_or_full_session_id`: label, full session id + canonical handle,
 /// related/predecessor ids) plus the transport short id and a prior label held
 /// as an alias.
-pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String, String), String> {
+pub fn rename_agent(
+    path: &Path,
+    token: &str,
+    new_name: &str,
+    node: Option<&str>,
+) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
             "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
         );
+    }
+    if let Some(node) = node {
+        if node.trim().is_empty() {
+            return Err("registry node must be non-empty when provided".to_string());
+        }
     }
     // Resolve BEFORE the lock. The resolution reads the same file the
     // transaction re-reads under the lock, and the identity re-check inside the
@@ -2474,6 +2484,9 @@ pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String,
             target.aliases.push(resolved_name.clone());
         }
         target.name = new_name.to_string();
+        if let Some(node) = node {
+            target.node = Some(node.trim().to_string());
+        }
         Ok(())
     }) {
         Ok(inner) => inner?,
@@ -2529,7 +2542,7 @@ pub(crate) fn rename_response(
             "registry name must be 1-64 letters, numbers, underscores, or hyphens",
         );
     }
-    match rename_agent(registry_path, token, new_name) {
+    match rename_agent(registry_path, token, new_name, None) {
         Ok((old, new)) => Response::ok(
             req.id,
             serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
@@ -2815,7 +2828,7 @@ where
     Ok(result)
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
@@ -2824,7 +2837,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
 /// lock, blocking until acquired. The returned `File` holds the lock until it
 /// is unlocked or dropped.
-fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
+pub(crate) fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -2878,7 +2891,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateEr
     Ok(serde_json::from_str(&buf)?)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(

@@ -43,7 +43,6 @@ class KingBlock(BaseModel):
     # default.
     implementation_guard: str = "refuse"
     write_roots: list[str] = []
-    # The loop and settled-PR watch are the beat; the cron proves they are alive.
     checkin_interval: str = "55m"
     checkin_text: str = KING_CHECKIN_TEXT
     # The verdict's compaction bound; default 3 because one crown

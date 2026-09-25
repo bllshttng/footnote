@@ -5,11 +5,16 @@
 use super::api::{ApiError, Store};
 use rusqlite::{params, Connection};
 
-const DDL: &str = "
+const TABLE: &str = "
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     id UNINDEXED, title, slug, description,
     content='nodes', content_rowid='rowid', tokenize='unicode61'
-);
+);";
+
+/// The update trigger names its columns: a write that moves only
+/// updated_at (the schema-4 touch trigger) must not re-index the row with
+/// an `old` image the index no longer holds.
+const TRIGGERS: &str = "
 CREATE TRIGGER IF NOT EXISTS nodes_fts_ai AFTER INSERT ON nodes BEGIN
     INSERT INTO nodes_fts(rowid, id, title, slug, description)
     VALUES (new.rowid, new.id, new.title, new.slug, new.description);
@@ -18,13 +23,18 @@ CREATE TRIGGER IF NOT EXISTS nodes_fts_ad AFTER DELETE ON nodes BEGIN
     INSERT INTO nodes_fts(nodes_fts, rowid, id, title, slug, description)
     VALUES ('delete', old.rowid, old.id, old.title, old.slug, old.description);
 END;
-CREATE TRIGGER IF NOT EXISTS nodes_fts_au AFTER UPDATE ON nodes BEGIN
+CREATE TRIGGER IF NOT EXISTS nodes_fts_au AFTER UPDATE OF id, title, slug, description ON nodes
+BEGIN
     INSERT INTO nodes_fts(nodes_fts, rowid, id, title, slug, description)
     VALUES ('delete', old.rowid, old.id, old.title, old.slug, old.description);
     INSERT INTO nodes_fts(rowid, id, title, slug, description)
     VALUES (new.rowid, new.id, new.title, new.slug, new.description);
 END;
 ";
+
+pub fn triggers() -> &'static str {
+    TRIGGERS
+}
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     let exists: bool = connection
@@ -34,14 +44,20 @@ pub fn ensure_table(connection: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    if exists {
-        return Ok(());
-    }
     connection
-        .execute_batch(DDL)
+        .execute_batch(TABLE)
+        .and_then(|()| connection.execute_batch(TRIGGERS))
         .map_err(|error| error.to_string())?;
-    // An external-content table starts empty; one 'rebuild' folds the
-    // existing nodes rows in. The triggers cover everything after.
+    if !exists {
+        rebuild(connection)?;
+    }
+    Ok(())
+}
+
+/// An external-content table starts empty, and a rebuilt nodes table
+/// keeps its rowids but not the index; one 'rebuild' folds the nodes rows
+/// in. The triggers cover everything after.
+pub(crate) fn rebuild(connection: &Connection) -> Result<(), String> {
     connection
         .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])
         .map_err(|error| error.to_string())?;
@@ -110,7 +126,9 @@ fn query_nodes(
 mod tests {
     use super::*;
     use crate::backlog::api::Node;
-    use crate::backlog::{comments, encounters, nodes, pull_requests, relations, sessions};
+    use crate::backlog::{
+        comments, costs, encounters, entities, findings, nodes, pull_requests, relations, sessions,
+    };
     use serde_json::json;
 
     fn db() -> Connection {
@@ -119,19 +137,16 @@ mod tests {
         // deliberately absent: tests that need it call ensure_table
         // themselves, so the backfill test seeds into an indexless db.
         let connection = Connection::open_in_memory().unwrap();
-        // INSERT OR REPLACE (nodes.rs save) deletes the old row without
-        // firing delete triggers unless this is on; the fts triggers
-        // depend on them. Mirrors the open() funnel pragma.
-        connection
-            .execute_batch("PRAGMA recursive_triggers=ON;")
-            .unwrap();
         for ensure in [
+            entities::ensure_table,
             nodes::ensure_table,
+            costs::ensure_table,
             sessions::ensure_table,
             comments::ensure_table,
             encounters::ensure_table,
             pull_requests::ensure_table,
             relations::ensure_table,
+            findings::ensure_table,
         ] {
             ensure(&connection).unwrap();
         }

@@ -63,7 +63,7 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
-mod agent_launch;
+pub(crate) mod agent_launch;
 mod agent_rows_join;
 mod drift_retire;
 mod human_input;
@@ -78,12 +78,14 @@ mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
+mod revival_gate;
 mod row_set;
 mod session_guard;
 mod shutdown_capture;
 mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
+mod workspace_restore;
 use self::session_guard::{ConnAlive, SocketGuard};
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
@@ -717,6 +719,17 @@ pub(crate) enum CoreMsg {
         argv: Result<(Vec<String>, bool), String>,
         replay: Box<ResumeReplay>,
     },
+    /// One revival gate answer (the `fno-agents spawn-gate` ask the
+    /// resume gesture or the held-pane focus fired off the core loop).
+    /// `Ok` stages an admission for the row and re-dispatches the same
+    /// command; `Err` is the visible refusal - the verdict line plus the
+    /// one-run CLI escape - and starts no pane.
+    RevivalGateAnswered {
+        id: u64,
+        name: String,
+        verdict: Result<(), String>,
+        replay: Box<ResumeReplay>,
+    },
     /// A batch's pre-resolved attach plans (restore's members or a
     /// picker recruit's selected ids, keyed by attach id), routed back so the
     /// existing loop re-enters on the core loop with the verdicts in hand.
@@ -739,12 +752,14 @@ pub(crate) enum CoreMsg {
     },
     /// The bulk apply half of a workspace restore: the plans are in
     /// hand (keyed by member worker name, `Err` being that member's visible
-    /// refusal), so every gate runs on the core loop through
+    /// refusal), and the revival gate's probed headroom is in hand (`Err`
+    /// refusing every member), so every gate runs on the core loop through
     /// [`Core::resume_one`].
     WorkspaceRestoreApply {
         dry_run: bool,
         harness: Option<String>,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
+        headroom: Result<revival_gate::ProbeHeadroom, String>,
         reply: ControlReply,
     },
     /// (v71) `ControlVerb::SquadReload`: re-read `squads.json` into
@@ -1124,6 +1139,12 @@ struct PaneEntry {
     /// This positive refusal marker is sweepable; it is not inferred from an
     /// absent registry row.
     refused_worker: Option<String>,
+    /// The held portal row this placeholder seat stands in for
+    /// (`FNO_PORTAL_HELD`), parsed once at spawn and re-parsed at keeper
+    /// re-adoption. A placeholder is held even though adoption gives its
+    /// bare shell `cmd: Some`; the portal doors read
+    /// [`Core::portal_seat_is_viewer`], never `cmd` alone.
+    portal_hold: Option<String>,
     /// True when this pane was adopted at a fresh id because the pane key its
     /// keeper socket carries could not be reused (zero, or already live). Set
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
@@ -1786,6 +1807,11 @@ pub(crate) struct Core {
     /// bulk apply, which keeps its sync declared-form render), consumed
     /// exactly once by the receiving arm. Empty in steady state.
     staged_resume_argv: Option<Vec<String>>,
+    /// The staged revival-gate admission for the worker whose `spawn-gate`
+    /// ask just admitted: `(name, staged_at)`, consumed exactly once by
+    /// [`Core::resume_worker_into`] and stale after 120s. Empty in steady
+    /// state.
+    revival_admission: Option<(String, std::time::Instant)>,
     /// A batch's pre-resolved attach plans, keyed by attach id:
     /// staged by the `BatchPlansReady` handler, drained per member by the
     /// consuming loop (restore or a picker recruit). Empty outside a batch
@@ -2336,20 +2362,6 @@ fn sanitize_mail_text(text: &str) -> Result<String, String> {
     Ok(clean.to_string())
 }
 
-/// Whether `s` is a lowercase 8-4-4-4-12 hex uuid (the respawn shape
-/// gate, the AttachAgent jobId precedent): a malformed value never reaches
-/// `spawn --resume`'s argv.
-fn valid_session_uuid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-}
-
 /// First non-empty line of `s` with control chars stripped, else
 /// `fallback`. Subprocess stdout/stderr becomes an operator-visible notice, so
 /// raw ANSI/C0 must never reach the status line (Domain Pitfall: route stderr
@@ -2387,65 +2399,6 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
         Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),
         Err(_) => format!("{label} {node}: unavailable"),
-    }
-}
-
-/// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-/// off-loop for the peek `r` respawn: a longer 60s bound (a bg spawn creates a
-/// thread; 20s is too tight). Success -> `respawned <name>`; failure -> the
-/// first stderr line. The 1s registry poll owns the row flipping live; this
-/// notice is advisory. Uses the `fno` porcelain, NOT `fno-agents`: the Rust
-/// runtime intercepts `agents spawn` and routes it (unlike stop/rm, which use
-/// the `fno-agents` binary deliberately).
-///
-/// `cwd` + `account` come from the registry row, NOT the `--resume` uuid:
-/// `fno agents spawn` defaults `--cwd` to the CANONICAL checkout, so a
-/// worker revived from a feature worktree would land in main without `--cwd`;
-/// an isolated-account session's uuid lives in that account's config dir, so it
-/// needs `--account` to be found. Both are omitted when empty/absent (the
-/// pre-existing default, correct for a canonical/default-account worker).
-async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
-    const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
-    // Pin `--harness claude`: respawn is definitionally a claude revival (the
-    // uuid is carried only for claude rows), but `fno agents spawn` otherwise
-    // infers the harness from the invoking one, so a mux server running under a
-    // non-claude context would infer the wrong harness and fail the claude-only
-    // `--resume` guard. The name rides `--name`: the single positional is the
-    // prompt now, and a revival seeds none.
-    let mut args: Vec<&str> = vec![
-        "agents",
-        "spawn",
-        "--name",
-        name,
-        "--harness",
-        "claude",
-        "--resume",
-        uuid,
-        "--substrate",
-        "bg",
-    ];
-    if !cwd.is_empty() {
-        args.push("--cwd");
-        args.push(cwd);
-    }
-    if let Some(acct) = account.filter(|a| !a.is_empty()) {
-        args.push("--account");
-        args.push(acct);
-    }
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
-        Err(_) => format!("respawn {name}: timed out"),
-        Ok(Err(_)) => format!("respawn {name}: unavailable"),
-        Ok(Ok(o)) if o.status.success() => format!("respawned {name}"),
-        Ok(Ok(o)) => first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("respawn {name}: failed"),
-        ),
     }
 }
 
@@ -2725,6 +2678,7 @@ impl Core {
             None,
             None,
             None,
+            None,
         )?;
         Ok(id)
     }
@@ -2860,6 +2814,7 @@ impl Core {
             account,
             resume_target,
             refused_worker_from_argv(argv),
+            portal_hold_from_argv(argv),
         )?;
         if let Some(keeper_err) = fell_back {
             if let Some(entry) = self.panes.get_mut(&id) {
@@ -2954,6 +2909,7 @@ impl Core {
         account: Option<String>,
         resume_target: Option<String>,
         refused_worker: Option<String>,
+        portal_hold: Option<String>,
     ) -> Result<(), String> {
         let Some(child_pid) = pty.child_pid() else {
             pty.kill();
@@ -2984,6 +2940,7 @@ impl Core {
                 account,
                 resume_target,
                 refused_worker,
+                portal_hold,
                 unreconciled: false,
                 unkept: false,
                 last_output: Instant::now(),
@@ -3025,7 +2982,7 @@ impl Core {
                 self.reconcile_worker_member_close(&worker, true);
             }
             self.reconcile_member_close(ctx, true);
-            if self.close_pane_reasoned(pid, "child exited") == Flow::Shutdown {
+            if self.close_viewer_died(pid, "child exited") == Flow::Shutdown {
                 return Flow::Shutdown;
             }
         }
@@ -3109,7 +3066,11 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
-                    pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
+                    // A portal seat never reads pristine: the seat is
+                    // load-bearing, so no cleanup caller may close it.
+                    pristine_idle_shell: entry.cmd.is_none()
+                        && entry.vt.is_pristine_idle_shell()
+                        && self.portal_of(Some(pid)).is_none(),
                     // (v65) The spent-shell reading: shell integration
                     // measured, nothing running now. `cmd.is_none()` keeps an
                     // agent or `pane run` pane out of the category even when
@@ -3131,6 +3092,9 @@ impl Core {
                         .unwrap_or_default(),
                     forked_from_session_id: joined_row
                         .and_then(|a| a.forked_from_session_id.clone()),
+                    // (v90) The seat's portal index, under the same one-row
+                    // rule the sideline marker wears.
+                    portal: self.portal_marker(Some(pid)),
                 }
             })
             .collect();
@@ -5639,11 +5603,11 @@ impl Core {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
         };
+        // Screen text only: the line is fed to the seat's VT and never
+        // typed as shell input - a typed printf echoed and executed on the
+        // placeholder, so the operator read the same message three times.
         let line = format!("{message}\r\n");
         entry.vt.feed(line.as_bytes());
-        let quoted = message.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s\\n' '{quoted}'\r");
-        let _ = entry.pty.write_input(command.as_bytes());
     }
 
     fn hold_worker_pane(
@@ -5661,24 +5625,13 @@ impl Core {
         // worker spawn path uses): every pane is keeper-hosted, so the
         // placeholder outlives this server, and the next one re-derives whose
         // seat it holds from the argv instead of minting a twin beside it.
-        let candidates: Vec<String> = self
-            .shells
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        let mut spawned = Err("no shell candidate for held placeholder".to_string());
-        for shell in &candidates {
-            let argv = vec![
-                "env".to_string(),
-                format!("FNO_AGENT_SELF={}", facts.name),
-                shell.clone(),
-            ];
-            spawned = self.spawn_pane_cmd(&argv, rows, cols, &cwd);
-            if spawned.is_ok() {
-                break;
-            }
-        }
-        let pid = spawned?;
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_AGENT_SELF={}", facts.name),
+            rows,
+            cols,
+            &cwd,
+            "held placeholder",
+        )?;
         self.write_restore_message(
             pid,
             &format!(
@@ -5705,24 +5658,13 @@ impl Core {
         // argv cannot. Each shell candidate takes its turn, so a broken
         // $SHELL falls through to /bin/sh the way the plain shell spawn
         // always did; the title carries the human-readable half.
-        let candidates: Vec<String> = self
-            .shells
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        let mut spawned = Err("no shell candidate for refused placeholder".to_string());
-        for shell in &candidates {
-            let argv = vec![
-                "env".to_string(),
-                format!("FNO_REFUSED_WORKER={name}"),
-                shell.clone(),
-            ];
-            spawned = self.spawn_pane_cmd(&argv, rows, cols, cwd);
-            if spawned.is_ok() {
-                break;
-            }
-        }
-        let pid = spawned?;
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_REFUSED_WORKER={name}"),
+            rows,
+            cols,
+            cwd,
+            "refused placeholder",
+        )?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
             entry.refused_worker = Some(name.to_string());
@@ -5900,6 +5842,21 @@ impl Core {
         if dry_run {
             return ResumeOutcome::Planned;
         }
+        // The revival gate asks BEFORE the claude plan or the codex argv
+        // resolution: a refusal starts neither hop. The bulk restore
+        // caller carries its own admission staging, so it skips this ask.
+        if client_id != portal_reach::RESTORE_CLIENT {
+            let replay_name = row_name.clone().unwrap_or_else(|| facts.name.clone());
+            match self.revival_admitted(
+                client_id,
+                &facts,
+                ResumeReplay::Gesture { name: replay_name },
+            ) {
+                None => return ResumeOutcome::PlanPending,
+                Some(Err(reason)) => return ResumeOutcome::Refused { reason },
+                Some(Ok(())) => {}
+            }
+        }
         let sid = self
             .squad_members
             .iter()
@@ -6006,249 +5963,6 @@ impl Core {
             .collect()
     }
 
-    /// `fno mux workspace restore`, phase 1: split the run. A dry
-    /// run never resolves plans (it reports classifications and spawns
-    /// nothing), and a run with no claude members needs none, so both apply
-    /// inline. Otherwise the claude members' re-entry plans resolve OFF the
-    /// core loop (the BatchPlansReady shape) and the apply half re-enters
-    /// with the verdicts in hand - no bare claude resume on this axis, and
-    /// no per-member resolver wait landing on the loop.
-    fn workspace_restore_start(
-        &mut self,
-        dry_run: bool,
-        harness: Option<String>,
-        reply: ControlReply,
-    ) {
-        // The off-loop registry reader ticks independently and may never have
-        // run in a session nobody has watched (a headless reboot-restore).
-        // This verb's classification IS a registry read, so it reads the file
-        // itself rather than refuse members whose rows exist on disk.
-        if let Some(rows) = restore_registry_rows() {
-            self.agents = rows;
-        }
-        if dry_run {
-            self.workspace_restore_apply(true, harness, HashMap::new(), reply);
-            return;
-        }
-        let claude_names: Vec<String> = self
-            .restore_candidates(harness.as_deref())
-            .into_iter()
-            .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
-            .map(|(name, _)| name)
-            .collect();
-        let portal_names = portal_reach::portals_needing_claude_plan(self);
-        if claude_names.is_empty() && portal_names.is_empty() {
-            self.workspace_restore_apply(false, harness, HashMap::new(), reply);
-            return;
-        }
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let plans = agent_actions::resolve_restore_plans(claude_names, portal_names).await;
-            let _ = core_tx
-                .send(CoreMsg::WorkspaceRestoreApply {
-                    dry_run,
-                    harness,
-                    plans,
-                    reply,
-                })
-                .await;
-        });
-    }
-
-    /// `fno mux workspace restore`, phase 2: walk every candidate
-    /// through [`Core::resume_one`] and report one row per member. A claude
-    /// member whose plan refused (or never resolved) refuses with the
-    /// resolver's own reason - never a bare claude resume - and
-    /// `reentry_verdict` is cleared around every attempt so one member's
-    /// verdict can never leak into the next one's argv.
-    fn workspace_restore_apply(
-        &mut self,
-        dry_run: bool,
-        harness: Option<String>,
-        mut plans: HashMap<String, Result<ReentryVerdict, String>>,
-        reply: ControlReply,
-    ) {
-        use self::portal_reach::RESTORE_CLIENT;
-        let candidates = self.restore_candidates(harness.as_deref());
-        // A worker NAME the store holds more than once (distinct sessions,
-        // one display name - a supported state) refuses up front instead of
-        // reaching resume_one: the second twin would find the first one's
-        // pane through the name-only map and report "focused" while its own
-        // session was never restored.
-        let mut name_counts: HashMap<String, usize> = HashMap::new();
-        for (name, _) in &candidates {
-            *name_counts.entry(name.clone()).or_default() += 1;
-        }
-        let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
-        // A reap receipt is the session's death record: a member it preserves
-        // must not read as a live restore candidate, or restore resurrects a
-        // session the fleet deliberately retired.
-        let retired = crate::restore_gate::retired_receipt_session_ids().unwrap_or_default();
-        let mut rows = Vec::with_capacity(candidates.len());
-        for (name, member) in candidates {
-            if let Some(reason) =
-                crate::restore_gate::retired_refusal(member.harness_session_id.as_deref(), &retired)
-            {
-                rows.push(restore_route_gate::refused_row(
-                    name,
-                    member.harness.clone(),
-                    reason,
-                ));
-                continue;
-            }
-            if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
-                rows.push(restore_route_gate::refused_row(
-                    name,
-                    member.harness.clone(),
-                    "member name is ambiguous in the store; resume by exact session id".into(),
-                ));
-                continue;
-            }
-            let harness_name = member.harness.clone();
-            // a routed codex member refuses before any staging. A pane
-            // spawn's only env channel is an argv prefix (visible in ps), so it
-            // cannot carry the route's key; `fno agents resume` is the door
-            // that restores the route, and the member is marked refused here.
-            if harness_name.as_deref() == Some("codex") {
-                let row = self.agents.iter().find(|a| {
-                    agent_harness_session_id(a)
-                        == member
-                            .harness_session_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                });
-                if let Some(reason) =
-                    row.and_then(|row| restore_route_gate::member_routed_codex_refusal(row, &name))
-                {
-                    rows.push(restore_route_gate::refused_row(name, harness_name, reason));
-                    continue;
-                }
-            }
-            // A claude member without a resolvable plan refuses here instead
-            // of firing a stray off-loop resolution from the bulk path; the
-            // single gesture keeps its own replay behavior.
-            if !dry_run && harness_name.as_deref() == Some("claude") {
-                match plans.get(&name) {
-                    Some(Ok(_)) => {
-                        self.reentry_verdict = plans.remove(&name).and_then(|r| r.ok());
-                    }
-                    Some(Err(reason)) => {
-                        rows.push(restore_route_gate::refused_row(
-                            name,
-                            harness_name,
-                            reason.clone(),
-                        ));
-                        continue;
-                    }
-                    None => {
-                        rows.push(restore_route_gate::refused_row(
-                            name,
-                            harness_name,
-                            "claude re-entry plan unresolved; resume it from the agent panel"
-                                .into(),
-                        ));
-                        continue;
-                    }
-                }
-            }
-            let structural = member_structural_refusal(&member);
-            // Pre-stage the sync render so the non-claude arm never
-            // fires the off-loop resolution per bulk member: bulk restore
-            // stays byte-identical to before.
-            if harness_name.as_deref().is_some_and(|h| h != "claude") {
-                self.staged_resume_argv = resume_argv_for(
-                    harness_name.as_deref().unwrap_or(""),
-                    member.harness_session_id.as_deref().unwrap_or(""),
-                )
-                .ok();
-            }
-            let outcome =
-                self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
-            self.staged_resume_argv = None;
-            self.reentry_verdict = None;
-            let row = match outcome {
-                ResumeOutcome::Resumed {
-                    pane,
-                    squad,
-                    tab,
-                    notice,
-                } => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad,
-                    portal: None,
-                    outcome: "resumed".into(),
-                    pane: Some(pane),
-                    tab: Some(tab),
-                    reason: None,
-                    notice,
-                },
-                ResumeOutcome::Focused { pane, squad, tab } => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad,
-                    portal: None,
-                    outcome: "focused".into(),
-                    pane: Some(pane),
-                    tab: Some(tab),
-                    reason: None,
-                    notice: None,
-                },
-                ResumeOutcome::Refused { reason } => {
-                    // The member's own structural gap outranks the generic
-                    // gesture notice in the REPORT: a no-form harness or a
-                    // missing session id is the specific reason AC5-ERR
-                    // demands. The gates themselves already ran.
-                    restore_route_gate::refused_row(
-                        name,
-                        harness_name,
-                        structural.unwrap_or(reason),
-                    )
-                }
-                ResumeOutcome::PlanPending => restore_route_gate::refused_row(
-                    name,
-                    harness_name,
-                    "claude re-entry plan unresolved; resume it from the agent panel".into(),
-                ),
-                ResumeOutcome::Planned => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad: 0,
-                    portal: None,
-                    outcome: "planned".into(),
-                    pane: None,
-                    tab: None,
-                    reason: None,
-                    notice: None,
-                },
-            };
-            rows.push(row);
-        }
-        rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
-        let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
-        if resumed > 0 {
-            self.push_layout(true);
-        }
-        if !dry_run {
-            // Every refusal reaches the attached clients by name (AC5-ERR),
-            // and a zero-inclusive summary answers "did restore do anything"
-            // without reading a pane count.
-            for row in rows.iter().filter(|r| r.outcome == "refused") {
-                self.notice_all(format!(
-                    "workspace restore: {} could not be resumed: {}",
-                    row.member,
-                    row.reason.as_deref().unwrap_or("no reason given"),
-                ));
-            }
-            let focused = rows.iter().filter(|r| r.outcome == "focused").count();
-            let refused = rows.iter().filter(|r| r.outcome == "refused").count();
-            self.notice_all(format!(
-                "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
-            ));
-        }
-        let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
-    }
-
     /// The directory a resumed member spawns at, and the missing
     /// recorded directory when it is gone. Extracted from
     /// [`Core::resume_worker_into`] so the off-loop argv resolution grants
@@ -6278,6 +5992,9 @@ impl Core {
         plan: Option<&ReentryVerdict>,
         staged_argv: Option<&[String]>,
     ) -> Result<(u64, TabId, Option<String>), String> {
+        // Fail closed: the one spawn site spawns only behind a staged
+        // revival admission, so a future caller cannot skip the gate.
+        self.take_revival_admission(&facts.name)?;
         if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
         }
@@ -8477,21 +8194,12 @@ impl Core {
         });
     }
 
-    /// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-    /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
-    /// notice; the 1s registry poll owns the row flipping live. `uuid` was
-    /// shape-validated by the caller.
-    fn respawn_agent(
-        &self,
-        id: u64,
-        name: String,
-        uuid: String,
-        cwd: String,
-        account: Option<String>,
-    ) {
+    /// Shell `fno agents resume <name>` off-loop; the door owns harness routing
+    /// and race-time refusals, and its verdict returns as the visible notice.
+    fn resume_agent(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_respawn(&name, &uuid, &cwd, account.as_deref()).await;
+            let notice = agent_actions::run_resume(&name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -10312,19 +10020,9 @@ impl Core {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
-                let pid = tab.focus;
-                // Capture membership BEFORE the reap clears it, reconcile AFTER
-                // the close settles (so squad-survival is known) - user close
-                // de-recruits (AC3-EDGE).
-                let ctx = self.member_ctx(pid);
-                let worker_ctx = self.worker_member_context(pid);
-                let flow = self.close_pane_reasoned(pid, "closed by operator");
-                self.reconcile_member_close(ctx, false);
-                if let Some(worker_ctx) = worker_ctx {
-                    self.reconcile_worker_member_close(&worker_ctx, false);
-                }
-                flow
+                self.close_by_operator(tab.focus)
             }
+            Command::ClosePortal { seat } => self.close_portal(client_id, seat),
             Command::DetachPane { pane } => {
                 match self.detach_worker_pane(pane) {
                     Ok(()) => self.push_layout(true),
@@ -10601,6 +10299,22 @@ impl Core {
                             .find(|client| client.id == client_id)
                             .map(|client| client.dims)
                             .unwrap_or((vp.rows, vp.cols));
+                        // The revival gate asks before any plan or argv
+                        // resolution. A refusal keeps the held pane held
+                        // (a retry after a worker finishes is one click)
+                        // and names the gate's verdict on the seat itself.
+                        match self.revival_admitted(client_id, &facts, ResumeReplay::Held { pid }) {
+                            None => return Flow::Continue,
+                            Some(Err(reason)) => {
+                                self.write_restore_message(
+                                    pid,
+                                    &format!("{} was not resumed: {reason}", facts.name),
+                                );
+                                self.notice(client_id, format!("resume refused: {reason}"));
+                                return Flow::Continue;
+                            }
+                            Some(Ok(())) => {}
+                        }
                         // A claude row's held resume runs the
                         // canonical re-entry plan; the `None` arm fires the
                         // off-loop resolution and this focus replays with the
@@ -11801,43 +11515,11 @@ impl Core {
                 Flow::Continue
             }
             Command::RespawnAgent { name } => {
-                // Respawn an exited claude bg row from peek (`r`). Copy
-                // the two fields out via `.map` so the row borrow is dropped
-                // before the arm bodies touch `&mut self`. Refuse a still-live
-                // row, a uuid-less row (also covers non-claude - derive_rows only
-                // carries the uuid for claude), and a malformed uuid (shape gate
-                // before argv); else shell `fno agents spawn --resume` off-loop.
-                // Carry the row's cwd + account too: `fno agents spawn` defaults
-                // to the CANONICAL checkout, NOT the row's worktree, so a
-                // cross-worktree revival must pass `--cwd <recorded>` or it comes
-                // back in main; an isolated-account session needs `--account`
-                // (its uuid lives in that account's config dir). The row is the
-                // only source of these - they are not on the `--resume` uuid.
-                let resolved = self.resolve_lifecycle_target(&name, None).map(|a| {
-                    (
-                        a.exited,
-                        a.claude_session_uuid.clone(),
-                        a.cwd.clone(),
-                        a.account.clone(),
-                    )
-                });
-                match resolved {
+                // Keep the target check fail-closed, then let the shared resume
+                // door own its route and any row-state race.
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok((false, ..)) => self.notice(client_id, format!("{name} is still live")),
-                    Ok((true, None, ..)) => self.notice(
-                        client_id,
-                        format!("{name}: no claude session recorded - cannot respawn"),
-                    ),
-                    Ok((true, Some(uuid), cwd, account)) => {
-                        if valid_session_uuid(&uuid) {
-                            self.respawn_agent(client_id, name, uuid, cwd, account);
-                        } else {
-                            self.notice(
-                                client_id,
-                                format!("{name}: malformed session id - cannot respawn"),
-                            );
-                        }
-                    }
+                    Ok(_) => self.resume_agent(client_id, name),
                 }
                 Flow::Continue
             }
@@ -12182,6 +11864,15 @@ impl Core {
             // against live state before the pane spawns. The degradation
             // notice fires even when the replay later refuses: the operator
             // asked for a resume and deserves the grant-loss news regardless.
+            CoreMsg::RevivalGateAnswered {
+                id,
+                name,
+                verdict,
+                replay,
+            } => {
+                self.on_revival_gate_answered(id, name, verdict, replay);
+                Flow::Continue
+            }
             CoreMsg::ResumeArgvReady { id, argv, replay } => {
                 let parked = self.pending_thread_reply.take().and_then(|p| {
                     if p.client == id {
@@ -12341,9 +12032,10 @@ impl Core {
                 dry_run,
                 harness,
                 plans,
+                headroom,
                 reply,
             } => {
-                self.workspace_restore_apply(dry_run, harness, plans, reply);
+                self.workspace_restore_apply(dry_run, harness, plans, headroom, reply);
                 Flow::Continue
             }
             CoreMsg::SquadReload { reply } => {
@@ -13292,6 +12984,7 @@ async fn serve(
         last_topology_flush: None,
         reentry_verdict: None,
         staged_resume_argv: None,
+        revival_admission: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
@@ -13702,7 +13395,7 @@ async fn serve(
                 // BEFORE the reap clears the mapping (AC4-EDGE).
                 let ctx = core.member_ctx(pid);
                 core.reconcile_member_close(ctx, true);
-                if core.close_pane(pid) == Flow::Shutdown {
+                if core.close_viewer_died(pid, "viewer exited") == Flow::Shutdown {
                     e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
                 }

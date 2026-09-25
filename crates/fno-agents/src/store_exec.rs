@@ -6,7 +6,8 @@
 //! build this argv; humans never type it.
 
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::graph_keeper::{err_reply, handle_request, StoreState, MAX_FRAME_BYTES};
@@ -73,7 +74,6 @@ pub(crate) fn fresh_store_state(
         cache: std::sync::RwLock::new(None),
         fill: std::sync::Mutex::new(()),
         file_opens: std::sync::atomic::AtomicU64::new(0),
-        snapshots: std::sync::Mutex::new(std::collections::VecDeque::new()),
         write_ledger: std::sync::Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: std::sync::Mutex::new(crate::graph_keeper::GateMetrics::new()),
         last_write: std::sync::Mutex::new(None),
@@ -164,6 +164,9 @@ fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
             format!("request of {} bytes exceeds the cap", payload.len()),
         );
     }
+    if let Some(reply) = fno_home_write_fence(payload, &cfg.graph) {
+        return reply;
+    }
     let state = fresh_store_state(
         cfg.graph.clone(),
         cfg.canonical,
@@ -173,6 +176,75 @@ fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
         None,
     );
     handle_request(&state, payload)
+}
+
+/// The FNO_HOME write fence. FNO_HOME relocates fno's sidecars; it never
+/// moves the backlog (config `state_dir` does), so a write aimed at the
+/// HOME-default store while FNO_HOME points elsewhere is the sandbox leak
+/// this lane refuses. Reads stay allowed, a graph inside FNO_HOME is
+/// unambiguous sandbox intent, and explicit graph paths (repo tests,
+/// FNO_CONFIG state_dir targets) are deliberate and never refused. A payload
+/// that does not parse returns None here and falls through to
+/// `handle_request`, which answers `malformed_frame`.
+fn fno_home_write_fence(payload: &[u8], graph: &Path) -> Option<Value> {
+    let req: Value = serde_json::from_slice(payload).ok()?;
+    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    if !crate::graph_keeper::is_write_method(method) {
+        return None;
+    }
+    let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
+    fno_home_escape(graph, std::env::var_os("FNO_HOME"))
+        .map(|message| err_reply(id, "invalid", message))
+}
+
+/// True when `dir` is `root` or beneath it, in raw or canonical form on both
+/// sides (macOS /var vs /private/tmp), the compare `fence_declared_root` uses.
+fn under_root(dir: &Path, root: &Path) -> bool {
+    let dir_forms = [
+        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()),
+        dir.to_path_buf(),
+    ];
+    let root_forms = [
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        root.to_path_buf(),
+    ];
+    dir_forms
+        .iter()
+        .any(|d| root_forms.iter().any(|r| d.starts_with(r)))
+}
+
+/// The escape verdict: Some carries the one-line refusal naming FNO_CONFIG as
+/// the sandbox lever. None means no fence fires: FNO_HOME unset or empty, the
+/// graph's parent under FNO_HOME, HOME absent, or the graph anywhere but the
+/// HOME-default store.
+fn fno_home_escape(graph: &Path, fno_home: Option<OsString>) -> Option<String> {
+    let home = fno_home?;
+    if home.is_empty() {
+        return None;
+    }
+    let parent = graph.parent()?;
+    if under_root(parent, &PathBuf::from(&home)) {
+        return None;
+    }
+    let user_home = std::env::var_os("HOME")?;
+    if user_home.is_empty() {
+        return None;
+    }
+    // The default store root a config-less process resolves (paths.py's
+    // state_dir fallback); the leak lands exactly here.
+    let default_root = PathBuf::from(&user_home).join(".fno");
+    if !under_root(parent, &default_root) {
+        return None;
+    }
+    Some(format!(
+        "refused a graph write: FNO_HOME={} is set, but this write targets the default \
+         store at {}, outside it. FNO_HOME does not move the backlog; config state_dir \
+         does. To sandbox the backlog, set FNO_CONFIG to a config.toml that holds \
+         state_dir = \"<dir>\" (docs/path-config.md, \"Sandbox a shell reproduction\"). \
+         To write the live graph, unset FNO_HOME.",
+        home.to_string_lossy(),
+        graph.display()
+    ))
 }
 
 /// `--store-exec` lifecycle: read ONE request JSON (the same

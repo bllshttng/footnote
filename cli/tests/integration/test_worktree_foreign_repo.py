@@ -1,4 +1,4 @@
-"""Integration tests for fno worktree status/cleanup/archive in a foreign repo (x-05d7).
+"""Integration tests for fno agents workspace worktree status/cleanup/archive in a foreign repo (x-05d7).
 
 Asserts that all three verbs resolve scripts/lib/worktree-lifecycle.sh from the
 plugin root (CLAUDE_PLUGIN_ROOT, CODEX_PLUGIN_ROOT, ~/.fno/plugin-root, package root)
@@ -45,7 +45,7 @@ def test_worktree_status_in_foreign_repo(foreign_git_repo: Path, plugin_root: Pa
     monkeypatch.chdir(foreign_git_repo)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
-    result = runner.invoke(app, ["worktree", "status", "--json"])
+    result = runner.invoke(app, ["agents", "workspace", "worktree", "status", "--json"])
     assert result.exit_code == 0, f"Expected 0, got {result.exit_code}: {result.output}"
     captured = capfd.readouterr()
     stdout = captured.out or result.output
@@ -60,7 +60,7 @@ def test_worktree_cleanup_in_foreign_repo(foreign_git_repo: Path, plugin_root: P
     monkeypatch.chdir(foreign_git_repo)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
-    result = runner.invoke(app, ["worktree", "cleanup", "--dry-run"])
+    result = runner.invoke(app, ["agents", "workspace", "worktree", "cleanup", "--dry-run"])
     assert result.exit_code == 0, f"Expected 0, got {result.exit_code}: {result.output}"
     captured = capfd.readouterr()
     assert "worktree-lifecycle script not found" not in (captured.err + captured.out + result.output)
@@ -126,7 +126,7 @@ def test_worktree_archive_in_foreign_repo(
     ).stdout.strip()
     assert wt_dir.exists()
 
-    result = runner.invoke(app, ["worktree", "archive", "test-archive"])
+    result = runner.invoke(app, ["agents", "workspace", "worktree", "archive", "test-archive"])
     captured = capfd.readouterr()
     diag = captured.err + captured.out + result.output
     assert result.exit_code == 2, diag
@@ -142,7 +142,7 @@ def test_worktree_verbs_resolve_via_codex_plugin_root(foreign_git_repo: Path, pl
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.setenv("CODEX_PLUGIN_ROOT", str(plugin_root))
 
-    result = runner.invoke(app, ["worktree", "status", "--json"])
+    result = runner.invoke(app, ["agents", "workspace", "worktree", "status", "--json"])
     assert result.exit_code == 0, f"Expected 0, got {result.exit_code}: {result.output}"
     captured = capfd.readouterr()
     stdout = captured.out or result.output
@@ -162,7 +162,7 @@ def test_worktree_verbs_resolve_via_persisted_pointer(foreign_git_repo: Path, pl
     (fno_home / "plugin-root").write_text(str(plugin_root) + "\n", encoding="utf-8")
     monkeypatch.setenv("FNO_HOME", str(fno_home))
 
-    result = runner.invoke(app, ["worktree", "status", "--json"])
+    result = runner.invoke(app, ["agents", "workspace", "worktree", "status", "--json"])
     assert result.exit_code == 0, f"Expected 0, got {result.exit_code}: {result.output}"
     captured = capfd.readouterr()
     stdout = captured.out or result.output

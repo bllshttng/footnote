@@ -289,6 +289,13 @@ fn daemon_env_bin(
         "export FNO_AGENTS_WORKER_BIN={}\n",
         shell_quote(WORKER_BIN),
     ));
+    // Every successor forked through this wrapper inherits the test binary as
+    // its owner, so the daemon's watchdog reaps it when the test dies - even
+    // under a bare `cargo test`, which sets no owner env of its own. Emitted
+    // before `extra` so a caller's explicit owner still wins.
+    for (key, value) in fno_agents::test_run::self_owner_env() {
+        script.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+    }
     for (key, value) in extra {
         script.push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
@@ -1658,6 +1665,90 @@ async fn restart_when_down_starts_fresh() {
         libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
     }
     std::thread::sleep(Duration::from_millis(200));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn the_default_wrapper_exports_the_test_binary_owner() {
+    // The default (no-extra) wrapper must arm every successor on the test
+    // binary itself: that is the one owner a bare `cargo test` provides, and
+    // the watchdog is what reaps the successor when the test binary dies. The
+    // behavioral counterpart is a_restart_successor_dies_with_its_test_owner,
+    // which hands an explicit owner through `extra`.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let bin = daemon_env_bin(&home, "default-owner", None, &[]);
+    let script = std::fs::read_to_string(&bin).expect("read the wrapper script");
+    let want_pid = std::process::id().to_string();
+    assert!(
+        script.contains(&format!(
+            "export FNO_TEST_OWNER_PID={}",
+            shell_quote(&want_pid)
+        )),
+        "the wrapper must arm successors on the test binary as owner:\n{script}"
+    );
+    assert!(
+        script.contains("export FNO_TEST_OWNER_BIRTH="),
+        "the wrapper must export the owner birth:\n{script}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn a_restart_successor_dies_with_its_test_owner() {
+    // The wrapper exports the owner it is handed, the daemon arms its watchdog
+    // on it, and killing the owner brings the successor down - the path that
+    // used to orphan a daemon for hours when a bare `cargo test` died mid-test.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let mut owner = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn owner process");
+    let owner_pid = owner.id();
+    let owner_birth = fno_agents::daemon::process_start_time(owner_pid)
+        .expect("a just-spawned owner must have a readable birth time");
+    let daemon_bin = daemon_env_bin(
+        &home,
+        "owner-bound",
+        None,
+        &[
+            ("FNO_TEST_OWNER_PID", &owner_pid.to_string()),
+            ("FNO_TEST_OWNER_BIRTH", &owner_birth.to_string()),
+        ],
+    );
+
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, false)
+        .await
+        .expect("restart-when-down succeeds");
+    assert!(pid_alive(outcome.new_pid), "successor is alive");
+
+    // Kill the owner for real: the positive control this test proves against.
+    let _ = owner.kill();
+    let _ = owner.wait();
+
+    let mut reaped = false;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let mut status: libc::c_int = 0;
+        let settled =
+            unsafe { libc::waitpid(outcome.new_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if settled != 0 {
+            // A pid return means we reaped it; -1/ECHILD means tokio's
+            // process driver did. Both read "the successor exited".
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !reaped {
+        terminate_untracked(outcome.new_pid);
+    }
+    assert!(
+        reaped,
+        "successor {} outlived its killed owner",
+        outcome.new_pid
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 

@@ -178,14 +178,21 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         // Retry briefly: a fresh child can sit in an exec window where procfs
-        // reads empty, and a busy runner stretches it.
+        // reads empty, and a busy runner stretches it. A loaded runner can
+        // also surface the FORK's image in the child slot: the first readable
+        // argv may still be the parent's, so a read is accepted only when
+        // argv[0] ends with `sleep`; anything else is recorded as `why` and
+        // the poll continues.
         let mut read = None;
         let mut why = String::new();
-        for _ in 0..20 {
+        for _ in 0..60 {
             match process_argv(child.id()) {
-                Some(argv) => {
+                Some(argv) if argv.first().is_some_and(|t| t.ends_with("sleep")) => {
                     read = Some(argv);
                     break;
+                }
+                Some(argv) => {
+                    why = format!("still the parent image: {argv:?}");
                 }
                 None => {
                     // Name the platform fact instead of guessing: is the
@@ -205,8 +212,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let still_running = child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+        #[cfg(target_os = "linux")]
+        let procfs_pid_mismatch = still_running
+            && read.as_ref().is_some_and(|child_argv| {
+                process_argv(std::process::id())
+                    .as_ref()
+                    .is_some_and(|own_argv| own_argv == child_argv)
+            });
+        #[cfg(not(target_os = "linux"))]
+        let procfs_pid_mismatch = false;
         child.kill().ok();
         child.wait().ok();
+        if procfs_pid_mismatch {
+            eprintln!(
+                "skipping child-probe leg: /proc/{} resolves to the caller's argv while the spawned sleep child is live; pid namespaces do not match",
+                child.id()
+            );
+            return;
+        }
         let Some(read) = read else {
             let hidden = why.contains("alive but /proc entry hidden") && still_running;
             // A hardened platform may hide other pids' procfs entries
@@ -218,7 +241,7 @@ mod tests {
                 eprintln!("skipping child-probe leg: {why}; the platform hides cross-pid procfs");
                 return;
             }
-            panic!("child argv unreadable after 1s ({why})");
+            panic!("child argv unreadable after 3s ({why})");
         };
         assert!(
             read.first().is_some_and(|t| t.ends_with("sleep")) && read.contains(&"37".to_string()),

@@ -130,6 +130,13 @@ pub fn read_all_agents() -> ClaudeAgentsSnapshot {
     read_all_agents_with(run_all_agents_command)
 }
 
+/// Read `claude agents --json --all` under one account root. `None` preserves
+/// the ambient `CLAUDE_CONFIG_DIR`; a plan's explicit root pins both the
+/// roster and the daemon paths used by live resume.
+pub fn read_all_agents_in(config_dir: Option<&Path>) -> ClaudeAgentsSnapshot {
+    read_all_agents_with(|| run_all_agents_command_in(config_dir))
+}
+
 fn read_all_agents_with(
     run: impl FnOnce() -> Result<ClaudeCommandOutput, String>,
 ) -> ClaudeAgentsSnapshot {
@@ -335,10 +342,12 @@ fn run_all_agents_command_in(
 /// from the accounts config the same way the mux's `agents_view` reads them
 /// (the crates share no types; the FILE is the contract). Managed accounts
 /// carry no `config_dir` and contribute nothing, so an all-managed config
-/// degrades to the single ambient read. Source precedence: project-local
-/// `.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling, then
-/// `~/.fno/config.toml`. Fail-open to empty: an unreadable config means no
-/// known isolated roots, and the union degrades to the ambient read.
+/// degrades to the single ambient read. Every source is read and the results
+/// merge first-wins per id (project-local `.fno/config.toml`, then the
+/// `$FNO_GLOBAL_SETTINGS_PATH` sibling, then `~/.fno/config.toml`), so one
+/// source's record never hides another source's account. Fail-open to empty:
+/// an unreadable config means no known isolated roots, and the union
+/// degrades to the ambient read.
 pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
     let mut sources: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -356,16 +365,19 @@ pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
                 .join("config.toml"),
         );
     }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
     for path in sources {
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let parsed = parse_isolated_config_dirs(&body, std::env::var_os("HOME").as_deref());
-        if !parsed.is_empty() {
-            return parsed;
+        for (id, dir) in parse_isolated_config_dirs(&body, std::env::var_os("HOME").as_deref()) {
+            if seen.insert(id.clone()) {
+                out.push((id, dir));
+            }
         }
     }
-    Vec::new()
+    out
 }
 
 /// The config dir a removal must address for this row, `None` meaning the
@@ -526,8 +538,18 @@ pub fn config_dir() -> PathBuf {
 /// Resolve the Claude daemon directory (`<home>/.claude/daemon`). Honors
 /// [`DAEMON_DIR_ENV`] first so tests and alt-home setups redirect the whole tree.
 pub fn daemon_dir() -> PathBuf {
+    daemon_dir_in(None)
+}
+
+/// Resolve the Claude daemon directory for an explicit account root. The
+/// operator override remains highest priority so tests and alt-home setups
+/// can redirect the complete daemon tree.
+pub fn daemon_dir_in(config_dir: Option<&Path>) -> PathBuf {
     if let Some(v) = std::env::var_os(DAEMON_DIR_ENV) {
         return PathBuf::from(v);
+    }
+    if let Some(config_dir) = config_dir {
+        return config_dir.join("daemon");
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -552,7 +574,11 @@ pub fn control_key_path() -> PathBuf {
 /// client, allowed via peerUid"), so the caller treats this as optional, never an
 /// error. [corroborated]
 pub fn read_control_key() -> Option<String> {
-    let raw = std::fs::read_to_string(control_key_path()).ok()?;
+    read_control_key_in(&daemon_dir())
+}
+
+pub(crate) fn read_control_key_in(daemon_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(daemon_dir.join("control.key")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         None
@@ -769,6 +795,71 @@ mod tests {
             Some(std::path::Path::new("/")),
             "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
+    }
+
+    #[test]
+    fn pinned_agents_reader_uses_the_plan_config_dir() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = temp.path().join("config-dir");
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$FNO_TEST_CLAUDE_CONFIG_LOG\"\nprintf '%s\\n' '{\"agents\":[{\"kind\":\"background\",\"short_id\":\"abcd1234\",\"status\":\"idle\"}]}'\n",
+        );
+
+        let old_path = std::env::var_os("PATH");
+        let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let old_log = std::env::var_os("FNO_TEST_CLAUDE_CONFIG_LOG");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("CLAUDE_CONFIG_DIR", temp.path().join("ambient"));
+        std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", &log);
+        let alt = temp.path().join("alt");
+
+        let snapshot = read_all_agents_in(Some(&alt));
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", value),
+            None => std::env::remove_var("FNO_TEST_CLAUDE_CONFIG_LOG"),
+        }
+
+        assert!(snapshot.is_known(), "the pinned fake roster must parse");
+        assert_eq!(
+            snapshot
+                .find("abcd1234")
+                .and_then(|row| row.state.as_deref()),
+            Some("idle")
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), alt.to_string_lossy());
+    }
+
+    #[test]
+    fn pinned_daemon_dir_uses_config_root_and_keeps_the_override() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("account");
+        let old = std::env::var_os(DAEMON_DIR_ENV);
+        std::env::remove_var(DAEMON_DIR_ENV);
+        let account_dir = daemon_dir_in(Some(&config_dir));
+        let override_dir = temp.path().join("override");
+        std::env::set_var(DAEMON_DIR_ENV, &override_dir);
+        let redirected_dir = daemon_dir_in(Some(&config_dir));
+        match old {
+            Some(value) => std::env::set_var(DAEMON_DIR_ENV, value),
+            None => std::env::remove_var(DAEMON_DIR_ENV),
+        }
+        assert_eq!(account_dir, config_dir.join("daemon"));
+        assert_eq!(redirected_dir, override_dir);
     }
 
     // A 2-worker roster in the confirmed live shape (extra keys present, to prove
@@ -1190,5 +1281,76 @@ mod tests {
         }
         assert!(result.is_err(), "the injected panic did not run");
         assert_eq!(observed, previous, "the helper leaked its environment");
+    }
+
+    // Every source is read, first wins per id: project-local over global over
+    // home, so one source's record never hides another's.
+    #[test]
+    fn isolated_account_dirs_merge_sources_first_wins_per_id() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let global = std::env::temp_dir().join(format!(
+            "fno-roster-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = global.with_file_name(format!(
+            "{}-h",
+            global.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let toml_g = r#"
+[[accounts.records]]
+id = "makers"
+config_dir = "dir-g"
+
+[[accounts.records]]
+id = "beta"
+config_dir = "dir-b"
+"#;
+        let toml_h = r#"
+[[accounts.records]]
+id = "makers"
+config_dir = "dir-h"
+
+[[accounts.records]]
+id = "gamma"
+config_dir = "dir-c"
+"#;
+        std::fs::write(global.join("config.toml"), toml_g).unwrap();
+        // The home source reads HOME/.fno/config.toml, not HOME/config.toml.
+        std::fs::create_dir_all(home.join(".fno")).unwrap();
+        std::fs::write(home.join(".fno").join("config.toml"), toml_h).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", global.join("settings.toml"));
+        let out = isolated_account_dirs();
+        match previous_global {
+            Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            out[0],
+            ("makers".to_string(), std::path::PathBuf::from("dir-g"))
+        );
+        assert_eq!(
+            out[1],
+            ("beta".to_string(), std::path::PathBuf::from("dir-b"))
+        );
+        assert_eq!(
+            out[2],
+            ("gamma".to_string(), std::path::PathBuf::from("dir-c"))
+        );
     }
 }

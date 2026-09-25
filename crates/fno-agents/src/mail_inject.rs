@@ -35,8 +35,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
-use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
-use crate::claude_roster::{read_control_key, ClaudeRoster};
+use crate::claude_drive::{
+    contains_detach_sentinel, find_transcript_in, transcript_len, DriveError,
+};
+use crate::claude_roster::{read_control_key_in, ClaudeRoster};
 use crate::codex_inject::discover_loaded_threads;
 use crate::paths::AgentsHome;
 
@@ -484,9 +486,10 @@ pub fn mail_send_receipt(stdout: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Did the send land? Exit 0 covers both `delivered (hosted)` and
-/// `queued (durable)`, so only the receipt says which.
-pub fn mail_send_landed(code: i32, stdout: &str) -> bool {
+/// Did the send get accepted? Exit 0 covers both `delivered (hosted)` and
+/// `queued (durable)`, so only the receipt says which. Acceptance is not landing:
+/// see `fno agents mail sent`.
+pub fn mail_send_accepted(code: i32, stdout: &str) -> bool {
     code == 0 && mail_send_receipt(stdout).contains("delivered (hosted)")
 }
 
@@ -615,14 +618,27 @@ fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Resu
 /// call it, so a probe cannot disagree with the send it predicts -- a second
 /// implementation of these four steps would drift the moment resolution changes,
 /// and a probe that says yes where the send says no is worse than no probe.
-fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static str> {
-    let roster = ClaudeRoster::load_default().map_err(|_| NOT_INJECTABLE)?;
+fn resolve_target_in(
+    session: &str,
+    daemon_dir: &Path,
+    projects_base: &Path,
+) -> Result<(PathBuf, String, PathBuf), &'static str> {
+    let roster = ClaudeRoster::load(&daemon_dir.join("roster.json")).map_err(|_| NOT_INJECTABLE)?;
     let worker = roster.find(session).ok_or(NOT_INJECTABLE)?;
     let sock = worker.resolve_control_sock().ok_or(NOT_INJECTABLE)?;
     // No transcript yet == we cannot confirm landing, so there is no usable path
     // even though the socket resolved.
-    let transcript = find_transcript(&worker.session_id).ok_or("no-transcript")?;
+    let transcript =
+        find_transcript_in(projects_base, &worker.session_id).ok_or("no-transcript")?;
     Ok((sock, worker.short_id().to_string(), transcript))
+}
+
+fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static str> {
+    resolve_target_in(
+        session,
+        &crate::claude_roster::daemon_dir(),
+        &crate::claude_drive::claude_projects_dir(),
+    )
 }
 
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
@@ -645,8 +661,31 @@ pub fn deliver_via_control_sock(
     interval_ms: u64,
     enter_delay_ms: u64,
 ) -> Result<(), &'static str> {
-    let (sock, short, transcript) = resolve_target(session)?;
-    let auth = read_control_key();
+    deliver_via_control_sock_in(
+        &crate::claude_roster::daemon_dir(),
+        &crate::claude_drive::claude_projects_dir(),
+        session,
+        text,
+        attempts,
+        interval_ms,
+        enter_delay_ms,
+    )
+}
+
+/// Deliver through an explicitly selected Claude account root. The roster,
+/// control key and transcript all come from that same root, so an isolated
+/// account can never attach to or confirm against the ambient account.
+pub fn deliver_via_control_sock_in(
+    daemon_dir: &Path,
+    projects_base: &Path,
+    session: &str,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    let (sock, short, transcript) = resolve_target_in(session, daemon_dir, projects_base)?;
+    let auth = read_control_key_in(daemon_dir);
 
     let mut transport = UnixControlTransport::connect(&sock).map_err(|_| "io-error")?;
     if perform_attach(
@@ -1660,23 +1699,26 @@ mod tests {
     }
 
     #[test]
-    fn mail_send_landed_hosted_receipt_is_true() {
-        assert!(mail_send_landed(0, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_hosted_receipt_is_true() {
+        assert!(mail_send_accepted(0, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_queued_receipt_is_false() {
-        assert!(!mail_send_landed(0, "msg-1 queued (durable) [live-miss]\n"));
+    fn mail_send_accepted_queued_receipt_is_false() {
+        assert!(!mail_send_accepted(
+            0,
+            "msg-1 queued (durable) [live-miss]\n"
+        ));
     }
 
     #[test]
-    fn mail_send_landed_nonzero_exit_is_false() {
-        assert!(!mail_send_landed(1, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_nonzero_exit_is_false() {
+        assert!(!mail_send_accepted(1, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_empty_stdout_is_false() {
-        assert!(!mail_send_landed(0, "\n"));
+    fn mail_send_accepted_empty_stdout_is_false() {
+        assert!(!mail_send_accepted(0, "\n"));
         assert_eq!(mail_send_receipt("  \n"), "");
     }
 
@@ -1783,6 +1825,58 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mailinj-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("t.jsonl")
+    }
+
+    #[test]
+    fn pinned_mail_target_uses_the_supplied_roster_and_projects_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon_dir = temp.path().join("alt/daemon");
+        let projects_base = temp.path().join("alt/projects");
+        let session = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let short = "0a1b2c3d";
+        let spare = daemon_dir.join("deadbeef/spare");
+        let project = projects_base.join("encoded-project");
+        std::fs::create_dir_all(&spare).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let control = daemon_dir.join("deadbeef/control.sock");
+        std::fs::write(&control, b"").unwrap();
+        let pty = spare.join(format!("{short}.pty.sock"));
+        std::fs::write(&pty, b"").unwrap();
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(&transcript, b"").unwrap();
+        let roster = serde_json::json!({
+            "workers": {
+                short: {
+                    "sessionId": session,
+                    "ptySock": pty.to_string_lossy(),
+                }
+            }
+        });
+        std::fs::write(
+            daemon_dir.join("roster.json"),
+            serde_json::to_vec(&roster).unwrap(),
+        )
+        .unwrap();
+
+        let (sock, got_short, got_transcript) =
+            resolve_target_in(session, &daemon_dir, &projects_base).unwrap();
+
+        assert_eq!(sock, control);
+        assert_eq!(got_short, short);
+        assert_eq!(got_transcript, transcript);
+    }
+
+    #[test]
+    fn pinned_mail_control_key_comes_from_the_supplied_daemon_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon_dir = temp.path().join("alt/daemon");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        std::fs::write(daemon_dir.join("control.key"), "pinned-key\n").unwrap();
+
+        assert_eq!(
+            read_control_key_in(&daemon_dir).as_deref(),
+            Some("pinned-key")
+        );
     }
 
     #[test]

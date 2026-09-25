@@ -49,7 +49,9 @@ def _no_real_mail_inject(monkeypatch):
 # Helper: write a registry entry for "red" (live claude peer)
 # ---------------------------------------------------------------------------
 
-def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None:
+def _register_claude_peer(
+    name: str = "red", short_id: str = "abcd1234", mux: dict | None = None
+) -> None:
     """Write a single live claude AgentEntry into the registry."""
     from fno.agents.registry import AgentEntry, write_registry
 
@@ -60,8 +62,10 @@ def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None
             harness_session_id="abcd1234-1111-7222-8333-444455556666",
             cwd="/tmp",
             log_path="/tmp/red.log",
-            short_id=short_id,
+            # A mux row must not also carry a worker-socket key (one-live-ref).
+            short_id=short_id if mux is None else "",
             status="live",
+            mux=mux,
         )
     ])
 
@@ -1180,8 +1184,10 @@ def test_dispatch_send_stale_orphaned_status_uses_live_family1(
 def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
     tmp_path: Path, monkeypatch, state: str
 ) -> None:
+    """A claude row IN a mux pane keeps the transcript veto: the pane lane has
+    no identity check, so a stalled/done reading still skips the live attempt."""
     use_tmpdir(monkeypatch, tmp_path)
-    _register_claude_peer()
+    _register_claude_peer(mux={"session": "main", "pane_id": 11})
     from fno.agents import dispatch as dispatch_mod
 
     monkeypatch.setattr(
@@ -1198,6 +1204,98 @@ def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
 
     assert result.delivery == "durable"
     assert attempts == []
+    assert result.reason == f"transcript-{state}"
+
+
+@pytest.mark.parametrize("state", ["done", "stalled"])
+def test_dispatch_send_idle_claude_thread_tries_the_roster_lane(
+    tmp_path: Path, monkeypatch, state: str
+) -> None:
+    """A claude row with no pane ref is attempted whatever its transcript says;
+    mail-inject reads the daemon roster first, and the roster decides."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: state
+    )
+    attempts: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="ping", provider=None, cwd=tmp_path
+    )
+
+    assert result.delivery == "hosted"
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("state", ["done", "stalled"])
+def test_dispatch_send_idle_claude_thread_roster_miss_queues_durable(
+    tmp_path: Path, monkeypatch, state: str
+) -> None:
+    """When the roster refuses (not-injectable), the send demotes to durable
+    with the lane's own reason and the bus holds exactly one copy."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: state
+    )
+
+    def _roster_miss(*_a, reason_out=None, **_k):
+        if reason_out is not None:
+            reason_out.append("not-injectable")
+        return False
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", _roster_miss)
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="ping", provider=None, cwd=tmp_path
+    )
+
+    assert result.delivery == "durable"
+    assert result.reason == "not-injectable"
+
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import read_all_threads
+
+    threads = read_all_threads(
+        canonical_handle("abcd1234-1111-7222-8333-444455556666")
+    )
+    assert len(threads) == 1
+
+
+def test_cmd_send_transcript_veto_receipt_names_the_reading(
+    runner: CliRunner, tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP (CLI): a skipped live lane prints transcript-<state>, never a
+    bare live-miss."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer(mux={"session": "main", "pane_id": 11})
+    from fno.agents import dispatch as dispatch_mod
+    from fno.cli import app
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "stalled"
+    )
+    attempts: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a)
+    )
+
+    res = runner.invoke(
+        app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"]
+    )
+
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert attempts == []
+    assert "[transcript-stalled, transcript" in res.stdout, f"stdout: {res.stdout!r}"
+    assert "live-miss" not in res.stdout, f"stdout: {res.stdout!r}"
 
 
 def test_dispatch_send_unknown_family1_attempts_confirmable_transport(
@@ -1518,6 +1616,81 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
             break
     else:
         pytest.fail("agent_send_done event not found in events")
+
+
+# ---------------------------------------------------------------------------
+# Live-miss reason: waited token + done-event reason field (x-7345)
+# ---------------------------------------------------------------------------
+
+def test_run_mail_inject_records_waited_token_on_miss(monkeypatch) -> None:
+    """A parsed not-delivered outcome also records how long the probe waited.
+
+    The waited token rides the same reason list, so the done event and the
+    demotion receipt can name the spend without a second channel (x-7345).
+    """
+    from fno.agents import dispatch as dispatch_mod
+
+    class _Proc:
+        stdout = json.dumps({"delivered": False, "reason": "not-confirmed"})
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *_a, **_k: _Proc())
+    records: list[str] = []
+    delivered = dispatch_mod._run_mail_inject(["bin", "mail-inject"], "hi", 5.0, records.append)
+    assert delivered is False
+    assert "not-confirmed" in records
+    waited = [tok for tok in records if tok.startswith("waited-")]
+    assert len(waited) == 1 and waited[0].endswith("s"), records
+
+    class _Delivered:
+        stdout = json.dumps({"delivered": True, "reason": "ok"})
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *_a, **_k: _Delivered())
+    records.clear()
+    assert dispatch_mod._run_mail_inject(["bin", "mail-inject"], "hi", 5.0, records.append) is True
+    assert records == ["ok"], records
+
+
+def test_dispatch_send_done_event_carries_live_miss_reason(tmp_path: Path, monkeypatch) -> None:
+    """AC1/AC2 (x-7345): the done event keeps the live-lane cause.
+
+    A durable demotion carries the joined tokens (the raw cause and the wait);
+    a hosted delivery carries no reason at all.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+
+    def _miss(*_args, reason_out=None, **_kwargs):
+        if reason_out is not None:
+            reason_out.extend(["not-confirmed", "waited-32s"])
+        return False
+
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", _miss)
+    monkeypatch.setattr(
+        dispatch_mod.events, "emit", lambda kind, **data: captured.append((kind, data))
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="hello", provider=None, cwd=tmp_path
+    )
+    assert result.delivery == "durable"
+    done = [data for kind, data in captured if kind == "agent_send_done"]
+    assert done, "agent_send_done not emitted"
+    assert done[-1]["delivery"] == "durable"
+    reason = done[-1].get("reason")
+    assert reason is not None and "not-confirmed" in reason and "waited-32s" in reason, done[-1]
+
+    captured.clear()
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_a, **_k: True)
+    result = dispatch_mod.dispatch_send(
+        name="red", message="hello again", provider=None, cwd=tmp_path
+    )
+    assert result.delivery == "hosted"
+    done = [data for kind, data in captured if kind == "agent_send_done"]
+    assert done and done[-1]["delivery"] == "hosted"
+    assert not done[-1].get("reason"), done[-1]
 
 
 def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(

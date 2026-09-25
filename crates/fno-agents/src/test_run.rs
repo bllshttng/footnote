@@ -42,6 +42,161 @@ const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// True when `argv` is a cargo test run that selects no narrower target
+/// than a whole crate: no test-name filter, no `--test`/`--bin`/`--example`/
+/// `--bench`/`--doc`, no nextest filterset. `--lib` alone is whole: it runs
+/// every unit test. Any other program reads false. An unknown flag's value
+/// reads as a filter, so a doubt errs toward targeted.
+pub(crate) fn cargo_test_selects_whole_suite(argv: &[String]) -> bool {
+    let is_cargo = argv
+        .first()
+        .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "cargo"));
+    if !is_cargo {
+        return false;
+    }
+    let mut i = 1;
+    while i < argv.len() && argv[i].starts_with('+') {
+        i += 1;
+    }
+    let rest_start = match argv.get(i).map(String::as_str) {
+        Some("test") | Some("t") => i + 1,
+        Some("nextest") => match argv.get(i + 1).map(String::as_str) {
+            Some("run") | Some("r") => i + 2,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // Flags whose presence means the selection is narrower than a crate.
+    const TARGETED: &[&str] = &[
+        "--test",
+        "--bin",
+        "--example",
+        "--bench",
+        "--doc",
+        "-E",
+        "--filterset",
+        "--filter-expr",
+    ];
+    // Flags whose NEXT token is a value, so a positional filter is never
+    // mistaken for one. Only the exact spelling consumes; `--target=foo`
+    // carries its own value.
+    const VALUE_FLAGS: &[&str] = &[
+        "--manifest-path",
+        "-p",
+        "--package",
+        "--exclude",
+        "-F",
+        "--features",
+        "-j",
+        "--jobs",
+        "--target",
+        "--target-dir",
+        "--profile",
+        "--cargo-profile",
+        "--color",
+        "--config",
+        "-Z",
+        "--message-format",
+        "--test-threads",
+        "--partition",
+        "--retries",
+    ];
+    let split = argv[rest_start..]
+        .iter()
+        .position(|t| t == "--")
+        .map(|p| rest_start + p);
+    let (cargo_args, libtest_args): (&[String], &[String]) = match split {
+        Some(p) => (&argv[rest_start..p], &argv[p + 1..]),
+        None => (&argv[rest_start..], &[]),
+    };
+    let mut skip = false;
+    for tok in cargo_args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if TARGETED.contains(&tok.as_str())
+            || TARGETED
+                .iter()
+                .any(|f| tok.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
+        {
+            return false;
+        }
+        if VALUE_FLAGS.contains(&tok.as_str()) {
+            skip = true;
+            continue;
+        }
+        if !tok.starts_with('-') {
+            return false;
+        }
+    }
+    // Past `--` the argv is libtest/nextest's own: positional tokens are
+    // filters, and these flags take a value.
+    const LIBTEST_VALUES: &[&str] = &[
+        "--test-threads",
+        "--skip",
+        "--format",
+        "--color",
+        "-Z",
+        "--logfile",
+        "--shuffle-seed",
+    ];
+    let mut skip = false;
+    for tok in libtest_args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if LIBTEST_VALUES.contains(&tok.as_str()) {
+            skip = true;
+            continue;
+        }
+        if !tok.starts_with('-') {
+            return false;
+        }
+    }
+    true
+}
+
+/// The claim key naming the one checkout that gets the next test or build
+/// slot: set with `fno agents claim acquire test:priority --holder
+/// worktree:<checkout> --ttl 30m --pid-unavailable -R "<why>"`.
+pub const PRIORITY_KEY: &str = "test:priority";
+
+/// The priority lane a live `test:priority` claim names: that checkout's
+/// canonical worktree path, and the claim's expiry.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PriorityLane {
+    worktree: PathBuf,
+    expires_at: i64,
+}
+
+/// The priority lane, when a live `test:priority` claim names one. Only a
+/// Live or Suspect claim with an `expires_at` still in the future and a
+/// `worktree:` holder counts: a `--pid-unavailable` claim reads Suspect, so
+/// its TTL is its liveness, and a claim with no TTL never names a lane. The
+/// holder path is canonicalized, with the raw path as fallback.
+fn priority_lane(root: Option<&Path>) -> Option<PriorityLane> {
+    let (state, rec) = crate::claims::status(PRIORITY_KEY, root);
+    let rec = rec?;
+    if !matches!(
+        state,
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+    ) {
+        return None;
+    }
+    let expires_at = rec.expires_at?;
+    if expires_at <= crate::claims::now_ms() {
+        return None;
+    }
+    let raw = rec.holder.strip_prefix("worktree:")?;
+    let worktree = std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw));
+    Some(PriorityLane {
+        worktree,
+        expires_at,
+    })
+}
+
 /// The signal number this OWNER received, or 0 (none). A plain Python
 /// `Popen` wrapper no longer isolates this process into its own group (that
 /// job moved to the child's `setsid()`), so a terminal Ctrl-C reaches this
@@ -223,32 +378,108 @@ enum OnHeld {
     Stop(i32),
 }
 
+/// A waiter's lane at one admission door, best first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lane {
+    Priority,
+    Normal,
+    Full,
+}
+
+impl Lane {
+    /// The name the waiting line prints (`normal`, never the dir spelling).
+    fn name(self) -> &'static str {
+        match self {
+            Lane::Priority => "priority",
+            Lane::Normal => "normal",
+            Lane::Full => "full",
+        }
+    }
+
+    fn dir_suffix(self) -> &'static str {
+        match self {
+            Lane::Priority => "priority",
+            Lane::Normal => "queue",
+            Lane::Full => "full",
+        }
+    }
+
+    /// The lanes better than this one, best first: a waiter tries only
+    /// while every one of these is empty.
+    fn better(self) -> &'static [Lane] {
+        match self {
+            Lane::Priority => &[],
+            Lane::Normal => &[Lane::Priority],
+            Lane::Full => &[Lane::Priority, Lane::Normal],
+        }
+    }
+}
+
+/// What a held poll hands its caller: this waiter's own lane, and the better
+/// lane it is yielding to, when one holds live tickets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Wait {
+    lane: Lane,
+    yielding_to: Option<Lane>,
+}
+
+/// The live or suspect holders of `keys`: `(holder, pid, host)` per key.
+/// Every branch that skips the acquire attempt passes these rows, so the
+/// ancestor-admit and nested-cargo checks keep running while a better lane
+/// gates the attempt - that read is the deadlock guard.
+fn holder_rows(keys: &[String], root: Option<&Path>) -> Vec<(String, Option<i32>, String)> {
+    keys.iter()
+        .filter_map(|key| {
+            let (state, rec) = crate::claims::status(key, root);
+            if matches!(
+                state,
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+            ) {
+                Some((
+                    rec.as_ref().map_or(String::new(), |r| r.holder.clone()),
+                    rec.as_ref().and_then(|r| r.pid),
+                    rec.map(|r| r.host).unwrap_or_default(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Block until one of `keys` is ours, or `on_held` admits or stops. Each
 /// poll tries the keys in order and returns on the first acquire; when every
-/// key refuses, `on_held` sees every refused `(holder, pid, host)` row. A
-/// contender spawns ZERO workers while waiting: the loop returns before any
-/// `Command` is built.
+/// key refuses, `on_held` sees every refused `(holder, pid, host)` row and
+/// this waiter's [`Wait`] readout. A contender spawns ZERO workers while
+/// waiting: the loop returns before any `Command` is built.
 ///
-/// Arrival order: the waiters of one key set line up in a FIFO claim queue
-/// ([`crate::claim_queue`]) beside the first key's lockfile. A contender may
-/// attempt the acquire only from the front `keys.len()` positions - the run
-/// slots pass `cap` keys, which is a counted semaphore, and a front-only rule
-/// would serialise those slots down to one. A queue that cannot be read
-/// (enter failed, position gone) degrades to the old unordered poll rather
-/// than refusing a run that can still make progress.
+/// Lanes: each door orders its waiters in up to three claim-queue dirs
+/// beside the first key's lockfile, best first ([`Lane`]). A waiter holds
+/// one ticket in its own lane's dir and may attempt the acquire only when
+/// every better lane is empty and it sits in the front `keys.len()` positions
+/// of its own lane - the run slots pass `cap` keys, which is a counted
+/// semaphore, and a front-only rule would serialise those slots down to one.
+/// An empty better lane reserves nothing. A ticket whose lane dir cannot be
+/// read degrades to the old unordered poll rather than refusing a run that
+/// can still make progress.
 fn acquire_claim_blocking(
     keys: &[String],
     holder: &str,
     opts: impl Fn(usize) -> crate::claims::AcquireOpts,
-    mut on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>) -> OnHeld,
+    mut lane_of: impl FnMut() -> Lane,
+    mut on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>, Wait) -> OnHeld,
 ) -> Result<(), i32> {
     let admit_width = keys.len();
-    let queue_dir = opts(0)
-        .root
-        .as_deref()
-        .and_then(|root| crate::claims::claim_path(&keys[0], Some(root)).ok())
-        .map(|p| crate::claim_queue::queue_dir_for(&p));
-    let mut ticket = queue_dir
+    let opts0 = opts(0);
+    let lock_path = crate::claims::claim_path(&keys[0], opts0.root.as_deref()).ok();
+    let dir_for = |lane: Lane| {
+        lock_path
+            .as_deref()
+            .map(|p| crate::claim_queue::lane_dir_for(p, lane.dir_suffix()))
+    };
+    let mut lane = lane_of();
+    let mut dir = dir_for(lane);
+    let mut ticket = dir
         .as_deref()
         .and_then(|dir| match crate::claim_queue::enter(dir) {
             Ok(t) => Some(t),
@@ -262,12 +493,55 @@ fn acquire_claim_blocking(
             }
         });
     let result = 'wait: loop {
+        // The lane may change while this waiter sits queued: a whole-suite
+        // waiter holds `full` at the suite door until its budget is spent,
+        // then joins `queue` at the back. Re-read the lane every poll and
+        // re-seat the ticket when it moved.
+        let current = lane_of();
+        if current != lane {
+            if let Some(t) = ticket.take() {
+                crate::claim_queue::leave(t);
+            }
+            lane = current;
+            dir = dir_for(lane);
+            ticket = match dir.as_deref().map(crate::claim_queue::enter) {
+                Some(Ok(t)) => Some(t),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "test_run: claim queue re-enter failed on {}: {e}; waiting unordered",
+                        dir.as_deref()
+                            .map_or(String::new(), |d| d.display().to_string())
+                    );
+                    None
+                }
+                None => None,
+            };
+        }
         let mut pos_out: Option<(usize, usize)> = None;
-        if let (Some(dir), Some(t)) = (queue_dir.as_deref(), ticket.as_ref()) {
+        if let (Some(dir), Some(t)) = (dir.as_deref(), ticket.as_ref()) {
             match crate::claim_queue::position(t) {
                 Ok(pos) => {
-                    if pos.index >= admit_width {
-                        match on_held(&[], Some((pos.index, pos.total))) {
+                    // A live ticket in any better lane gates the attempt:
+                    // a waiter tries only while every better lane is empty.
+                    let mut yielding: Option<Lane> = None;
+                    for better in lane.better() {
+                        if let Some(p) = lock_path.as_deref() {
+                            let dir = crate::claim_queue::lane_dir_for(p, better.dir_suffix());
+                            if crate::claim_queue::depth(&dir) > 0 {
+                                yielding = Some(*better);
+                                break;
+                            }
+                        }
+                    }
+                    if yielding.is_some() || pos.index >= admit_width {
+                        match on_held(
+                            &holder_rows(keys, opts0.root.as_deref()),
+                            Some((pos.index, pos.total)),
+                            Wait {
+                                lane,
+                                yielding_to: yielding,
+                            },
+                        ) {
                             OnHeld::Wait => {
                                 std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500)))
                             }
@@ -318,7 +592,14 @@ fn acquire_claim_blocking(
                 }
             }
         }
-        match on_held(&held, pos_out) {
+        match on_held(
+            &held,
+            pos_out,
+            Wait {
+                lane,
+                yielding_to: None,
+            },
+        ) {
             OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
             OnHeld::Admit => break 'wait Ok(()),
             OnHeld::Stop(code) => break 'wait Err(code),
@@ -339,6 +620,8 @@ fn suite_wait_fields(
     root: Option<&Path>,
     pos: Option<(usize, usize)>,
     started: Instant,
+    wait: Wait,
+    prio: Option<&Path>,
 ) -> Vec<(&'static str, String)> {
     let (state, rec) = crate::claims::status(SUITE_CLAIM_KEY, root);
     let mut fields: Vec<(&'static str, String)> = vec![
@@ -361,10 +644,28 @@ fn suite_wait_fields(
             },
         ),
         ("holder_state", state.as_str().to_string()),
+        (
+            "holder_left_s",
+            match rec.as_ref().and_then(|r| r.expires_at) {
+                Some(expires_at) => ((expires_at - crate::claims::now_ms()) / 1000).to_string(),
+                None => "-".to_string(),
+            },
+        ),
     ];
     if let Some((index, total)) = pos {
         fields.push(("position", index.to_string()));
         fields.push(("queued", total.to_string()));
+    }
+    if wait.yielding_to.is_some() {
+        fields.push((
+            "yielding_to",
+            wait.yielding_to
+                .map_or(String::new(), |l| l.name().to_string()),
+        ));
+    }
+    fields.push(("lane", wait.lane.name().to_string()));
+    if let Some(p) = prio {
+        fields.push(("priority", p.display().to_string()));
     }
     fields.push(("waited_s", started.elapsed().as_secs().to_string()));
     fields
@@ -374,7 +675,8 @@ fn acquire_suite_claim(
     run_id: &str,
     holder: &str,
     root: Option<&Path>,
-    deadline: Instant,
+    worktree: Option<&Path>,
+    whole: bool,
     budget: Duration,
 ) -> Result<(), i32> {
     let opts = |_: usize| crate::claims::AcquireOpts {
@@ -382,56 +684,78 @@ fn acquire_suite_claim(
         // The recorded pid is this owner, which lives for the whole run:
         // stamp holder-process so the classifier reads the pid's verdict and
         // a SIGKILLed holder's slot frees inside the TTL instead of refusing
-        // every waiter until expiry.
+        // every waiter until expiry. The TTL is the holder's own run budget,
+        // so expires_at is that deadline; a live holder-process pid keeps
+        // the lease Live past it while the run is still going.
         pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
-        ttl_ms: Some(3_600_000),
+        // expires_at is the holder's own run deadline, clamped into the
+        // range every claim must carry (a sub-60s budget reads the 60s
+        // floor; a live holder-process pid keeps the lease past it anyway).
+        ttl_ms: Some(
+            (budget.as_millis() as i64).clamp(crate::claims::MIN_TTL_MS, crate::claims::MAX_TTL_MS),
+        ),
         reason: Some("test-run".to_string()),
         root: root.map(PathBuf::from),
         ..Default::default()
     };
     let started = Instant::now();
     let mut last_notice: Option<Instant> = None;
+    let mut last_wait: Option<Wait> = None;
+    let mut whole_notice = false;
+    // The wait has no timer, like `poll_held`: it ends on admission or a
+    // signal. `--timeout` bounds only the admitted run.
     acquire_claim_blocking(
         &[SUITE_CLAIM_KEY.to_string()],
         holder,
         opts,
-        |_rows, pos| {
+        || {
+            if let Some(w) = worktree {
+                if priority_lane(root).is_some_and(|p| p.worktree.as_path() == w) {
+                    return Lane::Priority;
+                }
+            }
+            if whole && started.elapsed() < budget {
+                Lane::Full
+            } else {
+                Lane::Normal
+            }
+        },
+        |_rows, pos, wait| {
             if let Some(sig) = received_signal() {
-                let mut fields = suite_wait_fields(root, pos, started);
+                let prio = priority_lane(root);
+                let mut fields = suite_wait_fields(
+                    root,
+                    pos,
+                    started,
+                    wait,
+                    prio.as_ref().map(|p| p.worktree.as_path()),
+                );
                 fields.push(("signal", sig.to_string()));
                 emit(run_id, "suite_wait_interrupted", &fields);
                 return OnHeld::Stop(128 + sig);
             }
-            if Instant::now() >= deadline {
-                emit(
-                    run_id,
-                    "suite_wait_timeout",
-                    &suite_wait_fields(root, pos, started),
-                );
-                let where_txt = match pos {
-                    Some((index, total)) => {
-                        format!("{index} runs were ahead of it in a queue of {total}")
-                    }
-                    None => "No wait queue was active.".to_string(),
-                };
-                eprintln!(
-                "test_run: the machine-wide test:suite claim did not reach this run inside its {}s budget. {} The argv never started.",
-                budget.as_secs(),
-                where_txt
-            );
-                eprintln!("test_run:   who holds it: fno agents claim status test:suite");
-                eprintln!(
-                    "test_run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
-                );
-                return OnHeld::Stop(124);
-            }
-            if last_notice.is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE) {
+            let changed = last_wait != Some(wait);
+            if changed || last_notice.is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE) {
+                last_wait = Some(wait);
                 last_notice = Some(Instant::now());
-                emit(
-                    run_id,
-                    "suite_waiting",
-                    &suite_wait_fields(root, pos, started),
+                let prio = priority_lane(root);
+                let fields = suite_wait_fields(
+                    root,
+                    pos,
+                    started,
+                    wait,
+                    prio.as_ref().map(|p| p.worktree.as_path()),
                 );
+                emit(run_id, "suite_waiting", &fields);
+                if wait.lane == Lane::Full && !whole_notice {
+                    whole_notice = true;
+                    eprintln!(
+                        "test_run: this run selects a whole crate suite, so it waits while \
+                         targeted runs are queued, for at most {}s, then queues in arrival \
+                         order. CI runs every suite on every PR.",
+                        budget.as_secs()
+                    );
+                }
             }
             OnHeld::Wait
         },
@@ -491,11 +815,19 @@ fn run_build_admit(args: &[String]) -> i32 {
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };
+    let lane_of = || {
+        if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+            Lane::Priority
+        } else {
+            Lane::Normal
+        }
+    };
     let result = acquire_claim_blocking(
         &[BUILD_CLAIM_KEY.to_string()],
         &holder,
         opts,
-        |rows, _| {
+        lane_of,
+        |rows, _, w| {
             let mut scan = |table: &[crate::census::ProcRow],
                             parent: &ParentMap|
              -> Option<OnHeld> {
@@ -527,7 +859,7 @@ fn run_build_admit(args: &[String]) -> i32 {
                 }
                 None
             };
-            wait.poll_held(rows, None, Some(&mut scan))
+            wait.poll_held(rows, None, Some(&mut scan), w)
         },
     );
     wait.clear_marker();
@@ -537,15 +869,70 @@ fn run_build_admit(args: &[String]) -> i32 {
     }
 }
 
+/// How often a parked cargo door re-reads the breaker.
+const FLEET_HOLD_POLL: Duration = Duration::from_secs(5);
+/// Re-print the holding line about every minute, so a long wait is never
+/// silent in a log.
+const FLEET_HOLD_REPRINT_POLLS: u32 = 12;
+
+/// The tests hold at the cargo doors: while the breaker holds `tests` (or
+/// its state is unreadable, fail closed), a door waits instead of admitting,
+/// printing a holding line on entry and about every minute after. A running
+/// cargo pauses at its next compile or test binary and resumes when the
+/// hold lifts. A recorded SIGINT/SIGTERM ends the wait with that signal as
+/// the code, so a killed cargo unwinds instead of parking forever.
+fn wait_for_tests_admission() -> i32 {
+    let mut lines: u32 = 0;
+    loop {
+        if let Some(sig) = received_signal() {
+            return sig;
+        }
+        let verdict = crate::fleet_incident::verdict_for("tests");
+        if !verdict.holds("tests") {
+            if lines > 0 {
+                eprintln!("test-run: fleet stop lifted; cargo admission resumes");
+            }
+            return 0;
+        }
+        if lines == 0 || lines % FLEET_HOLD_REPRINT_POLLS == 0 {
+            match &verdict {
+                crate::fleet_incident::Verdict::Stopped(r) => eprintln!(
+                    "test-run: fleet stop holds tests (generation {}, reason: {}); \
+                     this cargo waits at admission",
+                    r.generation, r.reason
+                ),
+                crate::fleet_incident::Verdict::Unavailable(d) => eprintln!(
+                    "test-run: fleet incident state unreadable ({d}); \
+                     this cargo waits at admission"
+                ),
+                crate::fleet_incident::Verdict::Clear(_) => unreachable!(),
+            }
+        }
+        lines += 1;
+        std::thread::sleep(FLEET_HOLD_POLL);
+    }
+}
+
 /// `test-run run-admit --cargo-pid PID --worktree PATH`: the cargo target
-/// runner calls this before every test binary and doctest. The cargo holds
-/// one of `test.max_cargo_runs` machine-wide run slots (`test:cargo-run:<i>`),
-/// keyed to its pid with no TTL, so the slot frees when the cargo exits. The
-/// status pass writes nothing: a slot already naming this holder, or one
-/// whose pid is this cargo or an ancestor (a nested cargo, a doctest's
-/// rustdoc), admits at once without a second claim.
+/// runner calls this before test binary and doctest admission. The cargo
+/// holds one of `test.max_cargo_runs` machine-wide run slots
+/// (`test:cargo-run:<i>`), keyed to its pid with no TTL, so the slot frees
+/// when the cargo exits. The status pass writes nothing: a slot already
+/// naming this holder, or one whose pid is this cargo or an ancestor (a
+/// nested cargo, a doctest's rustdoc), admits at once without a second
+/// claim.
 fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     install_signal_handlers();
+    // The tests hold parks the cargo doors instead of failing them: a
+    // running cargo pauses at its next compile or test binary and resumes
+    // when the hold lifts (the operator records demos against a quiet
+    // machine). The own-holder early return below stays behind the wait, so
+    // a cargo already mid-run pauses at its next admission ask too. A
+    // recorded signal ends the wait nonzero, unwinding the cargo.
+    let held_code = wait_for_tests_admission();
+    if held_code != 0 {
+        return Err(held_code);
+    }
     let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
     let cap = crate::agents_config::max_cargo_runs(&worktree) as usize;
@@ -573,8 +960,15 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };
-    let result = acquire_claim_blocking(&keys, &holder, opts, |rows, _| {
-        wait.poll_held(rows, Some((cap, "cargo run slots")), None)
+    let lane_of = || {
+        if priority_lane(None).is_some_and(|p| p.worktree == worktree) {
+            Lane::Priority
+        } else {
+            Lane::Normal
+        }
+    };
+    let result = acquire_claim_blocking(&keys, &holder, opts, lane_of, |rows, _, w| {
+        wait.poll_held(rows, Some((cap, "cargo run slots")), None, w)
     });
     wait.clear_marker();
     result
@@ -607,6 +1001,7 @@ struct CargoWait {
     marked: bool,
     last_notice: Option<Instant>,
     last_scan: Option<Instant>,
+    last_readout: Option<(Lane, Option<Lane>)>,
     started: Instant,
 }
 
@@ -625,6 +1020,7 @@ impl CargoWait {
             marked: false,
             last_notice: None,
             last_scan: None,
+            last_readout: None,
             started: Instant::now(),
         }
     }
@@ -642,6 +1038,7 @@ impl CargoWait {
         rows: &[(String, Option<i32>, String)],
         slot_context: Option<(usize, &'static str)>,
         scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow], &ParentMap) -> Option<OnHeld>>,
+        w: Wait,
     ) -> OnHeld {
         for (_, pid, _) in rows {
             if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, self.cargo_pid)) {
@@ -677,10 +1074,14 @@ impl CargoWait {
             }
             self.marked = true;
         }
-        if self
-            .last_notice
-            .is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE)
+        let readout = (w.lane, w.yielding_to);
+        let changed = self.last_readout != Some(readout);
+        if changed
+            || self
+                .last_notice
+                .is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE)
         {
+            self.last_readout = Some(readout);
             let held = rows
                 .iter()
                 .map(|(h, pid, _)| {
@@ -694,10 +1095,36 @@ impl CargoWait {
             let context = slot_context
                 .map(|(cap, label)| format!("{} of {cap} {label} held by ", rows.len()))
                 .unwrap_or_default();
+            let prefix = match (w.lane, w.yielding_to) {
+                (Lane::Priority, _) => "holding (priority lane); ".to_string(),
+                (_, Some(Lane::Priority)) => {
+                    let lane = priority_lane(None);
+                    let secs = lane.as_ref().map_or(0, |l| {
+                        ((l.expires_at - crate::claims::now_ms()) / 1000).max(0)
+                    });
+                    format!(
+                        "yielding to priority worktree {} for {}s more; ",
+                        lane.as_ref()
+                            .map_or(String::new(), |l| l.worktree.display().to_string()),
+                        secs
+                    )
+                }
+                _ => "holding; ".to_string(),
+            };
             eprintln!(
-                "cargo admission: holding; {context}{held}; waited {}s",
+                "cargo admission: {prefix}{context}{held}; waited {}s",
                 self.started.elapsed().as_secs()
             );
+            // The priority lever, taught once per wait: a person (or a
+            // king) can give this checkout the next slot with one acquire.
+            if self.last_notice.is_none() {
+                eprintln!(
+                    "cargo admission: to give {wt} the next slot (user or king): \
+                     fno agents claim acquire test:priority --holder worktree:{wt} \
+                     --ttl 30m --pid-unavailable -R \"<why>\"",
+                    wt = self.worktree.display()
+                )
+            }
             self.last_notice = Some(Instant::now());
         }
         OnHeld::Wait
@@ -1066,6 +1493,35 @@ fn cleanup_group(pgid: i32) -> bool {
     unsafe { libc::killpg(pgid, 0) != 0 }
 }
 
+/// The durable fleet incident stop, read as a refusal for this run: `Some`
+/// exit code with a `suite_refused` receipt when the tests scope is held or
+/// the incident state is unreadable, `None` otherwise. `extra` fields ride
+/// the receipt; the post-admission recheck names its wait there.
+fn fleet_refusal(run_id: &str, extra: &[(&str, String)]) -> Option<i32> {
+    match crate::fleet_incident::verdict_for("tests") {
+        crate::fleet_incident::Verdict::Clear(_) => None,
+        crate::fleet_incident::Verdict::Stopped(record) => {
+            let mut fields = vec![
+                ("reason", "fleet-stop".to_string()),
+                ("generation", record.generation.to_string()),
+                ("incident", record.reason.clone()),
+            ];
+            fields.extend_from_slice(extra);
+            emit(run_id, "suite_refused", &fields);
+            Some(crate::fleet_incident::EXIT_CHECK_STOPPED)
+        }
+        crate::fleet_incident::Verdict::Unavailable(detail) => {
+            let mut fields = vec![
+                ("reason", "fleet-stop-unavailable".to_string()),
+                ("detail", detail),
+            ];
+            fields.extend_from_slice(extra);
+            emit(run_id, "suite_refused", &fields);
+            Some(crate::fleet_incident::EXIT_CHECK_UNAVAILABLE)
+        }
+    }
+}
+
 pub fn run_test_run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("build-admit") => return run_build_admit(&args[1..]),
@@ -1092,31 +1548,8 @@ pub fn run_test_run(args: &[String]) -> i32 {
     // suite_refused receipt naming the generation, so absence never reads as
     // evidence. An unreadable state fails closed with its own marker.
     let run_id = new_run_id();
-    match crate::fleet_incident::verdict() {
-        crate::fleet_incident::Verdict::Clear(_) => {}
-        crate::fleet_incident::Verdict::Stopped(record) => {
-            emit(
-                &run_id,
-                "suite_refused",
-                &[
-                    ("reason", "fleet-stop".to_string()),
-                    ("generation", record.generation.to_string()),
-                    ("incident", record.reason.clone()),
-                ],
-            );
-            return crate::fleet_incident::EXIT_CHECK_STOPPED;
-        }
-        crate::fleet_incident::Verdict::Unavailable(detail) => {
-            emit(
-                &run_id,
-                "suite_refused",
-                &[
-                    ("reason", "fleet-stop-unavailable".to_string()),
-                    ("detail", detail),
-                ],
-            );
-            return crate::fleet_incident::EXIT_CHECK_UNAVAILABLE;
-        }
+    if let Some(code) = fleet_refusal(&run_id, &[]) {
+        return code;
     }
 
     let holder = format!("test-run:{}:{}", std::process::id(), now_secs());
@@ -1125,19 +1558,20 @@ pub fn run_test_run(args: &[String]) -> i32 {
         .clone()
         .or_else(crate::claims::global_claims_root);
 
-    // One deadline for the whole call, admission wait included: a caller's
-    // --timeout bounds total wall time, not just the run once admitted. Two
-    // separately-computed windows (wait-for-claim, then a fresh run window)
-    // let total wall time reach ~2x the configured timeout under claim
-    // contention, silently blowing through an outer CI job timeout sized to
-    // the same value.
-    let overall_deadline = Instant::now() + opts.timeout;
-
+    // --timeout bounds the argv's run, counted from admission, so a queued
+    // run keeps its whole budget. The wait for the claim has no timer: it
+    // ends on admission or a signal, the same policy the cargo doors run.
     let wait_started = Instant::now();
     // A nested invocation inherits the outer admission rather than
     // re-acquiring: it never touches the outer claim and never multiplies
     // the outer concurrency budget, because it never becomes a NEW claim
     // holder at all.
+    // The priority lane names one checkout; `whole` routes this run's wait
+    // through the `full` lane while targeted runs are queued.
+    let worktree = std::env::current_dir()
+        .ok()
+        .map(|cwd| crate::paths::worktree_repo_root(&cwd));
+    let whole = cargo_test_selects_whole_suite(&opts.argv);
     let nested = nested_owner();
     let mut claimed = false;
     if nested.is_none() {
@@ -1145,14 +1579,26 @@ pub fn run_test_run(args: &[String]) -> i32 {
             &run_id,
             &holder,
             claims_root.as_deref(),
-            overall_deadline,
+            worktree.as_deref(),
+            whole,
             opts.timeout,
         ) {
             return code;
         }
         claimed = true;
+        // Recheck after the wait: a fleet stop that landed while this run
+        // queued must not spawn mid-incident, and the wait has no timer of
+        // its own to bound that window.
+        if let Some(code) = fleet_refusal(
+            &run_id,
+            &[("waited_s", wait_started.elapsed().as_secs().to_string())],
+        ) {
+            let _ = crate::claims::release(SUITE_CLAIM_KEY, &holder, claims_root.as_deref(), None);
+            return code;
+        }
     }
     let admitted = Instant::now();
+    let run_deadline = admitted + opts.timeout;
 
     let (owner_pid, owner_birth) = nested.unwrap_or_else(|| {
         let pid = std::process::id();
@@ -1185,7 +1631,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
         ],
     );
 
-    let wait_result = wait_bounded(&mut child, overall_deadline);
+    let wait_result = wait_bounded(&mut child, run_deadline);
 
     // ALWAYS attempted, success or failure or timeout or signal - this line
     // is the fix: ownership of cleanup does not depend on which of those
@@ -1214,18 +1660,14 @@ pub fn run_test_run(args: &[String]) -> i32 {
         Ok(code) => code,
         Err(Unfinished::TimedOut) => {
             let wait_secs = admitted.saturating_duration_since(wait_started).as_secs();
-            let run_secs = admitted.elapsed().as_secs();
             eprintln!(
-                "fno-agents test-run: TIMEOUT after {}s: {}s waiting for the test:suite claim, {}s running the argv; process group killed",
+                "fno-agents test-run: TIMEOUT after {}s running the argv ({}s queued for the test:suite claim before that); process group killed",
                 opts.timeout.as_secs(),
-                wait_secs,
-                run_secs
+                wait_secs
             );
-            if wait_secs >= 1 {
-                eprintln!(
-                    "fno-agents test-run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
-                );
-            }
+            eprintln!(
+                "fno-agents test-run:   narrow the target, or raise the budget: FNO_TEST_TIMEOUT_SECONDS=<secs> fno doctor test ..."
+            );
             return 124;
         }
         Err(Unfinished::Signalled(sig)) => {
@@ -1300,6 +1742,170 @@ mod tests {
     fn missing_separator_refuses() {
         let args: Vec<String> = ["--timeout", "60"].iter().map(|s| s.to_string()).collect();
         assert!(parse_args(&args).is_err());
+    }
+
+    /// AC15-HP: a `test:priority` claim whose holder path is spelled through
+    /// a symlink reads as the canonical checkout path.
+    #[test]
+    fn priority_lane_canonicalizes_the_holder_path() {
+        let root = std::env::temp_dir().join(format!("fno-prio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("checkout");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let acquired = crate::claims::acquire(
+            PRIORITY_KEY,
+            &format!("worktree:{}", link.display()),
+            crate::claims::AcquireOpts {
+                ttl_ms: Some(600_000),
+                pid_unavailable: true,
+                reason: Some("probe".to_string()),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let lane = priority_lane(Some(&root)).expect("the claim names a lane");
+        assert_eq!(
+            lane.worktree,
+            std::fs::canonicalize(&real).unwrap(),
+            "the lane names the canonical checkout"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC16-EDGE: a claim with no TTL, a holder without the `worktree:`
+    /// prefix, or a TTL already past names no lane.
+    #[test]
+    fn priority_lane_ignores_an_unusable_claim() {
+        let root = std::env::temp_dir().join(format!("fno-prio-neg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let opts = |ttl: Option<i64>| crate::claims::AcquireOpts {
+            ttl_ms: ttl,
+            pid_unavailable: true,
+            reason: Some("probe".to_string()),
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        let acquire_with =
+            |holder: &str, ttl| crate::claims::acquire(PRIORITY_KEY, holder, opts(ttl));
+        // No TTL: pid_unavailable legally requires a TTL, so this claim
+        // carries the test process's own pid instead.
+        let no_ttl = crate::claims::AcquireOpts {
+            ttl_ms: None,
+            pid: Some(std::process::id()),
+            reason: Some("probe".to_string()),
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            crate::claims::acquire(PRIORITY_KEY, "worktree:/tmp/w1", no_ttl),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert!(priority_lane(Some(&root)).is_none(), "no TTL, no lane");
+        let _ = crate::claims::release(PRIORITY_KEY, "worktree:/tmp/w1", Some(&root), None);
+        // No worktree: prefix.
+        assert!(matches!(
+            acquire_with("pane:somewhere", Some(600_000)),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        assert!(
+            priority_lane(Some(&root)).is_none(),
+            "a holder without the prefix names no lane"
+        );
+        let _ = crate::claims::release(PRIORITY_KEY, "pane:somewhere", Some(&root), None);
+        // TTL already past: the store refuses a sub-minimum TTL, so the
+        // record's expiry is rewound by hand past the 60s floor.
+        assert!(matches!(
+            acquire_with("worktree:/tmp/w2", Some(crate::claims::MIN_TTL_MS)),
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let lock = crate::claims::claim_path(PRIORITY_KEY, Some(&root)).unwrap();
+        let text = std::fs::read_to_string(&lock).unwrap();
+        let rewound: String = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("expires_at:") {
+                    "expires_at: 0"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&lock, rewound).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            priority_lane(Some(&root)).is_none(),
+            "an expired TTL names no lane"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC14-HP: the classifier reads a whole crate suite from an unfiltered
+    /// cargo test argv, and a targeted run from any test-name filter, target
+    /// flag or nextest filterset. A non-cargo program never reads whole.
+    #[test]
+    fn whole_suite_classifier_reads_the_selection() {
+        let v = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
+        for whole in [
+            v(&[
+                "cargo",
+                "test",
+                "-q",
+                "--manifest-path",
+                "/abs/crates/fno/Cargo.toml",
+                "--",
+                "--test-threads",
+                "12",
+            ]),
+            v(&["cargo", "test", "--lib"]),
+            v(&["cargo", "+1.94.1", "test", "-p", "fno-agents"]),
+            v(&["cargo", "nextest", "run", "--test-threads", "4"]),
+            v(&["cargo", "test"]),
+        ] {
+            assert!(
+                cargo_test_selects_whole_suite(&whole),
+                "must read whole: {whole:?}"
+            );
+        }
+        for targeted in [
+            v(&[
+                "cargo",
+                "test",
+                "-q",
+                "--manifest-path",
+                "crates/fno/Cargo.toml",
+                "some_test",
+            ]),
+            v(&["cargo", "test", "--test", "test_run_lifecycle"]),
+            v(&["cargo", "test", "--lib", "--", "session_activity"]),
+            v(&["cargo", "test", "--doc"]),
+            v(&["cargo", "test", "--features=x", "name"]),
+            v(&["cargo", "nextest", "run", "-E", "test(x)"]),
+        ] {
+            assert!(
+                !cargo_test_selects_whole_suite(&targeted),
+                "must read targeted: {targeted:?}"
+            );
+        }
+        for other in [
+            v(&["bash", "-c", "cargo test"]),
+            v(&["python", "-m", "pytest"]),
+            v(&["cargo", "build"]),
+            v(&[]),
+        ] {
+            assert!(
+                !cargo_test_selects_whole_suite(&other),
+                "a non-cargo-test program must read false: {other:?}"
+            );
+        }
     }
 
     #[test]
@@ -1530,7 +2136,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fno-test-run-fields-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let fields = suite_wait_fields(Some(&root), Some((1, 2)), Instant::now());
+        let fields = suite_wait_fields(
+            Some(&root),
+            Some((1, 2)),
+            Instant::now(),
+            Wait {
+                lane: Lane::Normal,
+                yielding_to: None,
+            },
+            None,
+        );
         let get = |name: &str| {
             fields
                 .iter()
@@ -1542,6 +2157,7 @@ mod tests {
         assert_eq!(get("holder"), "-");
         assert_eq!(get("pid"), "-");
         assert_eq!(get("holder_state"), "free");
+        assert_eq!(get("holder_left_s"), "-");
         assert_eq!(get("position"), "1");
         assert_eq!(get("queued"), "2");
 
@@ -1561,7 +2177,16 @@ mod tests {
             acquired,
             crate::claims::AcquireOutcome::Acquired(_)
         ));
-        let fields = suite_wait_fields(Some(&root), None, Instant::now());
+        let fields = suite_wait_fields(
+            Some(&root),
+            None,
+            Instant::now(),
+            Wait {
+                lane: Lane::Normal,
+                yielding_to: None,
+            },
+            None,
+        );
         let get = |name: &str| {
             fields
                 .iter()
@@ -1573,6 +2198,11 @@ mod tests {
         assert_eq!(get("pid"), std::process::id().to_string());
         assert_eq!(get("host"), crate::claims::hostname());
         assert_eq!(get("holder_state"), "live");
+        let left: i64 = get("holder_left_s").parse().unwrap();
+        assert!(
+            (3590..=3600).contains(&left),
+            "a one-hour TTL reads 3590..=3600 seconds left, got {left}"
+        );
         assert_eq!(get("position"), "");
         let _ = std::fs::remove_dir_all(&root);
     }

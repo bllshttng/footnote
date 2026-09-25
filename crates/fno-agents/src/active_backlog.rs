@@ -262,7 +262,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    value_has_usable_pr_ref(&v)
+    crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
@@ -527,6 +527,27 @@ fn reconcile_pending(
     });
 }
 
+/// The close note the drain records when it closes a PR-less node: which
+/// terminal closed it and, when the event carries one, its first message
+/// line. Capped at 200 chars so a chatty message cannot bloat the graph
+/// row's completion_note.
+fn drain_close_note(reason: &TerminationReason, message: &str) -> String {
+    let mut note = format!("closed by the backlog drain on {reason:?}");
+    let first_line = message.lines().next().unwrap_or("").trim();
+    if !first_line.is_empty() {
+        note.push_str(": ");
+        note.push_str(first_line);
+    }
+    if note.len() > 200 {
+        let mut cut = 200;
+        while !note.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        note.truncate(cut);
+    }
+    note
+}
+
 /// Apply a polled termination event to the breaker via the shared `map_outcome`
 /// policy, mirroring the supervised path's `queue.close` side effects.
 fn resolve_dispatch(
@@ -547,16 +568,38 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if classify(ev.reason.clone()).projection().merge_armable
-        && !node_has_pr_ref(cfg, node_id)
-    {
+    let merge_armable = classify(ev.reason.clone()).projection().merge_armable;
+    // The park guard and the close note ask the same question, so the node
+    // is read once per event and the answer is shared. Non-close terminals
+    // (a crash, NoProgress) spawn no read at all.
+    let close_eligible = merge_armable || is_done_reason(&ev.reason);
+    let has_pr_ref = if close_eligible {
+        node_has_pr_ref(cfg, node_id)
+    } else {
+        false
+    };
+    let close = if merge_armable && !has_pr_ref {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
     } else if is_done_reason(&ev.reason) {
+        // The store refuses an evidence-less close, so a PR-less node
+        // (DoneAdvisory, DoneDelivery) closes with a note carrying the
+        // terminal and the event's first line. A node with a PR ref keeps
+        // the bare argv: the canonical close and its gates stay as they are.
+        let mut args = vec![
+            "backlog".to_string(),
+            "done".to_string(),
+            node_id.to_string(),
+        ];
+        if !has_pr_ref {
+            let note = drain_close_note(&ev.reason, &ev.message);
+            args.push("--note".to_string());
+            args.push(note);
+        }
         match retry_etxtbsy(|| {
             fno_cmd(&cfg.fno_bin)
-                .args(["backlog", "done", node_id])
+                .args(&args)
                 .current_dir(&cfg.cwd)
                 .output()
         }) {
@@ -620,25 +663,6 @@ fn resolve_crash(
     );
 }
 
-/// Does a parsed `fno backlog get` node carry a USABLE PR reference? `pr_number`
-/// an integer and `pr_url` a non-empty string, matching what the CLI's
-/// node_pr_refs can actually derive a ref from. An empty pr_url is not evidence
-/// of a ship.
-fn value_has_usable_pr_ref(v: &serde_json::Value) -> bool {
-    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
-        return true;
-    }
-    if v.get("pr_url")
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| !u.trim().is_empty())
-    {
-        return true;
-    }
-    v.get("additional_prs")
-        .and_then(|a| a.as_array())
-        .is_some_and(|a| !a.is_empty())
-}
-
 /// Did a SYNCHRONOUS (headless) child already reach a terminal state? The
 /// one-shot worker ran to completion before its dispatch returned, so graph
 /// state is the only evidence left. FAIL-OPEN: an unreadable or unparseable
@@ -666,7 +690,9 @@ fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
             .and_then(|t| t.as_str())
             .is_some_and(|t| !t.trim().is_empty())
     };
-    stamped("completed_at") || stamped("deferred_at") || value_has_usable_pr_ref(&v)
+    stamped("completed_at")
+        || stamped("deferred_at")
+        || crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Resolve a synchronous (headless) child on the spot instead of holding it
@@ -906,8 +932,10 @@ fn dispatch_member(
     // mid-incident takes this branch on its first tick, proving the stop is
     // durable state rather than a missed announcement. Reconciliation and tick
     // reporting continue; only new dispatch is refused. An unreadable state
-    // fails closed with its own reason, never as clear.
-    let incident = crate::fleet_incident::verdict();
+    // fails closed with its own reason, never as clear. The gate asks the
+    // spawns question: dispatch is automatic spawning, so a stop that holds
+    // only tests or merges keeps dispatching.
+    let incident = crate::fleet_incident::verdict_for("spawns");
     if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
         let (token, generation, detail) = match &incident {
             crate::fleet_incident::Verdict::Stopped(r) => (
@@ -1399,13 +1427,8 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 /// The held map for one config cwd: one fold over the question journals,
 /// failing open to an empty map (a missing journal holds nothing).
 fn held_for(cwd: &Path, registry_path: &Path) -> std::collections::BTreeMap<String, String> {
-    // catch_unwind: the fold resolves the state root, which can panic in a
-    // process with no declared hermetic root; a held read never kills a tick.
     match registry_path.parent().and_then(Path::parent) {
-        Some(fno_dir) => std::panic::catch_unwind(|| {
-            crate::needs::held_nodes(&crate::needs::question_journals(fno_dir, cwd))
-        })
-        .unwrap_or_default(),
+        Some(fno_dir) => crate::needs::held_map(fno_dir, cwd),
         None => Default::default(),
     }
 }
@@ -2359,8 +2382,6 @@ mod tests {
     // claims root, so it reads real state for a key that never exists (and never
     // writes there).
 
-    use std::os::unix::fs::PermissionsExt;
-
     /// Hold this for the whole body of any test that shells `fno_cmd`.
     ///
     /// `fno_cmd` resolves its binary from the process-global `$FNO_BIN` IN
@@ -2386,16 +2407,14 @@ mod tests {
     /// assert which `backlog done`/`defer` side effects the reconcile fired.
     fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2404,19 +2423,17 @@ mod tests {
     /// is unreachable with it, and the whole thing passes green when reverted.
     fn stub_fno_defer_fails(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [ \"$2\" = \"defer\" ]; then echo 'node not found' >&2; exit 1; fi\n\
                  exit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2425,19 +2442,17 @@ mod tests {
     /// records its argv and exits 0.
     fn stub_fno_get(dir: &std::path::Path, record: &std::path::Path, node_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [ \"$2\" = \"get\" ]; then printf '%s' '{}'; exit 0; fi\n\
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 node_json,
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2466,8 +2481,7 @@ mod tests {
         let p = tmp.path().join("bin").join("fno");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         // exec: the kill hits the sleeper itself, not a shell wrapper.
-        std::fs::write(&p, "#!/bin/bash\nexec sleep 10\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = crate::write_exec_stub(p.parent().unwrap(), "fno", "#!/bin/bash\nexec sleep 10\n");
         let mut cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
         cfg.advance_timeout_s = 1;
         let (journal, project_journal) = test_journal(tmp.path());
@@ -2699,6 +2713,50 @@ mod tests {
         assert_eq!(breaker.consecutive_failures("x-doc00001"), 0);
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(calls.contains("backlog done x-doc00001"), "calls: {calls}");
+        assert!(
+            calls.contains("--note"),
+            "a PR-less advisory close records why: {calls}"
+        );
+        assert!(
+            !calls.contains("--force"),
+            "the drain never force-closes: {calls}"
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_pr_green_close_carries_no_note() {
+        // AC4-ERR: a node with a PR ref keeps the bare argv, so the
+        // canonical close and its strand guard stay as they are.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-prgr0001","status":"in_review","pr_number":424}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-prgr0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "pr green".to_string(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-prgr0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-prgr0001"), "calls: {calls}");
+        assert!(
+            !calls.contains("--note"),
+            "a PR-bearing close never carries a note: {calls}"
+        );
     }
 
     #[test]
@@ -2742,13 +2800,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'node has open blockers' >&2; exit 1; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, _pj) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2781,13 +2837,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'awaiting merge: PR OPEN' >&2; exit 5; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2825,13 +2879,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-aaaa could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2868,13 +2920,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // failure_limit 1 so a single exit-6 trips and emits the parked event.
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 1);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -3168,16 +3218,14 @@ mod tests {
     /// stdout (exit 0). Any other subcommand is a no-op exit 0.
     fn stub_fno_advance(dir: &std::path::Path, receipt_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{receipt_json}\nJSON\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3191,10 +3239,10 @@ mod tests {
         node_json: &str,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{advance_json}\nJSON\nexit 0; fi\n\
@@ -3202,9 +3250,7 @@ mod tests {
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3215,20 +3261,18 @@ mod tests {
         observer_marker: Option<&std::path::Path>,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
         let observer = observer_marker
             .map(|path| format!("printf 'called' > '{}'\n", path.display()))
             .unwrap_or_default();
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \\
                  cat <<'JSON'\n{advance_json}\nJSON\nelif [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \\
                  {observer}printf '%s' '{observer_json}'\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3318,10 +3362,10 @@ mod tests {
         cwd: &std::path::Path,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
@@ -3333,9 +3377,7 @@ mod tests {
                 record.display(),
                 cwd.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3350,6 +3392,7 @@ mod tests {
                 changed_at: "2026-09-13T01:07:00Z".into(),
                 changed_by: "op".into(),
                 reason: "load 385".into(),
+                holds: Vec::new(),
                 source: Some("file".into()),
             })
             .unwrap(),
@@ -3512,6 +3555,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(
@@ -4174,10 +4218,10 @@ mod tests {
     /// The receipt itself is native now, so the fixture files carry it.
     fn stub_fno_converge(dir: &std::path::Path, log: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
@@ -4185,9 +4229,7 @@ mod tests {
                  exit 0\n",
                 log = log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 

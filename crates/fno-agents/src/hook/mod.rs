@@ -91,3 +91,49 @@ pub(crate) fn emit_block(reason: &str) -> i32 {
     println!("{out}");
     0
 }
+
+/// One control-plane arm row for this fire. The row carries the fire's
+/// session id: `emit_tick` writes one row per SPACE with no session key of
+/// its own, so a reader of `fno agents status` sees only the space's newest
+/// fire and cannot tell a king's own row from a neighbor's - the misread
+/// that once sent a drain-reserve fix chasing a driver=target
+/// misclassification for days.
+pub(crate) fn global_events_path(fallback: &Path) -> PathBuf {
+    std::env::var_os("GLOBAL_EVENTS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::paths::AgentsHome::from_env_opt()
+                .map(|home| crate::daemon::global_events_path(&home))
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+pub(crate) fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
+    let project_events = crate::paths::events_path(cwd);
+    let global_events = global_events_path(&project_events);
+    // A missing space root must drop nothing: this row is the one record
+    // that a fire ran, and the append below is best-effort, so the target
+    // dirs are created here rather than trusted to exist.
+    for events in [&project_events, &global_events] {
+        if let Some(parent) = events.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
+    let mut detail = format!(
+        "driver={driver} decision={decision} reason={}",
+        if reason.is_empty() { "live" } else { reason }
+    );
+    if !session.is_empty() {
+        let short: String = session.chars().take(8).collect();
+        detail.push_str(&format!(" session={short}"));
+    }
+    let data = serde_json::json!({
+        "arm": "stop_hook",
+        "scheduler": "hook:target-stop-hook",
+        "acted": 1,
+        "skip_reason": serde_json::Value::Null,
+        "detail": detail,
+        "interval_s": 0,
+    });
+    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
+}

@@ -15,11 +15,12 @@
 // The contract's vocabulary: api speaks (and re-exports) the model types,
 // so a caller imports them from here and the names stay single-sourced.
 pub use crate::backlog::model::{
-    Comment, Dispatch, Encounter, Node, Priority, PullRequest, RelationType, SessionRecord,
-    StateType, Status,
+    Comment, Dispatch, Encounter, Finding, Node, Priority, PullRequest, RelationType,
+    SessionRecord, StateType, Status,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -969,6 +970,202 @@ pub fn comment_create(
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FindingInput {
+    pub body: String,
+    #[serde(default)]
+    pub block_cmd: Option<String>,
+    #[serde(default)]
+    pub block_excerpt: Option<String>,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_harness: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FindingReceipt {
+    pub finding_id: String,
+    pub node_id: String,
+    pub version: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolveReceipt {
+    pub finding_id: String,
+    pub status: String,
+    pub resolved_at: String,
+    pub version: i64,
+}
+
+/// One blocking review finding on a node. The finding id mints inside the
+/// mutation (re-minting while it collides with any stored finding), and the
+/// receipt returns only after the commit and the readback both succeed: a
+/// write that did not persist is an error, never a receipt.
+pub fn finding_create(
+    store: &Store,
+    node_id: &str,
+    input: FindingInput,
+) -> Result<FindingReceipt, ApiError> {
+    const EXCERPT_LIMIT: usize = 2048;
+    let body = crate::backlog::node_state::normalize_prose(&input.body);
+    if body.is_empty() {
+        return Err(ApiError("finding body is empty".into()));
+    }
+    if crate::backlog::node_state::count_prose(&body) > crate::backlog::node_state::PROSE_LIMIT {
+        return Err(ApiError(format!(
+            "finding body exceeds the {} character prose limit",
+            crate::backlog::node_state::PROSE_LIMIT
+        )));
+    }
+    let mut excerpt = input.block_excerpt.clone();
+    if let Some(text) = &mut excerpt {
+        if text.chars().count() > EXCERPT_LIMIT {
+            *text = text.chars().take(EXCERPT_LIMIT).collect();
+        }
+    }
+    let mut minted = String::new();
+    let ok = mutate(store, "finding_create", |rows| {
+        if !rows
+            .iter()
+            .any(|row| crate::graph_store::entry_id(row) == Some(node_id))
+        {
+            return Ok(false);
+        }
+        loop {
+            minted = mint_finding_id();
+            let taken = rows
+                .iter()
+                .any(|row| super::findings::finding_ids_in(row).contains(&minted));
+            if !taken {
+                break;
+            }
+        }
+        for row in rows.iter_mut() {
+            if crate::graph_store::entry_id(row) != Some(node_id) {
+                continue;
+            }
+            let Ok(mut parsed) = Node::from_json(row) else {
+                return Ok(false);
+            };
+            parsed.findings.get_or_insert_with(Vec::new).push(Finding {
+                finding_id: minted.clone(),
+                created_at: Some(crate::graph_store::now_isoformat()),
+                body: body.clone(),
+                block_cmd: input.block_cmd.clone(),
+                block_excerpt: excerpt.clone(),
+                source_session_id: input.source_session_id.clone(),
+                source_harness: input.source_harness.clone(),
+                resolved_at: None,
+                resolved_by_session_id: None,
+            });
+            *row = parsed.to_json();
+            break;
+        }
+        Ok(true)
+    })?;
+    if !ok {
+        return Err(ApiError(format!("node {node_id} not found")));
+    }
+    let rows = read_rows(store)?;
+    let stored = rows
+        .iter()
+        .find(|row| crate::graph_store::entry_id(row) == Some(node_id))
+        .is_some_and(|row| super::findings::finding_ids_in(row).contains(&minted));
+    if !stored {
+        return Err(ApiError(format!(
+            "finding {minted} committed but not read back"
+        )));
+    }
+    Ok(FindingReceipt {
+        finding_id: minted,
+        node_id: node_id.to_string(),
+        version: fresh_version(store),
+    })
+}
+
+fn mint_finding_id() -> String {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Stamp `resolved_at` on a finding. An unknown id is an error; an
+/// already-resolved id returns `already_resolved` with the prior
+/// resolved_at and wrote nothing this call.
+pub fn finding_resolve(
+    store: &Store,
+    finding_id: &str,
+    session: Option<&str>,
+) -> Result<ResolveReceipt, ApiError> {
+    let mut seen = false;
+    let mut prior: Option<String> = None;
+    let mut stamped: Option<String> = None;
+    mutate(store, "finding_resolve", |rows| {
+        for row in rows.iter_mut() {
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let Some(list) = &mut parsed.findings else {
+                continue;
+            };
+            let Some(finding) = list.iter_mut().find(|f| f.finding_id == finding_id) else {
+                continue;
+            };
+            seen = true;
+            if let Some(when) = &finding.resolved_at {
+                prior = Some(when.clone());
+                return Ok(false);
+            }
+            let now = crate::graph_store::now_isoformat();
+            finding.resolved_at = Some(now.clone());
+            finding.resolved_by_session_id = session.map(str::to_string);
+            stamped = Some(now);
+            *row = parsed.to_json();
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    let (status, resolved_at) = match (stamped, prior) {
+        (Some(now), _) => ("resolved", now),
+        (None, Some(before)) => ("already_resolved", before),
+        (None, None) => return Err(ApiError(format!("unknown finding {finding_id}"))),
+    };
+    Ok(ResolveReceipt {
+        finding_id: finding_id.to_string(),
+        status: status.into(),
+        resolved_at,
+        version: fresh_version(store),
+    })
+}
+
+/// Open or resolved findings, optionally scoped to one node. A store read
+/// error is Err, never an empty list.
+pub fn findings(
+    store: &Store,
+    node_id: Option<&str>,
+    open_only: bool,
+) -> Result<Vec<Finding>, ApiError> {
+    let mut out: Vec<Finding> = Vec::new();
+    for row in read_rows(store)? {
+        let Ok(node) = Node::from_json(&row) else {
+            continue;
+        };
+        if let Some(id) = node_id {
+            if node.id != id {
+                continue;
+            }
+        }
+        for finding in node.findings.unwrap_or_default() {
+            if open_only && finding.resolved_at.is_some() {
+                continue;
+            }
+            out.push(finding);
+        }
+    }
+    Ok(out)
+}
+
 pub fn pull_request_attach(
     store: &Store,
     id: &str,
@@ -1291,6 +1488,117 @@ pub fn session_end(
     }
 }
 
+/// One session record's recorded stamps, for [`session_backfill`].
+pub struct SessionFill {
+    pub phase: String,
+    pub harness: String,
+    pub session_id: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub ended_by: String,
+}
+
+/// Fill missing `started_at` and `ended_at` on session records from recorded
+/// sources, all in one write. A stamp already there is never overwritten; a
+/// fill matches its node, phase, harness and session id. Returns the stamps
+/// written. A node that rides the raw carry takes none.
+pub fn session_backfill(store: &Store, fills: &[(String, SessionFill)]) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, Vec<&SessionFill>> = HashMap::new();
+    for (node, fill) in fills {
+        by_node.entry(node.as_str()).or_default().push(fill);
+    }
+    let mut written = 0;
+    if by_node.is_empty() {
+        return Ok(written);
+    }
+    mutate(store, "session_backfill", |rows| {
+        written = 0;
+        for row in rows.iter_mut() {
+            let Some(mine) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = written;
+            for record in parsed.sessions.iter_mut().flatten() {
+                for fill in mine {
+                    if record.phase != fill.phase
+                        || record.harness != fill.harness
+                        || record.session_id != fill.session_id
+                    {
+                        continue;
+                    }
+                    if record.started_at.as_deref().is_none_or(str::is_empty)
+                        && fill.started_at.is_some()
+                    {
+                        record.started_at = fill.started_at.clone();
+                        written += 1;
+                    }
+                    if record.ended_at.as_deref().is_none_or(str::is_empty)
+                        && fill.ended_at.is_some()
+                    {
+                        record.ended_at = fill.ended_at.clone();
+                        record.ended_by = Some(fill.ended_by.clone());
+                        written += 1;
+                    }
+                }
+            }
+            if written > before {
+                *row = parsed.to_json();
+            }
+        }
+        Ok(written > 0)
+    })?;
+    Ok(written)
+}
+
+/// Fill `ended_at` on every `phase` record that has none, whoever opened it,
+/// for each (node, ended_at, ended_by), all in one write: a ship record ends
+/// at the merge, whichever session linked the PR. The first end named for a
+/// node wins. Returns the records ended. A node that rides the raw carry
+/// takes none.
+pub fn phase_end(
+    store: &Store,
+    phase: &str,
+    ends: &[(String, String, &str)],
+) -> Result<usize, ApiError> {
+    let mut by_node: HashMap<&str, (&str, &str)> = HashMap::new();
+    for (node, at, by) in ends {
+        by_node.entry(node.as_str()).or_insert((at.as_str(), *by));
+    }
+    let mut ended = 0;
+    if by_node.is_empty() {
+        return Ok(ended);
+    }
+    mutate(store, "phase_end", |rows| {
+        ended = 0;
+        for row in rows.iter_mut() {
+            let Some(&(at, by)) = crate::graph_store::entry_id(row).and_then(|id| by_node.get(id))
+            else {
+                continue;
+            };
+            let Ok(mut parsed) = Node::from_json(row) else {
+                continue;
+            };
+            let before = ended;
+            for record in parsed.sessions.iter_mut().flatten() {
+                if record.phase == phase && record.ended_at.as_deref().is_none_or(str::is_empty) {
+                    record.ended_at = Some(at.to_string());
+                    record.ended_by = Some(by.to_string());
+                    ended += 1;
+                }
+            }
+            if ended > before {
+                *row = parsed.to_json();
+            }
+        }
+        Ok(ended > 0)
+    })?;
+    Ok(ended)
+}
+
 pub fn encounter_create(
     store: &Store,
     id: &str,
@@ -1309,7 +1617,7 @@ pub fn encounter_create(
                 .encounters
                 .get_or_insert_with(Vec::new)
                 .push(Encounter {
-                    ts: crate::graph_store::now_isoformat(),
+                    created_at: crate::graph_store::now_isoformat(),
                     evidence: input.evidence.clone(),
                     session_id: input.session_id.clone(),
                     voter_key: None,

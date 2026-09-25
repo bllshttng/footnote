@@ -2,7 +2,7 @@
 
 use crate::loopcheck::TerminationReason;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default)]
 pub(crate) struct KingManifest {
@@ -100,10 +100,7 @@ pub(crate) fn stand_down_gate(
         .harness_session_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())?;
-    let capture_dir = std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))?;
+    let capture_dir = crate::operator_turns::capture_dir(cwd)?;
     let pending = match crate::operator_turns::pending_stand_down(
         session,
         transcript,
@@ -311,6 +308,12 @@ pub(crate) fn read_king_board(
     state_path: &Path,
 ) -> Result<KingBoard, String> {
     let _ = fno_bin;
+    // Past the reserve line the board refuses instead of reading at the 1ms
+    // bound: a board that never answered is the readable, bounded outcome a
+    // spent fire owes the king, and the drain's reserve stays untouched.
+    if crate::loopcheck::stopgate_pre_drain_spent() {
+        return Err("king board not read: the fire budget was spent before the board".to_string());
+    }
     let opts = crate::king_board::BoardOpts {
         budget_ms: crate::loopcheck::stopgate_read_timeout().as_millis() as u64,
         max_pr_reads: crate::king_board::DEFAULT_MAX_PR_READS,
@@ -579,6 +582,7 @@ pub(crate) fn bound_breached(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn a_null_harness_session_is_treated_as_legacy_missing_identity() {
@@ -759,19 +763,16 @@ mod tests {
     }
 
     fn gate_status_stub(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fno = dir.join("fno");
         let payload = json!({
             "verdict": "refused",
             "reason": "max_live",
             "message": "15 live worker slots >= max_live 15",
         });
-        std::fs::write(&fno, format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n")).unwrap();
-        let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fno, permissions).unwrap();
-        fno
+        crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
+        )
     }
 
     fn accepted_probe() -> GateProbe {

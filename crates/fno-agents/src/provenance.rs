@@ -403,8 +403,8 @@ pub(crate) struct BusIndex {
 }
 
 impl BusIndex {
-    /// A join-free index: fixtures and the queue's no-bus path.
-    #[cfg(test)]
+    /// A join-free index: fixtures and readers with no bus join (the wake
+    /// meter classifies the king's own transcript without one).
     pub(crate) fn empty() -> Self {
         BusIndex { rows: Vec::new() }
     }

@@ -921,6 +921,56 @@ def native_backlog_door(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _closure_leg_hermetic(monkeypatch):
+    """Hermetic default for the closure-line forwarders.
+
+    `fno.pr.closure.parse_closure_trailer`/`render_closure_trailer` are thin
+    forwarders to the Rust leg (`fno-agents pr-closure-parse|render`, through
+    `fno.rust_binary.verb_call`). In the test environment that resolver can
+    find an installed binary without the new verb, or none at all, so the
+    default answers from a test-local copy of the shared-corpus grammar;
+    tests that pin the forwarder WIRING re-stub `fno.pr.closure.verb_call`
+    themselves (closure.py binds the transport at module level), and the
+    corpus test runs the real dev binary when one exists (skip otherwise,
+    the same contract as `native_backlog_door`).
+    """
+    from fno.graph._constants import is_wellformed_node_id
+
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        if verb == "pr-closure-render":
+            ids = [
+                t
+                for t in dict.fromkeys(payload.get("ids") or [])
+                if is_wellformed_node_id(t)
+            ]
+            return {"line": f"Fixes {' '.join(ids)}" if ids else ""}
+
+        def _line_ids(line):
+            stripped = line.strip()
+            for kw in ("fixes", "backlog-closure"):
+                if stripped.lower().startswith(kw):
+                    rest = stripped[len(kw):]
+                    if rest.startswith(":"):
+                        rest = rest[1:]
+                    if rest and not rest[0].isspace():
+                        return None  # glued word, not the keyword
+                    toks = [t for t in rest.replace(",", " ").split() if t]
+                    if not toks or not all(is_wellformed_node_id(t) for t in toks):
+                        return None  # one bad token: the line is prose
+                    return list(dict.fromkeys(toks))
+            return None
+
+        best = None
+        for line in (payload.get("body") or "").splitlines():
+            ids = _line_ids(line)
+            if ids is not None:
+                best = ids
+        return {"ids": best or []}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _fake_verb_call)
+
+
+@pytest.fixture(autouse=True)
 def _no_review_coverage_recompute(monkeypatch):
     """Hermetic default for the coverage recompute (x-3a3f).
 
@@ -1046,6 +1096,21 @@ def _hermetic_reap_receipt(monkeypatch):
     import fno.agents.spawn_axes_client as spawn_axes_client_module
 
     monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _answer)
+
+
+@pytest.fixture
+def loop_admission_ready(monkeypatch):
+    """Stub native readiness for CLI tests focused on other spawn behavior."""
+    import fno.rust_binary as rust_binary
+
+    real_call = rust_binary.call_binary_json
+
+    def ready(verb, args, *call_args, **call_kwargs):
+        if verb == "loop" and args and args[0] == "readiness":
+            return None, {"ready": True}
+        return real_call(verb, args, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(rust_binary, "call_binary_json", ready)
 
 
 def checkout_fno_agents_binary():

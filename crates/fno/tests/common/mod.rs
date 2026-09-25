@@ -253,6 +253,19 @@ impl ClientHarness {
         Self::spawn_sized_full(scratch, 24, 60, &[], &["--session", session])
     }
 
+    /// A sized spawn with extra client env - the composer e2e tests pin the
+    /// agent list against scratch-local fake harness bins (a clean CI home
+    /// has none on PATH), which need both the size and the PATH override.
+    #[allow(dead_code)]
+    pub fn spawn_sized_with(
+        scratch: &Scratch,
+        rows: u16,
+        cols: u16,
+        envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_sized_full(scratch, rows, cols, envs, &[])
+    }
+
     fn spawn_sized_full(
         scratch: &Scratch,
         rows: u16,
@@ -734,14 +747,43 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
 
 #[allow(dead_code)]
 pub fn connect_with_retry(sock: &Path) -> std::os::unix::net::UnixStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    connect_with_retry_for(sock, Duration::from_secs(10), "server startup")
+}
+
+/// Wait for a specific server startup phase and include its stderr tail on failure.
+pub fn connect_with_retry_for(
+    sock: &Path,
+    budget: Duration,
+    phase: &str,
+) -> std::os::unix::net::UnixStream {
+    let deadline = Instant::now() + budget;
     loop {
         match std::os::unix::net::UnixStream::connect(sock) {
             Ok(s) => return s,
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => panic!("server never came up at {}: {e}", sock.display()),
+            Err(e) => {
+                let server_log = sock
+                    .parent()
+                    .map(|parent| parent.join("server.log"))
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .map(|log| {
+                        log.lines()
+                            .rev()
+                            .take(40)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_else(|| "(no server log available)".into());
+                panic!(
+                    "server never came up during {phase} within {budget:?} at {}: {e}\nserver stderr (last 40 lines):\n{server_log}",
+                    sock.display()
+                );
+            }
         }
     }
 }

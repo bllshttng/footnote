@@ -622,9 +622,15 @@ commands:
         read a node's note journal, oldest first
   stale <node> --plan <path>
         report notes newer than the plan's last commit (else its mtime)
+  findings [<node>] [--open]
+        read blocking findings: one count line, then one line per finding
+  import [--apply] --journal <path>...
+        import retained review_finding journal rows; preview without --apply
 
 flags:
-  --node <id>              node for history or stale (a positional token also works)
+  --node <id>              node for history, stale or findings (a positional token also works)
+  --open                   findings reader: list open findings only
+  --journal <path>         journal to import (repeatable)
   --plan <path>            plan file for stale
   --offset N --limit N     page the history read (default limit 50)
   --json                   machine output; history emits {{total, offset, records}}
@@ -645,10 +651,14 @@ pub fn run_notes(args: &[String]) -> i32 {
     let mut positional: Option<String> = None;
     let mut offset = 0usize;
     let mut limit = 50usize;
+    let mut open_only = false;
+    let mut journals: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "inventory" | "migrate" | "history" | "stale" if action.is_empty() => {
+            "inventory" | "migrate" | "history" | "stale" | "findings" | "import"
+                if action.is_empty() =>
+            {
                 action = args[i].clone();
             }
             "-h" | "--help" => {
@@ -716,9 +726,24 @@ pub fn run_notes(args: &[String]) -> i32 {
                 }
             }
             "--apply" => apply = true,
+            "--open" => open_only = true,
             "--json" | "-J" => json_out = true,
+            "--journal" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => journals.push(PathBuf::from(v)),
+                    None => {
+                        eprintln!("fno-agents backlog-notes: --journal needs a path");
+                        return 2;
+                    }
+                }
+            }
+            "import" if action == "findings" => {
+                // The two-word action: `backlog-notes findings import`.
+                action = "import".to_string();
+            }
             other
-                if (action == "history" || action == "stale")
+                if (action == "history" || action == "stale" || action == "findings")
                     && positional.is_none()
                     && !other.starts_with('-') =>
             {
@@ -768,11 +793,190 @@ pub fn run_notes(args: &[String]) -> i32 {
             json_out,
         ),
         "stale" => super::note_stale::run_stale(&graph, node.as_deref(), plan.as_deref(), json_out),
+        "findings" => run_findings(&graph, node.as_deref(), open_only, json_out),
+        "import" => run_import(&graph, &journals, apply, json_out),
         "migrate" => run_migrate(&graph, manifest.as_deref(), apply, json_out),
         _ => {
             print_usage();
             2
         }
+    }
+}
+
+/// `backlog-notes findings [<node>] [--open] [--json]`: the public reader.
+/// One count line first, even for zero; exit 1 with the error on stderr
+/// and no count line when the store cannot be read.
+fn run_findings(
+    graph: &std::path::Path,
+    node: Option<&str>,
+    open_only: bool,
+    json_out: bool,
+) -> i32 {
+    let list = match super::api::findings(&super::api::Store::new(graph), node, false) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("fno-agents backlog-notes: {}", e.0);
+            return 1;
+        }
+    };
+    let open = list.iter().filter(|f| f.resolved_at.is_none()).count();
+    let resolved = list.len() - open;
+    if json_out {
+        let items: Vec<Value> = list
+            .iter()
+            .map(crate::backlog::model::finding_to_json)
+            .collect();
+        let out = json!({
+            "node": node, "open": open, "resolved": resolved, "findings": items,
+        });
+        println!("{out}");
+        return 0;
+    }
+    match node {
+        Some(id) => println!("findings {id}: {open} open, {resolved} resolved"),
+        None => println!("findings: {open} open, {resolved} resolved"),
+    }
+    for f in list
+        .iter()
+        .filter(|f| !open_only || f.resolved_at.is_none())
+    {
+        let head: String = f
+            .body
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        match &f.resolved_at {
+            Some(when) => println!("  {} resolved {when} {head}", f.finding_id),
+            None => println!("  {} OPEN {head}", f.finding_id),
+        }
+    }
+    0
+}
+
+/// `backlog-notes import [--apply] --journal <path>...`: carry retained
+/// `review_finding` / `review_finding_resolved` journal rows into the
+/// findings store, preserving ids. Preview without `--apply`: the receipt
+/// projects the outcome and writes nothing. `errors > 0` exits 1.
+fn run_import(graph: &std::path::Path, journals: &[PathBuf], apply: bool, json_out: bool) -> i32 {
+    let mut journals_scanned = 0usize;
+    let mut rows_scanned = 0usize;
+    let mut imported = 0usize;
+    let mut resolutions = 0usize;
+    let mut duplicates = 0usize;
+    let mut errors = 0usize;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for journal in journals {
+        let Ok(content) = std::fs::read_to_string(journal) else {
+            errors += 1;
+            continue;
+        };
+        journals_scanned += 1;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            rows_scanned += 1;
+            let Ok(ev) = serde_json::from_str::<Value>(line) else {
+                errors += 1;
+                continue;
+            };
+            let etype = ev
+                .get("type")
+                .or_else(|| ev.get("event_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let data = ev.get("data").cloned().unwrap_or(Value::Null);
+            if etype != "review_finding" && etype != "review_finding_resolved" {
+                continue;
+            }
+            let fid = data.get("finding_id").and_then(Value::as_str).unwrap_or("");
+            if fid.is_empty() {
+                errors += 1;
+                continue;
+            }
+            if etype == "review_finding" {
+                let node = data.get("node").and_then(Value::as_str).unwrap_or("");
+                let text = data.get("text").and_then(Value::as_str).unwrap_or("");
+                if !seen.insert(fid.to_string()) {
+                    duplicates += 1;
+                    continue;
+                }
+                if !apply {
+                    imported += 1;
+                    continue;
+                }
+                let finding = crate::backlog::model::Finding {
+                    finding_id: fid.to_string(),
+                    created_at: ev
+                        .get("ts")
+                        .and_then(Value::as_str)
+                        .filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts))
+                        .map(str::to_string),
+                    body: text.to_string(),
+                    block_cmd: data
+                        .get("block_cmd")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    block_excerpt: data
+                        .get("block_excerpt")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    source_session_id: None,
+                    source_harness: Some("annotate-import".to_string()),
+                    resolved_at: None,
+                    resolved_by_session_id: None,
+                };
+                match crate::backlog::findings::import_finding(graph, node, finding) {
+                    Ok(true) => imported += 1,
+                    Ok(false) => duplicates += 1,
+                    Err(_) => errors += 1,
+                }
+            } else {
+                // The resolved_at CHECK refuses a stamp that is not UTC; a
+                // refused resolution would leave the finding holding the gate.
+                let when = ev
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts))
+                    .map_or_else(crate::graph_store::now_isoformat, str::to_string);
+                if !apply {
+                    resolutions += 1;
+                    continue;
+                }
+                match crate::backlog::findings::import_resolve(graph, fid, &when, None) {
+                    Ok(true) => resolutions += 1,
+                    Ok(false) => duplicates += 1,
+                    Err(_) => errors += 1,
+                }
+            }
+        }
+    }
+    let receipt = json!({
+        "journals_scanned": journals_scanned,
+        "rows_scanned": rows_scanned,
+        "findings_imported": imported,
+        "resolutions_applied": resolutions,
+        "duplicates": duplicates,
+        "errors": errors,
+        "applied": apply,
+    });
+    if json_out {
+        println!("{receipt}");
+    } else {
+        println!(
+            "import: {} journal(s), {} row(s), {} finding(s) imported, {} resolution(s) applied, {} duplicate(s), {} error(s){}",
+            journals_scanned, rows_scanned, imported, resolutions, duplicates, errors,
+            if apply { "" } else { " (preview)" },
+        );
+    }
+    if errors > 0 {
+        1
+    } else {
+        0
     }
 }
 

@@ -700,6 +700,7 @@ mod tests {
                 reason: "roster blocked".to_string(),
             }],
             unread: None,
+            names_pruned: Vec::new(),
         });
         let text = render_reap(&s, false, false);
         assert!(
@@ -737,6 +738,7 @@ mod tests {
             }],
             kept: vec![],
             unread: None,
+            names_pruned: Vec::new(),
         });
         let text = render_reap(&s, false, true);
         assert!(text.contains("would vacate crown zed"), "{text}");

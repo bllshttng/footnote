@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
@@ -889,7 +889,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
     Delegates entirely to ``fno backlog reconcile --pr-number --repo`` (the
     same plural mode the post-merge ritual uses): it binds every node this
-    PR's exact ``Backlog-Closure`` trailer names, THEN runs the existing
+    PR's exact closure line names, THEN runs the existing
     forward scan (which also finds a node stamped at creation the old
     ``_find_pr_node_id`` match used to backfill by hand) plus the reverse
     branch-name map. A single-node PR with no trailer at all still closes via
@@ -937,7 +937,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             pr_url = view.stdout.strip()
 
         if external:
-            # External selection has no Backlog-Closure trailer concept of its
+            # External selection has no closure-trailer concept of its
             # own yet (that is graph-only) - resolve the ONE node this
             # PR's ref matches via the tracker-agnostic sidecar projection,
             # backfill its primary link, and close through the shared
@@ -1072,7 +1072,9 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         return []
 
 
-def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
+def _on_confirmed_merge(
+    pr_number: int, cwd: str = "", *, defer_close: bool = False
+) -> List[str]:
     """Every graph side-effect of a CONFIRMED (immediate) merge, in one place.
 
     Sync merge_status + stamp ship provenance (``_sync_graph_merge_status``), then
@@ -1080,8 +1082,13 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
     call this ONE function so the node-close can never be forgotten on one of
     them; the failure paths keep calling ``_sync_graph_merge_status`` alone.
     Returns the node ids the merge closed (the cleanup request's ``node_ids``).
+
+    ``defer_close`` (the watcher's durable-grant merge) skips the node-close:
+    the sweep ritual leg and merge_close arm close the node instead.
     """
     _sync_graph_merge_status("merged", pr_number, cwd)
+    if defer_close:
+        return []
     return _reconcile_merged_pr_node(pr_number, cwd)
 
 
@@ -1509,6 +1516,7 @@ def _finish_confirmed_merge(
     *,
     prior_cleanup_failure: str = "",
     release_lock: Optional[Callable[[], None]] = None,
+    defer_close: bool = False,
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
     # The race the lock closes ended at the merged receipt; release first so
@@ -1541,7 +1549,7 @@ def _finish_confirmed_merge(
         )
         rc = 0
 
-    bound_node_ids = _on_confirmed_merge(pr_number, repo)
+    bound_node_ids = _on_confirmed_merge(pr_number, repo, defer_close=defer_close)
     _run_post_merge_followups(pr_number, strategy, repo, bound_node_ids=bound_node_ids)
     return rc
 
@@ -1553,32 +1561,36 @@ def _finish_confirmed_merge(
 
 _MergeLockState = Literal["acquired", "held", "unavailable"]
 
+_MergeLockYield = tuple[_MergeLockState, Optional[Callable[[], None]], Optional[dict]]
+
 
 @contextmanager
-def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]]]]:
-    """Serialize merges repo-wide; yield ``(state, release_now)``.
+def _merge_lock(pr_number: int) -> Iterator[_MergeLockYield]:
+    """Serialize merges repo-wide; yield ``(state, release_now, held_detail)``.
 
     One ``merge:<canonical-root>`` claim per project (repo-local routing, so
     every worktree lane contends on the SAME lock - like ``walker:<root>``),
     pid-liveness anchored so a crashed merger frees it instantly. Acquisition
     polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
-    yields ``held``. A claims-layer error yields ``unavailable`` and the merge
+    yields ``held`` with ``held_detail`` naming the holder PR and claim age.
+    Stale claims are stolen by the claims layer, so ``held`` reports a holder
+    live at the last poll. A claims-layer error yields ``unavailable`` and the merge
     proceeds unserialized: the lock is coordination, GitHub stays the merge
-    authority, and our own tooling failing must never block a merge. Yields
-    ``(state, release_now)``; the early fire and the finally release are the
-    same idempotent call, so both firing is safe.
+    authority, and our own tooling failing must never block a merge.
     """
     state: Literal["acquired", "held", "unavailable"] = "acquired"
+    held_detail: Optional[dict] = None
     key = holder = release = None
     # Acquisition happens fully BEFORE the yield: an exception the consumer
     # body throws into the generator must reach the finally-release, never an
     # except-then-yield-again (which would RuntimeError inside contextmanager).
     try:
-        from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
+        from fno.claims.core import CLAIM_UNAVAILABLE, ClaimHeldByOther, acquire_claim, release_claim
+        from fno.claims.io import claim_path, read_claim_file
         from fno.paths import resolve_canonical_repo_root
 
         key = f"merge:{resolve_canonical_repo_root()}"
-        holder = f"pr-merge:{os.getpid()}"
+        holder = f"pr-merge:pr{pr_number}:{os.getpid()}"
 
         def _release_now() -> None:
             try:
@@ -1592,21 +1604,27 @@ def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]
                 acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
                 release = release_claim
                 break
-            except CLAIM_UNAVAILABLE:
+            except CLAIM_UNAVAILABLE as exc:
                 # At the exact moment two mergers are racing hardest, the
                 # outer except Exception below yields "unavailable" (lock
                 # disabled entirely), which is the wrong degrade for
                 # contention specifically when the whole point is LD#9's
                 # merge serialization under exactly this condition.
+                if isinstance(exc, ClaimHeldByOther):
+                    held_detail = {"holder": exc.holder, "pid": exc.pid, "host": exc.host}
                 if time.monotonic() >= deadline:
                     state = "held"
                     break
                 time.sleep(_MERGE_LOCK_POLL_S)
+        if state == "held" and held_detail is not None:
+            with suppress(Exception):
+                rec = read_claim_file(claim_path(key))
+                held_detail["age_s"] = max(0, int(time.time() * 1000 - rec.acquired_at) // 1000)
     except Exception as exc:  # noqa: BLE001 - fail-open: lock is best-effort
         sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
         state = "unavailable"
     try:
-        yield state, (_release_now if state == "acquired" else None)
+        yield state, (_release_now if state == "acquired" else None), held_detail
     finally:
         if release is not None and state == "acquired":
             assert key is not None and holder is not None  # set together before release
@@ -1687,6 +1705,14 @@ def run_merge(
         _emit(0, "failed", f"invalid pr number: {pr_raw}", "none", err=True)
         return 1
     pr_number = int(pr_raw)
+
+    try:
+        from fno.pr._review_hold import resolve_pr_worktree
+
+        repo = resolve_pr_worktree(pr_number, repo)
+    except Exception as exc:
+        _emit(pr_number, "held", str(exc), "none", err=True)
+        return 2
 
     # The plan-level hold and the in-flight review hold used to be asked here,
     # ahead of every other gate. Both now belong to the authorized-merge owner,
@@ -1855,15 +1881,16 @@ def run_merge(
     # between the freshness read and our merge is exactly the race the lock
     # exists to close. Sequential runs (no live lanes) skip the freshness hold
     # and see only an uncontended lock - behavior unchanged.
-    with _merge_lock() as (lock, release_now):
+    with _merge_lock(pr_number) as (lock, release_now, held_detail):
         if lock == "held":
-            _emit(
-                pr_number,
-                "held",
-                "merge serialized: another merge holds the lock; retry",
-                "none",
-                err=False,
-            )
+            reason = "merge serialized: another merge holds the lock; retry"
+            if held_detail:
+                age_part = f", held {held_detail['age_s']}s" if "age_s" in held_detail else ""
+                reason = (
+                    f"merge serialized: held by {held_detail['holder']} "
+                    f"(live at last poll{age_part}; waited {_MERGE_LOCK_WAIT_S}s); retry"
+                )
+            _emit(pr_number, "held", reason, "none", err=False)
             return 2
         return _do_merge(
             pr_number,
@@ -2098,5 +2125,6 @@ def _do_merge(
             note or "merged immediately",
             prior_cleanup_failure=(f"failed: {cleanup_failure}" if cleanup_failure else ""),
             release_lock=release_lock,
+            defer_close=(authority == "durable_grant"),
         )
     return _emit_authorized_outcome(pr_number, receipt, strategy)

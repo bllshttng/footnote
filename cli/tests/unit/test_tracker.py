@@ -1,10 +1,11 @@
-"""Tests for the work-item tracker seam (bring-your-own-id foundation).
+"""Tests for the work-item tracker seam (bring-your-your-own-id foundation).
 
-Covers the five-field read projection, the single close write, the footnote-
-owned sidecar roundtrip, the backend factory, and the backend-selected sidecar
-store (graph projection vs external per-id file). The partition invariant
-itself (zero overlap between sidecar and read interface) has its own CI gate
-in scripts/ci/check-tracker-partition.sh, exercised in test_partition_gate.py.
+Every backend answers in Rust (``crates/fno-agents/src/tracker/``); the
+backends' behavior is tested there (AC1-AC5 of the seam plan). This module
+covers the exec client, the footnote-owned sidecar store, and the verb
+refusals. The partition invariant itself (zero overlap between sidecar and
+read interface) has its own CI gate in scripts/ci/check-tracker-partition.sh,
+exercised in test_partition_gate.py.
 """
 from __future__ import annotations
 
@@ -15,17 +16,13 @@ import pytest
 
 from fno.paths import sidecar_path
 from fno.tracker import (
-    GitHubIssuesTracker,
-    GraphTracker,
     NodeNotFound,
-    TrackerCandidate,
     TrackerError,
     TrackerNode,
     TrackerState,
     get_tracker,
 )
 from fno.tracker import sidecar as sidecar_mod
-from fno.tracker.github_backend import parse_github_id
 from fno.tracker.sidecar import Sidecar, load, save
 from fno.graph.store import read_graph_strict
 
@@ -45,78 +42,98 @@ def _write_graph(path: Path, entries: list[dict]) -> Path:
     return path
 
 
-def test_read_projects_five_fields(tmp_path):
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [{"id": "ab-deadbeef", "title": "Fix login", "plan_path": "/p.md"}],
+def _stub_verb_call(answer_by_op: dict):
+    """A verb_call stand-in keyed by the door's ``tracker`` op."""
+
+    def _call(verb, payload, unavailable, *, timeout=30, passthrough_stderr=False):
+        assert verb == "graph-get"
+        op = payload["tracker"]
+        answer = answer_by_op[op]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return _call
+
+
+# -- the Rust exec client --
+
+
+def test_client_read_maps_node_payload(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        _stub_verb_call({"read": {"node": {
+            "id": "E-1", "title": "T", "state": "open", "parent": None,
+            "blocked_by": [], "details": "d", "url": "u", "size": None,
+        }}}),
     )
-    node = GraphTracker(path=g).read("ab-deadbeef")
-    # Exactly the five-field interface, nothing more.
-    assert node.id == "ab-deadbeef"
-    assert node.title == "Fix login"
+    node = get_tracker("graph").read("E-1")
+    assert node.id == "E-1"
+    assert node.title == "T"
     assert node.state is TrackerState.open
-    assert node.parent is None
-    assert node.blocked_by == []
+    # The extra Rust fields (details, url, size) are ignored by the parse
+    # target: only Sidecar sets extra="forbid".
     assert set(TrackerNode.model_fields) == {"id", "title", "state", "parent", "blocked_by"}
 
 
-def test_read_missing_raises(tmp_path):
-    g = _write_graph(tmp_path / "graph.json", [{"id": "ab-deadbeef"}])
-    with pytest.raises(NodeNotFound):
-        GraphTracker(path=g).read("ab-missing")
-
-
-def test_state_closed_only_for_terminal_rungs(tmp_path):
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [
-            {"id": "ab-done", "completed_at": "2026-01-01T00:00:00Z"},
-            {"id": "ab-sup", "superseded_by": "ab-other"},
-            {"id": "ab-open", "plan_path": "/p.md"},
-        ],
+def test_client_read_maps_not_found(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        _stub_verb_call({"read": {"not_found": True}}),
     )
-    t = GraphTracker(path=g)
-    assert t.read("ab-done").state is TrackerState.closed
-    assert t.read("ab-sup").state is TrackerState.closed
-    assert t.read("ab-open").state is TrackerState.open
-
-
-def test_close_sets_completed_and_flips_state(tmp_path):
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [{"id": "ab-deadbeef", "plan_path": "/p.md"}],
-    )
-    t = GraphTracker(path=g)
-    assert t.read("ab-deadbeef").state is TrackerState.open
-    t.close("ab-deadbeef")
-    # close sets completed_at; the store derives status=done, which projects to
-    # closed on the next read. The point of the test: close is observable via
-    # the read interface, not by poking at stored fields.
-    assert t.read("ab-deadbeef").state is TrackerState.closed
-
-
-def test_close_missing_raises(tmp_path):
-    g = _write_graph(tmp_path / "graph.json", [{"id": "ab-deadbeef"}])
     with pytest.raises(NodeNotFound):
-        GraphTracker(path=g).close("ab-missing")
+        get_tracker("graph").read("E-gone")
 
 
-def test_graph_tracker_satisfies_protocol():
-    # runtime_checkable: GraphTracker is structurally a NodeTracker.
-    from fno.tracker.types import NodeTracker
-
-    assert isinstance(GraphTracker(path=Path("/nonexistent")), NodeTracker)
-
-
-def test_get_tracker_default_is_graph():
-    t = get_tracker()
-    assert t.name == "graph"
-    assert isinstance(t, GraphTracker)
+def test_client_read_maps_error(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        _stub_verb_call({"read": {"error": "gh issue view failed for E-9: x"}}),
+    )
+    with pytest.raises(TrackerError):
+        get_tracker("graph").read("E-9")
 
 
-def test_get_tracker_unknown_backend():
-    with pytest.raises(ValueError):
-        get_tracker("linear")  # not shipped in the foundation
+def test_client_list_open_and_snapshot_and_close(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        _stub_verb_call({
+            "list-open": {"candidates": [{
+                "id": "E-1", "title": "T", "state": "open", "parent": None,
+                "blocked_by": [], "priority": "p1", "rank": None,
+                "created_at": "2026-01-01T00:00:00Z", "closed_at": None,
+            }]},
+            "snapshot": {"backend": "graph", "entries": [], "errors": []},
+            "close": {"closed": "E-1"},
+        }),
+    )
+    t = get_tracker("graph")
+    cands = t.list_open()
+    assert cands[0].id == "E-1"
+    assert cands[0].priority == "p1"
+    assert t._call("snapshot")["backend"] == "graph"
+    t.close("E-1")
+
+
+def test_get_tracker_unknown_backend_fails_at_first_call(monkeypatch):
+    # No ValueError at construction: the backend is resolved in Rust at the
+    # first call, with the Rust refusal text.
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        _stub_verb_call({"read": {"error": "unknown tracker backend: linear. Available: graph, github"}}),
+    )
+    with pytest.raises(TrackerError, match="linear"):
+        get_tracker("linear").read("X-1")
+
+
+def test_get_tracker_name_is_the_selected_backend(monkeypatch):
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    assert get_tracker().name == "github"
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    assert get_tracker().name == "graph"
+
+
+# -- sidecar roundtrip --
 
 
 def test_sidecar_roundtrip(tmp_path, monkeypatch, external_mode):
@@ -153,75 +170,6 @@ def test_sidecar_rejects_tracker_owned_field():
         Sidecar(id="ab-deadbeef", title="leaked tracker field")
     with pytest.raises(ValidationError):
         Sidecar(id="ab-deadbeef", priority="p1")
-
-
-# -- list_open (the enumeration `backlog next` ranks) --
-
-
-def test_list_open_excludes_terminal(tmp_path):
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [
-            {"id": "ab-done", "completed_at": "2026-01-01T00:00:00Z"},
-            {"id": "ab-open1", "plan_path": "/p.md"},
-            {"id": "ab-sup", "superseded_by": "ab-other"},
-            {"id": "ab-open2", "plan_path": "/q.md"},
-        ],
-    )
-    open_ids = [n.id for n in GraphTracker(path=g).list_open()]
-    assert open_ids == ["ab-open1", "ab-open2"]
-
-
-def test_list_open_returns_candidates_with_ordering_inputs(tmp_path):
-    # The selection projection: every open item carries priority / rank /
-    # created_at (the inputs make_selection_sort_key reads off the candidate)
-    # while read() stays five-field. Positive assertions on each widened field.
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [
-            {
-                "id": "ab-1", "plan_path": "/p.md", "priority": "p0",
-                "rank": 2.0, "created_at": "2026-01-02T00:00:00Z",
-                "cwd": "/repo", "pr_number": 9,
-            },
-            {"id": "ab-2", "plan_path": "/q.md"},
-        ],
-    )
-    by_id = {c.id: c for c in GraphTracker(path=g).list_open()}
-    assert set(by_id) == {"ab-1", "ab-2"}
-    assert isinstance(by_id["ab-1"], TrackerCandidate)
-    assert by_id["ab-1"].priority == "p0"
-    assert by_id["ab-1"].rank == 2.0
-    assert by_id["ab-1"].created_at == "2026-01-02T00:00:00Z"
-    # Absent entry values fall back to the projection defaults, and the
-    # sidecar-only fields (cwd, pr_number) stay OFF the candidate.
-    assert by_id["ab-2"].priority == "p2"
-    assert by_id["ab-2"].rank is None
-    assert "cwd" not in TrackerCandidate.model_fields
-    assert "pr_number" not in TrackerCandidate.model_fields
-
-
-def test_candidate_ordering_reproduces_priority_rank_recency(tmp_path):
-    # Distinct ordering inputs produce a distinct, reproducible order once
-    # footnote's sort key runs over candidates - the parity property AC5-EDGE
-    # leans on. Rank beats priority; priority beats created_at.
-    from fno.graph._intake import make_selection_sort_key
-
-    g = _write_graph(
-        tmp_path / "graph.json",
-        [
-            {"id": "ab-lo", "plan_path": "/a.md", "priority": "p3",
-             "created_at": "2026-01-01T00:00:00Z"},
-            {"id": "ab-hi", "plan_path": "/b.md", "priority": "p1",
-             "created_at": "2026-03-01T00:00:00Z"},
-            {"id": "ab-ranked", "plan_path": "/c.md", "priority": "p3",
-             "rank": 1.0, "created_at": "2026-02-01T00:00:00Z"},
-        ],
-    )
-    cands = GraphTracker(path=g).list_open()
-    as_entries = [c.model_dump() for c in cands]
-    ordered = sorted(as_entries, key=make_selection_sort_key(as_entries))
-    assert [e["id"] for e in ordered] == ["ab-ranked", "ab-hi", "ab-lo"]
 
 
 # -- sidecar store selection (graph projection vs external per-id file) --
@@ -347,140 +295,6 @@ def test_sidecar_external_mode_missing_file_is_empty(tmp_path, monkeypatch, exte
     assert load("EXT-new") == Sidecar(id="EXT-new")
 
 
-# -- GitHub Issues backend --
-
-
-class _FakeGH(GitHubIssuesTracker):
-    """Overrides the one gh I/O method with a scripted response table."""
-
-    def __init__(self, responses):
-        super().__init__(default_repo="owner/repo")
-        self._responses = responses  # args-tuple -> (rc, out, err)
-        self.calls = []
-
-    def _gh(self, args):
-        self.calls.append(args)
-        # Match on the first two tokens (e.g. ("issue", "view")) + number.
-        key = tuple(args[:2])
-        return self._responses.get(key, (1, "", "could not resolve to an issue"))
-
-
-def test_parse_github_id_good_and_bad():
-    assert parse_github_id("owner/repo#123") == ("owner", "repo", 123)
-    with pytest.raises(ValueError):
-        parse_github_id("ENG-441")
-    with pytest.raises(ValueError):
-        parse_github_id("owner/repo")
-
-
-def test_github_read_projects():
-    t = _FakeGH({("issue", "view"): (0, '{"title":"Fix","state":"OPEN"}', "")})
-    node = t.read("owner/repo#123")
-    assert node.title == "Fix"
-    assert node.state is TrackerState.open
-    assert node.parent is None
-    assert node.blocked_by == []
-    # The view call targeted the right repo/number.
-    assert t.calls[0][:3] == ["issue", "view", "123"]
-    assert "-R" in t.calls[0] and "owner/repo" in t.calls[0]
-
-
-def test_github_read_closed_state():
-    t = _FakeGH({("issue", "view"): (0, '{"title":"Done","state":"CLOSED"}', "")})
-    assert t.read("owner/repo#7").state is TrackerState.closed
-
-
-def test_github_read_not_found_raises_node_not_found():
-    t = _FakeGH({("issue", "view"): (1, "", "could not resolve to an issue")})
-    with pytest.raises(NodeNotFound):
-        t.read("owner/repo#999")
-
-
-def test_github_read_infra_failure_raises_tracker_error():
-    # A network failure is NOT a not-found; it must surface as TrackerError so
-    # callers can degrade rather than treat the item as absent.
-    t = _FakeGH({("issue", "view"): (1, "", "connection timed out")})
-    with pytest.raises(TrackerError):
-        t.read("owner/repo#1")
-
-
-def test_github_close_invokes_gh_close():
-    t = _FakeGH({("issue", "close"): (0, "", "")})
-    t.close("owner/repo#42")
-    assert t.calls[0][:3] == ["issue", "close", "42"]
-
-
-def test_github_list_open_needs_repo_scope():
-    # Without a default_repo, list_open returns [] (callers fall back) rather
-    # than guessing a scope.
-    t = GitHubIssuesTracker(default_repo=None)
-    assert t.list_open() == []
-
-
-def test_github_list_open_projects():
-    payload = '[{"number":1,"title":"A","state":"OPEN"},{"number":2,"title":"B","state":"OPEN"}]'
-    t = _FakeGH({("issue", "list"): (0, payload, "")})
-    items = t.list_open()
-    assert [n.id for n in items] == ["owner/repo#1", "owner/repo#2"]
-    assert items[0].title == "A" and items[0].state is TrackerState.open
-
-
-def test_get_tracker_github_via_env(monkeypatch):
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-    monkeypatch.setenv("FNO_TRACKER_GITHUB_REPO", "owner/repo")
-    t = get_tracker()
-    assert t.name == "github"
-    assert isinstance(t, GitHubIssuesTracker)
-
-
-def test_github_tracker_satisfies_protocol():
-    from fno.tracker.types import NodeTracker
-
-    assert isinstance(GitHubIssuesTracker(), NodeTracker)
-
-
-# -- github backend contract hardening (exceptions stay in the contract) --
-
-
-def test_github_gh_missing_binary_raises_tracker_error(monkeypatch):
-    # FileNotFoundError (no gh on PATH) must surface as TrackerError, not escape
-    # past the NodeTracker contract a caller degrades on.
-    import fno.tracker.github_backend as ghmod
-
-    def _boom(*a, **k):
-        raise FileNotFoundError("gh")
-
-    monkeypatch.setattr(ghmod.subprocess, "run", _boom)
-    with pytest.raises(TrackerError):
-        GitHubIssuesTracker(default_repo="o/r").read("o/r#1")
-
-
-def test_github_read_non_json_raises_tracker_error():
-    # rc=0 with non-JSON stdout (a gh regression or truncated pipe) is a backend
-    # fault, not a JSONDecodeError escaping the contract.
-    t = _FakeGH({("issue", "view"): (0, "not json at all", "")})
-    with pytest.raises(TrackerError):
-        t.read("owner/repo#5")
-
-
-def test_github_bad_id_raises_tracker_error():
-    # parse_github_id raises ValueError; the read/close boundary must convert it
-    # to TrackerError so callers keyed on the contract degrade, not crash.
-    with pytest.raises(TrackerError):
-        GitHubIssuesTracker().read("ENG-441")
-    with pytest.raises(TrackerError):
-        GitHubIssuesTracker().close("not-a-github-id")
-
-
-def test_github_list_open_warns_when_no_repo(capsys):
-    # No repo scope is a misconfiguration: warn (a signal), not a silent empty
-    # list that lets dispatch stall with no clue.
-    items = GitHubIssuesTracker(default_repo=None).list_open()
-    assert items == []
-    err = capsys.readouterr().err
-    assert "FNO_TRACKER_GITHUB_REPO" in err
-
-
 # -- verb refusal on an external backend --
 
 
@@ -519,5 +333,3 @@ def test_active_backend_name_default_and_override(monkeypatch):
     assert active_backend_name("github") == "github"
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     assert active_backend_name() == "github"
-
-

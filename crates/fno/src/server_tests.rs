@@ -1445,7 +1445,7 @@ fn rename_tab_sanitizes_hostile_wire_names() {
 
 // -- x-96e8 squad management verbs ----------------------------------
 
-fn leaf_tab(id: TabId, pane: u64) -> Tab {
+pub(super) fn leaf_tab(id: TabId, pane: u64) -> Tab {
     Tab {
         name: None,
         id,
@@ -4103,9 +4103,7 @@ fn attach_agent_refuses_unknown_or_malformed_jobid() {
     }
 }
 
-// -- x-76ea agent-row lifecycle (server-side validation) ------------
-
-fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
+pub(super) fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
     let (tx, rx) = mpsc::channel::<ServerMsg>(8);
     let mut c = client(id, 5, (24, 80), false);
     c.reliable_tx = tx;
@@ -4143,7 +4141,7 @@ fn stop_agent_unknown_name_refused() {
 
 /// A helper for the respawn refusal tests: an EXITED registry row with an
 /// optional recorded claude session uuid.
-fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
+pub(super) fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
     RegistryAgent {
         model: None,
         route: None,
@@ -4173,62 +4171,6 @@ fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
         harness: None,
         ..Default::default()
     }
-}
-
-#[test]
-fn respawn_agent_live_row_refused() {
-    // AC2-ERR: RespawnAgent on a still-live row is refused (a plain #[test]
-    // has no tokio runtime, so the clean refusal is also proof the spawn arm
-    // is never reached).
-    let mut core = empty_core();
-    core.agents = vec![bg_row("live-worker", "/w", None)]; // exited: false
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "live-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx).unwrap().contains("still live"));
-}
-
-#[test]
-fn respawn_agent_no_uuid_refused() {
-    // AC2-ERR: an exited row with no recorded claude_session_uuid (also the
-    // non-claude case, since derive_rows only carries the uuid for claude).
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", None)];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("no claude session recorded"));
-}
-
-#[test]
-fn respawn_agent_malformed_uuid_refused_before_argv() {
-    // AC2-ERR: a malformed uuid is refused with the SPECIFIC reason (a
-    // generic "error" would fail this AC) before it could reach argv.
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", Some("not-a-uuid"))];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("malformed session id"));
 }
 
 #[test]
@@ -5073,15 +5015,6 @@ fn sanitize_mail_text_strips_trims_and_bounds() {
 }
 
 #[test]
-fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
-    assert!(valid_session_uuid("12345678-1234-1234-1234-1234567890ab"));
-    assert!(!valid_session_uuid("not-a-uuid"));
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890AB")); // uppercase
-    assert!(!valid_session_uuid("12345678123412341234567890ab")); // no dashes
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
-}
-
-#[test]
 fn derive_failure_leaves_workers_ungrouped() {
     // A malformed/absent graph read leaves workers rendering via their
     // normal path: no squad matches, so the rows stay ungrouped.
@@ -5439,7 +5372,7 @@ fn fresh_attach_unknown_target_fails_closed_before_spawn() {
 // -- x-9f75 open-here (PanePlacement.here) ---------------------------
 
 /// Collect every notice text still queued on `rx`.
-fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
+pub(super) fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(msg) = rx.try_recv() {
         if let ServerMsg::Notice { text } = msg {
@@ -8767,6 +8700,7 @@ pub(super) fn empty_core() -> Core {
         last_topology_flush: None,
         reentry_verdict: None,
         staged_resume_argv: None,
+        revival_admission: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
@@ -9857,63 +9791,6 @@ fn copy_source_refuses_open_truncated_and_implicit_blocks() {
 // ---- the keeper contract (re-adopt, sweep, list) --------------------
 // The re-adoption spawn helpers live in server/tests/keeper_adopt_tests.rs,
 // their only consumers (shrink-only file budget).
-
-#[test]
-fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
-    // The contract the future sigwait reaper must keep: a shutdown-shaped
-    // sweep kills plain pane children and leaves keeper-hosted panes for
-    // the next server to re-adopt. Deliberate close (reap_pane) is the
-    // only path that kills a keeper pane.
-    let mut core = empty_core();
-    core.shells = vec!["/bin/sh".into()];
-    let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
-
-    let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let keeper_pane = {
-        let id = core.reserve_pane_id().unwrap();
-        core.register_pane(
-            id,
-            PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
-            24,
-            80,
-            None,
-            None,
-            "/tmp".into(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        id
-    };
-
-    core.kill_all_panes();
-
-    // The plain child is dead (poll: SIGKILL is fast but not instant).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while core.panes[&plain].pty.is_child_alive() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the plain pane's child must die in the shutdown sweep"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // The keeper pane got NO kill: nothing arrives on its wire inside a
-    // window far longer than the Local kill takes.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut probe = a;
-    use std::io::Read as _;
-    probe
-        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
-        .unwrap();
-    let mut byte = [0u8; 1];
-    assert!(
-        probe.read(&mut byte).is_err(),
-        "the shutdown sweep must never send a Kill frame to a keeper pane"
-    );
-    assert!(core.panes.contains_key(&keeper_pane));
-}
 
 #[test]
 fn emergency_roster_kills_plain_child_and_spares_keeper_child() {

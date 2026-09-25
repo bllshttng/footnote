@@ -112,7 +112,11 @@ pub(crate) async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
-pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
+pub(crate) fn build_sideline_menu(
+    anchor: Anchor,
+    update: Option<&UpdateOutcome>,
+    backlog_on: bool,
+) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -167,12 +171,38 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
     }
     rows.push(entry("♺", "sweep threads"));
     rows.push(entry("＋", "new agent"));
+    // The experimental backlog board: a toggle row always, the open
+    // row only when on. Off by default (the pref's own default), so the
+    // menu of an operator who never opted in is unchanged. The open row's
+    // hint names the prefix chord that opens the board from anywhere the
+    // menu is not (the pref gates it; the keybinds table documents it).
+    let open_hint = crate::keys::key_for("open-backlog-board")
+        .map(|k| format!("prefix {k}"))
+        .unwrap_or_default();
+    rows.push(entry(
+        if backlog_on { "☑" } else { "☐" },
+        "experimental: backlog view",
+    ));
+    if backlog_on {
+        rows.push(PopupRow::Entry {
+            glyph: "▦".into(),
+            label: "backlog".into(),
+            hint: open_hint,
+            enabled: true,
+        });
+    }
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
     actions.push(AuxAction::OpenSweep);
     actions.push(AuxAction::OpenAgentLauncher);
+    // Rows and actions pair by index: these two answer the backlog rows
+    // pushed above, in the same order.
+    actions.push(AuxAction::ToggleBacklogView);
+    if backlog_on {
+        actions.push(AuxAction::OpenBacklogView);
+    }
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);

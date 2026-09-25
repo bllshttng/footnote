@@ -13,7 +13,7 @@ from typing import Optional
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
-    """The transcript-age suffix a bare live-miss receipt carries (AC8).
+    """The transcript-age suffix a live-miss or transcript- reason carries (AC8).
 
     A bare live-miss reads the same for a transient miss to a genuinely live
     peer (re-send works) and for a session that stood down hours ago (nothing
@@ -78,15 +78,29 @@ def durable_window_clause(owner: Optional[str]) -> str:
     return f" - typically drains within {window} - an empty unread before then is not a failure"
 
 
-def durable_leg_story(reason: Optional[str]) -> Optional[str]:
+def durable_leg_story(
+    reason: Optional[str], recipient: Optional[str] = None
+) -> Optional[str]:
     """Positive stdout wording for a live-lane failure demotion : a
     live-inject miss plus a durable success is a normal outcome, and the raw
     token (``io-error``, ``attach-failed``, ...) rendered an error string
     inside a success receipt. None when the reason is not a live-lane
-    failure; the token stays diagnostic (stderr advisory, bus record)."""
+    failure; the token stays diagnostic (stderr advisory, bus record).
+
+    ``recipient``, when passed, appends how long the live leg waited
+    (a ``waited-<n>s`` token in the reason) and the transcript-age suffix, so
+    the sender can tell a busy peer from a silent one. Words only: no raw
+    token reaches this line."""
     if not _is_live_lane_failure(reason):
         return None
-    return "live leg unconfirmed; durable leg holds"
+    story = "live leg unconfirmed"
+    for token in (reason or "").split(";"):
+        if token.startswith("waited-"):
+            story += f" after {token[len('waited-'):]}"
+            break
+    if recipient is not None:
+        story += _live_miss_age_suffix(recipient)
+    return story + "; durable leg holds"
 
 
 def demotion_receipt(
@@ -99,10 +113,10 @@ def demotion_receipt(
     age_target: Optional[str] = None,
 ) -> str:
     """The stdout line for a durable demotion (refined by x-aaaa)."""
-    token = durable_leg_story(reason)
+    token = durable_leg_story(reason, age_target if age_target is not None else target)
     if token is None:
         token = reason or "live-miss"
-        if token == "live-miss":
+        if token == "live-miss" or token.startswith("transcript-"):
             age_of = age_target if age_target is not None else target
             if age_of is not None:
                 token += _live_miss_age_suffix(age_of)

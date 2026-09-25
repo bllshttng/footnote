@@ -1888,7 +1888,7 @@ def _claude_create_path(
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}"
+                f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                 if king_unarmed_reason
                 else "; king loop disabled, no scope manifest armed"
             )
@@ -6313,6 +6313,7 @@ def _delivery_policy_refusal(target) -> Optional[str]:
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
     """Run one ``mail-inject`` probe and classify its stdout verdict."""
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             argv,
@@ -6328,6 +6329,8 @@ def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> boo
         out = json.loads(proc.stdout.strip())
         delivered = bool(out.get("delivered"))
         _record(str(out.get("reason") or "unknown"))
+        if not delivered:
+            _record(f"waited-{round(time.monotonic() - started)}s")
         return delivered
     except (ValueError, AttributeError):
         _record("unreadable")
@@ -6917,12 +6920,6 @@ def _mail_inject_codex(
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node).
 
-    ``thread_id`` is the codex threadId (full UUID). Returns True only when the
-    daemon accepts the turn; any miss (binary absent, no daemon socket, thread
-    not attached) returns False so the caller writes the durable fallback. The
-    codex app-server daemon only exists when the user runs it
-    (``codex app-server daemon start``); absent it this is a clean no-op.
-
     ``reason_out``, when a non-empty list, receives the live lane's
     cause on a miss -- the same side-channel contract as
     :func:`_mail_inject_claude`, so a bus-only refusal names itself in the
@@ -6931,8 +6928,6 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    # same injector-level gate as the claude lane; see
-    # _delivery_policy_refusal.
     if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
         if reason_out is not None:
             reason_out.append(BUS_ONLY_POLICY)
@@ -6955,7 +6950,10 @@ def _mail_inject_codex(
     except (OSError, subprocess.SubprocessError):
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+        receipt = json.loads(proc.stdout.strip())
+        if reason_out is not None and receipt.get("reason"):
+            reason_out.append(str(receipt["reason"]))
+        return bool(receipt.get("delivered"))
     except (ValueError, AttributeError):
         return False
 
@@ -7935,10 +7933,10 @@ def dispatch_send(
                     recipient_live=family1_live,
                     recipient_resumable=not family1_live,
                 ).value
-                # Unknown is hands-off, not dead. A registered peer still has a
-                # confirmable transport, so try it once and let delivery's ack
-                # decide; failure falls through to the durable bus.
-                family1_attemptable = family1_live or family1_state == "unknown"
+                # Unknown is hands-off, not dead. A claude row off any pane is always
+                # tried: mail-inject reads the daemon roster first, and the roster decides.
+                family1_attemptable = family1_live or family1_state == "unknown" or (
+                    existing.harness == "claude" and not existing.mux)
 
                 # W3 write-ahead: a recipient we will not attempt live is asleep,
                 # so it cannot drain during a live window, and there is no live
@@ -7957,12 +7955,10 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
-                # the row's own policy names the durable queue's cause
-                # even when no live rung was attemptable (an idle registered
-                # leader), so the receipt never reads as a live-miss.
-                _bus_only = (
-                    _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
-                )
+                # A skipped live lane names the reading that vetoed it. Bus-only outranks both.
+                _bus_only = _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
+                if not family1_attemptable:
+                    live_miss_reason = f"transcript-{family1_state}"
                 if family1_attemptable:
                     live_attempted = True
                     _live_delivered = _deliver_live(
@@ -8029,11 +8025,8 @@ def dispatch_send(
                     )
 
                 _emit_ev(
-                    "agent_send_done",
-                    name=name,
-                    provider=existing.harness,
-                    msg_id=msg_id,
-                    delivery=delivery,
+                    "agent_send_done", name=name, provider=existing.harness,
+                    msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 )
             finally:
                 _DISPATCH_CTX.reset(ctx_token)

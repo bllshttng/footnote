@@ -103,6 +103,7 @@ impl Core {
                         None,
                         None,
                         None,
+                        None,
                     )?;
                     if !ring.is_empty() {
                         if let Some(entry) = self.panes.get_mut(&id) {
@@ -231,6 +232,7 @@ impl Core {
                         account_from_argv(&argv),
                         resume_target_from_argv(&argv),
                         refused_worker_from_argv(&argv),
+                        portal_hold_from_argv(&argv),
                     ) {
                         self.notice_all(format!(
                             "keeper readopt: {} refused registration ({e}); child was not adopted",

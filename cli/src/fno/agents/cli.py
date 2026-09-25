@@ -2311,6 +2311,9 @@ def cmd_spawn(
                 no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
                 account=account or dispatch_account,
+                seed=message,
+                session_phase=session_phase,
+                succession_scope=crown_scope if succeed else None,
             )
             break
         except GateRefused as exc:
@@ -2862,7 +2865,8 @@ def cmd_name(
 
 
 # `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
-# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
+# entry resolves it). The retask transaction is native too: the empty-argv rename payload door
+# in fno-agents runs it, and run_retask is the thin front that builds the payload.
 
 
 @agents_app.command("retask", hidden=True)
@@ -4946,7 +4950,8 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
+    No --hold holds all three scopes; status prints each scope as holds or admits.
     """
     import subprocess
 

@@ -558,6 +558,14 @@ pub mod basis {
     pub const TTL_EXPIRED_UNRESOLVED: &str = "ttl-expired-unresolved";
 }
 
+/// A blueprint planner runs inside its parent session: a native subagent has
+/// no pid or session id of its own, so the parent's pid and witness outlive a
+/// stopped planner. Its claim is a lease on the planning window.
+pub const BLUEPRINT_HOLDER_PREFIX: &str = "blueprint-session:";
+/// The planning-window lease length: 2.3x the slowest of the eight planner
+/// runs measured when the lease was designed.
+pub const BLUEPRINT_LEASE_MS: i64 = 3_600_000;
+
 /// The session-keyed liveness answer beside the pid probe. A pid
 /// dies on every harness resume while the session survives, so pid
 /// arithmetic alone cannot classify a resumed holder.
@@ -615,6 +623,11 @@ pub fn probe_pid(pid: i32) -> PidProbe {
         )
     };
     if written == size {
+        // A zombie holds no fds and will never resume; a no-TTL claim naming
+        // one must not read Live forever (a CI run-slot wedge).
+        if crate::census::pid_is_zombie(pid as u32) {
+            return PidProbe::Absent;
+        }
         return PidProbe::Created(
             (info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000,
         );
@@ -644,6 +657,11 @@ pub fn probe_pid(pid: i32) -> PidProbe {
     let Some(after) = stat.rsplit_once(')').map(|(_, tail)| tail) else {
         return PidProbe::Absent;
     };
+    // A zombie holds no fds and will never resume; a no-TTL claim naming
+    // one must not read Live forever (a CI run-slot wedge).
+    if after.trim_start().starts_with('Z') {
+        return PidProbe::Absent;
+    }
     let Some(Ok(starttime)) = after.split_whitespace().nth(19).map(|v| v.parse::<i64>()) else {
         return PidProbe::Absent;
     };
@@ -830,6 +848,19 @@ pub fn classify_with_basis_and_exclusivity(
         if let Some(verdict) = pid_verdict(rec, probe) {
             return verdict;
         }
+    }
+    // A blueprint-session claim is a lease on the PLANNING WINDOW, clock-only
+    // like a `review:branch:` hold: a native subagent planner shares its
+    // parent's pid and session id, so the hybrid arm and the witness would
+    // both heal the claim for the parent's whole life after a mid-flow
+    // TaskStop. The manual `claim release --holder` stays the fast path.
+    if rec.holder.starts_with(BLUEPRINT_HOLDER_PREFIX)
+        && now
+            >= rec
+                .expires_at
+                .unwrap_or(rec.acquired_at.saturating_add(BLUEPRINT_LEASE_MS))
+    {
+        return (ClaimState::Stale, basis::TTL_EXPIRED);
     }
     if is_expired(rec, now) {
         // A review hold is a lease on the review; the holder's session answers another question.
@@ -4182,6 +4213,50 @@ mod tests {
         let pid = child.id();
         child.wait().expect("wait");
         pid
+    }
+
+    /// A zombie answers `kill(pid, 0)` with success, so a no-TTL slot claim
+    /// naming one read Live forever and wedged the run-slot queue. The probe
+    /// must read a zombie as gone.
+    #[test]
+    fn a_zombie_holder_never_reads_live() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        // SAFETY: signal 0-style existence probe follow-up on a pid this
+        // test spawned; the child is killed and deliberately never waited
+        // so it stays a zombie under this process, the state under test.
+        unsafe {
+            libc::kill(pid as libc::c_int, libc::SIGKILL);
+        }
+        let mut corpse = false;
+        for _ in 0..50 {
+            if crate::census::pid_is_zombie(pid) {
+                corpse = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(corpse, "fixture must produce a zombie, not a reaped pid");
+        assert!(matches!(probe_pid(pid as i32), PidProbe::Absent));
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.pid = Some(pid);
+        o.ttl_ms = None;
+        assert!(matches!(
+            acquire("test:cargo-run:0", "cargo:fixture", o),
+            AcquireOutcome::Acquired(_)
+        ));
+        let rec = read_claim_file(&lockfile(&td, "test:cargo-run:0")).unwrap();
+        assert_ne!(classify(&rec, None), ClaimState::Live);
+        let mut next = opts_in(&td);
+        next.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("test:cargo-run:0", "cargo:next", next),
+            AcquireOutcome::Acquired(_)
+        ));
     }
 
     // -- machine identity -------------------------------------

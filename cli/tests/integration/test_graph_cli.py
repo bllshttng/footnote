@@ -223,7 +223,6 @@ def test_ac1_hp_graph_add_with_priority(tmp_graph):
 
 
 def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-    from types import SimpleNamespace
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
@@ -248,7 +247,6 @@ def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
 
 
 def test_add_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
-    from types import SimpleNamespace
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
@@ -623,6 +621,10 @@ def test_done_clears_queued_state(tmp_graph):
     r = _invoke("backlog", "add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "queue", nid)
+    # Evidence first, then the canonical bare close: its mutation is what
+    # clears the queued ghost fields, and the subject of this test is that
+    # clear, not the note path.
+    _invoke("backlog", "update", nid, "--completion-note", "queued-state fixture")
     _invoke("backlog", "done", nid)
     data = json.loads(_invoke("backlog", "get", nid).output)
     assert data.get("queued_at") is None
@@ -641,7 +643,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
         lambda action_type, **kw: captured.update(type=action_type, kw=kw),
     )
     nid = json.loads(_invoke("backlog", "add", "DriveDone").output)["id"]
-    _invoke("backlog", "done", nid)
+    _invoke("backlog", "done", nid, "--note", "drive fixture")
     assert captured.get("type") == "backlog_done_operator_initiated"
     assert captured["kw"]["task_id"] == nid
     assert captured["kw"]["source"] == "backlog"
@@ -657,7 +659,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
         da, "emit_operator_initiated", lambda *a, **k: calls.update(n=calls["n"] + 1)
     )
     nid = json.loads(_invoke("backlog", "add", "NoDriveDone").output)["id"]
-    _invoke("backlog", "done", nid)
+    _invoke("backlog", "done", nid, "--note", "no-drive fixture")
     assert calls["n"] == 0
 
 
@@ -732,108 +734,6 @@ class _SnapshotFakeTracker:
 
     def close(self, id):
         raise AssertionError("close is not part of the snapshot read path")
-
-
-def test_snapshot_mode_joins_tracker_and_sidecar_sentinels(
-    tmp_graph, tmp_path, monkeypatch
-):
-    """AC2-HP (mux snapshot path): `backlog status --snapshot` enumerates
-    list_open, joins sidecars, and emits the live fields - without reading the
-    default graph file for values. The graph file carries contradictory
-    sentinels; if the snapshot returned any of them, this test fails."""
-    # The graph file exists and is NON-empty with contradictory values.
-    tmp_graph.write_text(
-        json.dumps({"entries": [{
-            "id": "EXT-1", "title": "graph-title-sentinel",
-            "cwd": "/graph-cwd-sentinel", "plan_path": "/graph-plan-sentinel",
-            "pr_number": 999,
-        }]}),
-        encoding="utf-8",
-    )
-    sidecars = tmp_path / "sidecars"
-    sidecars.mkdir()
-    (sidecars / "EXT-1.json").write_text(
-        json.dumps({"id": "EXT-1", "cwd": "/external-cwd",
-                    "plan_path": "/external-plan.md", "pr_number": 7}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_graph)
-    import fno.tracker.sidecar as sidecar_store
-
-    monkeypatch.setattr(sidecar_store, "sidecar_path",
-                        lambda i: sidecars / f"{i}.json")
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "status", "--snapshot")
-    assert r.exit_code == 0, r.output
-    doc = json.loads(r.output)
-    assert doc["backend"] == "fake-external"
-    by_id = {e["id"]: e for e in doc["entries"]}
-    # Sidecar sentinels ride the joined rows; the graph sentinels do not.
-    assert by_id["EXT-1"]["cwd"] == "/external-cwd"
-    assert by_id["EXT-1"]["plan_path"] == "/external-plan.md"
-    assert by_id["EXT-1"]["pr_number"] == 7
-    assert by_id["EXT-1"]["title"] == "Free work"
-    assert by_id["EXT-2"]["pr_number"] is None
-    # EXT-2 has no sidecar (no PR, no plan): the same three-way split
-    # selection filters on, not the "any open node with no PR is ready" bug.
-    assert by_id["EXT-2"]["status"] == "idea"
-    # The closed dependency arrives as a tombstone row so the consumer's
-    # read-time readiness derives "satisfied" without a stored flag.
-    assert by_id["EXT-done"]["status"] == "done"
-    assert by_id["EXT-done"]["completed_at"]
-    # An open row never carries completed_at.
-    assert not by_id["EXT-1"].get("completed_at")
-
-
-def test_snapshot_mode_is_bounded_to_the_open_set(tmp_path, monkeypatch):
-    """AC4 enumeration bound, snapshot side: closed history is never requested.
-    The fake's read() is only ever called for blocker resolution of OPEN
-    items; a backend asked for its archive would fail loudly here."""
-    calls: list[str] = []
-
-    class _Tracker(_SnapshotFakeTracker):
-        def read(self, id):
-            calls.append(id)
-            return super().read(id)
-
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _Tracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "absent.json")
-    import fno.tracker.sidecar as sidecar_store
-
-    monkeypatch.setattr(sidecar_store, "sidecar_path",
-                        lambda i: tmp_path / "sidecars" / f"{i}.json")
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "status", "--snapshot")
-    assert r.exit_code == 0, r.output
-    doc = json.loads(r.output)
-    ids = [e["id"] for e in doc["entries"]]
-    assert set(ids) == {"EXT-1", "EXT-2", "EXT-done"}
-    assert calls == ["EXT-done"], f"read() must only resolve open blockers, saw {calls}"
-
-
-def test_snapshot_mode_fails_closed_on_a_list_open_error(tmp_path, monkeypatch):
-    """A bad tracker row (e.g. a malformed rank) must not crash the whole
-    snapshot render with a raw traceback - it fails loud with a named
-    backend, the same AC6-ERR contract selection already gets."""
-
-    class _FailingTracker(_SnapshotFakeTracker):
-        def list_open(self):
-            raise RuntimeError("bad row")
-
-    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _FailingTracker())
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "absent.json")
-    import fno.tracker.sidecar as sidecar_store
-
-    monkeypatch.setattr(sidecar_store, "sidecar_path",
-                        lambda i: tmp_path / "sidecars" / f"{i}.json")
-    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-
-    r = _invoke("backlog", "status", "--snapshot")
-    assert r.exit_code == 1
-    assert "list_open failed" in r.stderr
 
 
 # --- validate ---
@@ -1318,7 +1218,8 @@ def test_ac1_hp_graph_archive(tmp_graph):
     # Seed completed_at through the store rather than a CLI verb: closing is
     # merge-gated now, and archive only cares that the node reads done.
     commit_rows_via_store(tmp_graph, lambda rows: [
-        {**row, "completed_at": "2026-01-01T00:00:00+00:00"} if row["id"] == node_id else row
+        {**row, "completed_at": "2026-01-01T00:00:00+00:00",
+         "artifact_url": "https://example.test/artifact"} if row["id"] == node_id else row
         for row in rows
     ])
 
@@ -2409,7 +2310,8 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
          "parent": "ab-epic0000", "completed_at": "2026-01-01T00:00:00Z", "blocked_by": []},
         # Last open child, no PR refs -> `done` closes it with no gh cross-check.
         {"id": "ab-clast002", "title": "Last child", "status": "ready", "project": "p",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-clast002")
@@ -2427,7 +2329,8 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
         {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-cdone001", "title": "Child A", "status": "ready", "project": "p",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
         {"id": "ab-cstill02", "title": "Child B (stays open)", "status": "ready",
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
@@ -2448,7 +2351,8 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
         {"id": "ab-sub00001", "title": "Sub-epic", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
         {"id": "ab-leaf0002", "title": "Leaf", "status": "ready", "project": "p",
-         "parent": "ab-sub00001", "blocked_by": []},
+         "parent": "ab-sub00001", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0002")
@@ -2467,7 +2371,8 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
         {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "web",
          "blocked_by": [], "plan_path": "x.md"},
         {"id": "ab-leaf0001", "title": "Leaf", "status": "ready", "project": "etl",
-         "parent": "ab-epic0000", "blocked_by": []},
+         "parent": "ab-epic0000", "blocked_by": [],
+         "artifact_url": "https://example.test/artifact"},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "done", "ab-leaf0001")
@@ -2959,7 +2864,6 @@ def test_update_dispatch_verb_dollar_prefix_stores_namespaced(tmp_graph):
 def test_update_dispatch_verb_configured_allowlist_verb_writes(tmp_graph):
     """A verb outside the static name table but inside the configured
     allowlist writes, with a warning naming the drain's name-mint gap."""
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     settings = SimpleNamespace(

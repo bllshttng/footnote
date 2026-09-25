@@ -2322,16 +2322,14 @@ def _name_lane_send(
                 if injected:
                     to_harness = "codex"
                 if not injected:
-                    live_reason = (
-                        _codex_probe_reason[0] if _codex_probe_reason else None
-                    )
+                    live_reason = ";".join(_codex_probe_reason) or None
             else:
                 _probe_reason: list = []
                 injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
                 if injected:
                     to_harness = "claude"
                 if not injected:
-                    live_reason = _probe_reason[0] if _probe_reason else None
+                    live_reason = ";".join(_probe_reason) or None
                 if not injected and probe_agent is None:
                     _both_reason: list = []
                     injected = _mail_inject_codex(
@@ -2340,7 +2338,7 @@ def _name_lane_send(
                     if injected:
                         to_harness = "codex"
                     if not injected and _both_reason:
-                        live_reason = _both_reason[0]
+                        live_reason = ";".join(_both_reason) or None
             if not injected:
                 lanes.append("inject=not-delivered")
                 if token_reachable is None:
@@ -2390,16 +2388,14 @@ def _name_lane_send(
                 resolved.session_id, wrapped, reason_out=_resolved_reason
             )
             if not injected:
-                live_reason = _resolved_reason[0] if _resolved_reason else None
+                live_reason = ";".join(_resolved_reason) or None
         elif provider == "codex":
             _resolved_codex_reason: list = []
             injected = _mail_inject_codex(
                 resolved.session_id, wrapped, reason_out=_resolved_codex_reason
             )
             if not injected:
-                live_reason = (
-                    _resolved_codex_reason[0] if _resolved_codex_reason else None
-                )
+                live_reason = ";".join(_resolved_codex_reason) or None
         elif _keeper_thread_row:
             # a keeper-hosted lane-B thread has neither lane-A socket.
             # Its live transport is the keeper's own unix socket, resolved by
@@ -2415,9 +2411,7 @@ def _name_lane_send(
                 reason_out=_resolved_keeper_reason,
             )
             if not injected:
-                live_reason = (
-                    _resolved_keeper_reason[0] if _resolved_keeper_reason else None
-                )
+                live_reason = ";".join(_resolved_keeper_reason) or None
         if not injected and not _keeper_thread_row:
             # A send addressed by session id never consults the roster, so a
             # mux-hosted session of any provider would demote to durable with a
@@ -2578,7 +2572,7 @@ def _name_lane_send(
         # a live-lane failure renders as legs on stdout; the raw token
         # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
         # error string inside a success receipt reads as a broken lane.
-        reason = durable_leg_story(live_reason) or (
+        reason = durable_leg_story(live_reason, recipient) or (
             "self-send" if self_send else (live_reason or "live-miss")
         )
         if reason == "live-miss":
@@ -3201,9 +3195,9 @@ def _raw_send(
                 if not subject_ok:
                     reason = (
                         f"{name!r} review/start would read an empty diff: "
-                        f"{subject_detail}. Fire from the PR worktree session "
-                        "(`fno do target request-self-review --pr <n>`) or "
-                        "spawn the reviewer with --cwd <worktree>."
+                        f"{subject_detail}. Run the review inline in the PR "
+                        "worktree session: `fno do target request-self-review`, "
+                        "or `$fno:review <level>` there."
                     )
                     if check:
                         print(f"not-injectable: {reason}")
@@ -3497,10 +3491,7 @@ def cmd_send(
     ),
     from_name: str | None = typer.Option(
         None, "--from-name",
-        help=(
-            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
-            "agent send, the working dir's project for an inbox-kind send."
-        ),
+        help="XML-safe sender. Unset: session handle or 'fno' for agents; project for inbox notes.",
     ),
     origin: str | None = typer.Option(
         None,
@@ -4185,12 +4176,14 @@ def cmd_send(
             _unavailable_token_exit(name, unavailable)
         return
 
+    timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
     try:
         result = dispatch_send(
             name=name,
             message=message,
             provider=harness,
             cwd=workdir,
+            **({"lock_timeout": float(timeout_override)} if timeout_override else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
         )

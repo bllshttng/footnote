@@ -140,6 +140,16 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 | `resume <name> [--print-command] [--message/-m]` | yes (live only) | yes | yes | no | yes | Re-exec the harness's resume CLI in the agent's recorded cwd. A **live** claude row no longer exec's `claude attach <short_id>` directly; it wakes the session headlessly (pty-backed, route-settings-restored) and verifies it moved, since `claude attach` run non-interactively just prints "Attaching..." and exits. `--print-command` prints the route the row is actually on: `claude attach <short_id>` live, `claude respawn <short_id>` dead. A **dead/exited** claude row runs `claude respawn <short_id>` (same session id) and confirms the job state advanced; when `jobs/<short>/state.json` is gone it relaunches with `claude --bg --resume <session_id>` (same session id, measured on 2.1.272) and refuses a copy notice, stopping the copy. Not the same door as `spawn --resume`. `--message`/`-m` is the text delivered on wake. A claude row that `claude agents` lists as `blocked`, `done`, `stopped` or `failed` takes `-m` directly: a session whose process has exited is revived in place first, and exit 0 means the transcript shows the message. |
 | `logs <name>` | yes | yes | yes | yes | yes | Tail or follow the agent's log output (reads `log_path`). |
 
+Codex app-server mail is split by capability. Ordinary wrapped text uses the
+turn transport, and `/review` or `/code-review` uses structured `review/start`.
+Declared native non-review commands (`/compact`, `/model`, `/status`) are
+refused on `--raw` because the app-server has no prompt line; the refusal names
+the controller replacement. A mux-hosted Codex pane may use manual Escape plus
+`/compact` only after the pane path has been positively measured and its receipt
+read back. Provider goal and Footnote `Stop` receipts are separate: the
+verified provider goal is primary continuation evidence, while Stop remains an
+independent loop-hook proof.
+
 The three re-entry verbs are easy to conflate; the axes that separate them:
 
 | | Session must be live? | Where you end up | ID it keys on |
@@ -256,7 +266,7 @@ The verb reaches the same destination with none of that exposure.
 ## Why the asymmetries exist
 
 - **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the thread substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
-- **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. fno ships no thread lane for either, so neither has `attach`. For codex that is an unbuilt lane, not a ceiling. Its app-server drives a full no-PTY thread lifecycle over newline-delimited JSON on stdin/stdout: `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`. [codex-thread-driver](architecture/codex-thread-driver.md) records what a driver must speak and the journey test that earns the capability bit. The bit stays `false` until a driver ships. It is never inherited from protocol.
+- **codex / gemini** run as mux-hosted PTY panes or through their own one-shot/resume CLIs. Codex also has a daemon-hosted thread lane: fno's `fno-agents-daemon` drives Codex's shared app-server over newline-delimited JSON. Its provider controller owns `thread/goal/get`, `thread/goal/set`, and `thread/compact/start`; raw mail does not emulate those actions. Gemini has no equivalent provider-action receipt, so its looping lane remains refused.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - Codex recovery uses that full thread ID as its only join.
 - `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts, reports both discovered and usable counts, and refuses a short ID or a rollout without readable transcript work.
@@ -280,7 +290,7 @@ uv run --project cli fno-py agents list --json | jq -e --arg sid "$sid" '.agents
 
 ## Dispatch command surface
 
-This table shows how autonomous dispatch renders a footnote `/verb` for each harness. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. `fno.agents.harness_map` loads the generated cli copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback.
+This table shows how autonomous dispatch renders a footnote `/verb` for each harness. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. `fno.agents.harness_map` loads the generated cli copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback. The `fno agents retask` transaction runs inside fno-agents behind the `fno agents retask` leaf, which renders the target command through this same table.
 
 | Harness | Rendered invocation | Notes |
 |---|---|---|

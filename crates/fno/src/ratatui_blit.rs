@@ -30,12 +30,7 @@ pub fn blit(buf: &Buffer, cells: &mut [proto::Cell], frame_cols: usize) {
             let Some(slot) = cells.get_mut(y * frame_cols + x) else {
                 break;
             };
-            *slot = proto::Cell {
-                c: src.symbol().chars().next().unwrap_or(' '),
-                fg: map_color(src.fg),
-                bg: map_color(src.bg),
-                flags: map_flags(src.modifier),
-            };
+            *slot = map_cell(src);
             if wide && x + 1 < frame_cols {
                 // The glyph claims the next column; the compositor skips a
                 // WIDE_SPACER so the glyph's right half is never overdrawn.
@@ -51,6 +46,58 @@ pub fn blit(buf: &Buffer, cells: &mut [proto::Cell], frame_cols: usize) {
             }
             x += 1;
         }
+    }
+}
+
+/// Copy only the Buffer's cells into `cells` at the on-screen cell
+/// `(row, col)`: the overlay painter's copy for a body painted into a
+/// standalone Buffer that lands INSIDE an already-drawn frame. Same
+/// cell-mapping as [`blit`], clipped to the frame.
+pub fn blit_area(
+    buf: &Buffer,
+    row: usize,
+    col: usize,
+    cells: &mut [proto::Cell],
+    frame_cols: usize,
+) {
+    let area = buf.area;
+    for y in 0..area.height as usize {
+        let mut x = 0usize;
+        while x < area.width as usize {
+            let src = &buf.content[y * area.width as usize + x];
+            let wide = src.cell_width() == 2;
+            let fr = row + y;
+            let fc = col + x;
+            let Some(slot) = cells.get_mut(fr * frame_cols + fc) else {
+                break;
+            };
+            *slot = map_cell(src);
+            if wide {
+                // The pad stays inside the frame row: a wide glyph in the
+                // last column must never stamp the next row's first cell.
+                if fc + 1 < frame_cols {
+                    if let Some(pad) = cells.get_mut(fr * frame_cols + fc + 1) {
+                        *pad = proto::Cell {
+                            flags: cell_flags::WIDE_SPACER,
+                            ..proto::Cell::default()
+                        };
+                    }
+                }
+                x += 1;
+            }
+            x += 1;
+        }
+    }
+}
+
+/// One Buffer cell as a proto cell: the shared mapping of [`blit`] and
+/// [`blit_area`], so the two copies can never drift.
+fn map_cell(src: &ratatui_core::buffer::Cell) -> proto::Cell {
+    proto::Cell {
+        c: src.symbol().chars().next().unwrap_or(' '),
+        fg: map_color(src.fg),
+        bg: map_color(src.bg),
+        flags: map_flags(src.modifier),
     }
 }
 

@@ -29,7 +29,11 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 ## Review-cap gate
 
-The round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge on green CI. At the configured rounds the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round: the hold half lives in `review_invocation_refusal`, and the count half is the `review_round` the emitter stamps onto the pass when the flags carry the flag, so the counter reads the round the pass verified. An undeclared pass counts a fresh round. And a rebase delta measuring at or over the interdiff budget reviews freely.
+The round budget is `review.max_rounds` (default 2), counted across the whole life of the PR. One reviewed head is one round, pass or fail. Read it with `fno do pr status <n>`. When it reads `rounds_exhausted: true`, the review phase is complete. Request no review and emit no attestation. Decline what you do not fix with a recorded reason, and merge on green CI. Open findings stay in the PR conversation. When it reads null, the gate has no row at this head yet: run `fno-agents review-coverage --cwd . --pr <n>` and read again.
+
+A moved head does not by itself owe a round. A rebase whose code delta is unchanged carries the attestation. A fix commit, or a rebase that resolved conflicts, can leave coverage uncovered. Then the stop gate or `fno do pr status` names the owed round, inside the budget. Never copy an earlier verdict onto a new head. An attestation certifies a review that ran, and each new head it lands on spends a round.
+
+One path checks the budget for you. On Claude, the Skill-tool hook (`hooks/review-hold.sh`) denies a review whose rounds are spent. `fno do target request-self-review` sends its request whatever the budget reads. A review that arrives with no Skill-tool call meets no hook. So read the budget before you request or run a review. Two shapes pass the hook at the cap, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. The emitter stamps the verified round onto the pass as `review_round`, so the counter reads that round. A rebase delta at or over `review.carry_interdiff_lines` (default 100) takes one optional review.
 
 ## Active skill freshness preflight
 
@@ -64,7 +68,7 @@ esac
 
 ## Step 1: Resolve the mode (ALWAYS announce it)
 
-The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. A flag is a token in any accepted spelling of a known flag name: `--comment`, bare `comment`, or the em-dash `—comment` (what a phone autocorrects the double hyphen into), and the same three spellings for `fix`. The accepted set is the `canonical_flag` vocabulary in `cli/src/fno/review/invocation.py` - the one list both this router and the invocation telemetry read, so a spelling accepted here is also recorded there, and no fourth spelling is invented. Strip the flags BEFORE reading the first remaining token; the order is load-bearing, because stripping after the target test hands the flag tokens to the target slot, where they resolve to nothing and the run dies having posted nothing. Then read the first remaining token:
+The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. A flag is a token in any accepted spelling of a known flag name. Accept `--comment`, bare `comment`, or the em-dash `—comment` (what a phone autocorrects the double hyphen into), and the same three spellings for `fix`. The accepted set is the `canonical_flag` vocabulary in `cli/src/fno/review/invocation.py`. That one list feeds both this router and the invocation telemetry. A spelling accepted here is also recorded there, and no fourth spelling is invented. Strip the flags BEFORE reading the first remaining token. The order is load-bearing. Stripping after the target test hands the flag tokens to the target slot. There they resolve to nothing, and the run dies having posted nothing. `--comment` never drops findings without a PR. They hold on the branch and HEAD (the `review_attestation` row), and the create flow's publish-review step posts them once the PR opens. Then read the first remaining token:
 
 - **no argument** -> mode is the default lane at a level sized from the diff. Print exactly: `running fno review lane (default, level from diff)` and continue to Step 2.
 - **a level token** (`low` `medium` `high` `xhigh` `max`) -> mode is the default lane at that explicit level. Print `running fno review lane (level <token>)`. Any remaining tokens are the target. Continue to Step 2.
@@ -89,6 +93,8 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prov
 > A level is never inherited from a previous invocation: an explicit token records `explicit`, a bare invocation sizes from the diff, and no run reuses a typed level (that upstream behavior is a hazard, not a feature).
 
 > When any target token survives this step, export it as `REVIEW_TARGET` for the empty-diff guard below. A PR number resolves to its head ref here (`gh pr view <n> --json headRefName -q .headRefName`), so a PR named from a worktree that is not the PR's checkout is still inspected at its own head. A bare invocation leaves `REVIEW_TARGET` empty.
+
+> For a numeric PR target, resolve the local checkout with `bash "${SKILL_DIR}/scripts/resolve-pr-worktree.sh" "$REVIEW_TARGET"` and enter the returned path before Phase 0. If the PR branch has no listed worktree, stop with that refusal; reading source files from the caller's checkout would review a different tree. This also makes the later attestation measure the same branch and HEAD.
 
 ## Step 2: the default mode (the fno review lane)
 
@@ -167,7 +173,7 @@ The research-verify panel is **advisory**: the green/red verdict on a research b
 
 ## Step 5: declare mode (self-cert attestation, the escape hatch)
 
-`declare` is the bottom of the `config.review.reviewers` trust spectrum (cross-model peer > the fno lane > **declare**): a pure operator self-certification for a harness that has no other reviewer. It emits a head-pinned `review_attestation` event so a `reviewers: [declare]` gate can clear, and does nothing else. A declare attestation clears no fail-with-CONFIRMED-findings state; the class gate bounds it, which is why it survives at all.
+`declare` is the bottom of the `config.review.reviewers` trust spectrum, below a cross-model peer and the fno lane. It is user self-certification for a harness with no other reviewer. It emits a head-pinned `review_attestation` event so a `reviewers: [declare]` gate can clear. It does nothing else. A declare attestation cannot clear fail-with-CONFIRMED-findings state. The class gate bounds it, which is why it survives.
 
 Because it gives up "different model" entirely, it must be an **explicit** action - never inferred, never auto-emitted by any pipeline. State plainly what you are certifying (the current HEAD + the diff under review), then emit:
 
@@ -183,12 +189,21 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 - **the fno lane** (the default) emits `code-review` through the lane's emit step ([single-lane.md](references/single-lane.md)): `pass` only when `fno do review classify` yields zero blocking findings, `fail` carrying the classified record. One contract, one emit path, no hook-availability dependency.
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
-- **code-review** is the gate entry the fno lane satisfies above. The native verb path remains for an operator who runs it by choice: `hooks/code-review-attest.sh` classifies the findings the native review produced and emits on EITHER outcome, with the dual Claude (`PostToolUse(ReportFindings)` / Skill-tool `SubagentStop`) and Codex (`Stop` payload with a readable structured completion) trigger shapes. `skills/review/scripts/emit-attestation.sh code-review` is recovery when the lane and the hook were both unavailable, never permission to attest a verdict a review did not produce. A separate session (operator or otherwise) can emit the same label, yielding an `other_session` origin rather than `self_attested`; see the attestation-origin section in the review-lanes architecture doc. Spawning a reviewer session of your own is retired by operator law - a review session costs a lane and buys only a different session id; run the lane inline instead.
+- **code-review** is the gate entry the fno lane satisfies above.
+  - Run `/fno:review` on the final HEAD. Its emit step produces the attestation on every harness without hook support.
+  - `/code-review` on Claude and `/review` on Codex remain the user's choice.
+  - `hooks/code-review-attest.sh` classifies native review findings and emits on either outcome. Claude triggers include `PostToolUse(ReportFindings)` and Skill-tool `SubagentStop`.
+  - Codex triggers on a `Stop` payload with a readable structured completion. Both hooks require an object-valued findings array equal to `[]`.
+  - The Codex attester runs before `target-stop-hook.sh`. No second step is needed.
+  - If the lane is unavailable or a clean review's hook failed, recover with `skills/review/scripts/emit-attestation.sh code-review`. Confirm the attestation before promising.
+  - Never use recovery to attest over findings.
+  - A separate session can emit the same label. Its origin is `other_session`, not `self_attested`. See the attestation-origin section in the review-lanes architecture doc.
+  - User law bars spawning a reviewer session. It costs a lane and adds only another session ID. Run the lane inline instead.
 - **declare** emits `declare` via Step 5 above. `sigma` is retired and emits nothing: a config still naming it fails loud at init with the default lane named as the replacement.
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
 
-**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap the review phase is complete, hard findings included. The PR merges on green CI, open findings stay in the PR conversation, and nobody asks the operator. The live law is in `fno inbox decisions review-coverage`. If a gate still refuses at the cap, that is a gate defect: record it with `fno backlog encounter` and merge once it clears. Below the cap the gate can report IMPOSSIBLE. Then stop and report the blocking findings and the two remedies: a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
+**Termination (the round budget).** A blocking finding is cleared by fixing it, and the next round covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action. Answer it in thread or skip it with a note. At the cap the review phase is complete, hard findings included. The PR merges on green CI, and open findings stay in the conversation. The live law is in `fno inbox decisions review-coverage`. If a gate still refuses at the cap, record the gate defect with `fno backlog encounter` and merge once it clears.
 
 ## The manual coverage emit (sanctioned, with preconditions)
 
@@ -222,7 +237,7 @@ Nothing witnesses an invocation implicitly.
 The `/target` session runs your `invocation` and then `bash skills/review/scripts/emit-attestation.sh <name>` on the final HEAD, exactly as it does for `code-review` ([ship-and-promise.md](../target/references/ship-and-promise.md)).
 That helper takes any reviewer name, which is why a registered reviewer needs no producer machinery of its own.
 
-**Rung two: emit your findings.** Call `fno backlog annotate add -m "<finding>" --node <id>` and the gate becomes real.
+**Rung two: emit your findings.** Call `fno backlog note <id> "<finding>" --blocking` and the gate becomes real. Clear it after the fix with `fno backlog note --resolve <finding-id>`.
 An unaddressed blocking finding holds the loop until someone resolves it, independently of any attestation, and it needs no new footnote machinery on your side.
 
 `requires = "skill"` is checked at `fno do target init`: a skill that resolves on none of the harness's skill roots refuses there, naming the roots searched, rather than wedging the stop gate after the work is done.
