@@ -869,15 +869,70 @@ fn run_build_admit(args: &[String]) -> i32 {
     }
 }
 
+/// How often a parked cargo door re-reads the breaker.
+const FLEET_HOLD_POLL: Duration = Duration::from_secs(5);
+/// Re-print the holding line about every minute, so a long wait is never
+/// silent in a log.
+const FLEET_HOLD_REPRINT_POLLS: u32 = 12;
+
+/// The tests hold at the cargo doors: while the breaker holds `tests` (or
+/// its state is unreadable, fail closed), a door waits instead of admitting,
+/// printing a holding line on entry and about every minute after. A running
+/// cargo pauses at its next compile or test binary and resumes when the
+/// hold lifts. A recorded SIGINT/SIGTERM ends the wait with that signal as
+/// the code, so a killed cargo unwinds instead of parking forever.
+fn wait_for_tests_admission() -> i32 {
+    let mut lines: u32 = 0;
+    loop {
+        if let Some(sig) = received_signal() {
+            return sig;
+        }
+        let verdict = crate::fleet_incident::verdict_for("tests");
+        if !verdict.holds("tests") {
+            if lines > 0 {
+                eprintln!("test-run: fleet stop lifted; cargo admission resumes");
+            }
+            return 0;
+        }
+        if lines == 0 || lines % FLEET_HOLD_REPRINT_POLLS == 0 {
+            match &verdict {
+                crate::fleet_incident::Verdict::Stopped(r) => eprintln!(
+                    "test-run: fleet stop holds tests (generation {}, reason: {}); \
+                     this cargo waits at admission",
+                    r.generation, r.reason
+                ),
+                crate::fleet_incident::Verdict::Unavailable(d) => eprintln!(
+                    "test-run: fleet incident state unreadable ({d}); \
+                     this cargo waits at admission"
+                ),
+                crate::fleet_incident::Verdict::Clear(_) => unreachable!(),
+            }
+        }
+        lines += 1;
+        std::thread::sleep(FLEET_HOLD_POLL);
+    }
+}
+
 /// `test-run run-admit --cargo-pid PID --worktree PATH`: the cargo target
-/// runner calls this before every test binary and doctest. The cargo holds
-/// one of `test.max_cargo_runs` machine-wide run slots (`test:cargo-run:<i>`),
-/// keyed to its pid with no TTL, so the slot frees when the cargo exits. The
-/// status pass writes nothing: a slot already naming this holder, or one
-/// whose pid is this cargo or an ancestor (a nested cargo, a doctest's
-/// rustdoc), admits at once without a second claim.
+/// runner calls this before test binary and doctest admission. The cargo
+/// holds one of `test.max_cargo_runs` machine-wide run slots
+/// (`test:cargo-run:<i>`), keyed to its pid with no TTL, so the slot frees
+/// when the cargo exits. The status pass writes nothing: a slot already
+/// naming this holder, or one whose pid is this cargo or an ancestor (a
+/// nested cargo, a doctest's rustdoc), admits at once without a second
+/// claim.
 fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
     install_signal_handlers();
+    // The tests hold parks the cargo doors instead of failing them: a
+    // running cargo pauses at its next compile or test binary and resumes
+    // when the hold lifts (the operator records demos against a quiet
+    // machine). The own-holder early return below stays behind the wait, so
+    // a cargo already mid-run pauses at its next admission ask too. A
+    // recorded signal ends the wait nonzero, unwinding the cargo.
+    let held_code = wait_for_tests_admission();
+    if held_code != 0 {
+        return Err(held_code);
+    }
     let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
     let cap = crate::agents_config::max_cargo_runs(&worktree) as usize;
@@ -1439,11 +1494,11 @@ fn cleanup_group(pgid: i32) -> bool {
 }
 
 /// The durable fleet incident stop, read as a refusal for this run: `Some`
-/// exit code with a `suite_refused` receipt when the fleet is stopped or the
-/// incident state is unreadable, `None` when clear. `extra` fields ride the
-/// receipt; the post-admission recheck names its wait there.
+/// exit code with a `suite_refused` receipt when the tests scope is held or
+/// the incident state is unreadable, `None` otherwise. `extra` fields ride
+/// the receipt; the post-admission recheck names its wait there.
 fn fleet_refusal(run_id: &str, extra: &[(&str, String)]) -> Option<i32> {
-    match crate::fleet_incident::verdict() {
+    match crate::fleet_incident::verdict_for("tests") {
         crate::fleet_incident::Verdict::Clear(_) => None,
         crate::fleet_incident::Verdict::Stopped(record) => {
             let mut fields = vec![

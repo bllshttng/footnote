@@ -184,12 +184,12 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
 }
 
 /// The first admission boundary of the native gate: a durable
-/// incident stop or an unreadable incident state refuses before the
-/// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
-/// capacity math. Mail stays ungated so the incident can be announced and
-/// explained; `fno agents incident clear` reopens admission.
+/// incident stop that holds spawns (or an unreadable incident state)
+/// refuses before the `FNO_SPAWN_GATE=0` operator bypass, before `--force`,
+/// and before any capacity math. Mail stays ungated so the incident can be
+/// announced and explained; `fno agents incident clear` reopens admission.
 fn fleet_incident_gate() -> Result<(), Refusal> {
-    match crate::fleet_incident::verdict() {
+    match crate::fleet_incident::verdict_for("spawns") {
         crate::fleet_incident::Verdict::Clear(_) => Ok(()),
         crate::fleet_incident::Verdict::Stopped(record) => {
             eprintln!(
@@ -3171,6 +3171,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();

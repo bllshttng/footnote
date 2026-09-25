@@ -42,25 +42,54 @@ pub enum LanesBy {
     None,
 }
 
+/// How the list view asks for its rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum View {
+    /// The kanban grid: cells keep their per-column caps.
+    #[default]
+    Kanban,
+    /// The list: lanes carry every card, uncapped, so no row is hidden.
+    List,
+}
+
 /// The board query, parsed from the route's pairs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Query {
     pub lanes: LanesBy,
-    pub project: Option<String>,
-    epic: Option<String>,
-    status: Option<String>,
-    priority: Option<String>,
-    size: Option<String>,
-    king: Option<String>,
+    #[serde(skip_serializing_if = "View::is_kanban", default)]
+    pub view: View,
+    pub project: Vec<String>,
+    epic: Vec<String>,
+    status: Vec<String>,
+    priority: Vec<String>,
+    size: Vec<String>,
+    king: Vec<String>,
     q: Option<String>,
     all: bool,
 }
 
+impl View {
+    fn is_kanban(v: &View) -> bool {
+        *v == View::Kanban
+    }
+}
+
+/// One value per repeated key, first-seen order, duplicates dropped.
+fn push_unique(set: &mut Vec<String>, val: Option<&str>) {
+    if let Some(v) = val {
+        if !set.iter().any(|s| s == v) {
+            set.push(v.to_string());
+        }
+    }
+}
+
 impl Query {
     /// Parse the route's query pairs. Unknown keys (the page's `t` and
-    /// `node`) are ignored, an empty value reads as unset, and `all` is
-    /// true for `1`, `true` or an empty value.
-    pub fn from_pairs(p: &HashMap<String, String>) -> Result<Query, String> {
+    /// `node`) are ignored, an empty value reads as unset, repeated filter
+    /// keys accumulate any-of sets, and `all` is true for `1`, `true` or an
+    /// empty value.
+    pub fn from_pairs(p: &[(String, String)]) -> Result<Query, String> {
         let mut q = Query::default();
         for (k, v) in p {
             let val = (!v.is_empty()).then(|| v.as_str());
@@ -75,12 +104,17 @@ impl Query {
                         ))
                     }
                 },
-                "project" => q.project = val.map(str::to_string),
-                "epic" => q.epic = val.map(str::to_string),
-                "status" => q.status = val.map(str::to_string),
-                "priority" => q.priority = val.map(str::to_string),
-                "size" => q.size = val.map(str::to_string),
-                "king" => q.king = val.map(str::to_string),
+                "view" => match val.unwrap_or_default() {
+                    "" | "kanban" => q.view = View::Kanban,
+                    "list" => q.view = View::List,
+                    other => return Err(format!("unknown view '{other}'; use kanban or list")),
+                },
+                "project" => push_unique(&mut q.project, val),
+                "epic" => push_unique(&mut q.epic, val),
+                "status" => push_unique(&mut q.status, val),
+                "priority" => push_unique(&mut q.priority, val),
+                "size" => push_unique(&mut q.size, val),
+                "king" => push_unique(&mut q.king, val),
                 "q" => q.q = val.map(str::to_string),
                 "all" => q.all = matches!(v.as_str(), "1" | "true" | ""),
                 _ => {}
@@ -119,6 +153,8 @@ pub struct Card {
     pub king: Option<King>,
     /// True when any of the node's sessions joins a roster row.
     pub live: bool,
+    /// The row's `created_at`, for the list view's date column.
+    pub created_at: Option<String>,
 }
 
 /// A link to another node the read holds; an id-only link names a node the
@@ -154,11 +190,24 @@ pub struct ColumnTotal {
     pub total: usize,
 }
 
+/// One status's card count for the list view's count tiles.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusTotal {
+    pub status: String,
+    pub total: usize,
+}
+
 /// The board's aggregates.
 #[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     /// Open totals per column, counted over the filtered card set.
     pub open: Vec<ColumnTotal>,
+    /// Per-status totals over the pre-filter set: a tile's count is what
+    /// selecting it would show.
+    pub statuses: Vec<StatusTotal>,
+    /// Totals per column over the filtered set, Done included, for the
+    /// board-wide header counts.
+    pub totals: Vec<ColumnTotal>,
     /// The classifier's `flow` verbatim, or `{"available": false, ...}`.
     pub flow: Value,
 }
@@ -400,6 +449,10 @@ pub(crate) fn card_of(
         slug,
         title,
         column,
+        created_at: e
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -443,40 +496,41 @@ fn stamped(e: &Value, field: &str) -> bool {
         .is_some_and(|s| !s.is_empty())
 }
 
-/// Whether the filtered card set keeps the row: exact project, status,
+/// Whether the filtered card set keeps the row: any-of project, status,
 /// priority, size and king-name filters, `epic` keeps the epic's own card
-/// plus cards whose parent names it, and `q` is a case-insensitive
-/// substring of id, slug or title.
+/// plus cards whose parent names any selected epic, and `q` is a
+/// case-insensitive substring of id, slug or title.
 fn keeps_query(card: &Card, q: &Query) -> bool {
-    if let Some(p) = &q.project {
-        if card.project.as_deref() != Some(p.as_str()) {
-            return false;
-        }
+    let in_set = |values: &[String], have: Option<&str>| {
+        values.is_empty() || values.iter().any(|v| Some(v.as_str()) == have)
+    };
+    if !in_set(&q.project, card.project.as_deref()) {
+        return false;
     }
-    if let Some(s) = &q.status {
-        if card.status.as_deref() != Some(s.as_str()) {
-            return false;
-        }
+    if !in_set(&q.status, card.status.as_deref()) {
+        return false;
     }
-    if let Some(p) = &q.priority {
-        if card.priority.as_deref() != Some(p.as_str()) {
-            return false;
-        }
+    if !in_set(&q.priority, card.priority.as_deref()) {
+        return false;
     }
-    if let Some(s) = &q.size {
-        if card.size.as_deref() != Some(s.as_str()) {
-            return false;
-        }
+    if !in_set(&q.size, card.size.as_deref()) {
+        return false;
     }
-    if let Some(k) = &q.king {
-        if !card.king.as_ref().is_some_and(|king| king.name == *k) {
-            return false;
-        }
+    if !q.king.is_empty()
+        && !card
+            .king
+            .as_ref()
+            .is_some_and(|king| q.king.iter().any(|k| king.name == *k))
+    {
+        return false;
     }
-    if let Some(epic) = &q.epic {
-        if card.id != *epic && card.parent.as_deref() != Some(epic.as_str()) {
-            return false;
-        }
+    if !q.epic.is_empty()
+        && !q
+            .epic
+            .iter()
+            .any(|epic| card.id == *epic || card.parent.as_deref() == Some(epic.as_str()))
+    {
+        return false;
     }
     if let Some(needle) = &q.q {
         let needle = needle.to_lowercase();
@@ -501,6 +555,8 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
             lanes: vec![],
             stats: Stats {
                 open: vec![],
+                statuses: vec![],
+                totals: vec![],
                 flow: inp.flow.clone(),
             },
             facets: Facets {
@@ -536,7 +592,7 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
         }
     }
     // The spawn-env scope is skipped when the query itself scopes.
-    let scope_applies = !q.all && q.project.is_none();
+    let scope_applies = !q.all && q.project.is_empty();
     let scoped: Vec<Card> = if scope_applies {
         cards
             .into_iter()
@@ -548,15 +604,21 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
     } else {
         cards
     };
-    // Facets: values present after scope, before filters.
+    // Facets and per-status totals: values present after scope, before
+    // filters. A tile's count is what selecting it would show.
     let facets = facets_of(&scoped, inp);
+    let mut status_totals: BTreeMap<String, usize> = BTreeMap::new();
+    for c in &scoped {
+        if let Some(s) = &c.status {
+            *status_totals.entry(s.clone()).or_insert(0) += 1;
+        }
+    }
     let filtered: Vec<Card> = scoped.into_iter().filter(|c| keeps_query(c, q)).collect();
-    // Open totals per column over the filtered set (Done excluded).
+    // Per-column totals over the filtered set; `open` excludes Done, the
+    // header counts keep it.
     let mut open_totals: HashMap<&'static str, usize> = HashMap::new();
     for c in &filtered {
-        if c.column != "Done" {
-            *open_totals.entry(c.column).or_insert(0) += 1;
-        }
+        *open_totals.entry(c.column).or_insert(0) += 1;
     }
     let stats = Stats {
         open: KANBAN_COLUMNS
@@ -567,9 +629,20 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
                 total: open_totals.get(col).copied().unwrap_or(0),
             })
             .collect(),
+        statuses: status_totals
+            .into_iter()
+            .map(|(status, total)| StatusTotal { status, total })
+            .collect(),
+        totals: KANBAN_COLUMNS
+            .iter()
+            .map(|col| ColumnTotal {
+                column: col,
+                total: open_totals.get(col).copied().unwrap_or(0),
+            })
+            .collect(),
         flow: inp.flow.clone(),
     };
-    let lanes = build_lanes(filtered, &order, inp, &q.lanes);
+    let lanes = build_lanes(filtered, &order, inp, &q.lanes, q.view == View::List);
     Board {
         schema: 1,
         version: inp.version,
@@ -650,6 +723,7 @@ fn build_lanes(
     order: &HashMap<String, usize>,
     inp: &Inputs,
     lanes_by: &LanesBy,
+    uncapped: bool,
 ) -> Vec<Lane> {
     let by_id: HashMap<String, &Value> = inp
         .rows
@@ -777,8 +851,12 @@ fn build_lanes(
                 } else {
                     in_col.sort_by_key(|c| c.order);
                 }
-                let cap = if col == "Done" { DONE_CAP } else { CELL_CAP };
-                in_col.truncate(cap);
+                // The list view needs every row; the kanban keeps its
+                // per-cell caps for wire size.
+                if !uncapped {
+                    let cap = if col == "Done" { DONE_CAP } else { CELL_CAP };
+                    in_col.truncate(cap);
+                }
                 cells.push(Cell {
                     column: col,
                     total,

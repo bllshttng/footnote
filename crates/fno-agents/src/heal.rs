@@ -4424,6 +4424,7 @@ echo '[]'
         let armed = || crate::loops_pause::DispatchPause::FleetIncident {
             generation: 9,
             reason: "rustc storm".to_string(),
+            holds: vec!["spawns".to_string(), "tests".to_string()],
         };
         let code = run_detached(&a, &detach_args(d), &armed, &spawn);
         assert_eq!(code, EXIT_CLEAN);

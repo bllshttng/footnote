@@ -15,26 +15,13 @@ use crate::backlog_model::{unavailable_features, Board, Lane};
 use crate::backlog_view::graph_path;
 use crate::store_client;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::time::Duration;
-
-/// Swap in a fresh board view at the next generation (the overlay's
-/// regather trigger). The one open path shared by the menu tap and the
-/// prefix chord.
-pub(crate) fn open(view: &mut super::View) {
-    let gen = view
-        .backlog_board
-        .as_ref()
-        .map(|b| b.gen.wrapping_add(1))
-        .unwrap_or(0);
-    view.backlog_board = Some(BoardView::new(gen));
-}
 
 /// The prefix chord's gate: the board opens only while the experimental
 /// pref is on; otherwise a notice names the menu row that turns it on.
 pub(crate) fn open_pref_gated(view: &mut super::View) {
     if view.experimental_backlog {
-        open(view);
+        super::View::open(view);
     } else {
         view.set_notice("backlog board is off: sideline menu > experimental: backlog view".into());
     }
@@ -86,13 +73,12 @@ pub(crate) struct QueryState {
 impl QueryState {
     /// The model's parsed query for this state.
     pub(crate) fn to_query(&self) -> Result<backlog_model::Query, String> {
-        let mut p: HashMap<String, String> = HashMap::new();
         let lanes = match self.lanes {
             backlog_model::LanesBy::Project => "project",
             backlog_model::LanesBy::Epic => "epic",
             backlog_model::LanesBy::None => "none",
         };
-        p.insert("lanes".into(), lanes.into());
+        let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes.into())];
         for (k, v) in [
             ("project", &self.project),
             ("epic", &self.epic),
@@ -103,7 +89,7 @@ impl QueryState {
             ("q", &self.q),
         ] {
             if let Some(v) = v {
-                p.insert(k.to_string(), v.clone());
+                p.push((k.to_string(), v.clone()));
             }
         }
         backlog_model::Query::from_pairs(&p)
@@ -688,6 +674,220 @@ fn push_stacked_cells(
     }
 }
 
+/// The docked sideline column's width. Below `WIDE_CELLS_AT` of body
+/// width, the board's own render is the one-column list grouped by column
+/// with counts - the dock is that render pinned to a side column, not a
+/// second renderer.
+pub(crate) const BOARD_DOCK_W: u16 = 36;
+
+impl View {
+    /// Width the docked board consumes left of the content: `BOARD_DOCK_W`
+    /// clamped to what the terminal gives after the agent sideline and the
+    /// feed panel, 0 unless the board is open, docked left, and windowed.
+    pub(super) fn board_left_w(&self) -> u16 {
+        self.dock_w(crate::view_store::BoardDock::Left)
+    }
+
+    /// Width the docked board consumes right of the content (0 otherwise).
+    pub(super) fn board_right_w(&self) -> u16 {
+        self.dock_w(crate::view_store::BoardDock::Right)
+    }
+
+    fn dock_w(&self, side: crate::view_store::BoardDock) -> u16 {
+        if self.backlog_board.is_some() && !self.board_full && self.board_dock == side {
+            BOARD_DOCK_W.min(
+                self.term
+                    .1
+                    .saturating_sub(self.panel_w() + self.feed_panel_w()),
+            )
+        } else {
+            0
+        }
+    }
+
+    /// All chrome left of the content area: the agent sideline plus a
+    /// left-docked board. Every content-to-screen column mapping reads
+    /// this, or a left dock shifts every pane's keys and clicks one column
+    /// band sideways.
+    pub(super) fn left_chrome_w(&self) -> u16 {
+        self.panel_w() + self.board_left_w()
+    }
+
+    /// The docked column's `(origin, dims)` in outer-terminal `(row, col)`
+    /// cells, `None` when the board paints centered or full screen instead.
+    pub(super) fn backlog_dock_rect(&self) -> Option<((usize, usize), (usize, usize))> {
+        if self.backlog_board.is_none() || self.board_full {
+            return None;
+        }
+        let bw = match self.board_dock {
+            crate::view_store::BoardDock::Left => self.board_left_w(),
+            crate::view_store::BoardDock::Right => self.board_right_w(),
+            crate::view_store::BoardDock::Off => return None,
+        };
+        if bw == 0 {
+            return None;
+        }
+        let col = match self.board_dock {
+            crate::view_store::BoardDock::Left => self.panel_w() as usize,
+            // Flush against the feed panel's left edge when it is open,
+            // else the terminal's right edge.
+            _ => (self.term.1 as usize).saturating_sub(self.feed_panel_w() as usize + bw as usize),
+        };
+        let row = TAB_BAR_ROWS as usize;
+        let h = (self.term.0 as usize)
+            .saturating_sub(row + self.status_rows() as usize)
+            .max(1);
+        Some(((row, col), (h, bw as usize)))
+    }
+
+    /// Paint the docked column: the board's own render at the dock's
+    /// narrow width, framed and scrolled by the shared overlay machinery
+    /// and pinned to the dock rect. A drill-down or picker paints over it.
+    pub(super) fn draw_backlog_dock(&self, cells: &mut [Cell], rows: usize, cols: usize) {
+        let Some((origin, dims)) = self.backlog_dock_rect() else {
+            return;
+        };
+        let Some(b) = &self.backlog_board else {
+            return;
+        };
+        let text_w = dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+        let (lines, follow) = render(b, text_w);
+        let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
+            .footer("x side · F full · esc close");
+        let layout = layout_lines_overlay(
+            origin,
+            dims,
+            &chrome,
+            &lines,
+            follow,
+            OverlayAnchor::At {
+                row: origin.0,
+                col: origin.1,
+            },
+        );
+        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
+    }
+
+    /// The board's whole paint: the docked column first (a drill-down or
+    /// picker frames over it), then the drill-down, the pickers, or the
+    /// board itself - centered in the content viewport, or full screen.
+    /// The compose branch in `client.rs` is this one call.
+    pub(super) fn draw_board(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        overlay_origin: (usize, usize),
+        overlay_dims: (usize, usize),
+    ) {
+        self.draw_backlog_dock(cells, rows, cols);
+        let Some(b) = &self.backlog_board else {
+            return;
+        };
+        if b.detail.is_some() {
+            let w = overlay_dims
+                .1
+                .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+            let (lines, follow) = node_detail::overlay_lines(b, w);
+            let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
+                .footer("enter open · b plan · A king · d details · esc back");
+            draw_lines_overlay(
+                cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                follow,
+            );
+        } else if let Some(m) = pick_popup(b) {
+            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
+        } else if let Some(m) = facet_popup(b) {
+            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
+        } else if self.backlog_dock_rect().is_some() {
+            // painted above by draw_backlog_dock
+        } else {
+            let (origin, dims) = if self.board_full {
+                ((0usize, 0usize), (rows, cols))
+            } else {
+                (overlay_origin, overlay_dims)
+            };
+            let w = dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+            let (lines, follow) = render(b, w);
+            let footer = if self.board_full {
+                "hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · F window · esc close"
+            } else {
+                "hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · x dock · F full · esc close"
+            };
+            let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center).footer(footer);
+            draw_lines_overlay(
+                cells,
+                rows,
+                cols,
+                origin,
+                dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                follow,
+            );
+        }
+    }
+
+    /// The sidebar menu's open action: a fresh board view at the next
+    /// generation (the stale fold of a previous open can never land).
+    pub(crate) fn open(view: &mut View) {
+        let gen = view
+            .backlog_board
+            .as_ref()
+            .map(|b| b.gen.wrapping_add(1))
+            .unwrap_or(0);
+        view.backlog_board = Some(BoardView::new(gen));
+    }
+
+    /// The menu's enable/disable toggle for the whole experimental view.
+    /// Disabling closes the board; the choice persists in the view store.
+    pub(crate) fn toggle_enabled(view: &mut View) {
+        view.experimental_backlog = !view.experimental_backlog;
+        crate::view_store::save_experimental_backlog_view(view.experimental_backlog);
+        let on = if view.experimental_backlog {
+            "on"
+        } else {
+            "off"
+        };
+        if !view.experimental_backlog {
+            view.backlog_board = None;
+        }
+        view.set_notice(format!("experimental backlog view: {on}"));
+        view.refresh_open_sideline_menu();
+    }
+}
+
+/// `x`: cycle the dock off -> left -> right -> off, persisting the choice.
+/// The dock width enters `content_dims` the same turn, so the server
+/// shrinks the panes around the column while it is docked.
+fn cycle_dock(view: &mut View) {
+    let next = view.board_dock.next();
+    view.board_dock = next;
+    crate::view_store::save_board_dock(next);
+    view.set_notice(format!("board dock: {}", next.as_str()));
+}
+
+/// `F`: full-screen the board - the docked column and the centered overlay
+/// both expand to the terminal - and back, persisting the choice.
+fn toggle_full(view: &mut View) {
+    view.board_full = !view.board_full;
+    crate::view_store::save_board_full(view.board_full);
+    let word = if view.board_full {
+        "full screen"
+    } else {
+        "windowed"
+    };
+    view.set_notice(format!("board: {word}"));
+}
+
 /// Keys while the board owns the keyboard. The drill-down, the find input,
 /// and the facet picker each consume a whole chunk; otherwise the folded
 /// modal keys drive the board itself.
@@ -756,6 +956,8 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b's') => edit_size(view)?,
             ModalKey::Byte(b'S') => edit_status(view)?,
             ModalKey::Byte(b'D') => append_details(view)?,
+            ModalKey::Byte(b'x') => cycle_dock(view),
+            ModalKey::Byte(b'F') => toggle_full(view),
             ModalKey::Byte(b'T') => rank_move(view, "top", None)?,
             ModalKey::Byte(b'K') => rank_move(view, "before", Some(true))?,
             ModalKey::Byte(b'J') => rank_move(view, "after", Some(false))?,
