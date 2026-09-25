@@ -650,7 +650,21 @@ pub(crate) fn build_resume_argv_tokens_split(
         // rides separately. An empty grant_cwd is absent for both, which is
         // what Python's `if cwd` does and the parity test pins (AC4-EDGE).
         if let Some(cwd) = grant_cwd.filter(|c| !c.is_empty()) {
-            let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
+            // codex 0.156.1 refuses a `sandbox_workspace_write.writable_roots`
+            // override paired with `--remote` ("Configure additional workspace
+            // roots on the server"), and the declared codex resume/attach forms
+            // all ride `--remote unix://`. On a --remote form the `-c` splice
+            // is dropped and the roots reach the thread the way delivery
+            // carries them: codex_inject::inject probes the resolved sandbox
+            // and widens the roots on the turn/start policy, and the daemon
+            // thread lanes grant via granted_roots on every turn. A non-remote
+            // form keeps the splice.
+            let remote_form = argv.iter().any(|token| token == "--remote");
+            let grant = if remote_form {
+                Vec::new()
+            } else {
+                crate::provider::codex_writable_config_args(Path::new(cwd))
+            };
             let grant_len = grant.len();
             if !grant.is_empty() {
                 argv.splice(1..1, grant);
