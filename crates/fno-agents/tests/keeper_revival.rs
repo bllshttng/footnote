@@ -54,11 +54,14 @@ impl Fixture {
         write_registry(&home, &[row]);
         write_executable(
             &bins.join("agy"),
-            &format!(
-                "#!/bin/sh\necho \"launch: $@\" >> \"$FAKE_AGY_LOG\"\n{body}"
-            ),
+            &format!("#!/bin/sh\necho \"launch: $@\" >> \"$FAKE_AGY_LOG\"\n{body}"),
         );
-        Self { root, home, bins, name }
+        Self {
+            root,
+            home,
+            bins,
+            name,
+        }
     }
 
     fn sock(&self) -> PathBuf {
@@ -100,7 +103,10 @@ impl Fixture {
             // The fake's own helpers (dd, stty) live on the std paths; the
             // fixture's bins come first, so `agy` still resolves to the fake.
             .env("PATH", format!("{}:/usr/bin:/bin", self.bins.display()))
-            .env("FNO_AGENTS_WORKER_BIN", env!("CARGO_BIN_EXE_fno-agents-worker"))
+            .env(
+                "FNO_AGENTS_WORKER_BIN",
+                env!("CARGO_BIN_EXE_fno-agents-worker"),
+            )
             .env("FNO_SPAWN_GATE", "0")
             .env("FAKE_AGY_LOG", self.log())
             .stdin(Stdio::null())
@@ -164,7 +170,9 @@ fn identify(sock: &Path) -> Value {
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream
         .write_all(&fno_agents::pane_keeper::encode(
             &fno_agents::pane_keeper::Frame::Identify,
@@ -204,10 +212,7 @@ fn resume_revives_an_exited_agy_thread_row_on_a_fresh_keeper() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("is live on its keeper"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("is live on its keeper"), "stdout: {stdout}");
     let sock = fixture.sock();
     let row = fixture.registry_row();
     assert_eq!(row["status"], "live", "{row}");
@@ -291,7 +296,10 @@ fn a_pi_thread_row_keeps_a_refusal_that_names_its_keeper_row() {
         .env("FNO_AGENTS_HOME", &home)
         .env("HOME", root.path())
         .env("PATH", &bins)
-        .env("FNO_AGENTS_WORKER_BIN", env!("CARGO_BIN_EXE_fno-agents-worker"))
+        .env(
+            "FNO_AGENTS_WORKER_BIN",
+            env!("CARGO_BIN_EXE_fno-agents-worker"),
+        )
         .env("FNO_SPAWN_GATE", "0")
         .stdin(Stdio::null())
         .output()
@@ -358,7 +366,12 @@ fn a_revived_row_delivers_a_message_through_the_keeper_socket() {
     // per the plan (exit 1, row stays live).
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("is live on its keeper"), "stdout: {stdout}");
-    assert_eq!(fixture.registry_row()["status"], "live", "{:?}", fixture.registry_row());
+    assert_eq!(
+        fixture.registry_row()["status"],
+        "live",
+        "{:?}",
+        fixture.registry_row()
+    );
     let reply = identify(&fixture.sock());
     let keeper_pid = reply["keeper_pid"].as_u64().unwrap() as u32;
     let child_pid = reply["child_pid"].as_u64().unwrap() as u32;
