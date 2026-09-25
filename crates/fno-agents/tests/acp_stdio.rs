@@ -352,15 +352,23 @@ fn dsh_missing_provider_key_maps_to_its_typed_credential_refusal() {
     use fno_agents::acp_stdio::{AcpError, DSH_PROFILE};
 
     let dir = tempfile::tempdir().unwrap();
-    let script = concat!(
-        "read -r request; ",
-        "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"no API key for provider route\"}}'"
-    );
+    let diagnostic = include_str!("fixtures/dsh-acp-trials.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix("prompt_without_key.text="))
+        .expect("measured DSH authentication diagnostic");
+    let frame = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32603, "message": diagnostic},
+    })
+    .to_string();
+    let script = "read -r request; printf '%s\\n' \"$FAKE_RESPONSE\"";
+    let env = HashMap::from([("FAKE_RESPONSE".to_string(), frame)]);
     let session = AcpSession::start(
         &DSH_PROFILE,
         vec!["sh".into(), "-c".into(), script.into()],
         dir.path(),
-        None,
+        Some(env),
     )
     .unwrap();
     let response = session.request("session/prompt", json!({})).unwrap();

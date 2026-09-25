@@ -84,7 +84,7 @@ pub enum AcpError {
         method: String,
         stderr: String,
     },
-    #[error("{tool} ACP child is gone (broken pipe, code {code}); stderr: {stderr}")]
+    #[error("{tool} ACP child is gone (broken pipe, code {code:?}); stderr: {stderr}")]
     BrokenPipe {
         tool: &'static str,
         code: Option<i32>,

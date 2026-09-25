@@ -45,9 +45,9 @@
 // the macro expansion since `spawned_by_session` joined the contract.
 
 pub mod acceptance_evidence;
+pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
-pub mod acp_stdio;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;
@@ -169,6 +169,7 @@ mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
+pub mod grok_ask;
 pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
