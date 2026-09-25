@@ -1430,55 +1430,33 @@ pub fn menu_byte_for(action_id: &str) -> Option<u8> {
 /// table, and a rebind has to reach every one of them or the feature reads as
 /// broken from whichever surface was missed.
 ///
-/// A teaser, not the key list: it names one action per group and sends the
-/// reader to `?` for the rest. An action missing from the table drops silently
-/// rather than printing a gap.
+/// A teaser, not the key list: the short bar a pending prefix paints at
+/// once. Each key comes off the LIVE
+/// key table via [`key_for`], so a rebind shows the real key; an action
+/// missing from the table drops silently rather than printing a gap. The
+/// full table stays in `?`.
 pub fn prefix_hint() -> String {
-    // (actions, how their keys join, the phrase that follows). No actions means
-    // a literal entry: the digit range is structural, not a binding.
-    const GROUPS: &[(&[&str], &str, &str)] = &[
-        (&["split-h", "split-v"], " ", "split"),
-        (
-            &["focus-left", "focus-down", "focus-up", "focus-right"],
-            "",
-            "focus",
-        ),
-        (
-            &["resize-left", "resize-down", "resize-up", "resize-right"],
-            "",
-            "resize",
-        ),
-        (&["close-pane"], "", "close"),
-        (&["new-tab"], "", "tab"),
-        (&["next-tab", "prev-tab"], "/", "cycle"),
-        (&[], "", "<n> tab"),
-        (&["close-tab"], "", "close-tab"),
-        (&["selector"], "", "select"),
-        (&["toggle-sideline"], "", "sideline"),
-        (&["grab-work"], "", "grab"),
-        (&["find"], "", "find"),
-        (&["search"], "", "search"),
-        (&["toggle-status"], "", "status"),
-        (&["detach"], "", "detach"),
-        (&["show-keys"], "", "all keys"),
+    // (action id, the phrase that follows). `esc cancel` is literal: esc
+    // cancels a pending prefix structurally, before any binding lookup.
+    const BAR: &[(&str, &str)] = &[
+        ("selector", "workspaces"),
+        ("toggle-composer", "new agent"),
+        ("find", "find"),
+        ("show-keys", "all keys"),
     ];
     let rows = key_bindings();
-    let mut parts: Vec<String> = Vec::new();
-    for (actions, sep, phrase) in GROUPS {
-        if actions.is_empty() {
-            parts.push(phrase.to_string());
-            continue;
-        }
-        let keys: Vec<String> = actions
+    let mut parts: Vec<String> = vec!["esc cancel".to_string()];
+    for (action, phrase) in BAR {
+        let Some(key) = rows
             .iter()
-            .filter_map(|a| rows.iter().find(|kb| kb.action == *a))
+            .find(|kb| kb.action == *action)
             .map(|kb| kb.disp.clone())
-            .collect();
-        if !keys.is_empty() {
-            parts.push(format!("{} {phrase}", keys.join(sep)));
-        }
+        else {
+            continue;
+        };
+        parts.push(format!("{key} {phrase}"));
     }
-    format!(" {}", parts.join(" \u{b7} "))
+    format!(" {} ", parts.join(" \u{b7} "))
 }
 
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
@@ -2008,14 +1986,11 @@ mod tests {
         // one contains a particular character.
         let rows = key_bindings();
         let hint = prefix_hint();
-        // Byte-identical to the string this generator replaced. Generating it
-        // was meant to change nothing an operator sees until they rebind
-        // something, so the shipped rendering is worth pinning.
+        // Byte-identical to the shipped short bar: esc cancel plus
+        // one key per line, every glyph read from the live table.
         assert_eq!(
             hint,
-            " % \" split · hjkl focus · HJKL resize · x close · c tab · n/p cycle \
-             · <n> tab · & close-tab · w select · b sideline · g grab · f find \
-             · / search · s status · d detach · ? all keys"
+            " esc cancel · w workspaces · i new agent · f find · ? all keys "
         );
         let disp = |action: &str| {
             rows.iter()
@@ -2023,7 +1998,7 @@ mod tests {
                 .map(|kb| kb.disp.clone())
                 .expect("action is in the shipped table")
         };
-        for action in ["detach", "find", "search", "show-keys", "new-tab"] {
+        for action in ["selector", "toggle-composer", "find", "show-keys"] {
             assert!(
                 hint.contains(&disp(action)),
                 "the hint must name {action} on the key it actually answers on \
@@ -2031,11 +2006,11 @@ mod tests {
                 disp(action)
             );
         }
-        // A rebind moves the hint with it. Resolved locally rather than
-        // installed, since `install` is a process-global OnceLock.
-        let (map, warn) = resolve_keymap(None, &[("detach".into(), "Q".into())]);
+        // A rebind moves the glyph the bar reads. Resolved locally rather
+        // than installed, since `install` is a process-global OnceLock.
+        let (map, warn) = resolve_keymap(None, &[("find".into(), "Q".into())]);
         assert!(warn.is_empty(), "Q is free: {warn:?}");
-        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+        assert_eq!(map.rebinds, vec![("find".to_string(), b'Q')]);
         let rebound: Vec<KeyBinding> = {
             let mut rows = default_bindings();
             for (action, byte) in &map.rebinds {
@@ -2049,7 +2024,7 @@ mod tests {
         assert_eq!(
             rebound
                 .iter()
-                .find(|kb| kb.action == "detach")
+                .find(|kb| kb.action == "find")
                 .map(|kb| kb.disp.as_str()),
             Some("Q"),
             "the table moved, so the hint built from it moves too"

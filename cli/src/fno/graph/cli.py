@@ -8990,7 +8990,7 @@ def _reconcile_once(
     promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
-        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state
+        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state, reopen_held_reason
 
         gated: list = []
         reopen_expired: list[str] = []
@@ -9019,7 +9019,7 @@ def _reconcile_once(
                 # Expiry first: the record stamps the FIRST merged ref, so a
                 # later ref merging after the reopen closes the node instead.
                 if not _merge_postdates_reopen(gate_node, skip_pr=record.pr_number, query=query_pr_merge_state, cwd=gate_cwd):
-                    promise_held.append((record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held"))
+                    promise_held.append((record.node_id, reopen_held_reason(gate_node, record.pr_number), "reopen_held"))
                     continue
                 # Expired: the locked recheck covers only a NEWER reopen.
                 reopen_expired.append(record.node_id)
@@ -9208,11 +9208,7 @@ def _reconcile_once(
                         and _reopen_outranks_merge(node_obj, record.merged_at)
                     ):
                         promise_held.append(
-                            (
-                                record.node_id,
-                                f"reopened after PR #{record.pr_number} merged",
-                                "reopen_held",
-                            )
+                            (record.node_id, reopen_held_reason(node_obj, record.pr_number), "reopen_held")
                         )
                         continue
                     _apply_completion_fields(node_obj, merge_status="merged")
