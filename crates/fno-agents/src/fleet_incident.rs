@@ -356,7 +356,7 @@ fn write_transition_locked(
 /// [`SCOPES`] order with duplicates dropped. An unknown word refuses by
 /// name, so a typo can never arm a scope the operator did not mean.
 fn parse_hold_list(value: &str) -> Result<Vec<String>, String> {
-    let mut held: Vec<String> = Vec::new();
+    let mut words: Vec<&str> = Vec::new();
     for word in value.split(',') {
         let word = word.trim();
         if word.is_empty() {
@@ -368,11 +368,16 @@ fn parse_hold_list(value: &str) -> Result<Vec<String>, String> {
                 SCOPES.join(", ")
             ));
         }
-        if !held.iter().any(|s| s == word) {
-            held.push(word.to_string());
+        if !words.contains(&word) {
+            words.push(word);
         }
     }
-    Ok(held)
+    Ok(SCOPES
+        .iter()
+        .copied()
+        .filter(|s| words.contains(s))
+        .map(|s| s.to_string())
+        .collect())
 }
 
 /// One receipt line, JSON, on stdout: the resulting state, its generation,
@@ -512,8 +517,12 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             }
             // A stop without --hold holds every scope; a re-stop with a new
             // list is how the reach changes, and it bumps the generation. A
-            // clear writes no scope: the state word already says nothing is
-            // held.
+            // clear lifts every scope, so an explicit --hold there is a
+            // misunderstanding worth refusing, not ignoring.
+            if action == "clear" && holds.is_some() {
+                eprintln!("fleet-incident: clear lifts every scope; arm a reach with stop --hold");
+                return 2;
+            }
             let held = if action == "stop" {
                 match holds {
                     Some(h) if !h.is_empty() => h,
@@ -835,7 +844,8 @@ mod tests {
     fn hold_list_resolves_order_drops_dupes_and_refuses_unknown_words() {
         assert_eq!(
             super::parse_hold_list("merges, tests,merges").unwrap(),
-            vec!["merges".to_string(), "tests".to_string()]
+            vec!["tests".to_string(), "merges".to_string()],
+            "the readout order is canonical, whatever order the operator typed"
         );
         assert_eq!(super::parse_hold_list("").unwrap(), Vec::<String>::new());
         let err = super::parse_hold_list("spawns,mergess").expect_err("typo must refuse");
