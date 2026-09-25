@@ -835,7 +835,7 @@ def test_wave_receipt_names_where_the_payload_went(tmp_graph):
     add = _invoke("--json", "backlog", "add", "Host work")
     target_id = json.loads(add.stdout)["id"]
 
-    payload = "MARKER-CE1B first line\n" + ("ce1b payload filler for length\n" * 60)
+    payload = "MARKER-CE1B first line\n" + ("ce1b payload filler for length\n" * 80)
     assert len(payload) >= 2300
     r = _invoke(
         "backlog", "idea", "Measured finding",
