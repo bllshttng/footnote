@@ -381,6 +381,11 @@ pub enum Event {
     /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
     /// by the client's view layer, not here (like OpenAnswers).
     OpenYard,
+    /// Open the experimental backlog board (prefix+O). Whether the board
+    /// actually opens is the client's call: the sideline menu's
+    /// `experimental: backlog view` pref gates it, and the chord degrades to
+    /// a notice while the pref is off.
+    OpenBacklogBoard,
     /// (redefined by) Toggle the court block on the left
     /// sideline between its three-line glance and the full reading: load
     /// against the cap, what saturates the box, the working/idle/dead
@@ -1178,6 +1183,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             "the court (load, census, lanes)", // minimize/expand, sideline
         ),
         b(
+            b'O',
+            "open-backlog-board",
+            OpenBacklogBoard,
+            Global,
+            "open the backlog board (experimental pref)",
+        ),
+        b(
             b'b',
             "toggle-sideline",
             TogglePanel,
@@ -1753,6 +1765,8 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
         assert_eq!(scan_all(&[b"\x02i"]), vec![Event::ToggleComposer]);
+        // prefix+O opens the experimental backlog board (pref-gated client-side).
+        assert_eq!(scan_all(&[b"\x02O"]), vec![Event::OpenBacklogBoard]);
         assert_eq!(scan_all(&[b"\x02F"]), vec![Event::ToggleFullSideline]);
         assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);

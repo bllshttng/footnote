@@ -614,6 +614,10 @@ pub(super) fn two_pane_view() -> View {
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
     view.frames.insert(11, text_frame(29, 36, 'b'));
+    // Pin the row shape: these helpers assert display-row geometry, and the
+    // card default (ambient config or no config at all) inserts a detail
+    // line per agent and moves every row index.
+    view.sideline_layout = sideline_color::SidelineLayout::List;
     view
 }
 
@@ -7834,41 +7838,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     );
 }
 
-#[test]
-fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None, false);
-    let i = menu
-        .popup
-        .rows
-        .iter()
-        .position(|row| {
-            matches!(
-                row,
-                PopupRow::Entry { glyph, label, .. }
-                    if glyph == "♺" && label == "sweep threads"
-            )
-        })
-        .expect("sweep threads entry");
-    let action_i = menu
-        .popup
-        .rows
-        .iter()
-        .take(i + 1)
-        .filter(|row| matches!(row, PopupRow::Entry { .. }))
-        .count()
-        - 1;
-    assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
-    assert!(crate::popup::menu_glyph_is_bmp("♺"));
-    assert!(!crate::popup::menu_glyph_is_bmp("📄"));
-    assert_eq!(
-        menu.actions
-            .iter()
-            .filter(|action| **action == AuxAction::Detach)
-            .count(),
-        1,
-        "the global detach slot remains distinct"
-    );
-}
+#[path = "client/tests/backlog_pref_tests.rs"]
+mod backlog_pref_tests;
 
 #[tokio::test]
 async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {

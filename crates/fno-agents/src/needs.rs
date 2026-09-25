@@ -805,6 +805,13 @@ pub(crate) fn held_nodes(journals: &[PathBuf]) -> std::collections::BTreeMap<Str
         .collect()
 }
 
+/// The fail-open door over [`held_nodes`]: the fold resolves the state root,
+/// which panics in a process with no declared hermetic root, and no caller of
+/// a held read may die on it - the map it cannot read is an empty one.
+pub(crate) fn held_map(fno_dir: &Path, cwd: &Path) -> std::collections::BTreeMap<String, String> {
+    std::panic::catch_unwind(|| held_nodes(&question_journals(fno_dir, cwd))).unwrap_or_default()
+}
+
 /// The held rows: one per blocked node, oldest question first.
 fn held_rows(journals: &[PathBuf]) -> Vec<HeldRow> {
     let mut raw = String::new();
@@ -2445,5 +2452,26 @@ mod tests {
             held_rows(&[journal]).is_empty(),
             "the close releases the node"
         );
+    }
+
+    #[test]
+    fn held_map_folds_journals_fail_open() {
+        // AC1/AC2: an open store-committed question holds the node; a fno
+        // dir with no journals is an empty map, never a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let ask = serde_json::json!({
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
+        });
+        crate::event_store::append_envelope(&journal, &ask.to_string(), None).unwrap();
+        let held = held_map(dir.path(), Path::new("."));
+        assert_eq!(
+            held.get("x-hold").map(String::as_str),
+            Some("q-1"),
+            "{held:?}"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(held_map(empty.path(), Path::new(".")).is_empty());
     }
 }

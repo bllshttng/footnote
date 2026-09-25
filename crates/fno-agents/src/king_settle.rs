@@ -16,9 +16,6 @@ pub const MAX_PR_READS: usize = 12;
 /// The status read's wall budget, the same bound the court read applies.
 const STATUS_READ_BUDGET_S: u64 = 30;
 
-/// The mail child's wall budget, the same bound the confirmed notice applies.
-const MAIL_BUDGET_S: u64 = 30;
-
 /// One pass's receipt: what the tick row journals.
 pub struct SettleOutcome {
     pub mailed: u64,
@@ -314,8 +311,9 @@ pub(crate) fn evaluate(
 /// The daemon-facing pass over the court payload the arm_watch tick already
 /// read. Every child is bounded; a failed read or send names itself in the
 /// note and never mails a half answer. The status read rides the shared
-/// `run_fno_output` helper, and the mail child resolves the porcelain
-/// through `scrape::fno_bin()` - no second resolver lives here.
+/// `run_fno_output` helper, and the mail leg is the in-process
+/// `king_mail::send` - the daemon appends the durable envelope itself, so
+/// no mail child runs at all.
 pub fn run(payload: &Value, config_cwd: &Path, now_unix: u64) -> SettleOutcome {
     let store = crate::operator_notice::notify_signals_path();
     let graph_path = crate::king_board::scope::graph_json_path(config_cwd);
@@ -333,22 +331,7 @@ pub fn run(payload: &Value, config_cwd: &Path, now_unix: u64) -> SettleOutcome {
         serde_json::from_str(&out).map_err(|e| format!("the status payload did not parse: {e}"))
     };
     let mut mail = |scope: &str, text: &str| -> bool {
-        let fno = crate::scrape::fno_bin();
-        let mut cmd = std::process::Command::new(&fno);
-        cmd.args([
-            "agents",
-            "mail",
-            "send",
-            "--to-king",
-            scope,
-            "--from-name",
-            "king-settle",
-            text,
-        ])
-        .stdin(std::process::Stdio::null());
-        crate::bounded_cmd::output_with_timeout(cmd, MAIL_BUDGET_S)
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+        crate::king_mail::send(crate::king_mail::SETTLE_SENDER, scope, text).is_ok()
     };
     let rotate = now_unix / crate::arm_watch::ARM_WATCH_INTERVAL_S;
     evaluate(

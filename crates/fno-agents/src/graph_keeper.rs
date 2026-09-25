@@ -1484,6 +1484,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    let repo_root = opt_str_owned("repo_root");
     let opts = ReadyOpts {
         project: opt_str_owned("project"),
         all: params.get("all").and_then(Value::as_bool).unwrap_or(false),
@@ -1498,7 +1499,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .get("include_deferred")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        repo_root: opt_str_owned("repo_root"),
+        repo_root: repo_root.clone(),
         claimed: match params.get("claimed") {
             Some(Value::Array(ids)) => ids
                 .iter()
@@ -1532,6 +1533,14 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .get("now_ms")
             .and_then(Value::as_i64)
             .unwrap_or_else(|| crate::claims::now_ms()),
+        // The held fold: one read of the question journals beside the graph,
+        // resolved once per call so the admission decision cannot pick a node
+        // an open operator question blocks. repo_root anchors the cwd when
+        // the client passed it; the keeper's own cwd otherwise.
+        held: crate::needs::held_map(
+            state.graph.parent().unwrap_or(Path::new("")),
+            Path::new(repo_root.as_deref().unwrap_or(".")),
+        ),
     };
     // Borrowed in both arms: a deep clone of the owned graph per ready call
     // would re-spend most of the cache just saved.
@@ -4135,6 +4144,66 @@ mod tests {
         crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
         let state = read_state(&graph);
         (dir, state)
+    }
+
+    #[test]
+    fn ready_drops_a_node_an_open_question_blocks() {
+        // AC6: the keeper fills the held map from the journals beside the
+        // graph; a blocked node is no row and its drop reads held:<qid>.
+        let (dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-hold", "slug": "hold", "title": "held work", "status": "ready", "priority": "p1"},
+                {"id": "x-free", "slug": "free", "title": "free work", "status": "ready", "priority": "p1"},
+            ]
+        }));
+        let ask = json!({
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
+        });
+        std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n")).unwrap();
+        let reply = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids: Vec<&str> = reply["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&"x-hold"), "{reply}");
+        assert!(ids.contains(&"x-free"), "{reply}");
+        let drops = reply["drops"].as_array().unwrap();
+        assert!(
+            drops
+                .iter()
+                .any(|d| d["id"] == "x-hold" && d["reason"] == "held:q-1"),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn ready_releases_the_node_once_the_question_closes() {
+        // AC7: the close releases the node; nothing else moves.
+        let (dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-hold", "slug": "hold", "title": "held work", "status": "ready", "priority": "p1"},
+            ]
+        }));
+        let ask = json!({
+            "ts": "2026-09-25T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-1", "blocks": ["x-hold"], "question": "proceed?"}
+        });
+        let close = json!({
+            "ts": "2026-09-25T13:00:00Z", "type": "operator_question_closed", "source": "agent",
+            "data": {"question_id": "q-1"}
+        });
+        std::fs::write(dir.path().join("events.jsonl"), format!("{ask}\n{close}\n")).unwrap();
+        let reply = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids: Vec<&str> = reply["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"x-hold"), "{reply}");
     }
 
     #[test]
