@@ -931,14 +931,6 @@ def _norm(s: str) -> str:
 def _completed_node_ids(
     graph_path: Optional[Path], *, include_deferred: bool = False
 ) -> tuple[set[str], Optional[str]]:
-    """Return ``(complete_ids, warning)`` from the graph store.
-
-    A node is 'complete' when ``completed_at`` OR ``superseded_by`` is set
-    (read directly, since ``read_graph`` does not recompute ``status``).
-    ``deferred_at`` counts only with ``include_deferred``. Fail-safe: an
-    unreadable store returns an EMPTY id set plus a warning, so ``tidy``
-    ejects nothing rather than archiving a live item on a read miss.
-    """
     if graph_path is None:
         return set(), None
     graph_path = Path(graph_path)

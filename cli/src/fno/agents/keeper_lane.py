@@ -98,22 +98,13 @@ def keeper_rss_bound_kb() -> int:
 
 
 def store_backend_of(graph: Optional[Path]) -> str:
-    """Return the sole store kind only when its version is readable."""
-    if graph is None:
-        return "unknown"
-    try:
-        from fno.graph.store import store_export_status
-
-        return "sqlite" if store_export_status(graph).get("version") else "unknown"
-    except Exception:  # noqa: BLE001 - unreadable store never refuses cleanup
-        return "unknown"
+    from fno.graph.store import store_export_status
+    return "sqlite" if graph and store_export_status(graph).get("version") else "unknown"
 
 
 def graph_read_source() -> str:
-    """The default graph read path, or unknown when its store is unavailable."""
-    from fno.graph.store import GRAPH_JSON, store_export_status
-
-    return "sqlite" if store_export_status(GRAPH_JSON).get("version") else "unknown"
+    from fno.graph.store import GRAPH_JSON
+    return store_backend_of(GRAPH_JSON)
 
 
 @dataclass(frozen=True)

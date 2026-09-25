@@ -161,13 +161,12 @@ def _scan_state_file(
     try:
         if surface_key == "graph_json":
             from fno.graph.store import read_graph_strict
+
             text = repr(read_graph_strict(path))
         else:
             text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
-        if surface_key == "graph_json":
-            return [Violation(path, sid, 1, explanation) for sid in eval_session_ids]
-        return []
+        return [Violation(path, sid, 1, explanation) for sid in eval_session_ids] if surface_key == "graph_json" else []
 
     for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()

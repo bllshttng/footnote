@@ -7337,9 +7337,7 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     for entry in _read_json(path):
         node_id = entry.get("id") if isinstance(entry, dict) else None
         status = entry.get("status") if isinstance(entry, dict) else None
-        if status == "blocked" and entry.get("blocked_by"):
-            continue
-        if isinstance(node_id, str) and isinstance(status, str):
+        if isinstance(node_id, str) and isinstance(status, str) and not (status == "blocked" and entry.get("blocked_by")):
             persisted[node_id] = status
 
     derived: dict[str, str] = {}

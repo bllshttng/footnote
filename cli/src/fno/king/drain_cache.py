@@ -17,11 +17,9 @@ def cache_file() -> Path:
 
 
 def graph_ident(path: Path) -> "tuple | None":
-    """The SQLite version identifies the rows the store serves."""
     try:
         from fno.graph.store import store_export_status
-        version = store_export_status(Path(path)).get("version")
-        return ("sqlite", version) if version else None
+        return ("sqlite", version) if (version := store_export_status(path).get("version")) else None
     except Exception:  # noqa: BLE001 - a cache identity never blocks the read
         return None
 
