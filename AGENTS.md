@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-****footnote** is a Claude Code plugin: idea -> shipped PR (think -> plan -> execute -> review -> ship). Setup: `fno config setup wizard` or `/fno:setup`.
+****footnote** is a Claude Code plugin: idea -> shipped PR. Setup: `fno config setup wizard` or `/fno:setup`.
 
 ## Precedence and output style
 
