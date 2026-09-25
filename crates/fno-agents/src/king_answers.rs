@@ -267,6 +267,260 @@ fn one_line(text: &str, cap: usize) -> String {
     }
 }
 
+/// The held reading: this crown's open questions, read from the page
+/// frontmatter the attention arm froze at write time. The folder comes from
+/// items.json's `questions_dir`, so a king in any project reads the one
+/// folder the daemon writes. A missing or stale items.json is a failed
+/// reading, never `held: none`: the arm being down must not read as "no
+/// questions".
+pub(crate) fn held_reading(scope: &str) -> Result<Value, String> {
+    let index_path = crate::attention_arm::attention_dir()
+        .map_err(|e| e.to_string())?
+        .join("items.json");
+    let raw = std::fs::read_to_string(&index_path)
+        .map_err(|_| "the attention arm has not written items.json".to_string())?;
+    let index: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("items.json unreadable: {e}"))?;
+    let as_of = index.get("as_of").and_then(Value::as_u64).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(as_of);
+    if age > 600 {
+        return Err(format!(
+            "items.json is {age}s old; the attention arm is not beating"
+        ));
+    }
+    let dir = index
+        .get("questions_dir")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty())
+        .ok_or("items.json names no questions_dir")?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("questions folder {dir} unreadable: {e}"))?;
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    paths.sort();
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if crate::attention_file::has_conflict_markers(&text) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        pages.push((stem.to_string(), text));
+    }
+    let rows = held_from_pages(&pages, scope);
+    Ok(json!({"open": rows.len(), "rows": rows}))
+}
+
+/// The pure fold: open pages whose question_id the stem names and whose
+/// crown equals this check-in's canonical scope, oldest first. Rows carry
+/// what the render needs to name the decide verb.
+pub(crate) fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Value> {
+    let canon = crate::territory::canonical_scope(scope);
+    let mut rows: Vec<(u64, Value)> = Vec::new();
+    for (stem, text) in pages {
+        let Some((front, _)) = crate::attention_file::parse_page(text) else {
+            continue;
+        };
+        if front.status != "open" {
+            continue;
+        }
+        if !crate::attention_arm::stem_names_id(stem, &front.question_id) {
+            continue;
+        }
+        if crate::territory::canonical_scope(&front.crown) != canon {
+            continue;
+        }
+        let epoch = chrono::DateTime::parse_from_rfc3339(&front.asked_at)
+            .map(|d| d.timestamp().max(0) as u64)
+            .unwrap_or(0);
+        let node = front
+            .blocks
+            .first()
+            .cloned()
+            .filter(|b| !b.is_empty() && b != "none")
+            .or_else(|| Some(front.node.clone()).filter(|n| !n.is_empty() && n != "none"));
+        rows.push((
+            epoch,
+            json!({
+                "node": node,
+                "question_id": front.question_id,
+                "question": front.title,
+                "ts": front.asked_at,
+                "epoch": epoch,
+            }),
+        ));
+    }
+    rows.sort_by_key(|(epoch, _)| *epoch);
+    rows.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The workers payload, one `fno agents top --json` call shared by the
+/// workers and quiet readings.
+pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
+    let (_, out, err) = crate::king_checkin::fno_verb(&["agents", "top", "--json"])?;
+    let payload: Value = serde_json::from_str(out.trim())
+        .map_err(|e| format!("top payload did not parse: {e}: {}", err.trim()))?;
+    Ok(payload)
+}
+
+/// The summary the beat journals, folded from the shared top payload, so
+/// the workers and quiet readings cost one `top` call between them.
+pub(crate) fn workers_summary(payload: &Value) -> Result<Value, String> {
+    let predicate = payload
+        .get("predicate")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let workers = payload.get("workers").and_then(|w| w.as_array());
+    let workers = match (predicate.is_empty(), workers) {
+        (false, Some(w)) => w,
+        _ => return Err("the top payload carries no positive predicate".into()),
+    };
+    let mut oldest: Option<(f64, String)> = None;
+    for w in workers {
+        let age = w.get("status_age_s").and_then(|a| a.as_f64());
+        let handle = w
+            .get("handle")
+            .and_then(|h| h.as_str())
+            .or_else(|| crate::king_checkin::s_str(w, "name"))
+            .unwrap_or("");
+        if let Some(age) = age {
+            if oldest.as_ref().map(|(a, _)| age > *a).unwrap_or(true) {
+                oldest = Some((age, handle.to_string()));
+            }
+        }
+    }
+    let (age, handle) = oldest.ok_or_else(|| "every status_age_s is null".to_string())?;
+    Ok(json!({
+        "live_workers": workers.len(),
+        "oldest_worker_seen": format!("{}s {}", age as i64, handle),
+    }))
+}
+
+/// The rows an `ok` rows-carrying reading holds, or its failure reason.
+/// A reading the fixture lacks reads as absent-and-ok: the render's
+/// `none` line, never a failure.
+fn reading_rows(
+    readings: &[crate::king_checkin::Reading],
+    name: &str,
+) -> (Option<String>, Value, Vec<Value>) {
+    match readings.iter().find(|r| r.name == name) {
+        Some(r) if !r.ok => (Some(r.error.clone()), Value::Null, Vec::new()),
+        Some(r) => {
+            let rows = r
+                .value
+                .get("rows")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            (None, r.value.clone(), rows)
+        }
+        None => (None, Value::Null, Vec::new()),
+    }
+}
+
+/// The held render block: the decide and clear verbs one line per question.
+pub(crate) fn held_lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+    let (error, _value, rows) = reading_rows(readings, "held");
+    let mut lines = Vec::new();
+    if let Some(e) = error {
+        lines.push(format!("READER FAILED held: {e}"));
+        return lines;
+    }
+    // This crown's questions: the rows carry node, question id and ask
+    // time; a row with a node names the decide verb, a row with none names
+    // the clear verb.
+    if rows.is_empty() {
+        lines.push("held: none".into());
+        return lines;
+    }
+    lines.push(format!("held: {} question(s) for this crown", rows.len()));
+    for row in rows.iter().take(crate::king_checkin::MAX_COURT_ROWS) {
+        let qid = crate::king_checkin::dash(row.get("question_id"));
+        let node = row
+            .get("node")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty() && *n != "none");
+        match node {
+            Some(n) => lines.push(format!(
+                "  {n} on question {qid}; answer with: fno backlog decide {n} \"<ruling>\" --question-id {qid}"
+            )),
+            None => lines.push(format!(
+                "  question {qid}; answer with: fno inbox outstanding clear {qid} --answer \"<answer>\" --authority crown"
+            )),
+        }
+    }
+    lines
+}
+
+/// The answered render block: one ruling per line, scoped by node.
+pub(crate) fn answered_lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+    let (error, _value, rows) = reading_rows(readings, "answered");
+    let mut lines = Vec::new();
+    if let Some(e) = error {
+        lines.push(format!("READER FAILED answered: {e}"));
+        return lines;
+    }
+    if rows.is_empty() {
+        lines.push("answered: none in scope".into());
+        return lines;
+    }
+    lines.push(format!(
+        "answered: {} user decision(s) in scope",
+        rows.len()
+    ));
+    for row in rows.iter().take(crate::king_checkin::MAX_COURT_ROWS) {
+        lines.push(format!(
+            "  {} ({}): {}",
+            crate::king_checkin::dash(row.get("node")),
+            crate::king_checkin::dash(row.get("question_id")),
+            crate::king_checkin::dash(row.get("answer"))
+        ));
+    }
+    lines
+}
+
+/// The quiet render block: one line per quiet worker naming its own last
+/// word, READER FAILED included.
+pub(crate) fn quiet_lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+    let (error, value, rows) = reading_rows(readings, "quiet_workers");
+    let mut lines = Vec::new();
+    if let Some(e) = error {
+        lines.push(format!("READER FAILED quiet_workers: {e}"));
+        return lines;
+    }
+    if rows.is_empty() {
+        lines.push("quiet: none in scope".into());
+        return lines;
+    }
+    let total = value
+        .get("quiet")
+        .and_then(Value::as_u64)
+        .unwrap_or(rows.len() as u64);
+    lines.push(format!("quiet: {total} worker(s) in scope"));
+    for row in rows.iter().take(crate::king_checkin::MAX_COURT_ROWS) {
+        lines.push(format!(
+            "  {} ({}): {}",
+            crate::king_checkin::dash(row.get("worker")),
+            crate::king_checkin::dash(row.get("node")),
+            crate::king_checkin::dash(row.get("line"))
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +697,58 @@ mod tests {
         // dead-payload path stays named.
         let quiet = quiet_scope_workers(&payload, &ids);
         assert_eq!(quiet.len(), 1);
+    }
+
+    #[test]
+    fn held_from_pages_lists_this_crowns_open_questions_oldest_first() {
+        let pages = vec![
+            held_page("q-new", "x-b", "open", "2026-09-23T12:00:00Z", Some("x-1")),
+            held_page("q-old", "x-b", "open", "2026-09-22T08:00:00Z", None),
+            held_page(
+                "q-other",
+                "fno",
+                "open",
+                "2026-09-21T08:00:00Z",
+                Some("x-2"),
+            ),
+            held_page(
+                "q-closed",
+                "x-b",
+                "answered",
+                "2026-09-20T08:00:00Z",
+                Some("x-3"),
+            ),
+        ];
+        let rows = held_from_pages(&pages, "x-b");
+        assert_eq!(rows.len(), 2, "AC11-HP: only x-b's open pages: {rows:?}");
+        assert_eq!(
+            rows[0].get("question_id").and_then(|v| v.as_str()),
+            Some("q-old"),
+            "oldest first"
+        );
+        assert_eq!(
+            rows[1].get("question_id").and_then(|v| v.as_str()),
+            Some("q-new")
+        );
+        // The node-less row reads as null so the render names the clear verb.
+        assert_eq!(rows[0].get("node"), Some(&Value::Null));
+    }
+
+    fn held_page(
+        id: &str,
+        crown: &str,
+        status: &str,
+        asked_at: &str,
+        node: Option<&str>,
+    ) -> (String, String) {
+        let node_line = match node {
+            Some(n) => format!("node: {n}\n"),
+            None => String::new(),
+        };
+        let stem = format!("20260923-{id}-test-x-none");
+        let text = format!(
+            "---\nquestion_id: {id}\nkind: question\nstatus: {status}\ntitle: t-{id}\nasked_at: {asked_at}\n{node_line}crown: {crown}\n---\n\n# t-{id}\n"
+        );
+        (stem, text)
     }
 }
