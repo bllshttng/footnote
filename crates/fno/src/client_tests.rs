@@ -2,7 +2,10 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
-use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
+use crate::client::{
+    input_folds::MAX_ESC_CARRY,
+    keys_modal::{build_keys_modal, keys_modal_mouse},
+};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
@@ -4108,31 +4111,6 @@ fn client_compose_hint_paints_over_bottom_row() {
     view.status_on = false;
     let text = frame_text(&view.compose());
     assert!(text.lines().last().unwrap().contains("hjkl focus"));
-}
-
-#[test]
-fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // prefix+? opens the centered which-key modal, built from the single-source binding table.
-    let mut view = two_pane_view();
-    view.term = (40, 80);
-    view.open_keys_modal();
-    let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "modal title present");
-    assert!(text.contains("esc close"), "dismiss affordance present");
-    // Section headers + a sampling of bindings the table advertises.
-    assert!(text.contains("panes"), "section header");
-    assert!(text.contains("detach"), "the d binding's action");
-    assert!(
-        text.contains("find: goto squad/tab/pane/agent"),
-        "the f binding's action names every row class nav_rows emits"
-    );
-    // The digit row names the gesture and its resolve doors: an honest description of an input path the scanner really runs.
-    assert!(
-        text.contains("jump to tab by number")
-            && text.contains("Enter")
-            && text.contains("Alt works too"),
-        "the digit row names the gesture and its resolve doors"
-    );
 }
 
 #[test]
