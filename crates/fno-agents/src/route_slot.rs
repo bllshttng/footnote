@@ -1783,9 +1783,13 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 if current >= cap {
+                    // The count's only payload producer is the spawn-gate lane
+                    // probe, and the payload carries no per-vendor age, so the
+                    // suffix names the source alone.
                     chain.push(json!(format!(
-                        "slot skip {} provider {vendor} at {current} of {cap}",
+                        "slot skip {} provider {vendor} at {current} of {cap}{}; holders: fno agents provider-cap status; free one: fno agents stop <name>; queue: fno agents provider-cap decide <lane> --answer wait",
                         lane_label(rung, row_name),
+                        evidence_suffix("gate-probe", ""),
                     )));
                     continue;
                 }
@@ -3928,7 +3932,10 @@ mod tests {
         assert_eq!(out["candidate"]["lane"], "sonnet-x");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains(
-            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20"
+            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20 source=gate-probe"
+        )));
+        assert!(chain.iter().any(|l| l.contains(
+            "holders: fno agents provider-cap status; free one: fno agents stop <name>; queue: fno agents provider-cap decide <lane> --answer wait"
         )));
         assert!(chain.iter().any(|l| l.contains(
             "slot note agents.profiles.target.lanes[1] sonnet-x uncapped (no vendor declared)"

@@ -28,7 +28,6 @@ crossing	crates/fno-agents/src/finalize_run_summary.rs	164	let mut cmd = Command
 crossing	crates/fno-agents/src/gc.rs	1016	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	319	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	170	let mut argv = vec![fno_bin()];
-crossing	crates/fno-agents/src/king_settle.rs	529	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/lifecycle_child.rs	107	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
 crossing	crates/fno-agents/src/loopcheck.rs	258	pub(crate) fn loopcheck_fno_bin() -> String {

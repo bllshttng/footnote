@@ -11,6 +11,10 @@
 # design-doc on stdin and emits one of: '' | 'tdd' | 'impeccable' | 'mixed'.
 # /spec's SKILL.md calls into it and transcribes the result into plan
 # frontmatter.
+#
+# The former template/DOC grep tail (quick-template placeholder, LOCKED_SECTION
+# variable, parser-reference and transcription-verb strings) was junk under
+# the test-audit authoring gate: exact source greps of doc prose, not behavior.
 
 set -uo pipefail
 
@@ -19,9 +23,6 @@ PKG_SRC="$REPO_ROOT/cli/src"
 if [[ -f "$PKG_SRC/fno/executor/_locked.py" ]]; then
     export PYTHONPATH="${PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
-SPEC_SKILL="$REPO_ROOT/skills/blueprint/SKILL.md"
-EXECUTOR_GATE="$REPO_ROOT/skills/blueprint/references/blueprint-gates.md"
-QUICK_TPL="$REPO_ROOT/skills/blueprint/references/quick-template.md"
 
 PASS=0
 FAIL=0
@@ -45,7 +46,6 @@ echo "Pre-flight: required artifacts exist"
 python3 -c 'import fno.executor._locked' 2>/dev/null \
     && { echo "  PASS: fno.executor._locked importable"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: fno.executor._locked not importable"; FAIL=$((FAIL+1)); }
-[[ -f "$QUICK_TPL" ]] && { echo "  PASS: quick-template exists"; PASS=$((PASS+1)); } || { echo "  FAIL: $QUICK_TPL missing"; FAIL=$((FAIL+1)); }
 
 if [[ $FAIL -gt 0 ]]; then
     echo ""
@@ -176,36 +176,6 @@ The operator dispatches an `executor: impeccable` in some cases.
 1. **Auth model**: cookie-based.
 '
 assert "executor mentioned outside Locked Decisions" "" "$(parse "$DOC14")"
-
-echo ""
-echo "Templates carry guidance comment"
-grep -q '# executor: tdd' "$QUICK_TPL" \
-    && { echo "  PASS: quick-template has canonical tdd executor placeholder"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: quick-template missing canonical tdd executor placeholder"; FAIL=$((FAIL+1)); }
-grep -q -i 'think\|locked decision' "$QUICK_TPL" \
-    && { echo "  PASS: quick-template references the think handoff"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: quick-template doesn't mention think/Locked Decision"; FAIL=$((FAIL+1)); }
-
-echo ""
-echo "SKILL.md orphan-mention warning is section-scoped (regression guard)"
-# A document-global `grep -qi 'executor'` in the warning condition would
-# false-positive on docs that discuss the operator resolver in their
-# Architecture section without ever locking it. The fix is to scope the
-# second grep to the Locked Decisions section only. This regression guard
-# verifies the SKILL.md keeps an awk-extracted LOCKED_SECTION variable in
-# scope and does NOT grep the raw design doc.
-grep -q 'LOCKED_SECTION' "$EXECUTOR_GATE" \
-    && { echo "  PASS: executor gate uses awk-extracted LOCKED_SECTION for the warning grep"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: executor gate warning grep is doc-global (false-positive risk regression)"; FAIL=$((FAIL+1)); }
-
-echo ""
-echo "SKILL.md wires the parser"
-grep -q 'fno.executor._locked' "$EXECUTOR_GATE" \
-    && { echo "  PASS: executor gate references parser"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: executor gate does not reference parser"; FAIL=$((FAIL+1)); }
-grep -qi 'transcrib' "$SPEC_SKILL" \
-    && { echo "  PASS: spec SKILL.md describes transcription step"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: spec SKILL.md missing transcription verb"; FAIL=$((FAIL+1)); }
 
 echo ""
 echo "==="

@@ -39,6 +39,7 @@ The needs vocabulary is `loop`, every feature key the table declares a probe for
 | speculate | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 | target | loop | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
 | tdd | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
+| test-audit | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | think | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | triage | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 | using-fno | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
