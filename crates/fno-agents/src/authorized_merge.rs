@@ -2047,6 +2047,29 @@ pub fn run_authorized_merge(args: &[String]) -> i32 {
     code
 }
 
+/// The merges hold, read the way the spawn gate reads its breaker: a stop
+/// holding merges (or an unreadable record, fail closed) refuses the merge
+/// primitive with the breaker generation and reason. `None` admits.
+fn merges_breaker_refusal() -> Option<(i32, String)> {
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => None,
+        crate::fleet_incident::Verdict::Stopped(r) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP,
+            format!(
+                "refused: fleet incident stop holds merges (generation {}, reason: {}); \
+                 reopen with `fno agents incident clear --reason <text>`\n",
+                r.generation, r.reason
+            ),
+        )),
+        crate::fleet_incident::Verdict::Unavailable(d) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP_UNAVAILABLE,
+            format!(
+                "refused: fleet incident state is unreadable ({d}); the merge primitive fails closed\n"
+            ),
+        )),
+    }
+}
+
 /// Test-friendly variant: returns (exit_code, stdout, stderr) without printing.
 pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     let payload: Value = match read_payload(args) {
@@ -2099,6 +2122,15 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
     };
+    // The merges hold: the one merge primitive refuses like the spawn gate
+    // does, naming the breaker generation and reason, before any probe or
+    // queue work. Reads stay reads: preview and decide-only asks answer
+    // normally, and the quota ops above never touch the breaker.
+    if !request.decide_only && matches!(request.effect, Effect::Merge | Effect::Arm) {
+        if let Some((code, message)) = merges_breaker_refusal() {
+            return (code, String::new(), message);
+        }
+    }
     // A preview ask answers with the structured receipt: `ready` is the
     // receipt's `blockers` being empty, so the verb prints the list itself
     // instead of the joined-prose Outcome form the effect arms render.
