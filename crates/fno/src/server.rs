@@ -2962,7 +2962,7 @@ impl Core {
                 self.reconcile_worker_member_close(&worker, true);
             }
             self.reconcile_member_close(ctx, true);
-            if self.close_pane_reasoned(pid, "child exited") == Flow::Shutdown {
+            if self.close_viewer_died(pid, "child exited") == Flow::Shutdown {
                 return Flow::Shutdown;
             }
         }
@@ -3046,7 +3046,11 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
-                    pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
+                    // A portal seat never reads pristine: the seat is
+                    // load-bearing, so no cleanup caller may close it.
+                    pristine_idle_shell: entry.cmd.is_none()
+                        && entry.vt.is_pristine_idle_shell()
+                        && self.portal_of(Some(pid)).is_none(),
                     // (v65) The spent-shell reading: shell integration
                     // measured, nothing running now. `cmd.is_none()` keeps an
                     // agent or `pane run` pane out of the category even when
@@ -3068,6 +3072,9 @@ impl Core {
                         .unwrap_or_default(),
                     forked_from_session_id: joined_row
                         .and_then(|a| a.forked_from_session_id.clone()),
+                    // (v90) The seat's portal index, under the same one-row
+                    // rule the sideline marker wears.
+                    portal: self.portal_marker(Some(pid)),
                 }
             })
             .collect();
@@ -10218,19 +10225,9 @@ impl Core {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
-                let pid = tab.focus;
-                // Capture membership BEFORE the reap clears it, reconcile AFTER
-                // the close settles (so squad-survival is known) - user close
-                // de-recruits (AC3-EDGE).
-                let ctx = self.member_ctx(pid);
-                let worker_ctx = self.worker_member_context(pid);
-                let flow = self.close_pane_reasoned(pid, "closed by operator");
-                self.reconcile_member_close(ctx, false);
-                if let Some(worker_ctx) = worker_ctx {
-                    self.reconcile_worker_member_close(&worker_ctx, false);
-                }
-                flow
+                self.close_by_operator(tab.focus)
             }
+            Command::ClosePortal { seat } => self.close_portal(client_id, seat),
             Command::DetachPane { pane } => {
                 match self.detach_worker_pane(pane) {
                     Ok(()) => self.push_layout(true),
@@ -13576,7 +13573,7 @@ async fn serve(
                 // BEFORE the reap clears the mapping (AC4-EDGE).
                 let ctx = core.member_ctx(pid);
                 core.reconcile_member_close(ctx, true);
-                if core.close_pane(pid) == Flow::Shutdown {
+                if core.close_viewer_died(pid, "viewer exited") == Flow::Shutdown {
                     e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
                 }
