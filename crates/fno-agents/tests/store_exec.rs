@@ -198,12 +198,9 @@ fn store_exec_serves_a_read_at_the_default_store_under_fno_home() {
     let store = home.join(".fno");
     std::fs::create_dir_all(&store).unwrap();
     let graph = store.join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        serde_json::to_string(&json!({
-            "entries": [{"id": "x-hm2", "slug": "hm-read", "title": "t", "status": "ready"}]
-        }))
-        .unwrap(),
+        &[json!({"id": "x-hm2", "slug": "hm-read", "title": "t", "type": "feature", "status": "ready", "priority": "p2"})],
     )
     .unwrap();
     let sand = dir.path().join("sand");
@@ -226,12 +223,9 @@ fn store_exec_serves_a_write_inside_fno_home() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        serde_json::to_string(&json!({
-            "entries": [{"id": "x-hm3", "slug": "hm-inside", "title": "t", "status": "ready"}]
-        }))
-        .unwrap(),
+        &[json!({"id": "x-hm3", "slug": "hm-inside", "title": "t", "type": "feature", "status": "ready", "priority": "p2"})],
     )
     .unwrap();
 
@@ -265,12 +259,9 @@ fn store_exec_serves_a_default_store_write_without_fno_home() {
     let store = home.join(".fno");
     std::fs::create_dir_all(&store).unwrap();
     let graph = store.join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        serde_json::to_string(&json!({
-            "entries": [{"id": "x-hm4", "slug": "hm-nofence", "title": "t", "status": "ready"}]
-        }))
-        .unwrap(),
+        &[json!({"id": "x-hm4", "slug": "hm-nofence", "title": "t", "type": "feature", "status": "ready", "priority": "p2"})],
     )
     .unwrap();
 

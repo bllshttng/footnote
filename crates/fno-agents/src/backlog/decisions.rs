@@ -119,6 +119,25 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
         }
     }
 
+    let orphan: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT nd.node_id, nd.event_id
+             FROM node_decisions nd
+             LEFT JOIN decisions d ON d.event_id = nd.event_id
+             WHERE d.event_id IS NULL
+             ORDER BY nd.node_id, nd.event_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("decisions import: cannot validate node references: {error}"))?;
+    if let Some((node_id, event_id)) = orphan {
+        return Err(format!(
+            "decisions import: node {node_id} references missing decision {event_id}"
+        ));
+    }
+
     super::stamp_meta(&transaction, "decisions_imported", "1")?;
     transaction.commit().map_err(|error| error.to_string())
 }
@@ -381,22 +400,26 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let graph = temp.path().join("graph.json");
         std::fs::write(
-            &graph,
-            serde_json::json!({
-                "entries": [{
-                    "id": "x-node",
-                    "decisions": [{"decision_id": "d-missing"}]
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
             temp.path().join("decisions.jsonl"),
             serde_json::to_string(&event("d-present")).unwrap() + "\n",
         )
         .unwrap();
         let mut connection = connection();
+        crate::backlog::nodes::ensure_table(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO nodes (id, ordinal, slug, title, status, priority)
+                 VALUES ('x-node', 0, 'node', 'Node', 'ready', 'p2')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO node_decisions (node_id, event_id, seq)
+                 VALUES ('x-node', 'd-missing', 0)",
+                [],
+            )
+            .unwrap();
 
         let error = import_if_needed(&mut connection, &graph).unwrap_err();
 
