@@ -912,15 +912,15 @@ where
         // Second witness, bg-resume only: claude's own roster. The fno
         // daemon's truth view lags a same-id relaunch (its exit record
         // outranks the new process until reconcile re-adopts), while a
-        // non-terminal roster row IS the session's own account of being
-        // back under the same id.
+        // roster row with a hosted process behind it IS the session's own
+        // account of being back under the same id. A stale pre-death row
+        // (`blocked`, no pid) must not confirm a relaunch.
         if plan.mechanism == "bg-resume" {
             let roster = crate::claude_roster::read_all_agents();
             if let Some(row) = roster.find(&plan.short_id) {
-                let state = row.state.as_deref().unwrap_or("present");
-                if !crate::claude_roster::is_terminal_roster_state(state) {
+                if row.has_live_process(roster.carries_pids()) {
                     live = true;
-                    last_state = format!("roster:{state}");
+                    last_state = format!("roster:{}", row.state.as_deref().unwrap_or("present"));
                     break;
                 }
             }
@@ -1877,6 +1877,81 @@ mod tests {
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
         let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
         assert_eq!(row.status, crate::AgentStatus::Live);
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_refuses_a_stale_pid_less_roster_row() {
+        // AC1-ERR: the pre-death row never went terminal - it still reads
+        // `blocked`, with no pid. In a listing that CARRIES pids (the peer
+        // row has one) the missing pid is the death witness, so the second
+        // witness must not confirm the relaunch: exit 16, and the registry
+        // row keeps its exited status.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
+             echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"blocked\"},\
+             {\"id\":\"peer0001\",\"sessionId\":\"peer-uuid\",\"pid\":5001,\"state\":\"working\"}]'; fi\n",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            // The stale fno view: never live, never terminal.
+            |_| Some("unreachable".to_string()),
+            |_| {},
+            || Ok(crate::spawn_gate::GateGuard::default()),
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 16);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Exited);
         std::fs::remove_dir_all(temp.path()).ok();
     }
 
