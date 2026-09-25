@@ -469,29 +469,35 @@ test("parseHookDecision honors deny and reads allow (AC8-HP)", () => {
 })
 
 test("runProtections denies on the script's decision and throws at the seam (AC8-HP)", async () => {
-  const seen: string[] = []
-  const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
-    seen.push(script)
-    return JSON.stringify({
-      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
+  // A plugin root must resolve, or the seam reports no-root and allows. Stub
+  // the env so the suite never depends on the dev machine's ~/.fno.
+  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
+    const seen: string[] = []
+    const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
+      seen.push(script)
+      return JSON.stringify({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
+      })
     })
+    expect(out.denied).toBe(true)
+    expect(out.reason).toBe("protected manifest")
+    expect(seen.length).toBeGreaterThan(0)
   })
-  expect(out.denied).toBe(true)
-  expect(out.reason).toBe("protected manifest")
-  expect(seen.length).toBeGreaterThan(0)
 })
 
 test("a missing/deciding-nothing script reports once and allows - fail-open (AC8-ERR)", async () => {
-  const errors: string[] = []
-  const orig = console.error
-  console.error = (...a: unknown[]) => errors.push(a.join(" "))
-  try {
-    const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
-    expect(out.denied).toBe(false)
-    expect(errors.some((e) => e.includes("no decision"))).toBe(true)
-  } finally {
-    console.error = orig
-  }
+  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
+    const errors: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => errors.push(a.join(" "))
+    try {
+      const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
+      expect(out.denied).toBe(false)
+      expect(errors.some((e) => e.includes("no decision"))).toBe(true)
+    } finally {
+      console.error = orig
+    }
+  })
 })
 
 test("resolvePluginRoot reads the env chain and the plugin-root file", () => {
