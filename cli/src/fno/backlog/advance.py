@@ -385,6 +385,9 @@ def selection_guards(
         return hold.guard_reason
 
     try:
+        if qid := _held_questions().get(entry.get("id")):
+            return f"held:{qid}"
+
         owner = entry.get("contained_in")
         if isinstance(owner, str) and owner:
             return f"contained:{owner}"
@@ -471,6 +474,20 @@ def _select_read(kind: str, args: list[str]) -> Any:
     if receipt.get("status") != "ok":
         raise RuntimeError(str(receipt.get("detail")))
     return receipt.get("answer")
+
+_held_cache: tuple[float, dict] = (0.0, {})
+
+
+def _held_questions() -> dict:
+    """node -> open question id via select-read held; fail-open, 30s cache."""
+    global _held_cache
+    try:
+        if time.monotonic() - _held_cache[0] < 30:
+            return _held_cache[1]
+        _held_cache = (time.monotonic(), _select_read("held", []) or {})
+    except Exception:  # noqa: BLE001 - a held read never starves selection
+        return {}
+    return _held_cache[1]
 
 
 def _next_node(project: Optional[str]) -> Optional[dict]:

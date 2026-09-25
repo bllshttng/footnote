@@ -1119,6 +1119,23 @@ def test_direct_dependents_admit_plan_less_idea(monkeypatch):
     assert "ab-block01" not in ids
 
 
+def test_direct_dependents_omits_held_node(monkeypatch):
+    """x-40b2 AC9 (dependents path): a dependent an open operator question
+    names in blocks is skipped; its unheld sibling still dispatches."""
+    graph = [
+        {"id": "ab-closed11", "project": "fno"},
+        {"id": "ab-hold001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "ready", "cwd": "/w"},
+        {"id": "ab-free0001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "ready", "cwd": "/w"},
+    ]
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: graph)
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", lambda kind, args: {"ab-hold001": "q-1"})
+    ids = [d["id"] for d in adv._direct_dependents("ab-closed11", "fno")]
+    assert ids == ["ab-free0001"]
+
+
 def test_advance_model_tier_only_resolves_no_model(iso, monkeypatch):
     """AC4-HP negative half (x-baef): a node carrying only the retired
     model_tier key resolves nothing at the advance spawn; the compat read is
@@ -3351,6 +3368,28 @@ def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
         "created_at": now.isoformat(),
     }
     assert adv.selection_guards(node, {"c": node}, now) == "dispatch-hold-invalid:c"
+
+
+def test_selection_guards_held_question_names_the_question(monkeypatch):
+    """x-40b2 AC9: an open operator question whose blocks list names the node
+    holds it out of selection with reason held:<qid>."""
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", lambda kind, args: {"x-hold": "q-1"})
+    now = _gnow()
+    node = {"id": "x-hold", "status": "ready", "created_at": now.isoformat()}
+    assert adv.selection_guards(node, {"x-hold": node}, now) == "held:q-1"
+
+
+def test_selection_guards_held_read_fail_open(monkeypatch):
+    """x-40b2 AC10: a failed held read never starves selection."""
+    def boom(kind, args):
+        raise RuntimeError("select-read down")
+
+    monkeypatch.setattr(adv, "_held_cache", (0.0, {}))
+    monkeypatch.setattr(adv, "_select_read", boom)
+    now = _gnow()
+    node = {"id": "c", "status": "ready", "created_at": now.isoformat()}
+    assert adv.selection_guards(node, {"c": node}, now) is None
 
 
 def test_selection_guards_dead_ancestor_via_field_not_status():
