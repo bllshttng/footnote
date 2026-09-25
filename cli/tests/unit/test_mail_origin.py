@@ -408,7 +408,7 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     )
 
     assert "from_rank" not in rendered
-    assert rendered == '<fno_mail from="king">write the plan</fno_mail>'
+    assert rendered == '<fno_mail from="session-king">write the plan</fno_mail>'
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):

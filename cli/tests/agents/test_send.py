@@ -518,7 +518,7 @@ def test_dispatch_send_durable_fallback_resolves_sender_once(
     assert result.delivery == "durable"
     assert proof_calls == [canonical_handle(sender_session)]
     record = next(m for m in iter_messages() if m.id == result.msg_id)
-    assert f'from="{canonical_handle(sender_session)}"' in record.body
+    assert f'from="{sender_session}"' in record.body
 
 
 @pytest.mark.parametrize(
@@ -588,10 +588,8 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    expected_from = (
-        sender_session if sender_harness == "codex" else canonical_handle(sender_session)
-    )
-    assert f'from="{expected_from}"' in record.body
+    assert f'from="{sender_session}"' in record.body
+    assert f'harness="{wire_harness}"' in record.body
 
 
 def test_dispatch_send_keeps_unknown_for_unprovable_sender(

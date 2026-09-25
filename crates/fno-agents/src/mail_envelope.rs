@@ -64,12 +64,12 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
             "mail envelope: render mode {mode:?} has the wrong body shape"
         ));
     }
-    let from_short = attr(input, "from").unwrap_or("");
+    let from_input = attr(input, "from").unwrap_or("");
     let harness_hint = attr(input, "harness");
     let from_session = attr(input, "from_session");
     let to_session = attr(input, "to_session");
     let registry = crate::state::load_registry(registry_path).ok();
-    let from_identity = Some(from_session.unwrap_or(from_short));
+    let from_identity = Some(from_session.unwrap_or(from_input));
     let to_identity = to_session.or_else(|| attr(input, "to"));
     let from_row = registry
         .as_ref()
@@ -78,13 +78,9 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
         .as_ref()
         .and_then(|rows| live_entry_for_address(rows, to_identity));
     let harness = from_row.map(|row| row.harness.as_str()).or(harness_hint);
-    let from = if mode == "wrap" {
-        from_session
-            .or_else(|| from_row.and_then(|row| row.harness_session_id.as_deref()))
-            .unwrap_or(from_short)
-    } else {
-        from_short
-    };
+    let from = from_session
+        .or_else(|| from_row.and_then(|row| row.harness_session_id.as_deref()))
+        .unwrap_or(from_input);
     let resolved_harness = harness.map(|value| match value {
         "claude" => "claude-code",
         other => other,
@@ -297,7 +293,7 @@ mod tests {
 
         let tag = render_at(
             &json!({
-                "mode":"tag", "from":"claude-session", "to":"codex-session",
+                "mode":"tag", "from":"folio-short", "to":"quill-short",
                 "harness":"claude"
             }),
             &path,
@@ -306,7 +302,7 @@ mod tests {
 
         assert_eq!(
             tag,
-            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_name=\"folio\" to=\"codex-session\" to_name=\"quill\">"
+            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\">"
         );
     }
 

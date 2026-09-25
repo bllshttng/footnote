@@ -947,9 +947,10 @@ def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch)
     for value in minted:
         assert not LEGACY_HANDLE_RE.match(value), f"{value!r} is a retired address"
 
-    # The wire envelope's from/to too - the bus columns drifted from this once.
+    # Resolve the registered address to its full wire identity; the bus columns
+    # retain the compact recipient handle for lookup.
     body = wrap_fno_mail("hi", from_=stamp_from(None), to=canonical_handle(sid))
-    assert 'from="019f48e1"' in body and 'to="019f48e1"' in body
+    assert f'from="{sid}"' in body and 'to="019f48e1"' in body
 
 
 def test_ac4_err_legacy_suffix_is_read_only_compatibility_lookup():

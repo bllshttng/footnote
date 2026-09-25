@@ -1829,7 +1829,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 ) -> None:
     """A live claude recipient is reached over the control.sock lane (the sole
     live inject path after the PTY worker lane retired, x-3dac), and the injected
-    turn carries the <fno_mail> envelope with an 8-hex `from` and no `session=`."""
+    turn carries a named <fno_mail> envelope with full identity and no `session=`."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1881,8 +1881,10 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
     framed = inject_calls[0]["text"]
-    # Unknown senders retain their supplied address and label.
-    assert framed.startswith('<fno_mail from="sender"'), framed
+    # The current sender label and full session are both recorded.
+    assert framed.startswith(
+        '<fno_mail from="5e9de401-1111-2222-3333-444444444444"'
+    ), framed
     assert 'from_name="sender"' in framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
@@ -1947,7 +1949,9 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="bbbb2222"'), body
+    assert body.startswith('<fno_mail from="session-bob"'), body
+    assert 'from_name="bob"' in body
+    assert 'to_name="alice"' in body
     assert 'to_rank="L1 fno"' in body, body
 
 
