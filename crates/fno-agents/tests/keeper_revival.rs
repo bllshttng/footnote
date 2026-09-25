@@ -184,7 +184,7 @@ fn identify(sock: &Path) -> Value {
         let mut chunk = [0u8; 4096];
         match stream.read(&mut chunk) {
             Ok(0) | Err(_) => break,
-            Ok(n) => buf.extend_from_slice(&chunk),
+            Ok(_) => buf.extend_from_slice(&chunk),
         }
         if let fno_agents::pane_keeper::Decode::Frame(
             fno_agents::pane_keeper::Frame::IdentifyReply(payload),
