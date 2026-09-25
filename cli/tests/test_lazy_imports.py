@@ -1305,3 +1305,20 @@ def test_fno_py_entrypoint_is_main():
         encoding="utf-8"
     )
     assert 'fno-py = "fno.cli:main"' in pyproject, pyproject
+
+
+def test_plain_click_action_help_exits_clean():
+    """x-0cea: a plain-click action's --help behind the lazy group (a
+    collapsed forward or a lazy stub) prints its help and exits 0. The
+    plain-click Exit used to escape typer's vendored-click main as a
+    traceback ending in click.exceptions.Exit: 0."""
+    from typer.testing import CliRunner
+
+    from fno import cli as fno_cli
+
+    runner = CliRunner()
+    for argv in (["doctor", "test", "--help"], ["test", "--help"]):
+        result = runner.invoke(fno_cli.app, argv)
+        assert result.exit_code == 0, result.output
+        assert "Usage" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
