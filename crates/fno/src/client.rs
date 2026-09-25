@@ -2039,6 +2039,11 @@ pub(crate) enum AuxAction {
     ToggleBacklogView,
     /// Open the backlog board overlay (off unless the pref is on).
     OpenBacklogView,
+    /// Flip the sideline's row shape (list <-> card) live: swap the view's
+    /// in-memory layout, persist `sideline.layout` through the CLI, then
+    /// invalidate the palette cache. A failed save keeps the in-memory shape
+    /// and says so honestly, the same posture as the theme toggle.
+    ToggleSidelineLayout,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -11498,6 +11503,11 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenBacklogBoard => {
+            // The chord rides the same gate as the menu row: the pref
+            // decides, and the off case notices instead of opening.
+            backlog_board::open_pref_gated(view);
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
@@ -12744,12 +12754,7 @@ async fn execute_aux_action(
         }
         AuxAction::OpenBacklogView => {
             view.aux = None;
-            let gen = view
-                .backlog_board
-                .as_ref()
-                .map(|b| b.gen.wrapping_add(1))
-                .unwrap_or(0);
-            view.backlog_board = Some(backlog_board::BoardView::new(gen));
+            backlog_board::open(view);
         }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
@@ -12763,7 +12768,8 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleStatus
         | AuxAction::ToggleConfirmLifecycle
-        | AuxAction::ToggleResourceMeter => {
+        | AuxAction::ToggleResourceMeter
+        | AuxAction::ToggleSidelineLayout => {
             settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {

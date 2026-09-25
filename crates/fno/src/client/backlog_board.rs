@@ -18,6 +18,28 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Swap in a fresh board view at the next generation (the overlay's
+/// regather trigger). The one open path shared by the menu tap and the
+/// prefix chord.
+pub(crate) fn open(view: &mut super::View) {
+    let gen = view
+        .backlog_board
+        .as_ref()
+        .map(|b| b.gen.wrapping_add(1))
+        .unwrap_or(0);
+    view.backlog_board = Some(BoardView::new(gen));
+}
+
+/// The prefix chord's gate: the board opens only while the experimental
+/// pref is on; otherwise a notice names the menu row that turns it on.
+pub(crate) fn open_pref_gated(view: &mut super::View) {
+    if view.experimental_backlog {
+        open(view);
+    } else {
+        view.set_notice("backlog board is off: sideline menu > experimental: backlog view".into());
+    }
+}
+
 /// Right-pad one cell segment so side-by-side columns align.
 fn pad(seg: &str, w: usize) -> String {
     let n = seg.chars().count();

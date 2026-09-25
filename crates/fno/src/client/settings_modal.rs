@@ -69,10 +69,15 @@ impl View {
                     "resource meter (needs macmon)",
                 ));
                 rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
+                rows.push(toggle(
+                    self.sideline_layout == crate::sideline_color::SidelineLayout::Card,
+                    "sideline card layout",
+                ));
                 actions.push(AuxAction::ToggleHoverFocus);
                 actions.push(AuxAction::ToggleStatus);
                 actions.push(AuxAction::ToggleResourceMeter);
                 actions.push(AuxAction::ToggleConfirmLifecycle);
+                actions.push(AuxAction::ToggleSidelineLayout);
             }
             SettingsTab::Theme => {
                 // The four shipped palettes; the active one is marked. Enter on a
@@ -180,6 +185,32 @@ pub(super) async fn run_toggle(
             let notice = match spawn_config_set("resource_meter.enabled", enabled).await {
                 Ok(()) => format!("resource meter: {enabled}"),
                 Err(_) => "resource meter applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::ToggleSidelineLayout => {
+            // Flip the in-memory shape first (the sideline reads this field
+            // per render), then persist through the CLI and invalidate the
+            // palette cache. A failed save keeps the shape and says so, the
+            // same posture as the theme toggle.
+            view.sideline_layout = match view.sideline_layout {
+                crate::sideline_color::SidelineLayout::Card => {
+                    crate::sideline_color::SidelineLayout::List
+                }
+                crate::sideline_color::SidelineLayout::List => {
+                    crate::sideline_color::SidelineLayout::Card
+                }
+            };
+            crate::sideline_color::reload_palette();
+            let shape = if view.sideline_layout == crate::sideline_color::SidelineLayout::Card {
+                "card"
+            } else {
+                "list"
+            };
+            let notice = match spawn_config_set("sideline.layout", shape).await {
+                Ok(()) => format!("sideline layout: {shape}"),
+                Err(_) => "sideline layout applied this session; save failed".into(),
             };
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
