@@ -94,7 +94,16 @@ pub(crate) fn compose_payload(inputs: &ComposeInputs) -> (i32, Value, Vec<String
         )
     };
     let coverage: Value = if is_terminal {
-        json!({"coverage": "not_asked", "reviewed_count": null})
+        // Deliberate skip, spelled with the full NOT_ASKED shape: a reader
+        // must tell "nobody looked because terminal" from "the probe died".
+        json!({
+            "coverage": "not_asked",
+            "reviewed_count": 0,
+            "self_attested_count": 0,
+            "head_sha": null,
+            "stale_verdicts": [],
+            "note": "not asked: PR is terminal (merged or closed); this says nothing about coverage at merge time",
+        })
     } else {
         inputs.coverage_row.clone()
     };
@@ -303,6 +312,7 @@ pub(crate) fn verdict_line(payload: &Value) -> String {
         _ => "mergeable-unavailable(no-answer)".to_string(),
     };
     let head = payload.get("head").and_then(Value::as_str).unwrap_or("");
+    let head = if head.is_empty() { "unknown" } else { head };
     let coverage = payload.get("review_coverage").cloned().unwrap_or(json!({}));
     let cov_head = coverage
         .get("head_sha")

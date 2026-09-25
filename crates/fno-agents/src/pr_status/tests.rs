@@ -64,6 +64,32 @@ impl GhProbe for FakeGh {
         if cmd.contains("/actions/runs?head_sha=") {
             return Ok(serve(&self.raw["runs_listing"]));
         }
+        if cmd.contains("/actions/runs/") && cmd.contains("/jobs?per_page=") {
+            // A run is zero-job in the fixture iff a zero_rows entry names
+            // its run id in the details URL; every other run has jobs.
+            let run_id = cmd
+                .split("/actions/runs/")
+                .nth(1)
+                .unwrap_or("")
+                .split('/')
+                .next()
+                .unwrap_or("");
+            let zero = self.raw["zero_rows"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter().any(|r| {
+                        r.get("detailsUrl")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .contains(&format!("/runs/{run_id}"))
+                    })
+                })
+                .unwrap_or(false);
+            let total = if zero { 0 } else { 2 };
+            return Ok(serve(
+                &serde_json::json!({"total_count": total, "jobs": []}),
+            ));
+        }
         if cmd.ends_with("/status") {
             return Ok(serve(&self.raw["statuses"]));
         }

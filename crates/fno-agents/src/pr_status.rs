@@ -182,7 +182,7 @@ fn probe_json<P: GhProbe>(probe: &P, cwd: &Path, path: &str) -> Result<Value, Re
         Err(why) => return Err(RestReason::new(why, "")),
     };
     if !ok {
-        return Err(rest_reason(&stderr));
+        return Err(rest_reason(probe, cwd, &stderr));
     }
     serde_json::from_str::<Value>(&stdout).map_err(|e| {
         RestReason::new(
@@ -199,7 +199,7 @@ fn probe_json<P: GhProbe>(probe: &P, cwd: &Path, path: &str) -> Result<Value, Re
 /// The fleet-backoff record arm Python's classifier carried (`_quota.
 /// record_refusal`) lands with the cache port, where the gh_budget door is
 /// already in scope.
-pub(crate) fn rest_reason(stderr: &str) -> RestReason {
+pub(crate) fn rest_reason<P: GhProbe>(probe: &P, cwd: &Path, stderr: &str) -> RestReason {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
@@ -220,23 +220,40 @@ pub(crate) fn rest_reason(stderr: &str) -> RestReason {
     };
     if text.to_lowercase().contains("rate limit") {
         let base = matched(&|l| l.to_lowercase().contains("rate limit"));
-        if stderr.contains("HTTP 403") || stderr.contains("HTTP 429") {
-            // The one arm that records the fleet backoff; the cache port
-            // adds the gh_budget call (see the doc comment above).
+        // The wording never decides: a measured secondary refusal read
+        // "API rate limit exceeded" with no "secondary" anywhere. The one
+        // exempt probe asks the CORE bucket - exhausted means core, healthy
+        // or unreadable means secondary (back off rather than trust wording).
+        let remaining = probe
+            .run_gh(cwd, &["api".to_string(), "rate_limit".to_string()])
+            .ok()
+            .filter(|(ok, _, _)| *ok)
+            .and_then(|(_, stdout, _)| serde_json::from_str::<Value>(&stdout).ok())
+            .and_then(|v| {
+                v.pointer("/resources/core/remaining")
+                    .and_then(Value::as_i64)
+            });
+        if remaining == Some(0) {
             return RestReason::new(
                 format!(
-                    "{base} | this is the SECONDARY rate limit (request rate, not budget). \
-Back off - retrying on a fixed interval sustains the refusal."
+                    "{base} | this is the CORE REST quota (the live exempt bucket reads 0 \
+core remaining). Check `gh api rate_limit --jq .resources.core` and wait for its reset."
                 ),
-                "secondary",
+                "core",
             );
         }
+        let budget = match remaining {
+            Some(n) => format!("the live exempt bucket reads {n} core remaining"),
+            None => "the exempt rate_limit endpoint itself was unreadable, so the bucket \
+could not be checked and this backs off rather than trust the wording"
+                .to_string(),
+        };
         return RestReason::new(
             format!(
-                "{base} | this is the CORE REST quota (the live exempt bucket). \
-Check `gh api rate_limit --jq .resources.core` and wait for its reset."
+                "{base} | this is the SECONDARY rate limit (request rate, not budget: \
+{budget}). Back off - retrying on a fixed interval sustains the refusal."
             ),
-            "core",
+            "secondary",
         );
     }
     if text.contains("gh auth login")
@@ -707,7 +724,280 @@ fn truncate(text: &str, cap: usize) -> String {
     text[..end].to_string()
 }
 
+/// The live read behind the cache: `run_status`'s whole flow, returning the
+/// exit code, the payload, and the stderr lines. `prior` is the same-head
+/// previous payload; detail and rerun facts are reused within one head only.
+pub(crate) fn status_payload<P: GhProbe>(
+    probe: &P,
+    cwd: &Path,
+    pr: u64,
+    prior: Option<&Value>,
+    slug: &str,
+) -> (i32, Value, Vec<String>) {
+    let pr_json = match read_pr(probe, cwd, slug, pr) {
+        Ok(pr_json) => pr_json,
+        Err(reason) => return compose::error_payload(&pr.to_string(), &reason),
+    };
+    let rollup = pr_json
+        .get("statusCheckRollup")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let generic_rollup = without_coverage_statuses(&rollup);
+    let (verdict, _code, counts) = verdict_for(&generic_rollup);
+    let green = verdict == "green";
+    let head_sha = pr_json
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let is_terminal = matches!(
+        pr_json
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_uppercase()
+            .as_str(),
+        "MERGED" | "CLOSED"
+    );
+    let latest_rows: Vec<Value> =
+        crate::check_supersession::latest_per_name(&Value::Array(generic_rollup.clone()))
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+    // A job id is minted per attempt, so a known id is the same completed job.
+    let prior_payload = prior.unwrap_or(&Value::Null);
+    let mut known: BTreeMap<String, Value> = BTreeMap::new();
+    if let Some(failures) = prior_payload.get("failures").and_then(Value::as_array) {
+        for f in failures {
+            if let Some(id) = f.get("job_id").and_then(Value::as_str) {
+                known.insert(id.to_string(), f.clone());
+            }
+        }
+    }
+
+    // Only SETTLED fails: a CANCELLED or STALE latest run is a taken-away
+    // run, not a concluded failure - its instruction is already the "push
+    // again or rerun" note, and a detail entry would read as a diagnosed
+    // defect that does not exist.
+    let failures: Value = if verdict == "red" {
+        let failing: Vec<Value> = latest_rows
+            .iter()
+            .filter(|c| classify_check(c) == "fail" && has_settled_marker(c))
+            .cloned()
+            .collect();
+        let slug_key = slug.replace('/', "--");
+        Value::Array(collect_failures(probe, cwd, &slug_key, &failing, &known))
+    } else {
+        Value::Null
+    };
+
+    // A terminal PR has no would-merge left: the review probes are live
+    // reads a closed PR can still burn. Skip all of them; the report prints
+    // the no-pending answers rather than `unknown`, because nothing was
+    // failed, it was deliberately not asked.
+    let (reviews_input, coverage, lane, hold, activity) = if is_terminal {
+        (
+            json!({
+                "optional_reviews": [],
+                "optional_reviews_unresolved": 0,
+                "optional_reviews_resolved_unchanged": 0,
+            }),
+            json!({
+                "coverage": "not_asked",
+                "reviewed_count": null,
+                "self_attested_count": 0,
+                "head_sha": null,
+                "stale_verdicts": [],
+                "note": "not asked: PR is terminal (merged or closed); this says nothing about coverage at merge time",
+            }),
+            false,
+            Value::Null,
+            json!({
+                "blocker": "",
+                "detail": "",
+                "hold": null,
+                "worktree": {
+                    "probed": false,
+                    "path": null,
+                    "dirty": null,
+                    "head": null,
+                    "note": "not asked: PR is terminal",
+                },
+            }),
+        )
+    } else {
+        let reviews_input = reviews::optional_reviews(cwd, pr);
+        let lane = reviews::review_lane(cwd, pr);
+        let coverage = reviews::read_review_coverage(cwd, pr, Some(&head_sha), lane, false);
+        let hold = json!(seams::hold_reason(cwd, pr));
+        let branch = pr_json
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let activity = reviews::review_activity(cwd, branch, &head_sha);
+        (reviews_input, coverage, lane, hold, activity)
+    };
+
+    // GitHub's mergeStateStatus as named ready blockers; unasked on a
+    // terminal PR and null mergeStateStatus.
+    let github_merge: Value = if is_terminal
+        || pr_json
+            .get("mergeStateStatus")
+            .map(Value::is_null)
+            .unwrap_or(true)
+    {
+        Value::Null
+    } else {
+        let op_payload = json!({
+            "op": "status-merge-blocker",
+            "cwd": cwd.to_string_lossy(),
+            "pr": pr,
+            "mergeStateStatus": pr_json.get("mergeStateStatus").cloned().unwrap_or(Value::Null),
+            "baseRefName": pr_json.get("baseRefName").cloned().unwrap_or(Value::Null),
+            "mergeable": pr_json.get("mergeable").cloned().unwrap_or(Value::Null),
+            "rollup": rollup,
+        });
+        let out = crate::pr_status_facts::run_op("status-merge-blocker", &op_payload);
+        serde_json::from_str(&out).unwrap_or_else(
+            |e| json!({"blockers": ["github_merge_state_unknown"], "source": e.to_string()}),
+        )
+    };
+
+    // A cancelled or timed-out latest run has a branch-history story: which
+    // run, which attempt, what the re-run shows.
+    let mut branch_history = Value::Null;
+    if verdict == "red"
+        && !is_terminal
+        && latest_rows
+            .iter()
+            .any(|c| matches!(alt_conclusion(c).as_str(), "CANCELLED" | "TIMED_OUT"))
+    {
+        let op_payload = json!({
+            "op": "status-branch-history",
+            "cwd": cwd.to_string_lossy(),
+            "branch": pr_json.get("headRefName").and_then(Value::as_str).unwrap_or(""),
+            "rollup": generic_rollup,
+            "workflow_runs": pr_json.get("workflowRuns").cloned().unwrap_or(json!([])),
+            "prior": prior_payload.get("branch_history").cloned().unwrap_or(Value::Null),
+        });
+        let out = crate::pr_status_facts::run_op("status-branch-history", &op_payload);
+        if let Ok(parsed) = serde_json::from_str::<Value>(&out) {
+            let has_line = parsed
+                .get("line")
+                .and_then(Value::as_str)
+                .map(|l| !l.is_empty())
+                .unwrap_or(false);
+            if has_line {
+                branch_history = parsed;
+            }
+        }
+    }
+
+    // Rerun recovery rides green reads of live PRs (fail-open); a prior
+    // green at the same head with the same check total replays instead of
+    // re-probing.
+    let rerun: Option<Value> = if green && !is_terminal {
+        let prior_green = prior_payload.get("verdict").and_then(Value::as_str) == Some("green")
+            && prior_payload.get("head") == Some(&json!(head_sha))
+            && prior_payload.get("rerun_recovered").is_some()
+            && prior_payload
+                .pointer("/checks/total")
+                .and_then(Value::as_i64)
+                == counts.get("total").and_then(Value::as_i64);
+        if prior_green {
+            Some(json!({
+                "recovered": prior_payload
+                    .get("rerun_recovered")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "failed": prior_payload
+                    .get("recovered_failures")
+                    .cloned()
+                    .unwrap_or(json!([])),
+            }))
+        } else {
+            let runs = pr_json
+                .get("workflowRuns")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Some(seams::rerun_recovery(
+                probe,
+                cwd,
+                slug,
+                &head_sha,
+                Some(&runs),
+            ))
+        }
+    } else {
+        None
+    };
+
+    // ONE merge decision: the probes this read already paid for ride the
+    // ask, so the owner never spawns a second status read.
+    let reviews_unresolved = reviews_input
+        .get("optional_reviews_unresolved")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let rerun_recovered_fact: Value = match &rerun {
+        Some(r) => json!(r.get("recovered").and_then(Value::as_bool).unwrap_or(false)),
+        None => Value::Null,
+    };
+    let receipt_ask = json!({
+        "cwd": cwd.to_string_lossy(),
+        "pr": pr,
+        "effect": "preview",
+        "verdict": verdict,
+        "counts": counts,
+        "rerun_recovered": rerun_recovered_fact,
+        "optional_reviews_unresolved": reviews_unresolved,
+        "github_blockers": github_merge.get("blockers").and_then(Value::as_array).cloned().unwrap_or_default(),
+        "covered_head": head_sha,
+    });
+    let mut receipt = crate::authorized_merge::preview_receipt_payload(&receipt_ask);
+    if !receipt
+        .get("blockers")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
+        receipt["blockers"] = json!([{
+            "code": "merge_decision_unknown",
+            "class": "unknown",
+            "detail": receipt
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("authorized-merge receipt unreadable"),
+        }]);
+    }
+
+    let inputs = compose::ComposeInputs {
+        pr: pr.to_string(),
+        pr_json,
+        rerun_recovery: rerun.unwrap_or(Value::Null),
+        branch_history,
+        optional_reviews: reviews_input,
+        coverage_row: coverage,
+        hold_reason: hold,
+        review_activity: activity,
+        receipt,
+        github_merge_blockers: github_merge,
+        merge_authority: seams::merge_authority(cwd),
+        merge_execution: if is_terminal {
+            Value::Null
+        } else {
+            seams::merge_execution(cwd, pr)
+        },
+        failures,
+        review_lane: lane,
+    };
+    compose::compose_payload(&inputs)
+}
+
+pub(crate) mod cache;
 pub(crate) mod compose;
+pub(crate) mod reviews;
 pub(crate) mod seams;
 #[cfg(test)]
 mod tests;

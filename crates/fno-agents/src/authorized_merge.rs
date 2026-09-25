@@ -2112,10 +2112,16 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         .and_then(Value::as_str)
         .is_some_and(|op| op.starts_with("status-"))
     {
-        let out = crate::pr_status_facts::run_op(
-            payload.get("op").and_then(Value::as_str).unwrap_or(""),
-            &payload,
-        );
+        let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+        // The verb-shaped door ops answer with the verb's own streams and
+        // exit; the fact ops keep their JSON-receipt contract.
+        if matches!(
+            op,
+            "status-read" | "status-wait" | "status-logs" | "status-ci"
+        ) {
+            return crate::pr_status::cache::run_door(op, &payload);
+        }
+        let out = crate::pr_status_facts::run_op(op, &payload);
         return (0, out, String::new());
     }
     let request = match parse_request(&payload) {
@@ -2183,6 +2189,16 @@ pub(crate) fn preview_receipt(request: &Request) -> Value {
                     .collect::<Vec<_>>(),
             }),
         },
+    }
+}
+
+/// The preview receipt for a raw payload: parse, then the same in-process
+/// receipt the verb answers. An unusable payload reads `unknown` with the
+/// parse error named, never a guessed verdict.
+pub(crate) fn preview_receipt_payload(payload: &Value) -> Value {
+    match parse_request(payload) {
+        Ok(request) => preview_receipt(&request),
+        Err(message) => serde_json::json!({ "outcome": "unknown", "detail": message }),
     }
 }
 
