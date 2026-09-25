@@ -311,8 +311,13 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     // closing action is the retraction of that law. A law-lane row refuses
     // every non-operator retraction (`retract_decision`), so "act on the
     // law; do not ask" has no agent-side remedy there and the user is the
-    // only door.
-    let retraction_ask = targets_operator_retraction(&req.question, &req.laws);
+    // only door. The closing action may ride the pin line (`--ask`), so it
+    // scans with the question, not after it.
+    let closing_text = match req.ask.as_deref() {
+        Some(ask) if !ask.trim().is_empty() => format!("{}\n{}", req.question, ask),
+        _ => req.question.clone(),
+    };
+    let retraction_ask = targets_operator_retraction(&closing_text, &req.laws);
     let law_verdict = crate::law_match::ask_answer(&crate::law_match::AskRequest {
         question: req.question.clone(),
         subject: req.subject.clone(),
@@ -1006,6 +1011,21 @@ stops
         let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
         assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn a_pin_whose_ask_line_carries_the_retraction_is_accepted() {
+        // The closing action is the --ask line: a pin whose question names
+        // the law only by subject still passes when the action names the id.
+        let home = tmp_home("retract-pin-ask");
+        let root = tmp_root("retract-pin-ask");
+        let mut r = req("the junk law on junk-law blocks this node.", &root);
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("retract d-junk0001".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        assert!(journal_text(&root).lines().count() == 1);
     }
 
     #[test]
