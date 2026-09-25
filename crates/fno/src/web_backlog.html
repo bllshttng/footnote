@@ -26,7 +26,7 @@
 html, body { margin: 0; height: 100%; background: #0b0e14; color: #c5cdd9; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { display: flex; flex-direction: column; overflow: hidden; }
 noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
-.controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: #10141d; border-bottom: 1px solid #1c2230; }
+.controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px; background: #10141d; border-bottom: 1px solid #1c2230; }
 .controls .lbl { color: #6f7a8f; font-size: 12px; }
 .controls button, .controls select, .controls input { font: inherit; font-size: 12px; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 8px; max-width: 180px; min-height: 26px; }
 .controls button { cursor: pointer; color: #9aa4b6; }
@@ -39,13 +39,13 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 #hdr { flex: 0 0 auto; padding: 0 10px; color: #6f7a8f; font-size: 12px; }
 #hdr:empty { display: none; }
 #hdr .unavail { color: #f0c674; }
-#stats { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 6px 10px; border-bottom: 1px solid #1c2230; font-size: 12px; }
+#stats { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 8px 14px; border-bottom: 1px solid #1c2230; font-size: 12px; }
 #stats:empty { display: none; }
 #stats .dim { color: #6f7a8f; }
 .bars { display: flex; align-items: flex-end; gap: 2px; height: 40px; }
 .bars .bar { width: 9px; background: #3763ac; }
 .bars .bar.partial { opacity: .45; }
-#main { flex: 1 1 auto; overflow: auto; padding: 8px 10px 24px; }
+#main { flex: 1 1 auto; overflow: auto; padding: 16px 18px 40px; }
 #board { display: grid; gap: 8px; width: max-content; min-width: 100%; }
 .hcell { position: sticky; top: 0; z-index: 5; background: #10141d; color: #9aa4b6; font-weight: 600; padding: 5px 8px; border-radius: 5px; border-bottom: 2px solid #232b3a; }
 .hcell.corner { left: 0; z-index: 6; }
@@ -53,8 +53,8 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 .cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .card { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; width: 100%; background: #141a26; color: #c5cdd9; border: 1px solid #232b3a; border-radius: 6px; padding: 6px 8px; cursor: pointer; font: inherit; }
 .card:hover { border-color: #3763ac; }
-.card .cid { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; }
-.card .ct { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.card .cid { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; font-weight: 700; }
+.card .ct { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .card .cm { color: #6f7a8f; font-size: 11px; }
 .card .king { color: #c99b45; font-size: 11px; }
 .card .chip { font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid #4a3a12; color: #f0c674; }
@@ -66,7 +66,7 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 #panel[hidden] { display: none; }
 #panelhead { display: flex; justify-content: flex-end; margin-bottom: 4px; }
 #panelclose { font: inherit; font-size: 11px; cursor: pointer; background: #141a26; color: #9aa4b6; border: 1px solid #232b3a; border-radius: 5px; padding: 3px 10px; min-height: 26px; }
-.ptitle { margin: 0 0 6px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.ptitle { margin: 0 0 6px; font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
 .pid { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; }
 .pgroup { margin: 10px 0 0; }
 .pgroup h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #6f7a8f; }
@@ -96,6 +96,25 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 .prlink { color: #7ea3d8; overflow-wrap: anywhere; }
 .noteline { margin: 3px 0; overflow-wrap: anywhere; }
 .noteline .nts { color: #6f7a8f; font-size: 11px; }
+.controls select[multiple] { height: 44px; }
+#tiles { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px 0; }
+#tiles[hidden] { display: none; }
+.tile { font: inherit; font-size: 12px; cursor: pointer; background: #141a26; color: #9aa4b6; border: 1px solid #232b3a; border-radius: 14px; padding: 3px 10px; min-height: 26px; }
+.tile.active { background: #24406b; color: #fff; border-color: #3763ac; }
+.lsec { border: 1px solid #1c2230; border-radius: 8px; background: #0d1119; margin: 0 0 10px; }
+.lhead { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; background: #10141d; color: #c5cdd9; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.lhead:hover { background: #141a26; }
+.lname { font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.lbar { flex: 1 1 auto; height: 6px; background: #1c2230; border-radius: 3px; overflow: hidden; }
+.lfill { display: block; height: 100%; background: #6cc04a; }
+.lrows { display: flex; flex-direction: column; }
+.lsec.closed .lrows { display: none; }
+.lrow { display: grid; grid-template-columns: 92px minmax(0,1fr) auto; gap: 10px; align-items: baseline; text-align: left; font: inherit; background: none; color: #c5cdd9; border: 0; border-top: 1px solid #141a26; padding: 6px 12px; cursor: pointer; }
+.lrow:hover { background: #141a26; }
+.lid { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ea3d8; font-weight: 700; }
+.ltitle { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
+.lmeta { color: #6f7a8f; font-size: 11px; }
+.lrow.blocked .ltitle { color: #f08a8a; }
 @media (max-width: 720px) { #panel { width: auto; left: 0; }
 }
 </style>
@@ -104,22 +123,26 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 <!--fno-nav-->
 <noscript><p>JavaScript is off; this page cannot draw the board.</p></noscript>
 <div class="controls" id="controls">
+  <span class="lbl">view</span>
+  <button type="button" data-view="kanban">kanban</button>
+  <button type="button" data-view="list">list</button>
   <span class="lbl">lanes</span>
   <button type="button" data-lanes="project">project</button>
   <button type="button" data-lanes="epic">epic</button>
   <button type="button" data-lanes="none">none</button>
-  <label>project <select id="f-project"><option value="">any</option></select></label>
-  <label>epic <select id="f-epic"><option value="">any</option></select></label>
-  <label>status <select id="f-status"><option value="">any</option></select></label>
-  <label>priority <select id="f-priority"><option value="">any</option></select></label>
-  <label>size <select id="f-size"><option value="">any</option></select></label>
-  <label>king <select id="f-king"><option value="">any</option></select></label>
+  <label>project <select id="f-project" multiple size="1"><option value="">any</option></select></label>
+  <label>epic <select id="f-epic" multiple size="1"><option value="">any</option></select></label>
+  <label>status <select id="f-status" multiple size="1"><option value="">any</option></select></label>
+  <label>priority <select id="f-priority" multiple size="1"><option value="">any</option></select></label>
+  <label>size <select id="f-size" multiple size="1"><option value="">any</option></select></label>
+  <label>king <select id="f-king" multiple size="1"><option value="">any</option></select></label>
   <label>find <input id="f-q" type="search" size="14" placeholder="id, slug or title"></label>
   <label><input id="f-all" type="checkbox"> all projects</label>
 </div>
 <div id="note"></div>
 <div id="hdr"></div>
 <div id="stats"></div>
+<div id="tiles" hidden></div>
 <div id="main"><div id="board"></div></div>
 <aside id="panel" hidden>
   <div id="panelhead"><button id="panelclose" type="button">close</button></div>
@@ -131,6 +154,10 @@ noscript p { margin: 0; padding: 8px 12px; color: #f0c674; }
 // tests lift and run them under node (see web.rs lift_js_fn).
 function cellHead(cell) {
   return cell.column + " " + cell.total;
+}
+// A lane's whole count: the sum of its cells' (uncapped) totals.
+function laneTotal(lane) {
+  return (lane.cells || []).reduce((s, c) => s + (c.total || 0), 0);
 }
 // One board answer folded into what the page shows. An errors-only answer
 // never wipes a good board: the previous lanes stay and the answer carries
@@ -156,7 +183,15 @@ function sessionCommand(s) {
   const initial = new URLSearchParams(location.search);
   const t = initial.get("t") || "";
   const state = {
-    lanes: initial.get("lanes") || "project", project: initial.get("project") || "", epic: initial.get("epic") || "", status: initial.get("status") || "", priority: initial.get("priority") || "", size: initial.get("size") || "", king: initial.get("king") || "", q: initial.get("q") || "", all: initial.get("all") === "1", };
+    lanes: initial.get("lanes") || "project",
+    view: initial.get("view") || "kanban",
+    project: initial.getAll("project"), epic: initial.getAll("epic"),
+    status: initial.getAll("status"), priority: initial.getAll("priority"),
+    size: initial.getAll("size"), king: initial.getAll("king"),
+    q: initial.get("q") || "", all: initial.get("all") === "1", };
+  // Collapse state survives the 10 s poll's rebuild: the lane keys whose
+  // list section is closed.
+  const closedLanes = new Set();
   let board = null;
   let seenVersion;
   let pollTimer = 0;
@@ -171,6 +206,7 @@ function sessionCommand(s) {
   const noteEl = document.getElementById("note");
   const hdrEl = document.getElementById("hdr");
   const statsEl = document.getElementById("stats");
+  const tilesEl = document.getElementById("tiles");
   const mainEl = document.getElementById("main");
   const gridEl = document.getElementById("board");
   const controls = document.getElementById("controls");
@@ -180,7 +216,8 @@ function sessionCommand(s) {
   // default lanes=project rides the model's own default and is omitted.
   function filterParams(p) {
     if (state.lanes && state.lanes !== "project") p.set("lanes", state.lanes);
-    for (const k of FILTER_KEYS) if (state[k]) p.set(k, state[k]);
+    if (state.view && state.view !== "kanban") p.set("view", state.view);
+    for (const k of FILTER_KEYS) for (const v of state[k]) p.append(k, v);
     if (state.q) p.set("q", state.q);
     if (state.all) p.set("all", "1");
     return p;
@@ -202,7 +239,7 @@ function sessionCommand(s) {
     const sel = document.getElementById(id);
     // Rebuild only on a real change: repopulating an open dropdown resets it
     // mid-choice, and the 10 s poll would do that constantly.
-    const sig = JSON.stringify(pairs) + "|" + (current || "");
+    const sig = JSON.stringify(pairs) + "|" + (current || []).join("\n");
     if (sel.dataset.sig === sig) return;
     sel.dataset.sig = sig;
     sel.textContent = "";
@@ -214,20 +251,26 @@ function sessionCommand(s) {
       const o = document.createElement("option");
       o.value = p.v;
       o.textContent = p.l;
+      o.selected = (current || []).includes(p.v);
       sel.appendChild(o);
     }
     // A bookmarked filter that matches nothing on the board still shows.
-    if (current && !pairs.some((p) => p.v === current)) {
-      const o = document.createElement("option");
-      o.value = current;
-      o.textContent = current;
-      sel.appendChild(o);
+    for (const v of current || []) {
+      if (!pairs.some((p) => p.v === v)) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v;
+        o.selected = true;
+        sel.appendChild(o);
+      }
     }
-    sel.value = current || "";
   }
   function syncControls() {
     for (const b of controls.querySelectorAll("button[data-lanes]")) {
       b.classList.toggle("active", b.dataset.lanes === state.lanes);
+    }
+    for (const b of controls.querySelectorAll("button[data-view]")) {
+      b.classList.toggle("active", b.dataset.view === state.view);
     }
     const f = (board && board.facets) ||
       { projects: [], epics: [], kings: [], priorities: [], sizes: [], statuses: [] };
@@ -245,7 +288,9 @@ function sessionCommand(s) {
     drawNote();
     drawHeader();
     drawStats();
-    drawGrid();
+    drawTiles();
+    if (state.view === "list") drawList();
+    else drawGrid();
     syncControls();
   }
   function drawNote() {
@@ -342,11 +387,18 @@ function sessionCommand(s) {
     const n = lanes[0].cells ? lanes[0].cells.length : 0;
     gridEl.style.gridTemplateColumns =
       "minmax(96px,150px) repeat(" + n + ", minmax(175px,225px))";
+    gridEl.style.width = "max-content";
     const corner = document.createElement("div");
     corner.className = "hcell corner";
     corner.textContent = "lane";
     gridEl.appendChild(corner);
-    for (const c of lanes[0].cells || []) {
+    // Board-wide column totals, not lane 0's: the header count must agree
+    // with `fno backlog` counts over the whole board, whatever the lanes.
+    const totals = (board && board.stats && board.stats.totals) || [];
+    const heads = totals.length
+      ? totals
+      : (lanes[0].cells || []).map((c) => ({ column: c.column, total: c.total }));
+    for (const c of heads) {
       const h = document.createElement("div");
       h.className = "hcell";
       h.textContent = cellHead(c);
@@ -355,7 +407,7 @@ function sessionCommand(s) {
     for (const lane of lanes) {
       const title = document.createElement("div");
       title.className = "lcell";
-      title.textContent = lane.title;
+      title.textContent = lane.title + " " + laneTotal(lane);
       gridEl.appendChild(title);
       for (const cell of lane.cells || []) drawCell(cell);
     }
@@ -417,6 +469,116 @@ function sessionCommand(s) {
     }
     b.addEventListener("click", () => openNode(card.id));
     return b;
+  }
+  // One collapsible list section: a click target header (title, count,
+  // done/total progress bar) over one row per card. The section opens and
+  // closes in place; collapse state lives in the page, not the URL.
+  function drawList() {
+    // The same children-replacement rule as the grid: the reading position
+    // and the open panel survive the 10 s poll.
+    const top = mainEl.scrollTop;
+    gridEl.textContent = "";
+    const lanes = (board && board.lanes) || [];
+    if (!lanes.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "no cards";
+      gridEl.appendChild(p);
+      return;
+    }
+    // The kanban board is width: max-content (its lanes scroll sideways);
+    // the list is one honest column, so the section and its progress bar
+    // span the page, not the content's widest row.
+    gridEl.style.gridTemplateColumns = "minmax(0, 1fr)";
+    gridEl.style.width = "100%";
+    for (const lane of lanes) gridEl.appendChild(listSection(lane));
+    mainEl.scrollTop = top;
+  }
+  function listSection(lane) {
+    const sec = document.createElement("section");
+    sec.className = "lsec";
+    if (closedLanes.has(lane.key)) sec.classList.add("closed");
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "lhead";
+    const name = document.createElement("span");
+    name.className = "lname";
+    name.textContent = lane.title + " " + laneTotal(lane);
+    head.appendChild(name);
+    const doneCell = (lane.cells || []).find((c) => c.column === "Done");
+    const done = (doneCell && doneCell.total) || 0;
+    const total = laneTotal(lane);
+    if (total > 0) {
+      const bar = document.createElement("span");
+      bar.className = "lbar";
+      const fill = document.createElement("span");
+      fill.className = "lfill";
+      fill.style.width = Math.round(done / total * 100) + "%";
+      fill.title = done + " of " + total + " done";
+      bar.appendChild(fill);
+      head.appendChild(bar);
+    }
+    head.addEventListener("click", () => {
+      sec.classList.toggle("closed");
+      if (sec.classList.contains("closed")) closedLanes.add(lane.key);
+      else closedLanes.delete(lane.key);
+    });
+    const rows = document.createElement("div");
+    rows.className = "lrows";
+    for (const card of (lane.cells || []).flatMap((c) => c.cards || [])) {
+      rows.appendChild(listRow(card));
+    }
+    sec.append(head, rows);
+    return sec;
+  }
+  function listRow(card) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "lrow" + (card.blocked ? " blocked" : "");
+    const id = document.createElement("span");
+    id.className = "lid";
+    id.textContent = card.id;
+    b.appendChild(id);
+    const title = document.createElement("span");
+    title.className = "ltitle";
+    title.textContent = card.title;
+    b.appendChild(title);
+    const meta = [];
+    if (card.status) meta.push(card.status);
+    if (card.priority) meta.push(card.priority);
+    if (card.size) meta.push(card.size);
+    if (card.created_at) meta.push(card.created_at.slice(0, 10));
+    const m = document.createElement("span");
+    m.className = "lmeta";
+    m.textContent = meta.join(" · ");
+    b.appendChild(m);
+    b.addEventListener("click", () => openNode(card.id));
+    return b;
+  }
+  // Status count tiles: each shows what selecting that status would show.
+  // Active tiles mirror the status multi-select.
+  function drawTiles() {
+    tilesEl.hidden = state.view !== "list";
+    if (tilesEl.hidden) return;
+    tilesEl.textContent = "";
+    for (const t of (board && board.stats && board.stats.statuses) || []) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tile" + (state.status.includes(t.status) ? " active" : "");
+      b.textContent = t.status + " " + t.total;
+      b.addEventListener("click", () => {
+        toggleStatus(t.status);
+        syncUrl();
+        fetchBoard();
+      });
+      tilesEl.appendChild(b);
+    }
+  }
+  // One status in or out of the multi-select.
+  function toggleStatus(s) {
+    const i = state.status.indexOf(s);
+    if (i >= 0) state.status.splice(i, 1);
+    else state.status.push(s);
   }
   function stopPoll() {
     dead = true;
@@ -930,9 +1092,16 @@ function sessionCommand(s) {
       fetchBoard();
     });
   }
+  for (const b of controls.querySelectorAll("button[data-view]")) {
+    b.addEventListener("click", () => {
+      state.view = b.dataset.view;
+      syncUrl();
+      fetchBoard();
+    });
+  }
   for (const k of FILTER_KEYS) {
     document.getElementById("f-" + k).addEventListener("change", (ev) => {
-      state[k] = ev.target.value;
+      state[k] = [...ev.target.selectedOptions].map((o) => o.value);
       syncUrl();
       fetchBoard();
     });

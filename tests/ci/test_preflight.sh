@@ -29,7 +29,12 @@ PREFLIGHT_SRC="$REPO_ROOT/scripts/ci/preflight.sh"
 export PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}"
 # pwd -P: resolve macOS /var -> /private/var so `git worktree list` paths match.
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
-trap 'rm -rf "$TMP"' EXIT
+# Pids the explicit kills can miss: a TERM to the script mid-run skips every
+# straight-path kill, so the trap is the backstop. Unquoted on purpose so it
+# splits into pids; empty is fine under set -u.
+REAP_PIDS=""
+trap 'kill $REAP_PIDS 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'exit 130' INT TERM
 
 FAILS=0
 ok()   { echo "  ok: $1"; }
@@ -686,6 +691,7 @@ need_queue "orphan steal" && {
 # the orphan lanes skip rather than fail the suite for the host's shape
 # (the Darwin signal-lane skip is the prior idiom for exactly this).
 probe_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $probe_orphan"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$probe_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -699,6 +705,7 @@ fi
 if [[ "$HOST_SEES_ORPHANS" -eq 1 ]]; then
 rm -f "$(cur_att)"   # every steal section clears the attestation or reuse skips the lock
 orphan_pid="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $orphan_pid"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -730,6 +737,7 @@ if [[ "$HOST_SEES_ORPHANS" -eq 0 ]]; then
     echo "  ok: orphan guard skipped on this host (no observable orphan to guard)"
 else
 spin_orphan="$(bash -c 'while :; do :; done >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $spin_orphan"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$spin_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -901,7 +909,7 @@ kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b"
 # (measured ~1s per spinner per 20s at load 380); fewer or shorter would
 # truncate to zero on a starved box.
 unit_spin_pids=""
-for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; done
+for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; REAP_PIDS="$REAP_PIDS $!"; done
 unit_sum_start=0
 for _p in $unit_spin_pids; do unit_sum_start=$(( unit_sum_start + $(holder_tree_cpu "$_p") )); done
 sleep 15
@@ -924,6 +932,7 @@ holder_is_orphaned "99999999" && fail "condemned a pid nothing can read" \
     || ok "an unreadable pid reads as not-orphan (waited on, never stolen)"
 if [[ "${HOST_SEES_ORPHANS:-1}" -eq 1 ]]; then
     unit_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+    REAP_PIDS="$REAP_PIDS $unit_orphan"
     for _i in $(seq 1 40); do
         [[ "$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
         sleep 0.2
