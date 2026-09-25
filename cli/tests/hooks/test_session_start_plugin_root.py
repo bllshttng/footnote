@@ -130,7 +130,14 @@ def test_worktree_start_neither_flips_stamp_nor_repairs(tmp_path):
     capture = tmp_path / "fno-argv"
     (home / "bin").mkdir(parents=True)
     fno = home / "bin" / "fno"
-    fno.write_text(f'#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >> "{capture}"\n')
+    # Log only the repair invocation: the hook also backgrounds maintenance
+    # sweeps (plan sync) whenever any fno is on PATH, and those are not the
+    # work this test watches.
+    fno.write_text(
+        '#!/usr/bin/env bash\n'
+        '[[ "$1 $2" == "config setup" ]] && printf \'%s\\n\' "$@" >> "'
+        + str(capture) + '"\nexit 0\n'
+    )
     fno.chmod(0o755)
     _run_hook(root, home)
     assert (fno_home / ".worktree-hook-root").read_text().strip() == INSTALLED
