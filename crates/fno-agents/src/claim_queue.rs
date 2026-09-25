@@ -16,8 +16,10 @@
 //! reaps as it scans: a ticket is condemned when its pid is gone or its
 //! recorded `create_time` no longer matches the live process (the recycled-pid
 //! case). A ticket stamped on another machine cannot be pid-probed, so it is
-//! skipped, never ordered. FIFO is fair, not optimal: a short run queues
-//! behind a long one, and priority is deliberately out of scope.
+//! skipped, never ordered. FIFO is fair, not optimal. `test_run.rs` adds lanes
+//! beside this queue: a `priority` dir for the one checkout a `test:priority`
+//! claim names and, at the suite door, a `full` dir for whole-suite runs. A
+//! waiter tries only while every better lane is empty.
 
 use std::path::{Path, PathBuf};
 
@@ -46,9 +48,23 @@ pub struct Position {
 
 /// The queue directory that orders a claim at `claim_path`: `<claim_path>.queue.d`.
 pub fn queue_dir_for(claim_path: &Path) -> PathBuf {
+    lane_dir_for(claim_path, "queue")
+}
+
+/// A lane dir beside a claim's lockfile: `<claim_path>.<lane>.d`. `queue` is
+/// the shipped FIFO; `priority` and `full` order their waiters the same way.
+pub fn lane_dir_for(claim_path: &Path, lane: &str) -> PathBuf {
     let mut s = claim_path.as_os_str().to_os_string();
-    s.push(".queue.d");
+    s.push(".");
+    s.push(lane);
+    s.push(".d");
     PathBuf::from(s)
+}
+
+/// Live tickets in a lane dir, reaping as it scans. A missing or unreadable
+/// dir reads 0, so a broken lane never holds another.
+pub fn depth(queue_dir: &Path) -> usize {
+    scan(queue_dir, None).map_or(0, |(survivors, _)| survivors.len())
 }
 
 /// Take a ticket at the back of the queue, stamped with this process. The
@@ -676,6 +692,27 @@ mod tests {
         assert_eq!(pos.total, 2, "the fresh legacy stamp survives: {pos:?}");
         assert!(fresh.exists(), "a plausibly-live legacy ticket is kept");
         leave(t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC17-HP: lane_dir_for derives every lane dir from one claim path, the
+    /// queue spelling matches queue_dir_for, and depth counts live tickets
+    /// while a missing dir reads 0.
+    #[test]
+    fn lane_dirs_and_depth_read_live_tickets() {
+        let claim = Path::new("/tmp/claim-q-lanes.lock");
+        assert_eq!(lane_dir_for(claim, "queue"), queue_dir_for(claim));
+        assert_eq!(
+            lane_dir_for(claim, "priority"),
+            PathBuf::from("/tmp/claim-q-lanes.lock.priority.d")
+        );
+        let dir = lane_dir_for(claim, "priority");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(depth(&dir), 0, "a missing lane dir reads 0");
+        let t = enter(&dir).expect("enter");
+        assert_eq!(depth(&dir), 1, "one live ticket reads 1");
+        leave(t);
+        assert_eq!(depth(&dir), 0, "after leave the lane reads 0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
