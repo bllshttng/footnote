@@ -1806,7 +1806,7 @@ mod tests {
         let unplanned = queues.iter().find(|q| q["name"] == "unplanned").unwrap();
         let note = unplanned["note"].as_str().unwrap();
         assert!(!note.is_empty());
-        assert!(note.contains('3') || note.to_lowercase().contains("three"));
+        assert!(note.to_lowercase().contains("per king"));
         let undispatched = queues.iter().find(|q| q["name"] == "undispatched").unwrap();
         assert_eq!(undispatched["verb"], "/fno:target");
         assert!(!undispatched["note"]

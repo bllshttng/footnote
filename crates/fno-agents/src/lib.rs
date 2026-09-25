@@ -263,6 +263,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod quarantine;
+pub mod question_clear;
 pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
@@ -345,6 +346,7 @@ pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod wake_meter;
 pub mod worktree_reapable;
 pub mod write_queue;
 

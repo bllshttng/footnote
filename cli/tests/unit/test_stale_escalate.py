@@ -182,11 +182,9 @@ def test_reconcile_channel_end_to_end_against_the_binary(
     assert outcome == "asked"
     assert qid.startswith("ft-")
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "questions.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(tmp_path / "questions.jsonl")
     kinds = [r["type"] for r in rows]
     assert "fleet_task" in kinds
     assert "operator_question" not in kinds
