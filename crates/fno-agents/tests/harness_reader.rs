@@ -2,7 +2,7 @@
 //! blind-pattern conviction, the shipped-table assertion, the journey
 //! declarations, the watch-lease journey cell, and the isolation nonce pair.
 
-use fno_agents::harness_capabilities::{HarnessContract, JourneyDecl, ProbeDecl, JOURNEY_KEYS};
+use fno_agents::harness_capabilities::{HarnessContract, ProbeDecl, JOURNEY_KEYS};
 use fno_agents::harness_reader::{retry_marker, wait_for_ci_cell, LineVerdict};
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ fn decl(kind: &str, authority: &str, pattern: &str, control: &str) -> ProbeDecl 
 /// capability in ordinary words. Every one matches its own denial: this is
 /// the conviction the load-time refusal rests on, and the test holds it so a
 /// later edit cannot quietly re-declare a blind reader.
-const CONVICTED_PATTERNS: [(&str, &str); 8] = [
+const CONVICTED_PATTERNS: [(&str, &str, &str); 8] = [
     (
         "features.rpc",
         "(?i)\\b(app-server|rpc|daemon)\\b",
@@ -60,7 +60,6 @@ const CONVICTED_PATTERNS: [(&str, &str); 8] = [
     ("features.acp", "(?i)\\bacp\\b", "this build speaks no ACP"),
 ];
 
-#[test]
 #[test]
 fn a_declared_instrument_carries_the_text_it_rejects() {
     // The shipped table's one declared instrument carries a control, and the
@@ -117,7 +116,7 @@ fn the_ten_journey_keys_are_declared() {
     let contract = HarnessContract::packaged().expect("the shipped table parses");
     for key in JOURNEY_KEYS {
         assert!(
-            contract.journeys.contains_key(*key),
+            contract.journeys.contains_key(key),
             "journey {key:?} is missing from the shipped table"
         );
     }

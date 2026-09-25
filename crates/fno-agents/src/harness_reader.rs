@@ -458,7 +458,7 @@ impl LineVerdict {
 
 /// Read a positive marker three times before calling it absent. The last
 /// read travels in the detail, so a fail names what was actually seen.
-fn retry_marker(
+pub fn retry_marker(
     line: &str,
     marker_name: &str,
     mut read: impl FnMut() -> String,
@@ -706,7 +706,7 @@ fn dry_run_argv(contract: &HarnessContract, harness: &str) -> Result<Vec<String>
 /// reader admits a harness the lease permits (the journey's control) and
 /// reads every other harness absent with the refusal quoted - the refusal is
 /// code that already runs, not a table word.
-pub(crate) fn wait_for_ci_cell(harness: &str) -> (&'static str, String) {
+pub fn wait_for_ci_cell(harness: &str) -> (&'static str, String) {
     let author = if harness.is_empty() {
         None
     } else {

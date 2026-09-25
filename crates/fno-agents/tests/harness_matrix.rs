@@ -120,7 +120,9 @@ fn the_grok_loop_cell_reads_absent_with_the_refusal_quoted() {
         "the grok loop cell reads absent, not native"
     );
     assert!(
-        refusal.is_some_and(|r| r.contains("nothing invokes loop-check")),
+        refusal
+            .as_ref()
+            .is_some_and(|r| r.contains("nothing invokes loop-check")),
         "the refusal is quoted: {refusal:?}"
     );
     // The control: a harness whose loop extension is shipped, which the same
