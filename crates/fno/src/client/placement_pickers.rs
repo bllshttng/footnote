@@ -210,7 +210,10 @@ impl View {
         // `shift+HJKL` rather than a bare `HJKL`, naming the modifier in words
         // so it reads as "hjkl, held with shift" rather than an unrelated set
         // of four capital-letter bindings.
-        lines.push(pad_to(" arrows/hjkl move · 1-9 jump · shift+arrows/HJKL split", W));
+        lines.push(pad_to(
+            " arrows/hjkl move · 1-9 jump · shift+arrows/HJKL split",
+            W,
+        ));
         lines.push(pad_to(
             " enter/t new tab in › · space/. here · esc/q cancel",
             W,
@@ -285,7 +288,10 @@ impl View {
         ));
         // The commit axis on the + row, one line below the navigation footer:
         // neither line exceeds W, so nothing ellipsizes.
-        lines.push(pad_to(" on + new portal: shift+arrows/HJKL split · t new tab", W));
+        lines.push(pad_to(
+            " on + new portal: shift+arrows/HJKL split · t new tab",
+            W,
+        ));
         lines
     }
 }

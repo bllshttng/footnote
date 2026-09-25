@@ -1981,8 +1981,8 @@ mod mail_input;
 mod overlay_keys;
 
 use input_folds::{
-    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys, ModalKey, NavKey,
-    SearchKey,
+    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys,
+    fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
 use mail_input::peek_input_keys;
@@ -12100,7 +12100,7 @@ async fn execute_row_menu_action(
         MenuAction::PortalPicker => {
             // One decision path with sideline `P`: the picker itself refuses
             // what it cannot show (not attachable, no open portals to keep).
-            match view.portal_pick_decision(Some(a)) {
+            match view.portal_pick_decision(Some(&a)) {
                 PortalPickDecision::Open(id) => view.open_portal_pick(id),
                 PortalPickDecision::Refuse(text) => view.set_notice(text),
             }
