@@ -677,14 +677,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # cases sat unrun, including the ones covering this very gate. Named
     # explicitly rather than globbed so adding a fourth is a visible edit.
     #
-    # This closes tests/hooks/ ONLY, and the gap is wider: tests/operator/,
-    # tests/spec/, tests/integration/*_bdd_invariants.py and about a dozen
-    # loose tests/test_*.py files are in neither tree either. They are left out
-    # deliberately, not overlooked - running them today gives 3 failed, 159
-    # passed, 1 error, so wiring them in would red the build on pre-existing
-    # rot that has nothing to do with the guard this PR adds. Whoever repairs
-    # those files should add them here in the same change, and the honest
-    # reading until then is that this step fixes one directory, not the class.
+    # This closes tests/hooks/ ONLY. `tests/spec/` is routed by the
+    # auto-discovered `scripts/tests/test-spec-suite.sh`; remaining gaps are
+    # tests/operator/, tests/integration/*_bdd_invariants.py, and loose
+    # tests/test_*.py files. Keep those out until their owners have a green
+    # baseline, rather than making unrelated pre-existing failures part of
+    # this suite.
     ("Python hook harnesses (outside both test trees)", ".",
      "uv run --project cli python -m pytest -q "
      "tests/hooks/test_git_protection_push.py "
