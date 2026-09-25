@@ -611,24 +611,28 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
     }
-    // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct
-    // dispatch; no daemon RPC.
+    // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc); no daemon RPC.
     if verb == "finalize" {
         return fno_agents::finalize::run_finalize(&args[1..]);
     }
 
-    // `kill-check`: Rust port of scripts/lib/kill-criteria.sh (see
-    // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
+    // `kill-check`: the Rust port of scripts/lib/kill-criteria.sh; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
     // `authorized-merge`: the one merge/arm authorization (see
-    // authorized_merge.rs doc). Direct dispatch; no daemon RPC. `fno do pr
-    // merge` sends one JSON payload and reads one receipt back, so the merge
-    // verb and finalize cannot answer "may this head merge?" differently.
+    // authorized_merge.rs doc). One payload in, one receipt out, one verdict.
     if verb == "authorized-merge" {
         return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
+    }
+
+    // `rename` with no argv is the retask payload door: the Python
+    // `fno agents retask` front sends one JSON payload and reads the receipt
+    // back. No action added (the shrink law); the transaction's contract
+    // lives in retask.rs.
+    if verb == "rename" && args.len() == 1 {
+        return fno_agents::retask::transport::run_payload();
     }
 
     // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct
@@ -889,9 +893,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_trace(&args[1..], &AgentsHome::from_env());
     }
     // registry-json: the daemon-free registry projection the hooks read.
-    // Reads the registry file client-side and derives the served liveness
-    // pair with the vendored freshness rule; starts nothing, so the Stop
-    // hook's never-lazy-start promise still holds.
+    // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {
         return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
     }
@@ -900,9 +902,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
     // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
     // re-entry: it falls through to build_request, which routes it to the
-    // daemon's agent.convert. The daemon owns it because the agent lock
-    // serializes it and a mid-move claim must be pinned to a process that
-    // outlives the client.
+    // daemon's agent.convert, whose agent lock outlives the client.
     if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
