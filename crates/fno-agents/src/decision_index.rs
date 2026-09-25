@@ -319,7 +319,7 @@ pub fn row_scope(row: &Value) -> &str {
         .unwrap_or("project:fno")
 }
 
-/// The session-scope test (x-0c70): `global` always governs; a
+/// The session-scope test: `global` always governs; a
 /// `project:<slug>` row governs only the matching slug.
 pub fn row_in_scope(row: &Value, project: &str) -> bool {
     match row_scope(row) {

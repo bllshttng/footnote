@@ -1,4 +1,4 @@
-"""Law scope (x-0c70): the door stamps, the chokepoint filter, both fail visibly.
+"""Law scope: the door stamps, the chokepoint filter, both fail visibly.
 
 Crate tests pin the matcher; these pin the transport contracts: `record-scope`
 answers at the door, `scope-split` filters `list_decisions`, and a project

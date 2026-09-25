@@ -48,7 +48,7 @@ enum MatchRequest {
     ScopeSplit(ScopeSplitRequest),
 }
 
-/// The law door's scope stamp (x-0c70): the recording project by default,
+/// The law door's scope stamp: the recording project by default,
 /// `global` only by explicit flag, because law is never inherited by silence.
 #[derive(Deserialize)]
 struct RecordScopeRequest {
@@ -2112,7 +2112,7 @@ mod scope_tests {
             .join(".fno")
             .join("worktrees")
             .join("footnote")
-            .join("x-1a2b");
+            .join("feat-branch");
         let slug = resolve_project(Some(&cwd), &sources(tmp.path())).expect("resolves");
         assert_eq!(slug, "demo");
     }
