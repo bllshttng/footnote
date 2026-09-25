@@ -1549,6 +1549,8 @@ mod tests {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let old_config = std::env::var_os("FNO_CONFIG");
+        let old_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
         std::env::remove_var("FNO_CONFIG");
         let isolated_global = temp_dir();
         std::fs::create_dir_all(&isolated_global).unwrap();
@@ -1576,8 +1578,20 @@ mod tests {
         assert_eq!(row.arm_value.as_deref(), Some("true"));
         assert!(!row_is_unarmed(row));
 
-        std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
-        std::fs::remove_dir_all(isolated_global).ok();
+        if let Some(value) = old_config {
+            std::env::set_var("FNO_CONFIG", value);
+        } else {
+            std::env::remove_var("FNO_CONFIG");
+        }
+        if let Some(value) = old_global {
+            std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value);
+            std::fs::remove_dir_all(isolated_global).ok();
+        } else {
+            std::env::set_var(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                isolated_global.join("settings.json"),
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 
