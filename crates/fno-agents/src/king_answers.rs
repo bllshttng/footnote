@@ -168,7 +168,7 @@ fn quiet_scope_workers(payload: &Value, scope_ids: &BTreeSet<String>) -> Vec<(St
     rows
 }
 
-/// The node id a spawned worker's name carries (`t-x-1a5e-glm`): the first
+/// The node id a spawned worker's name carries (`t-x-9999-glm`): the first
 /// `x-` run of 4 to 8 hex chars bounded by non-alphanumerics.
 fn node_from_name(name: &str) -> Option<String> {
     let mut from = 0usize;
@@ -368,17 +368,17 @@ mod tests {
     #[test]
     fn quiet_workers_read_nodes_off_names_and_drop_kings() {
         let payload = json!({"workers": [
-            {"name": "t-x-1a5e-glm", "handle": "abc", "status": "quiet", "node": null},
+            {"name": "t-x-9999-glm", "handle": "abc", "status": "quiet", "node": null},
             {"name": "t-x-2-w", "handle": "def", "status": "writing", "node": "x-2"},
             {"name": "king-4d9b-opus-g7", "handle": "ghi", "status": "quiet", "node": null},
             {"name": "review-2269", "handle": "jkl", "status": "quiet", "node": null},
             {"name": "x-3-worker", "handle": "mno", "status": "quiet", "node": "x-3"},
         ]});
-        let rows = quiet_scope_workers(&payload, &ids(&["x-1a5e", "x-3"]));
+        let rows = quiet_scope_workers(&payload, &ids(&["x-9999", "x-3"]));
         assert_eq!(
             rows,
             vec![
-                ("t-x-1a5e-glm".to_string(), "x-1a5e".to_string()),
+                ("t-x-9999-glm".to_string(), "x-9999".to_string()),
                 ("x-3-worker".to_string(), "x-3".to_string()),
             ],
             "name join, live workers and kings out: {rows:?}"
