@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sys
 
 import pytest
 
@@ -1096,3 +1097,16 @@ def test_adopt_stamps_the_newest_entry_not_the_mtime(tmp_path):
     # The entry's stamp, not the mtime an hour fresher: mtime would read
     # 2023-11-14T23:13:20Z.
     assert entry.last_message_at == "2023-11-14T22:13:20Z"
+
+
+def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch):
+    """A failing fno.inbox.store import degrades to pid=None; the verb completes.
+
+    The lazy import sat inside the try, so a raising import (module or dep
+    missing) made ``except ProjectIdentificationError:`` evaluate an unbound
+    local and the UnboundLocalError escaped the broad except, crashing stop.
+    """
+    monkeypatch.setitem(sys.modules, "fno.inbox.store", None)
+
+    assert store_fallback._project_identity("/tmp") == (None, None)
+    assert store_fallback.heal_from_harness_store("deadbeef") is None
