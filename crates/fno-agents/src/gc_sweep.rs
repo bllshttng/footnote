@@ -1784,7 +1784,8 @@ pub(crate) fn run_with_release(
         let eligible = e.crown_level.is_none()
             && (e.origin.as_deref() == Some("spawn")
                 || e.pid.is_some_and(crate::daemon::pid_is_gone)
-                || e.harness_name() == "claude");
+                || e.harness_name() == "claude"
+                || adopted_finished(e));
         if !eligible {
             staged.push(None);
             continue;

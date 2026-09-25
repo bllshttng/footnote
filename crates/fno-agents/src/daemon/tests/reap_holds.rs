@@ -1319,11 +1319,12 @@ fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     );
 
     assert_eq!(
-        summary.retired.len(),
+        summary.needs_live_stop.len(),
         1,
-        "quiet past the grace, a terminal adopted row retires: {summary:?}"
+        "the phantom-forever keep is gone: the row reaches the pipeline and holds at the stop proof, which a dry run never promises: {summary:?}"
     );
-    assert_eq!(summary.retired[0].0, "aurow000");
+    assert_eq!(summary.needs_live_stop[0].0, "aurow000");
+    assert!(summary.retired.is_empty(), "{summary:?}");
     assert!(
         summary.kept_not_spawn.is_empty(),
         "{:?}",
@@ -1378,11 +1379,11 @@ fn a_roster_listed_adopted_row_keeps_and_an_unlisted_one_takes_the_carve_out() {
     );
 
     assert_eq!(
-        summary.retired.len(),
+        summary.needs_live_stop.len(),
         1,
-        "the unlisted codex row retires quiet: {summary:?}"
+        "the unlisted codex row reaches the pipeline and holds at the stop proof: {summary:?}"
     );
-    assert_eq!(summary.retired[0].0, "cxrow000", "{summary:?}");
+    assert_eq!(summary.needs_live_stop[0].0, "cxrow000", "{summary:?}");
     assert_eq!(
         summary.kept_not_spawn,
         vec![("prrow000".to_string(), "adopted".to_string())],
