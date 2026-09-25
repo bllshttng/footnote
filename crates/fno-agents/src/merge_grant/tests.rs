@@ -16,7 +16,7 @@ fn receipt(approved: bool, source: &str, at: &str) -> Value {
 
 fn do_row(grant: Option<Value>, session: &str) -> Value {
     let mut row = json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": "claude",
         "session_id": session,
         "started_at": "2026-08-24T11:00:00Z",

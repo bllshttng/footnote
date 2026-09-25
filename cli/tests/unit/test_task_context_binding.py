@@ -137,7 +137,7 @@ def _minimal_receipt(**kwargs):
     defaults = dict(
         node="x-59b0",
         session="sess-worker",
-        phase="do",
+        phase="execute",
         generation=1,
         repo="footnote",
         worktree="/wt/x-59b0",

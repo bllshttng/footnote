@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn non_planning_phase_is_not_a_planning_lane() {
         let graph = GraphRead {
-            phases: HashMap::from([(String::from("s1"), vec![String::from("do")])]),
+            phases: HashMap::from([(String::from("s1"), vec![String::from("execute")])]),
             ..Default::default()
         };
         assert!(signals(&graph, "s1", "worker").is_none());

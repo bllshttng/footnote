@@ -977,7 +977,7 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             &row.node,
             &row.session_id,
             "reap-sweep",
-            Some("do"),
+            Some("execute"),
             Some(&row.harness),
             crate::claude_adopt::transcript_stamp(&row.session_id).as_deref(),
         ) {
@@ -1027,7 +1027,7 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
             node,
             session_id,
             "reap-release",
-            Some("do"),
+            Some("execute"),
             Some(&harness),
             tail.as_deref(),
         ) {
@@ -4876,7 +4876,7 @@ mod tests {
             "status": "done", "priority": "p2", "merge_status": "merged",
             "created_at": "2026-09-11T00:00:00+00:00",
             "completed_at": "2026-09-11T02:00:00+00:00",
-            "sessions": [{"phase": "do", "harness": "claude", "session_id": "s-open",
+            "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s-open",
                           "started_at": "2026-09-11T01:00:00+00:00"}]
         })
     }

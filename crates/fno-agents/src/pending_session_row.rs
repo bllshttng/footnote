@@ -261,17 +261,17 @@ mod tests {
         let dir = tmp_dir("park");
         let registry = dir.join("registry.json");
         seed_row(&registry, "w1", Some("x-1"));
-        let payload = park_payload(&registry, "do");
+        let payload = park_payload(&registry, "execute");
 
         let first = park(&payload).unwrap();
         assert_eq!(first["parked"], json!(true));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
-        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
+        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("execute"));
 
         let second = park(&park_payload(&registry, "review")).unwrap();
         assert_eq!(second["parked"], json!(false));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
-        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
+        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("execute"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -301,7 +301,7 @@ mod tests {
         )
         .unwrap();
         seed_row(&registry, "w1", Some("x-defr"));
-        park(&park_payload(&registry, "do")).unwrap();
+        park(&park_payload(&registry, "execute")).unwrap();
 
         let answer = open(&open_payload(&registry, &graph, "sid-1")).unwrap();
         assert_eq!(answer["opened"], json!(true));
@@ -311,7 +311,7 @@ mod tests {
         let sessions = rows[0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["session_id"], json!("sid-1"));
-        assert_eq!(sessions[0]["phase"], json!("do"));
+        assert_eq!(sessions[0]["phase"], json!("execute"));
         assert_eq!(sessions[0]["effort"], json!("xhigh"));
         // The row carries the PARK instant as its start, not the open instant.
         assert!(sessions[0]["started_at"].is_string());
@@ -335,13 +335,13 @@ mod tests {
             &graph,
             &[json!({
                 "id": "x-clai", "title": "t", "status": "in_progress",
-                "sessions": [{"phase": "do", "harness": "claude", "session_id": "sid-2",
+                "sessions": [{"phase": "execute", "harness": "claude", "session_id": "sid-2",
                               "started_at": "2026-09-22T00:00:00Z"}],
             })],
         )
         .unwrap();
         seed_row(&registry, "w1", Some("x-clai"));
-        park(&park_payload(&registry, "do")).unwrap();
+        park(&park_payload(&registry, "execute")).unwrap();
 
         let answer = open(&open_payload(&registry, &graph, "sid-2")).unwrap();
         assert_eq!(answer["opened"], json!(true));

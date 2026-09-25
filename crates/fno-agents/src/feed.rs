@@ -699,7 +699,7 @@ mod tests {
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
                  "ended_at": "2026-09-02T16:00:00Z"},
-                {"phase": "do", "harness": "claude", "session_id": "s-do",
+                {"phase": "execute", "harness": "claude", "session_id": "s-do",
                  "observed_model": {"kind": "observed", "model": "claude-opus-5", "samples": 12},
                  "effort": "high",
                  "started_at": "2026-09-02T17:12:52Z"},
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
         assert_eq!(started.effort.as_deref(), Some("high"));
-        assert_eq!(started.phase.as_deref(), Some("do"));
+        assert_eq!(started.phase.as_deref(), Some("execute"));
         let ended = p.rows.iter().find(|r| r.kind == "node_ended").unwrap();
         assert_eq!(ended.harness.as_deref(), Some("claude"));
     }
