@@ -24,7 +24,7 @@ const GUARD_TIMEOUT: Duration = Duration::from_secs(60);
 /// The body-only guards in a fixed order, resolved under the repo root so
 /// the run sees the copy CI runs on this branch. Env contract, identical for
 /// every guard: `PR_BODY`, `PR_TITLE`, `PR_HEAD_REF`, `PR_HEAD_SHA=HEAD`,
-/// `PR_BASE_SHA` (merge-base of `origin/<base>` and HEAD). A script missing
+/// `PR_BASE_SHA` (merge-base of the resolved base ref and HEAD). A script missing
 /// from this repo is a `skip`, not a failure, so a repo carrying none of
 /// these guards passes vacuously.
 const GUARDS: [&str; 3] = [
@@ -33,7 +33,15 @@ const GUARDS: [&str; 3] = [
     "scripts/ci/check-oos-tracked.sh",
 ];
 
-const USAGE: &str = "usage: fno-agents pr-body-check --body-file <path|-> [--title <t>] [--head <ref>] [--base <branch>]";
+const USAGE: &str = "usage: fno-agents pr-body-check --body-file <path|-> [--title <t>] [--head <ref>] [--base <branch|ref>]";
+
+fn base_ref(base: &str) -> String {
+    if base.contains('/') || (base.len() >= 7 && base.bytes().all(|b| b.is_ascii_hexdigit())) {
+        base.to_string()
+    } else {
+        format!("origin/{base}")
+    }
+}
 
 #[derive(Debug)]
 struct Args {
@@ -174,13 +182,12 @@ pub fn run(argv: &[String]) -> i32 {
             }
         },
     };
-    let base_ref = format!("origin/{}", a.base);
+    let base_ref = base_ref(&a.base);
     let base_sha = match git(git_bin, &a.cwd, &["merge-base", &base_ref, "HEAD"]) {
         Ok(sha) if !sha.is_empty() => sha,
         _ => {
             eprintln!(
-                "pr-body-check: could not resolve git merge-base {base_ref} HEAD; run git fetch origin {} and retry",
-                a.base
+                "pr-body-check: could not resolve git merge-base {base_ref} HEAD; verify the base ref exists and is fetched"
             );
             return 2;
         }
@@ -282,6 +289,14 @@ mod tests {
         assert_eq!(a.base, "main");
         assert_eq!(a.title, "");
         assert!(a.head.is_none());
+    }
+
+    #[test]
+    fn branch_names_expand_to_origin_but_qualified_refs_and_shas_stay_exact() {
+        assert_eq!(base_ref("main"), "origin/main");
+        assert_eq!(base_ref("origin/main"), "origin/main");
+        assert_eq!(base_ref("upstream/main"), "upstream/main");
+        assert_eq!(base_ref("0123456789abcdef"), "0123456789abcdef");
     }
 
     #[test]
