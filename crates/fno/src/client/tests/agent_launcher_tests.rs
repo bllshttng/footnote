@@ -885,7 +885,7 @@ fn launcher_mouse_click_uses_popup_target_to_find_the_model_row() {
                 verdict: "not-installed".into(),
             },
             super::agent_launcher::ModelChoice {
-                name: "openrouter-qwen".into(),
+                name: "qwen/qwen3-coder".into(),
                 model: "qwen/qwen3-coder".into(),
                 route: "openrouter/qwen/qwen3-coder".into(),
                 provider: super::agent_launcher::provider_from_route("openrouter/qwen/qwen3-coder"),
@@ -905,7 +905,7 @@ fn launcher_mouse_click_uses_popup_target_to_find_the_model_row() {
         .popup
         .rows
         .iter()
-        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter/qwen/qwen3-coder"))
+        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "qwen/qwen3-coder"))
         .unwrap();
     let target = picker
         .popup
@@ -946,7 +946,10 @@ fn launcher_mouse_click_uses_popup_target_to_find_the_model_row() {
     });
     let launcher = v.launcher.as_ref().unwrap();
     assert!(launcher.picker.is_none());
-    assert_eq!(launcher.draft.model_row.as_deref(), Some("openrouter-qwen"));
+    assert_eq!(
+        launcher.draft.model_row.as_deref(),
+        Some("qwen/qwen3-coder")
+    );
     assert_eq!(launcher.draft.provider, "openrouter");
 }
 
