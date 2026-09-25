@@ -388,7 +388,7 @@ where
     );
     if let Some(text) = message.map(str::trim).filter(|t| !t.is_empty()) {
         if let Err(reason) = crate::mail_inject::deliver_via_keeper_socket(
-            row_name,
+            session_id,
             text,
             crate::mail_inject::DEFAULT_ATTEMPTS,
             crate::mail_inject::DEFAULT_INTERVAL_MS,

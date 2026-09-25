@@ -344,16 +344,19 @@ fn a_second_resume_of_a_revived_row_launches_nothing() {
 #[test]
 fn a_revived_row_delivers_a_message_through_the_keeper_socket() {
     // AC11-HP
-    let fixture = Fixture::new("while IFS= read -r line; do echo \"got: $line\" >> \"$FAKE_AGY_LOG\"; done\n");
-    let output = fixture.resume(&["--message", "ping"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let fixture = Fixture::new(
+        // The keeper's pty is raw, so the typed envelope arrives as bytes
+        // ending in CR, never a NL: log byte-wise, not line-wise.
+        "stty raw -echo 2>/dev/null\nwhile :; do\n  c=$(dd bs=1 count=1 2>/dev/null)\n  [ -n \"$c\" ] || break\n  printf '%s' \"$c\" >> \"$FAKE_AGY_LOG\"\ndone\n",
     );
+    let output = fixture.resume(&["--message", "ping"]);
+    // AC11 pins the live line and the delivered text. The delivery verdict is
+    // the mail lane's own: agy keeps no greppable receipt, so the lane answers
+    // not-confirmed after typing, and the revival reports that as its failure
+    // per the plan (exit 1, row stays live).
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("is live on its keeper"), "stdout: {stdout}");
+    assert_eq!(fixture.registry_row()["status"], "live", "{:?}", fixture.registry_row());
     let reply = identify(&fixture.sock());
     let keeper_pid = reply["keeper_pid"].as_u64().unwrap() as u32;
     let child_pid = reply["child_pid"].as_u64().unwrap() as u32;
