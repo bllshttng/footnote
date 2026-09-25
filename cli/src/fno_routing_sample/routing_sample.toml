@@ -114,9 +114,13 @@ band = "medium"
 # Effort is harness-shaped: declare it beside the harness it belongs to.
 # A harness with no effort surface (agy) omits it and the grid injects nothing.
 effort = "high"
-# Optional ordering facts: input cost per million tokens and context window.
+# Optional ordering fact: input cost per million tokens.
 cost_per_mtok_in = 6.9
-context = 1000000
+# A context window counts as MEASURED only beside a date; an undated context
+# number is ignored and readers fall back to the id-based default:
+# context = <tokens>
+# context_measured_at = "<YYYY-MM-DD>"
+# context_source = "<vendor doc URL or observation>"
 # Optional quota keying: route ("zai/glm-5.3") or account (a config.accounts
 # record id) names whose quota this row spends. Omitted rows fall back to every
 # registered account bound to the harness.
@@ -131,7 +135,6 @@ route = "zai/glm-5.3-flash"
 band = "medium"
 effort = "high"
 cost_per_mtok_in = 2.3
-context = 1310720
 
 [[routing.models]]
 # The same model again through per-token API dollars. Its own row, its own
@@ -142,7 +145,6 @@ model = "glm-5.3-flash"
 band = "medium"
 effort = "high"
 cost_per_mtok_in = 0.075
-context = 1310720
 
 [[routing.models]]
 name = "gpt-5.6-sol"

@@ -593,7 +593,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
-        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
+        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context, context_measured_at, context_source} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. A row's context counts as a measured window only beside a context_measured_at date; an unmeasured model falls back to the id-based default. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
     ),
     "routing.objective": Meta(
         "advanced", "How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.",

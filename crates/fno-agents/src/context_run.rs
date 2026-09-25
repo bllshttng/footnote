@@ -206,31 +206,60 @@ fn run_context_probe(args: &[String]) -> i32 {
         Some(tokens) => tokens,
         None => return 3,
     };
-    let window_tokens =
-        match crate::context_window::effective_window_for_model(&usage.model, &session) {
-            Ok(window) => window,
-            Err(error) => {
-                eprintln!("context-run --probe: effective context window unreadable: {error:?}");
-                return 3;
+    let (window_tokens, window_source, window_measured_at, window_evidence) =
+        if crate::context_window::is_astra_model(&usage.model) {
+            match crate::context_window::effective_window_for_model(&usage.model, &session) {
+                Ok(window) => (window, "harness", None, None),
+                Err(error) => {
+                    eprintln!(
+                        "context-run --probe: effective context window unreadable: {error:?}"
+                    );
+                    return 3;
+                }
             }
+        } else {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let reading = crate::context_window::window_reading(&usage.model, &cwd);
+            let source = if reading.measured_at.is_some() {
+                "measured"
+            } else {
+                "unmeasured"
+            };
+            (
+                reading.tokens,
+                source,
+                reading.measured_at,
+                reading.evidence,
+            )
         };
     let Some(used_pct) = crate::context_window::used_percent(used_tokens, window_tokens) else {
         return 3;
     };
     let band = crate::context_window::compaction_band(&usage.model, used_tokens, window_tokens);
+    let provenance = match window_source {
+        "measured" => format!(
+            " [measured {}]",
+            window_measured_at.as_deref().unwrap_or("")
+        ),
+        "harness" => " [harness window]".to_string(),
+        _ => " [unmeasured default]".to_string(),
+    };
     let payload = json!({
         "used_tokens": used_tokens,
         "window_tokens": window_tokens,
         "used_pct": used_pct,
         "model": usage.model,
         "compaction_band": format!("{band:?}").to_ascii_lowercase(),
+        "window_source": window_source,
+        "window_measured_at": window_measured_at,
+        "window_evidence": window_evidence,
     });
     if json_output {
         println!("{payload}");
     } else {
         println!(
-            "{}% used ({} of {} tokens), model {}",
-            used_pct, used_tokens, window_tokens, payload["model"]
+            "{}% used ({} of {} tokens), model {}{}",
+            used_pct, used_tokens, window_tokens, payload["model"], provenance
         );
     }
     0
