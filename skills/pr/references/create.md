@@ -96,9 +96,7 @@ EOF
 # expansion). The closure trailer and the reviewed-at line are appended later,
 # at the create step, since they matter only for a real PR.
 printf '%s\n' "$BODY" > .fno/pr-body.md
-if ! TEST_DELTA=$(cargo run --quiet \
-  --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents -- \
-  test-delta --base "$BASE"); then
+if ! TEST_DELTA=$(fno-agents test-delta --base "$BASE"); then
   echo "test delta unavailable for base $BASE" >&2
   cat .fno/pr-title.txt .fno/pr-body.md
   echo "RESULT: BLOCKED step=test-delta reason=Rust test delta command failed draft=.fno/pr-body.md"
