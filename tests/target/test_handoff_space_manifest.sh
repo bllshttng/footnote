@@ -46,15 +46,17 @@ target_claim_key: node:${NODE_ID}
 MAN
 }
 
-# run_handoff <cwd> [env assignments...]; sets OUT and RC
+# run_handoff <cwd> [env assignments...]; sets OUT and RC. The assignments
+# ride `env` itself: handoff.sh ignores unknown argv, so a KEY=VALUE passed
+# after the verb would silently pin nothing.
 run_handoff() {
   local dir="$1"; shift
   set +e
-  OUT="$(cd "$dir" && env -u FNO_DIR -u FNO_AGENTS_BIN \
+  OUT="$(cd "$dir" && env -u FNO_DIR -u FNO_AGENTS_BIN "$@" \
     HOME="${TMP_DIR}/home" \
     HANDOFF_VERIFY_TIMEOUT=5 HANDOFF_VERIFY_INTERVAL=1 \
     PATH="${BIN_DIR}:$PATH" \
-    timeout 60 bash "$HANDOFF" --harness claude --model opus "$@" 2>&1)"
+    timeout 60 bash "$HANDOFF" --harness claude --model opus 2>&1)"
   RC=$?
   set -e
 }
@@ -122,18 +124,21 @@ if assert_reached_manifest "${WT2}/legacy-plan.md"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Explicit FNO_DIR keeps the cwd-relative layout, no resolver consulted
+# 3. Explicit FNO_DIR keeps its own layout even with a resolver available.
+#    The manifest lives under cfg/ (NOT .fno/), and the stub names a space
+#    path that does not exist: if the script wrongly consulted the resolver
+#    anyway, the belt would find no .fno manifest either and the park would
+#    name the missing manifest, not the cfg plan.
 # ---------------------------------------------------------------------------
 C3="${TMP_DIR}/c3"; WT3="${C3}/wt"
-mkdir -p "${WT3}/.fno"
-make_manifest "${WT3}/.fno/target-state.md" "${WT3}/override-plan.md"
-mv "$BIN_DIR/fno-agents" "${BIN_DIR}/fno-agents.bak"
+mkdir -p "${WT3}/cfg"
+make_manifest "${WT3}/cfg/target-state.md" "${WT3}/override-plan.md"
+write_agents_stub "${C3}/space/worktrees/wt/target-state.md" "${C3}/space/events.jsonl"
 
-run_handoff "$WT3" FNO_DIR=".fno"
+run_handoff "$WT3" FNO_DIR="cfg"
 if assert_reached_manifest "${WT3}/override-plan.md"; then
   pass "explicit FNO_DIR override still wins"
 fi
-mv "${BIN_DIR}/fno-agents.bak" "$BIN_DIR/fno-agents"
 
 # ---------------------------------------------------------------------------
 printf '\n[handoff-space-manifest] %d passed, %d failed\n' "$PASS" "$FAIL"
