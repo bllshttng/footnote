@@ -31,7 +31,157 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::c_int, 0) == 0 }
 }
 
+static LAST_PROGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// CI once sat 56 minutes silent inside this suite with a live `fno-agents`
+/// child and no failing assertion. One watchdog for the whole binary: when
+/// no test has made progress for 120s it dumps the process tree, the
+/// interested pids' kernel state, and the claims roots to stderr, then
+/// aborts so the shard fails in minutes with evidence instead of at the cap.
+fn note_progress() {
+    LAST_PROGRESS.store(now_secs(), std::sync::atomic::Ordering::SeqCst);
+    std::thread::Builder::new()
+        .name("hang-watchdog".into())
+        .spawn(|| {
+            static ARMED: std::sync::Once = std::sync::Once::new();
+            ARMED.call_once(|| loop {
+                std::thread::sleep(Duration::from_secs(5));
+                let now = now_secs();
+                let last = LAST_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
+                if now.saturating_sub(last) > 120 {
+                    dump_stuck_state();
+                    std::process::abort();
+                }
+            });
+        })
+        .ok();
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// The dump rides three channels because the first run's stderr dump never
+/// reached the CI log: the ordinary stderr write, a raw fd 2 write that no
+/// output capture can intercept, and `GITHUB_STEP_SUMMARY`, whose file the
+/// runner renders even for a failed job. The temp file is the audit copy.
+fn emit_dump(buf: &str) {
+    eprint!("{buf}");
+    use std::io::Write as _;
+    let bytes = buf.as_bytes();
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = unsafe { libc::write(2, bytes[off..].as_ptr().cast(), bytes.len() - off) };
+        if n <= 0 {
+            break;
+        }
+        off += n as usize;
+    }
+    if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
+            let _ = f.write_all(bytes);
+        }
+    }
+    let _ = std::fs::write(
+        std::env::temp_dir().join(format!("hang-watchdog-dump-{}.txt", std::process::id())),
+        bytes,
+    );
+}
+
+fn dump_stuck_state() {
+    let mut buf = String::from("hang-watchdog: no test progress for 120s; dumping state\n");
+    if let Ok(out) = Command::new("ps")
+        .args(["-e", "-o", "pid,ppid,pgid,sess,stat,wchan:28,etime,args"])
+        .output()
+    {
+        buf.push_str(&format!(
+            "--- ps ---\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let ok_pid = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            if !ok_pid {
+                continue;
+            }
+            let pid_path = entry.path();
+            let cmdline = std::fs::read_to_string(pid_path.join("cmdline"))
+                .unwrap_or_default()
+                .replace('\0', " ");
+            if !["fno-agents", "test_run_lifecycle", "sleep", "cargo"]
+                .iter()
+                .any(|needle| cmdline.contains(needle))
+            {
+                continue;
+            }
+            buf.push_str(&format!("--- pid {} ---\n", pid_path.display()));
+            buf.push_str(&format!("cmdline: {cmdline}\n"));
+            for f in ["stat", "wchan", "status", "syscall"] {
+                if let Ok(body) = std::fs::read_to_string(pid_path.join(f)) {
+                    buf.push_str(&format!(
+                        "{f}: {}\n",
+                        body.lines().take(4).collect::<Vec<_>>().join(" | ")
+                    ));
+                }
+            }
+            if let Ok(fds) = std::fs::read_dir(pid_path.join("fd")) {
+                let links: Vec<String> = fds
+                    .flatten()
+                    .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                buf.push_str(&format!("fds: {}\n", links.join(", ")));
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("fno-test-run-lifecycle-") {
+                continue;
+            }
+            buf.push_str(&format!("--- root {} ---\n", entry.path().display()));
+            dump_tree(&entry.path(), 0, &mut buf);
+        }
+    }
+    emit_dump(&buf);
+}
+
+fn dump_tree(dir: &std::path::Path, depth: usize, buf: &mut String) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            buf.push_str(&format!("{} {}/\n", " ".repeat(depth * 2), p.display()));
+            dump_tree(&p, depth + 1, buf);
+        } else {
+            buf.push_str(&format!("{} {}\n", " ".repeat(depth * 2), p.display()));
+            if let Ok(body) = std::fs::read_to_string(&p) {
+                buf.push_str(&format!("{}: {body}\n", p.display()));
+            }
+        }
+    }
+}
+
 fn tmp_claims_root(tag: &str) -> PathBuf {
+    note_progress();
     let dir = std::env::temp_dir().join(format!(
         "fno-test-run-lifecycle-{tag}-{}-{}",
         std::process::id(),
@@ -100,6 +250,7 @@ fn timeout_kills_the_hung_leader() {
         .arg("--")
         .arg("sleep")
         .arg("30")
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn fno-agents test-run");
     let output = child.wait_with_output().expect("wait for test-run");
@@ -108,6 +259,11 @@ fn timeout_kills_the_hung_leader() {
         output.status.code(),
         Some(124),
         "a hung leader must exit 124"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("0s queued"),
+        "an uncontended timeout names its zero-second wait: {stderr}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -387,9 +543,10 @@ fn a_dead_holders_slot_frees_at_once() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC8-HP: a run admitted late dies at the shared deadline with a TIMEOUT
-/// line that names the split: seconds waiting for the claim, seconds
-/// running the argv.
+/// AC2-ERR: a run admitted behind a holder dies at its own run budget with a
+/// TIMEOUT line that names the run seconds first and the queued seconds as
+/// the parenthetical, then a line naming the budget lever and the narrow
+/// target.
 #[test]
 fn the_run_timeout_names_the_wait_and_the_run() {
     let root = tmp_claims_root("timeout-split");
@@ -403,7 +560,7 @@ fn the_run_timeout_names_the_wait_and_the_run() {
         .expect("spawn holder");
     std::thread::sleep(Duration::from_millis(300));
     let out = test_run(&root)
-        .args(["--timeout", "4"])
+        .args(["--timeout", "2"])
         .arg("--")
         .arg("sleep")
         .arg("10")
@@ -419,41 +576,106 @@ fn the_run_timeout_names_the_wait_and_the_run() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let line = stderr
         .lines()
-        .find(|l| l.contains("TIMEOUT after 4s"))
+        .find(|l| l.contains("TIMEOUT after 2s running the argv"))
         .unwrap_or_else(|| panic!("timeout line missing: {stderr}"));
-    assert!(
-        line.contains("waiting for the test:suite claim") && line.contains("running the argv"),
-        "{line}"
-    );
-    let wait_secs: u64 = line
-        .split("TIMEOUT after 4s: ")
+    assert!(line.contains("process group killed"), "{line}");
+    let queued_secs: u64 = line
+        .split('(')
         .nth(1)
-        .and_then(|rest| rest.split("s waiting").next())
+        .and_then(|rest| rest.split("s queued").next())
         .unwrap_or("0")
         .trim()
         .parse()
         .unwrap_or(0);
-    assert!(wait_secs >= 1, "the wait share must be named: {line}");
-    let run_secs: u64 = line
-        .split("s waiting for the test:suite claim, ")
-        .nth(1)
-        .and_then(|rest| rest.split("s running").next())
-        .unwrap_or("0")
-        .trim()
-        .parse()
-        .unwrap_or(0);
-    assert!(run_secs >= 1, "the run share must be named: {line}");
+    assert!(queued_secs >= 1, "the queued share must be named: {line}");
+    let remedy = stderr
+        .lines()
+        .find(|l| l.contains("FNO_TEST_TIMEOUT_SECONDS"))
+        .unwrap_or_else(|| panic!("remedy line missing: {stderr}"));
+    assert!(remedy.contains("narrow the target"), "{remedy}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// AC9-HP: a waiter that never reaches the front ends at the budget with the
-/// refusal naming how many runs were ahead of it and that the argv never
-/// started.
+/// AC1-HP: a waiter queued 3s behind a live holder keeps its whole budget
+/// once admitted: `--timeout 5 -- sleep 4` runs its full 4 seconds and exits
+/// 0, where the old shared deadline would have killed it 2s into the run.
 #[test]
-fn the_wait_refusal_names_the_queue_and_the_unstarted_argv() {
-    let root = tmp_claims_root("wait-refusal");
+fn a_queued_run_keeps_its_whole_budget() {
+    let root = tmp_claims_root("whole-budget");
     let mut holder = test_run(&root)
-        .args(["--timeout", "20"])
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("3")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let out = test_run(&root)
+        .args(["--timeout", "5"])
+        .arg("--")
+        .arg("sleep")
+        .arg("4")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the queued waiter");
+    assert!(holder.try_wait().unwrap().is_some());
+    let _ = holder.wait();
+    assert!(
+        out.status.success(),
+        "the waiter must run its whole 4s budget, got {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("suite_wait_timeout"),
+        "the wait has no timer: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC4-HP: a waiter whose own budget is already spent keeps waiting, is
+/// admitted when the holder releases, and exits 0.
+#[test]
+fn a_waiter_outlasts_its_own_budget_while_the_holder_runs() {
+    let root = tmp_claims_root("outlast-budget");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("4")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let out = test_run(&root)
+        .args(["--timeout", "1"])
+        .arg("--")
+        .arg("true")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the under-budgeted waiter");
+    assert!(holder.try_wait().unwrap().is_some());
+    let _ = holder.wait();
+    assert!(
+        out.status.success(),
+        "a queued waiter outlives its own budget: got {:?}: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC5-HP: the waiting line carries holder_left_s in the holder's remaining
+/// budget, and the holder's own claim record sets expires_at to acquired_at
+/// plus its --timeout. The budget clears the store's 60s TTL floor, so the
+/// equality is exact.
+#[test]
+fn the_waiting_line_names_the_holders_remaining_budget() {
+    let root = tmp_claims_root("holder-left");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "90"])
         .arg("--")
         .arg("sleep")
         .arg("20")
@@ -461,24 +683,119 @@ fn the_wait_refusal_names_the_queue_and_the_unstarted_argv() {
         .spawn()
         .expect("spawn holder");
     std::thread::sleep(Duration::from_millis(300));
-    let out = test_run(&root)
-        .args(["--timeout", "2"])
+    let waiter = test_run(&root)
+        .args(["--timeout", "30"])
         .arg("--")
         .arg("true")
         .stderr(std::process::Stdio::piped())
-        .output()
-        .expect("run the never-admitted waiter");
-    assert_eq!(out.status.code(), Some(124));
+        .spawn()
+        .expect("spawn the waiter");
+    // The record is read while the holder still holds it; once the holder
+    // releases, the record is gone.
+    std::thread::sleep(Duration::from_millis(1500));
+    let (_, rec) = fno_agents::claims::status("test:suite", Some(&root));
+    let rec = rec.expect("the holder's claim record while it holds");
+    assert_eq!(
+        rec.expires_at,
+        Some(rec.acquired_at + 90_000),
+        "expires_at is the holder's own run deadline: {rec:?}"
+    );
+    let out = waiter.wait_with_output().expect("wait for the waiter");
+    assert!(holder.try_wait().unwrap().is_some());
+    let _ = holder.wait();
+    assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("The argv never started."), "{stderr}");
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("suite_waiting") && l.contains("holder_left_s="))
+        .unwrap_or_else(|| panic!("waiting line missing: {stderr}"));
+    let left: i64 = line
+        .split(" holder_left_s=")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or("")
+        .parse()
+        .unwrap_or(-1);
     assert!(
-        stderr.contains("runs were ahead of it in a queue of"),
-        "{stderr}"
+        (85..=90).contains(&left),
+        "holder_left_s must sit in the holder's remaining 90s budget: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC7-ERR: a fleet stop written while a waiter queues is read at its
+/// ADMISSION, not only at entry: the waiter exits 90 after the holder
+/// releases, names fleet-stop, never spawns, and a clear reopens admission.
+#[test]
+fn a_waiter_admitted_after_a_fleet_stop_refuses() {
+    let root = tmp_claims_root("fleet-recheck");
+    let home = tmp_claims_root("fleet-recheck-home");
+    let mut holder = test_run(&root)
+        .env("FNO_AGENTS_HOME", &home)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("3")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut waiter = test_run(&root)
+        .env("FNO_AGENTS_HOME", &home)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("60")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the queued waiter");
+    std::thread::sleep(Duration::from_millis(500));
+    let stopped = Command::new(bin())
+        .args(["fleet-incident", "stop", "--reason", "queue wedge"])
+        .env("FNO_AGENTS_HOME", &home)
+        .output()
+        .expect("write the fleet stop");
+    assert!(stopped.status.success(), "the stop must land");
+
+    let start = Instant::now();
+    let status = waiter.wait().expect("wait for the refused waiter");
+    assert_eq!(
+        status.code(),
+        Some(90),
+        "a waiter admitted after a fleet stop must refuse with 90"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "the refusal must follow the holder's release, took {:?}",
+        start.elapsed()
+    );
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(stderr.contains("suite_refused"), "{stderr}");
+    assert!(stderr.contains("fleet-stop"), "{stderr}");
+    assert!(stderr.contains("waited_s="), "{stderr}");
+    assert!(
+        !stderr.contains("suite_started"),
+        "the argv must never spawn mid-incident: {stderr}"
     );
 
-    let _ = holder.kill();
     let _ = holder.wait();
+    let cleared = Command::new(bin())
+        .args(["fleet-incident", "clear", "--reason", "queue wedge done"])
+        .env("FNO_AGENTS_HOME", &home)
+        .output()
+        .expect("clear the fleet stop");
+    assert!(cleared.status.success(), "the clear must land");
+    let third = test_run(&root)
+        .env("FNO_AGENTS_HOME", &home)
+        .args(["--timeout", "10"])
+        .arg("--")
+        .arg("true")
+        .status()
+        .expect("run after the clear");
+    assert!(third.success(), "a clear reopens admission");
     let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 fn build_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path) -> Command {
@@ -944,5 +1261,651 @@ fn a_run_slot_waiter_writes_the_stop_hook_marker() {
         status.success(),
         "the waiter must be admitted, got {status}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC18-HP helper: name one checkout the priority lane through the same
+/// claim surface the readout teaches (pid-unavailable acquire with a TTL).
+fn set_priority(root: &std::path::Path, worktree: &std::path::Path, ttl_ms: i64) {
+    let outcome = fno_agents::claims::acquire(
+        fno_agents::test_run::PRIORITY_KEY,
+        &format!("worktree:{}", worktree.display()),
+        fno_agents::claims::AcquireOpts {
+            ttl_ms: Some(ttl_ms),
+            pid_unavailable: true,
+            reason: Some("test lane".to_string()),
+            root: Some(root.to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(outcome, fno_agents::claims::AcquireOutcome::Acquired(_)),
+        "the priority lane must acquire"
+    );
+}
+
+/// An executable named `cargo` that appends its label to an order file when
+/// its argv runs: the suite classifier reads its basename, so lane logic is
+/// observed with no real cargo.
+fn fake_cargo(dir: &std::path::Path) -> std::path::PathBuf {
+    let script = dir.join("cargo");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho \"$FAKE_LABEL\" >> \"$FAKE_ORDER\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    script
+}
+
+fn git_dir(path: &std::path::Path) {
+    std::fs::create_dir_all(path.join(".git")).unwrap();
+}
+
+/// AC18-HP: a priority checkout takes the next free run slot ahead of an
+/// earlier normal waiter; the earlier waiter names what it yields to.
+#[test]
+fn a_priority_checkout_jumps_the_run_slot_queue() {
+    let root = std::fs::canonicalize(tmp_claims_root("prio-run")).unwrap();
+    let (w1, w2, w3, w4) = (
+        root.join("w1"),
+        root.join("w2"),
+        root.join("w3"),
+        root.join("w4"),
+    );
+    for w in [&w1, &w2, &w3, &w4] {
+        std::fs::create_dir_all(w).unwrap();
+    }
+    slot_pool_setup(&root);
+
+    let mut h1 = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut h2 = Command::new("sleep").arg("60").spawn().unwrap();
+    assert!(run_admit(&root, h1.id(), &w1).status().unwrap().success());
+    assert!(run_admit(&root, h2.id(), &w2).status().unwrap().success());
+
+    // Q from w3 queues first, before the lane exists.
+    let mut q = run_admit(&root, std::process::id(), &w3)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    set_priority(&root, &w4, 600_000);
+    // P from w4 queues second, in the priority lane.
+    let mut p_proc = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut p = run_admit(&root, p_proc.id(), &w4)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        q.try_wait().unwrap().is_none() && p.try_wait().unwrap().is_none(),
+        "both waiters must still wait while both slots are held"
+    );
+
+    // Free one slot: the priority waiter takes it.
+    let _ = h1.kill();
+    let _ = h1.wait();
+    let start = Instant::now();
+    let p_status = p.wait().unwrap();
+    assert!(
+        p_status.success() && start.elapsed() < Duration::from_secs(3),
+        "P must be admitted ahead of Q within 3s, took {:?} ({p_status})",
+        start.elapsed()
+    );
+    let mut p_err = String::new();
+    std::io::Read::read_to_string(&mut p.stderr.take().unwrap(), &mut p_err).unwrap();
+    assert!(
+        p_err.contains("holding (priority lane)"),
+        "P must name its lane: {p_err}"
+    );
+
+    // Q still waits and names the checkout it yields to.
+    assert!(
+        q.try_wait().unwrap().is_none(),
+        "Q must keep waiting behind the priority checkout"
+    );
+    let mut q_err = String::new();
+    std::io::Read::read_to_string(&mut q.stderr.take().unwrap(), &mut q_err).unwrap();
+    assert!(
+        q_err.contains("yielding to priority worktree") && q_err.contains(w4.to_str().unwrap()),
+        "Q must name the priority checkout: {q_err}"
+    );
+
+    // Free the rest: Q is admitted.
+    let _ = p_proc.kill();
+    let _ = p_proc.wait();
+    let _ = h2.kill();
+    let _ = h2.wait();
+    let start = Instant::now();
+    let q_status = q.wait().unwrap();
+    assert!(
+        q_status.success() && start.elapsed() < Duration::from_secs(3),
+        "Q must follow within 3s, took {:?} ({q_status})",
+        start.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC19-EDGE: a live lane reserves nothing. With the lane held for w4 but no
+/// waiter from w4, a normal waiter is admitted as soon as a slot frees.
+#[test]
+fn an_idle_priority_lane_reserves_nothing() {
+    let root = std::fs::canonicalize(tmp_claims_root("prio-idle")).unwrap();
+    let (w1, w2, w3, w4) = (
+        root.join("w1"),
+        root.join("w2"),
+        root.join("w3"),
+        root.join("w4"),
+    );
+    for w in [&w1, &w2, &w3, &w4] {
+        std::fs::create_dir_all(w).unwrap();
+    }
+    slot_pool_setup(&root);
+
+    let mut h1 = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut h2 = Command::new("sleep").arg("60").spawn().unwrap();
+    assert!(run_admit(&root, h1.id(), &w1).status().unwrap().success());
+    assert!(run_admit(&root, h2.id(), &w2).status().unwrap().success());
+
+    set_priority(&root, &w4, 600_000);
+    let mut q = run_admit(&root, std::process::id(), &w3)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(q.try_wait().unwrap().is_none());
+
+    let _ = h1.kill();
+    let _ = h1.wait();
+    let start = Instant::now();
+    let status = q.wait().unwrap();
+    assert!(
+        status.success() && start.elapsed() < Duration::from_secs(3),
+        "an idle lane must never hold a slot, took {:?}",
+        start.elapsed()
+    );
+    let _ = h2.kill();
+    let _ = h2.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC20-HP: at the suite door, a priority checkout's argv runs ahead of an
+/// earlier targeted waiter, and both waiting lines name the lane read.
+#[test]
+fn the_priority_lane_orders_the_suite_door() {
+    let root = std::fs::canonicalize(tmp_claims_root("prio-suite")).unwrap();
+    let (w3, w4) = (root.join("w3"), root.join("w4"));
+    git_dir(&w3);
+    git_dir(&w4);
+    let order = root.join("order.txt");
+    let fake = fake_cargo(&root);
+
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("30")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Q from w3 queues first, targeted.
+    let mut q = test_run(&root)
+        .current_dir(&w3)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .env("FAKE_LABEL", "Q")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    set_priority(&root, &w4, 600_000);
+    // P from w4 queues second, in the priority lane.
+    let mut p = test_run(&root)
+        .current_dir(&w4)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .env("FAKE_LABEL", "P")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        q.try_wait().unwrap().is_none() && p.try_wait().unwrap().is_none(),
+        "both must wait behind the holder"
+    );
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let start = Instant::now();
+    let p_status = p.wait().unwrap();
+    let q_status = q.wait().unwrap();
+    assert!(p_status.success() && q_status.success());
+    assert!(
+        start.elapsed() < Duration::from_secs(6),
+        "both must run after the holder dies, took {:?}",
+        start.elapsed()
+    );
+    let order_text = std::fs::read_to_string(&order).unwrap();
+    assert_eq!(
+        order_text.lines().collect::<Vec<_>>(),
+        vec!["P", "Q"],
+        "the priority checkout's argv runs first: {order_text}"
+    );
+    let mut p_err = String::new();
+    std::io::Read::read_to_string(&mut p.stderr.take().unwrap(), &mut p_err).unwrap();
+    assert!(
+        p_err.contains("lane=priority"),
+        "P's waiting line names its lane: {p_err}"
+    );
+    let mut q_err = String::new();
+    std::io::Read::read_to_string(&mut q.stderr.take().unwrap(), &mut q_err).unwrap();
+    assert!(
+        q_err.contains("yielding_to=priority") && q_err.contains(w4.to_str().unwrap()),
+        "Q's waiting line names the lane and the checkout: {q_err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A pid with no living ancestor inside this test process: the sleep is
+/// backgrounded under a shell that exits, so init reparents it. A waiter
+/// naming this pid is never ancestor-admitted by a claim the test process
+/// holds.
+fn detached_pid() -> u32 {
+    let dir = std::env::temp_dir().join(format!(
+        "fno-detach-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("pid");
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "sleep 60 & echo $! > {}; exit 0",
+            pid_file.display()
+        ))
+        .status()
+        .expect("spawn the detaching shell");
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the shell must write the backgrounded pid")
+        .trim()
+        .parse()
+        .expect("pid file must hold a bare pid");
+    pid
+}
+
+fn kill_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::c_int, libc::SIGKILL);
+    }
+}
+
+/// AC21-EDGE: the ancestor admit survives the lane gate. With the test
+/// process holding build:cargo and a priority waiter queued, a child ask is
+/// admitted at once while the priority waiter still waits.
+#[test]
+fn the_lane_gate_keeps_the_ancestor_admit() {
+    let root = std::fs::canonicalize(tmp_claims_root("lane-ancestor")).unwrap();
+    let (outer, w2, w4) = (root.join("outer"), root.join("w2"), root.join("w4"));
+    for w in [&outer, &w2, &w4] {
+        std::fs::create_dir_all(w).unwrap();
+    }
+
+    let first = build_admit(&root, std::process::id(), &outer)
+        .status()
+        .unwrap();
+    assert!(first.success(), "the test process holds build:cargo");
+    set_priority(&root, &w4, 600_000);
+
+    let p_pid = detached_pid();
+    let mut p = build_admit(&root, p_pid, &w4)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let child_ask = build_admit(&root, child.id(), &w2).status().unwrap();
+    assert!(
+        child_ask.success() && start.elapsed() < Duration::from_secs(2),
+        "a child of the holder must be admitted while the lane gates: took {:?}",
+        start.elapsed()
+    );
+
+    kill_pid(p_pid);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = p.wait();
+    let mut p_err = String::new();
+    std::io::Read::read_to_string(&mut p.stderr.take().unwrap(), &mut p_err).unwrap();
+    assert!(
+        p_err.contains("holding (priority lane)"),
+        "the priority waiter must keep waiting: {p_err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC22-HP: the build door queues in arrival order. A admitted, B still
+/// waiting, with two tickets in the queue dir during the wait.
+#[test]
+fn the_build_door_queues_in_arrival_order() {
+    let root = std::fs::canonicalize(tmp_claims_root("build-order")).unwrap();
+    let (outer, wa, wb) = (root.join("outer"), root.join("wa"), root.join("wb"));
+    for w in [&outer, &wa, &wb] {
+        std::fs::create_dir_all(w).unwrap();
+    }
+    // Every build-door waiter first takes a run slot (the fixed lock
+    // order), so the pool must fit the holder and both waiters or the
+    // second waiter wedges at the slot door and never queues here.
+    std::fs::write(root.join("config.toml"), "[test]\nmax_cargo_runs = 4\n")
+        .expect("write the slot-pool config");
+    let slots = || {
+        std::iter::once(("FNO_CONFIG", root.join("config.toml")))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+
+    let holder_pid = detached_pid();
+    let first = build_admit(&root, holder_pid, &outer)
+        .envs(slots())
+        .status()
+        .unwrap();
+    assert!(first.success(), "the detached holder holds build:cargo");
+
+    let mut proc_a = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut proc_b = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut a = build_admit(&root, proc_a.id(), &wa)
+        .envs(slots())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let mut b = build_admit(&root, proc_b.id(), &wb)
+        .envs(slots())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+
+    let queue_dir = root
+        .join(".fno")
+        .join("claims")
+        .join("build%3Acargo.lock.queue.d");
+    let tickets = std::fs::read_dir(&queue_dir)
+        .expect("the queue dir must exist once waiters queue")
+        .count();
+    assert_eq!(tickets, 2, "both waiters hold tickets: {queue_dir:?}");
+
+    // Kill the holder: its dead pid frees the claim, A is admitted first.
+    kill_pid(holder_pid);
+    let start = Instant::now();
+    let a_status = a.wait().unwrap();
+    assert!(
+        a_status.success() && start.elapsed() < Duration::from_secs(3),
+        "A must be admitted first within 3s, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        b.try_wait().unwrap().is_none(),
+        "B must still wait behind A"
+    );
+
+    let _ = fno_agents::claims::release(
+        "build:cargo",
+        &format!("cargo:{}:{}", wa.display(), proc_a.id()),
+        Some(&root),
+        None,
+    );
+    let start = Instant::now();
+    let b_status = b.wait().unwrap();
+    assert!(
+        b_status.success() && start.elapsed() < Duration::from_secs(3),
+        "B must follow within 3s, took {:?}",
+        start.elapsed()
+    );
+    let _ = proc_a.kill();
+    let _ = proc_a.wait();
+    let _ = proc_b.kill();
+    let _ = proc_b.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC23-EDGE: a waiter queued ahead at the build door never blocks the
+/// holder's own child: the child is admitted from the back of the queue.
+#[test]
+fn the_ancestor_admit_passes_a_queued_waiter() {
+    let root = std::fs::canonicalize(tmp_claims_root("ancestor-back")).unwrap();
+    let (outer, ww, w2) = (root.join("outer"), root.join("ww"), root.join("w2"));
+    for w in [&outer, &ww, &w2] {
+        std::fs::create_dir_all(w).unwrap();
+    }
+
+    let first = build_admit(&root, std::process::id(), &outer)
+        .status()
+        .unwrap();
+    assert!(first.success());
+
+    let w_pid = detached_pid();
+    let mut w = build_admit(&root, w_pid, &ww)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let ask = build_admit(&root, child.id(), &w2).status().unwrap();
+    assert!(
+        ask.success() && start.elapsed() < Duration::from_secs(2),
+        "the child must pass the queued waiter, took {:?}",
+        start.elapsed()
+    );
+
+    kill_pid(w_pid);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = w.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC24-HP: at the suite door a whole-suite waiter yields to a targeted
+/// waiter that queued after it, prints lane=full + yielding_to=normal and
+/// the one whole-suite notice, and runs after the targeted argv.
+#[test]
+fn a_whole_suite_waiter_yields_to_a_targeted_run() {
+    let root = std::fs::canonicalize(tmp_claims_root("full-lane")).unwrap();
+    let order = root.join("order.txt");
+    let fake = fake_cargo(&root);
+
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("30")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // F: whole-suite argv, no filter, queues first.
+    let mut f = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml"])
+        .env("FAKE_LABEL", "F")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    // T: targeted argv, queues second.
+    let mut t = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .env("FAKE_LABEL", "T")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(f.try_wait().unwrap().is_none() && t.try_wait().unwrap().is_none());
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let start = Instant::now();
+    let t_status = t.wait().unwrap();
+    let f_status = f.wait().unwrap();
+    assert!(t_status.success() && f_status.success());
+    assert!(
+        start.elapsed() < Duration::from_secs(6),
+        "both must run once the slot frees, took {:?}",
+        start.elapsed()
+    );
+    let order_text = std::fs::read_to_string(&order).unwrap();
+    assert_eq!(
+        order_text.lines().collect::<Vec<_>>(),
+        vec!["T", "F"],
+        "the targeted run goes first: {order_text}"
+    );
+    let f_err = String::new();
+    let mut f_err = f_err;
+    std::io::Read::read_to_string(&mut f.stderr.take().unwrap(), &mut f_err).unwrap();
+    assert!(f_err.contains("lane=full"), "{f_err}");
+    assert!(f_err.contains("yielding_to=normal"), "{f_err}");
+    assert_eq!(
+        f_err.matches("whole crate suite").count(),
+        1,
+        "exactly one whole-suite notice: {f_err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC25-EDGE: a whole-suite waiter yields for at most its own budget, then
+/// joins the normal queue at the back: waiters that queued before the flip
+/// still go first, later arrivals go after.
+#[test]
+fn a_whole_suite_waiter_joins_the_back_after_its_budget() {
+    let root = std::fs::canonicalize(tmp_claims_root("yield-cap")).unwrap();
+    let order = root.join("order.txt");
+    let fake = fake_cargo(&root);
+
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("8")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // F: whole argv with a 2s budget, queued first.
+    let mut f = test_run(&root)
+        .args(["--timeout", "2"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml"])
+        .env("FAKE_LABEL", "F")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    // T1: targeted, queued before the flip.
+    let mut t1 = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .env("FAKE_LABEL", "T1")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    // T2: targeted, queued after F's flip.
+    let mut t2 = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml", "one_test"])
+        .env("FAKE_LABEL", "T2")
+        .env("FAKE_ORDER", &order)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let start = Instant::now();
+    let f_status = f.wait().unwrap();
+    let t1_status = t1.wait().unwrap();
+    let t2_status = t2.wait().unwrap();
+    assert!(f_status.success() && t1_status.success() && t2_status.success());
+    let _ = holder.wait();
+    let order_text = std::fs::read_to_string(&order).unwrap();
+    let ran: Vec<&str> = order_text.lines().collect();
+    let f_idx = ran
+        .iter()
+        .position(|l| *l == "F")
+        .unwrap_or_else(|| panic!("F must run: {order_text}"));
+    let t2_idx = ran
+        .iter()
+        .position(|l| *l == "T2")
+        .unwrap_or_else(|| panic!("T2 must run: {order_text}"));
+    let t1_idx = ran
+        .iter()
+        .position(|l| *l == "T1")
+        .unwrap_or_else(|| panic!("T1 must run: {order_text}"));
+    assert!(
+        t1_idx < f_idx && f_idx < t2_idx,
+        "T1 (queued before the flip) then F then T2: {order_text}"
+    );
+    let f_err = String::new();
+    let mut f_err = f_err;
+    std::io::Read::read_to_string(&mut f.stderr.take().unwrap(), &mut f_err).unwrap();
+    assert!(
+        f_err.contains("lane=normal"),
+        "after the budget F waits in the normal lane: {f_err}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(12), "{start:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC26-EDGE: with nothing queued, a whole-suite run is admitted at once.
+/// The full lane delays a whole run only while a targeted run waits.
+#[test]
+fn an_uncontended_whole_suite_run_is_admitted_at_once() {
+    let root = tmp_claims_root("full-solo");
+    let order = root.join("order.txt");
+    let fake = fake_cargo(&root);
+    let out = test_run(&root)
+        .args(["--timeout", "5"])
+        .arg("--")
+        .arg(&fake)
+        .args(["test", "--manifest-path", "x/Cargo.toml"])
+        .env("FAKE_LABEL", "F")
+        .env("FAKE_ORDER", &order)
+        .output()
+        .expect("run the whole-suite argv");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let order_text = std::fs::read_to_string(&order).unwrap();
+    assert_eq!(order_text.trim(), "F", "the argv ran at once");
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -181,6 +181,14 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         reader: Some("fno agents loops table"),
     },
     ArmSpec {
+        arm: "king_settle",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno agents court --nodes"),
+    },
+    ArmSpec {
         arm: "provider_cap",
         default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
         scheduler: SCHED_DAEMON,
@@ -1467,7 +1475,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 18);
+        assert_eq!(KNOWN_ARMS.len(), 19);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")
@@ -1519,6 +1527,12 @@ mod tests {
             crate::king_ledger::CROWN_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
+        let settle = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "king_settle")
+            .expect("king_settle row");
+        assert_eq!(settle.default_interval_s, 300);
+        assert_eq!(settle.scheduler, SCHED_DAEMON);
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {

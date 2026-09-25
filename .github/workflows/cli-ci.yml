@@ -630,6 +630,18 @@ jobs:
           PR_BASE_REF: ${{ github.base_ref }}
         run: bash scripts/ci/check-proto-version-bump.sh
 
+      - name: Registry schema field-set bump guard
+        # Same pull_request wiring as the proto guard, for the registry twin:
+        # a `fields` change in registry_schema.toml without a monotonic
+        # `version` bump re-opens the equal-version read (an fno built before
+        # the field landed reading newer rows as its own version, Python
+        # refusing the lot).
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/check-registry-schema-bump.sh
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -823,8 +835,10 @@ jobs:
     # and tests/common spawn bare python3 (yaml, psutil), the claim parity
     # harness imports through cli/.venv, blueprint_judge shells rg, and the
     # real-process tests spawn both built binaries. The aggregator reads
-    # the matrix as one verdict.
-    timeout-minutes: 20
+    # the matrix as one verdict. On a slow runner image a shard's quarter
+    # of the tests plus the build lands near 20 minutes; the cap leaves
+    # room above that.
+    timeout-minutes: 30
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
 

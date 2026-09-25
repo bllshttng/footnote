@@ -137,22 +137,37 @@ pub fn external_backend_selected() -> bool {
 /// clock instead - a backend outage must not become a hot exec loop).
 pub const SNAPSHOT_REFRESH_SECS: u64 = 10;
 
-/// Execute the backend-neutral snapshot verb (`fno backlog status --snapshot`)
-/// and return its stdout. `None` on any failure - missing binary, non-zero
-/// exit, unparseable stdout - so the caller's last-good/stale machinery treats
-/// a failed snapshot exactly like a failed file read.
+/// Execute the tracker snapshot door (`fno-agents graph-get`'s stdin form,
+/// `{"tracker":"snapshot","stale_ok":true}`) and return its stdout. `None` on
+/// any failure - missing binary, non-zero exit, unparseable stdout - so the
+/// caller's last-good/stale machinery treats a failed snapshot exactly like a
+/// failed file read.
 ///
 /// The snapshot document is the SAME shape `derive_queue` consumes
 /// (`{"backend": ..., "entries": [...]}` with graph-compatible entry fields),
 /// so both reader modes feed the same pure derivation functions; the mux
 /// classification, lanes, and read-time dependency readiness are unchanged.
 pub fn read_snapshot() -> Option<String> {
-    // fno_bin (FNO_BIN override, else the running binary) - the same resolver
-    // every other fno-subprocess site in the crate uses, so the snapshot is
-    // read from the binary version that owns this document's schema.
-    let mut command = crate::process_admission::std_command(crate::server::fno_bin());
-    command.args(["backlog", "status", "--snapshot"]);
-    let out = crate::process_admission::std_output(&mut command).ok()?;
+    use std::io::Write;
+    // fno_agents_bin (FNO_AGENTS_BIN override, else the paired dev binary) -
+    // the snapshot now lives in the fno-agents binary, so the paired-binary
+    // resolver that every other fno-agents subprocess site uses is the one
+    // that owns this document's schema.
+    let mut command =
+        crate::process_admission::std_command(crate::digest_overlay::fno_agents_bin());
+    command.arg("graph-get");
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut command).ok()?;
+    child
+        .stdin
+        .as_mut()?
+        .write_all(br#"{"tracker":"snapshot","stale_ok":true}"#)
+        .ok()?;
+    drop(child.stdin.take());
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1609,7 +1624,7 @@ mod tests {
 
     #[test]
     fn snapshot_document_feeds_the_same_derivation() {
-        // The backend-neutral snapshot (`fno backlog status --snapshot`) is the
+        // The backend-neutral snapshot (the graph-get stdin door) is the
         // same document shape the graph file is: entries[] with graph-compatible
         // fields plus an extra `backend` key the reader must tolerate. Readiness
         // stays derived: a closed blocker arrives as a tombstone row, and an

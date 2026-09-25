@@ -48,24 +48,19 @@ With `--once` the crown rules one wave and expires. Run Who runs this and On cro
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat and a shell watch; the watch runs with `claude --bg --exec`, so a quiet interval invokes no model. Codex uses provider-backed goal actions, not raw prompt-line `/goal` or `/loop`; read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state; Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
 
-The old rule “On Claude, arm ONE monitor, not six” is retired; Claude now arms the loop and settled-PR watch.
+The daemon mails the settle push on every harness:
 
-The old “Nudge-escalation wake” arm label is retired; its event-driven behavior now lives in the settled-PR watch. Codex uses provider-backed goal state and a separate Stop receipt; raw prompt-line commands do not arm it.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks. Codex arms nothing native: its provider goal and Stop receipts are the beat.
 
-1. **Settled-PR watch, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch reads that event, the crown row whose `manifest_session` matches, and its `scope_nodes.nodes` rows marked `owned: true`. A matching node with a ready, blocker-free `fno do pr status <n>` mails the crown one wrapped merge-lever line and exits. A missing crown row, `unreadable_files`, or any failed probe mails `reign watch probe failed: <reading>` and exits 1. The watch lock makes a second launch print its live pid and exit 0. Other matches stay quiet until the next poll.
-
-The watch is a demand arm, not a second board reader. Mail, board, crown liveness, CI, capacity and the tenure verdict remain check-in readings. A red settle stays with the daemon nudge ladder, which names the failing checks.
-
-On Claude, inject the loop as the cheap heartbeat, then launch the watch as a background shell job:
+On Claude, inject the loop as the cheap heartbeat:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
-claude --bg --exec "bash <skill-dir>/scripts/settled-pr-watch.sh <scope> <harness-session-id>"
 ```
 
-The watch's lock makes relaunching it after each check-in or watch wake safe. Confirm the Claude loop and watch receipts and journal them with `reign_armed` (`fno doctor event emit`). For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`; use the beat table for every other harness. A quiet watch costs zero king turns; only an event, mail or the heartbeat wakes the reign.
+Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it. For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`. Use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -124,7 +119,7 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
-Read `fno agents king verdict` and print its first line. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
+Read `fno agents king verdict` and print its first line and its `hygiene:` line. The `hygiene:` line is evidence about this session's own ordering, never a stop. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
 
 ## Recording a ruling
 
@@ -156,7 +151,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or one waiting only on the user, CI or a worker, exits `NoWork`; the next beat, mail or settled-PR watch wakes the reign. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective; the wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires escalates and parks the session; the answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
+Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective. The wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
 
 ## The three halts
 

@@ -6,16 +6,17 @@
 //! journals; it never decides (no spawn, no reap, no lever, no graph write).
 //! Contract: docs/architecture/reign.md and skills/reign/SKILL.md.
 //!
-//! Python resolves the caller's crown scope and the paths Python owns
-//! (journals, graph, handoffs, FAQs, the caller's king manifest) and relays
-//! here, the same split `king-history` applies; the gather and the row write
-//! are native so the Python-tree ratchet holds. The scope fold is the
-//! `court-fold` fold in process, the previous row comes through the
+//! Python resolves the paths Python owns (journals, graph, handoffs, FAQs)
+//! and relays here, the same split `king-history` applies; the caller's
+//! crown scope, level and board state are resolved NATIVELY when `--scope`
+//! is not passed (the scope fold's `resolve_scope`); the gather and
+//! the row write are native so the Python-tree ratchet holds. The scope fold
+//! is the `court-fold` fold in process, the previous row comes through the
 //! `king-history` scan, and the board is the `board` payload read in
 //! process, so the check-in cannot disagree with the surfaces a king already
 //! reads.
 //!
-//! `king-checkin --scope SCOPE --events-path PATH [--events-path ...]
+//! `king-checkin [--scope SCOPE] --events-path PATH [--events-path ...]
 //!              --graph PATH --handoffs-dir PATH [--faqs-dir PATH]
 //!              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 //!              [--no-emit] [--json]`
@@ -2281,10 +2282,64 @@ pub(crate) fn hook_beat(
 // ---------------------------------------------------------------------------
 // entry
 
-/// `king-checkin --scope SCOPE --events-path PATH [--events-path ...]
+/// Fill in the caller-crown inputs the retired Python shell used to resolve:
+/// the scope when `--scope` was not passed (refusing when the crown cannot
+/// be resolved), the crown level from the registry row holding that scope,
+/// and the board-state manifest for the named scope when one exists. The
+/// registry read tolerates unknown keys, so a row carrying a field this
+/// binary predates no longer blinds the resolution.
+fn resolve_missing_crown_inputs(
+    scope: &mut String,
+    level: &mut Option<i64>,
+    board_state: &mut Option<PathBuf>,
+    cwd: &Path,
+) -> Result<(), String> {
+    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+    if scope.is_empty() {
+        *scope = crate::king_verdict_inputs::resolve_scope(None, &registry_path)?;
+    }
+    if level.is_none() {
+        match crate::state::load_registry(&registry_path) {
+            Ok(registry) => {
+                *level = registry
+                    .entries
+                    .iter()
+                    .find(|row| {
+                        row.crown_level.is_some()
+                            && row
+                                .crown_scope
+                                .as_deref()
+                                .map(|s| crate::territory::canonical_scope(s.trim()) == *scope)
+                                .unwrap_or(false)
+                    })
+                    .and_then(|row| row.crown_level)
+                    .map(i64::from);
+            }
+            Err(e) => {
+                eprintln!(
+                    "king-checkin: the agent registry could not be read, so the \
+                     crown level is unresolved: {e}"
+                );
+            }
+        }
+    }
+    if board_state.is_none() {
+        if let Ok(path) = crate::loop_reign::manifest_path(&crate::paths::space_dir(cwd), scope) {
+            if path.is_file() {
+                *board_state = Some(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `king-checkin [--scope SCOPE] --events-path PATH [--events-path ...]
 ///              --graph PATH --handoffs-dir PATH [--faqs-dir PATH]
 ///              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 ///              [--no-emit] [--json]`
+///
+/// With no `--scope`, the caller's crown scope, level and board state are
+/// resolved natively from the registry (the retired Python shell's job).
 ///
 /// rc 0 a completed beat, 3 when an asked-for row was not journalled or
 /// stdout could not be written, 2 usage failure.
@@ -2353,15 +2408,23 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             return 2;
         }
     }
-    if ctx.scope.is_empty()
-        || ctx.events_paths.is_empty()
+    if ctx.events_paths.is_empty()
         || ctx.graph.as_os_str().is_empty()
         || ctx.handoffs_dir.as_os_str().is_empty()
     {
         eprintln!(
-            "fno-agents king-checkin: --scope, --events-path, --graph and \
+            "fno-agents king-checkin: --events-path, --graph and \
              --handoffs-dir are required"
         );
+        return 2;
+    }
+    if let Err(msg) = resolve_missing_crown_inputs(
+        &mut ctx.scope,
+        &mut ctx.level,
+        &mut ctx.board_state,
+        &ctx.cwd,
+    ) {
+        eprintln!("king: {msg}");
         return 2;
     }
 
@@ -4477,6 +4540,108 @@ mod tests {
             stale,
             vec!["stale crown fno on king-gone (stored status exited); fno agents rm king-gone (tool-call reading: no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d)".to_string()]
         );
+    }
+
+    /// The beat defaults under the equal-version trap this repo guards
+    /// against: no `--scope`, no `--level`, no
+    /// `--board-state`. The crowned caller's scope resolves from the
+    /// registry (which may carry fields this binary predates), the level
+    /// comes from the crowned row, and the board state defaults to the
+    /// named scope's king manifest when one exists.
+    #[test]
+    fn no_scope_resolves_scope_level_and_board_state_natively() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-checkin-crown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("registry.json"),
+            serde_json::json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "agents": [serde_json::json!({
+                    "name": "king-a792",
+                    "cwd": "/tmp/x",
+                    "created_at": "2026-09-01T00:00:00Z",
+                    "status": "idle",
+                    "harness": "claude",
+                    "harness_session_id": "ses-crown",
+                    "crown_level": 2,
+                    "crown_scope": "probe fleet",
+                    "future_field": "x",
+                })],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let home_backup = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+        for (marker, _) in crate::claims::HARNESS_SESSION_MARKERS
+            .iter()
+            .chain(crate::claims::LEGACY_HARNESS_SESSION_MARKERS.iter())
+        {
+            std::env::remove_var(marker);
+        }
+        std::env::set_var("FNO_HARNESS_NAME", "claude");
+        std::env::set_var("FNO_HARNESS_SESSION_ID", "ses-crown");
+
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let scope = crate::territory::canonical_scope("probe fleet");
+        let expected_board = crate::paths::space_dir(&repo)
+            .join("kings")
+            .join(format!("{scope}.md"));
+        std::fs::create_dir_all(expected_board.parent().unwrap()).unwrap();
+        std::fs::write(&expected_board, "# reign\n").unwrap();
+
+        let mut got_scope = String::new();
+        let mut level: Option<i64> = None;
+        let mut board_state: Option<PathBuf> = None;
+        let resolved =
+            resolve_missing_crown_inputs(&mut got_scope, &mut level, &mut board_state, &repo);
+        std::env::remove_var("FNO_HARNESS_NAME");
+        std::env::remove_var("FNO_HARNESS_SESSION_ID");
+        match home_backup {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        resolved.expect("the crowned caller's inputs must resolve");
+        assert_eq!(got_scope, scope);
+        assert_eq!(level, Some(2));
+        assert_eq!(board_state, Some(expected_board));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An explicit `--level` stands; a registry that cannot be read leaves
+    /// the level unresolved with one stderr line naming the read error,
+    /// never a failed beat.
+    #[test]
+    fn level_default_degrades_on_an_unreadable_registry() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-checkin-level-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_backup = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+
+        let mut scope = String::from("probe");
+        let mut level: Option<i64> = None;
+        let mut board_state: Option<PathBuf> = None;
+        let resolved =
+            resolve_missing_crown_inputs(&mut scope, &mut level, &mut board_state, &base);
+        match home_backup {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        resolved.expect("a levelless unreadable registry must not fail the beat");
+        assert_eq!(level, None);
+        assert_eq!(board_state, None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn held_page(

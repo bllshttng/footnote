@@ -168,6 +168,11 @@ fn main() {
             &args[1..],
         ));
     }
+    // PR-scoped callers resolve the local checkout from the head branch;
+    // transport-only, so this adds no client action to the curated menu.
+    if args.first().map(String::as_str) == Some("pr-worktree") {
+        std::process::exit(fno_agents::pr_worktree::run());
+    }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
     // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
     // no client action (the shrink law allows none); Python's

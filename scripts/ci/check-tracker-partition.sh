@@ -57,6 +57,47 @@ def projection_names(src):
         return False
     return sorted(c.name for c in by_name.values() if c.name == "TrackerNode" or is_proj(c))
 
+def extract_rust_fields(src, struct_name):
+    """The `pub <name>:` fields declared inside `pub struct <Name> { ... }`.
+
+    A `#[serde(flatten)]` field contributes its TYPE's fields, not its own
+    name. Field names come from the Rust projections; every name found here
+    joins the tracker side of the partition check.
+    """
+    import re
+    struct_re = re.compile(r"pub struct (\w+) \{")
+    m = struct_re.search(src)
+    while m and m.group(1) != struct_name:
+        m = struct_re.search(src, m.end())
+    if not m:
+        raise KeyError(f"no struct {struct_name!r} in Rust source")
+    depth = 1
+    pos = m.end()
+    fields = set()
+    pending_flatten = False
+    pending_type = None
+    lines = src[m.end():].split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if "{" in stripped:
+            depth += 1
+        if "}" in stripped and depth > 1:
+            depth -= 1
+        if "}" in stripped and depth == 1 and not stripped.startswith("//"):
+            break
+        fm = re.match(r"pub (\w+):\s*([^,]+),?", stripped)
+        if fm:
+            if pending_flatten:
+                fields |= extract_rust_fields(src, fm.group(2).strip())
+            else:
+                fields.add(fm.group(1))
+            pending_flatten = False
+            pending_type = None
+            continue
+        if "#[serde(flatten)]" in stripped:
+            pending_flatten = True
+    return fields
+
 ALLOWED_OVERLAP = frozenset({"id"})
 
 def extra_overlap(tracker, sidecar):
@@ -92,6 +133,27 @@ assert names == ["TrackerCandidate", "TrackerNode"], f"projection discovery brok
 # Positive control 4: a forbidden name declared only on the SUBCLASS projection
 # is caught by the union rule (a subclass is not a place to smuggle a mirror).
 assert extra_overlap({"id", "priority"}, {"id", "batch", "priority"}) == {"priority"}, "subclass overlap detection broken"
+# Positive control 5: the Rust extractor finds declared fields inside a pub
+# struct body, resolves the flattened type's fields instead of the flatten
+# field's own name, and skips non-pub lines.
+rust_snippet = '''
+pub struct TrackerNode {
+    pub id: String,
+    pub details: Option<String>,
+    /// not a field
+    fn helper() {}
+}
+
+pub struct Candidate {
+    pub priority: String,
+    #[serde(flatten)]
+    pub node: TrackerNode,
+}
+'''
+got_rust = extract_rust_fields(rust_snippet, "TrackerNode")
+assert got_rust == {"id", "details"}, f"rust extraction broken: got {got_rust}"
+got_cand = extract_rust_fields(rust_snippet, "Candidate")
+assert got_cand == {"priority", "id", "details"}, f"rust flatten broken: got {got_cand}"
 print("check-tracker-partition self-test OK")
 PY
   exit $?
@@ -100,16 +162,18 @@ fi
 [[ "${1:-}" != "" ]] && REPO_ROOT="$1"
 TYPES="$REPO_ROOT/cli/src/fno/tracker/types.py"
 SIDECAR="$REPO_ROOT/cli/src/fno/tracker/sidecar.py"
-for f in "$TYPES" "$SIDECAR"; do
+RUST="$REPO_ROOT/crates/fno-agents/src/tracker/mod.rs"
+for f in "$TYPES" "$SIDECAR" "$RUST"; do
   [[ -f "$f" ]] || { echo "check-tracker-partition: missing $f" >&2; exit 1; }
 done
 
-python3 - "$TYPES" "$SIDECAR" <<'PY'
+python3 - "$TYPES" "$SIDECAR" "$RUST" <<'PY'
 import ast, sys
 from pathlib import Path
 
 types_src = Path(sys.argv[1]).read_text()
 sidecar_src = Path(sys.argv[2]).read_text()
+rust_src = Path(sys.argv[3]).read_text()
 
 def extract_fields(src, class_name):
     tree = ast.parse(src)
@@ -136,6 +200,39 @@ def projection_names(src):
         return False
     return sorted(c.name for c in by_name.values() if c.name == "TrackerNode" or is_proj(c))
 
+def extract_rust_fields(src, struct_name):
+    """The `pub <name>:` fields declared inside `pub struct <Name> { ... }`.
+
+    A `#[serde(flatten)]` field contributes its TYPE's fields, not its own
+    name. Field names come from the Rust projections; every name found here
+    joins the tracker side of the partition check.
+    """
+    import re
+    struct_re = re.compile(r"pub struct (\w+) \{")
+    m = struct_re.search(src)
+    while m and m.group(1) != struct_name:
+        m = struct_re.search(src, m.end())
+    if not m:
+        raise KeyError(f"no struct {struct_name!r} in Rust source")
+    lines = src[m.end():].split("\n")
+    fields = set()
+    pending_flatten = False
+    for line in lines:
+        stripped = line.strip()
+        if "}" in stripped and not stripped.startswith("//") and "{" not in stripped:
+            break
+        fm = re.match(r"pub (\w+):\s*([^,]+),?", stripped)
+        if fm:
+            if pending_flatten:
+                fields |= extract_rust_fields(src, fm.group(2).strip())
+            else:
+                fields.add(fm.group(1))
+            pending_flatten = False
+            continue
+        if "#[serde(flatten)]" in stripped:
+            pending_flatten = True
+    return fields
+
 ALLOWED_OVERLAP = frozenset({"id"})
 
 projections = projection_names(types_src)
@@ -150,9 +247,25 @@ if not projections:
 sidecar = extract_fields(sidecar_src, "Sidecar")
 # Union across every projection: an inherited field (id on subclasses) is
 # covered by its declaring class, a smuggled mirror on any projection is caught.
+# The Rust projections (TrackerNode, Candidate in tracker/mod.rs) join the same
+# union: a `#[serde(flatten)]` field contributes its type's fields.
 tracker: set = set()
 for name in projections:
     tracker |= extract_fields(types_src, name)
+rust_projections = ["TrackerNode", "Candidate"]
+rust_fields: set = set()
+for name in rust_projections:
+    try:
+        rust_fields |= extract_rust_fields(rust_src, name)
+    except KeyError:
+        print(
+            "check-tracker-partition: FAIL - Rust projection "
+            f"{name!r} not found in {sys.argv[3]}; the gate inspects the "
+            "Rust structs, so a missing one is a refusal, never a pass.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+tracker |= rust_fields
 overlap = tracker & sidecar
 # Require the overlap to be EXACTLY {id}: the join key must be present on both
 # sides (an empty overlap is not "clean", it is a missing key) and nothing else
@@ -170,14 +283,15 @@ extra = overlap - ALLOWED_OVERLAP
 if extra:
     print(
         "check-tracker-partition: FAIL - sidecar and tracker share non-key "
-        f"fields {sorted(extra)} (projections inspected: {projections}). The "
-        "sidecar may hold only fields the tracker cannot express; a shared "
-        "name is the two-writer bug the partition exists to prevent.",
+        f"fields {sorted(extra)} (projections inspected: {projections} + Rust "
+        f"{rust_projections}). The sidecar may hold only fields the tracker "
+        "cannot express; a shared name is the two-writer bug the partition "
+        "exists to prevent.",
         file=sys.stderr,
     )
     sys.exit(1)
 print(
     f"check-tracker-partition: OK - overlap is exactly the join key {sorted(overlap)} "
-    f"across projections {projections}"
+    f"across projections {projections} + Rust {rust_projections}"
 )
 PY

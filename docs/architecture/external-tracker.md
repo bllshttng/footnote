@@ -26,7 +26,10 @@ Both sides carry `id` as the join key, never as a synced value.
 
 ## The interface
 
-Read from the tracker, five fields, on `TrackerNode` in `cli/src/fno/tracker/types.py`.
+The interface lives in Rust, on `TrackerNode` and `Candidate` in `crates/fno-agents/src/tracker/mod.rs`.
+The Python `fno.tracker` package is the exec client: it shells `fno-agents graph-get` and parses the pydantic models in `cli/src/fno/tracker/types.py`.
+
+Read from the tracker, five fields plus the display-only reads.
 
 | field | why |
 |---|---|
@@ -35,15 +38,37 @@ Read from the tracker, five fields, on `TrackerNode` in `cli/src/fno/tracker/typ
 | `state` | open or closed, footnote derives its own rung |
 | `parent` | epic rollup, board ordering |
 | `blocked_by` | merge-triggered dispatch via `backlog advance` |
+| `details` | display only, the issue body |
+| `url` | display only, the issue page |
+| `size` | display only, when the backend carries one |
+
+`list_open` widens each open item with the selection-only ordering inputs: `priority`, `rank`, `created_at`.
+`list_closed_since(days)` returns the closed window, or `None` when the backend keeps none; the Done column and cycle time empty out without it.
+A backend keeps a closed window only if it can answer it bounded.
 
 Write to the tracker, one operation.
 `close(id)` runs at node closure.
 A PR link is a comment or a native issue-PR link, not a field write.
 
 `status` is not on the interface and never will be.
-It is derived in `fno.graph.types._derive_status` from `completed_at`, `superseded_by`, `deferred_at`, `pr_number`, `blocked_by`, and the plan rung.
+It is derived from `completed_at`, `superseded_by`, `deferred_at`, `pr_number`, `blocked_by`, and the plan rung.
+For an open external item the one derivation is in `tracker/snapshot.rs`: a PR means `in_review`, else a plan means `ready`, else `idea`.
 A backend supplies open or closed.
-footnote keeps deriving the rest from the plan and the PR exactly as it does today.
+
+## The door and the cache
+
+Backends answer through `fno-agents graph-get`'s stdin door, the same stdin-JSON shape `gh-budget` uses on `fleet-incident`.
+The payload is `{"tracker": "read" | "list-open" | "snapshot" | "close", "backend": <name or null>, "id": <id or null>, "stale_ok": <bool>}`.
+The door prints one JSON object and exits 0 whenever the op ran; refusals ride in the payload as `{"not_found": true}` or `{"error": "..."}`.
+
+The `snapshot` op builds the joined view once per backend and caches the last good read at `<state_dir>/sidecar/.snapshot/<backend>-<encoded-scope>.json`.
+The scope is what selects the item set besides the backend name: `FNO_TRACKER_GITHUB_REPO` for github, empty for graph, the Linear team or the Jira project later.
+Only the board passes `stale_ok`; on a failed build it answers the cached snapshot plus `stale_since` and the failure as an errors line, so a backend outage degrades to the last good read instead of blanking the board.
+Selection never passes `stale_ok`, so dispatch never picks from stale data.
+
+GitHub parent and blocker links stay degraded (`parent: null`, `blocked_by: []`).
+`gh issue list --json` carries neither, and reading sub-issues and dependencies costs two REST calls per open issue per refresh.
+A repo with more than 1,000 open issues is truncated, as is the listing cap.
 
 ## The sidecar
 

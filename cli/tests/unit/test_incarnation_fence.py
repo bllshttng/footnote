@@ -132,6 +132,9 @@ def test_run_merge_blocked_by_fence(monkeypatch, tmp_path):
     # state from another test in the same xdist worker (round-12 review fix).
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+    monkeypatch.setattr(
         "fno.claims.incarnation.resolve_fence_session_uuid", lambda cwd=None: "uuid1"
     )
     monkeypatch.setattr(

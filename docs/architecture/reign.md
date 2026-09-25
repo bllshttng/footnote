@@ -7,14 +7,14 @@ A pass encodes a wave and abdicates (`/fno:reign <scope> --once`). A reign witho
 Three facts fix the design, all measured against the harness internals:
 
 - The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, and exits `NoWork` on a clean board or while it waits only on the user, CI or a worker. `NoProgress` remains the bounded fail-closed path.
-- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`; its settled-PR watch runs as `claude --bg --exec`, so quiet polling invokes no model. Other harnesses use the heartbeat or external wake documented in the beat table.
-- `king.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache. The watch is event-driven, not a Monitor, and relaunch is single-flight through its scope lock.
+- Claude can inject the native `/loop` with `fno agents mail send '<command>' --to-self --raw`. The daemon's `king_settle` arm mails every crown on every harness, so quiet polling invokes no model anywhere. Other harnesses use the heartbeat or external wake documented in the beat table.
+- `king.checkin_interval` is a 55-minute heartbeat under the one-hour prompt cache.
 
 ## The one arm, and the demand reads
 
-The settled-PR watch is the one demand arm. It polls the crown row and `pr_nudge_escalated`, then checks only owned nodes and their PR merge gates. A quiet shell job costs no king turns; a matched ready PR mails the crown and exits. Its scope lock makes a check-in or postcompact relaunch safe.
+The `king_settle` arm is the one push arm. The daemon reads the court on its 300s beat. It mails the crown once per covered PR that settles green, and once per covered node that merges and closes. The king arms no watch.
 
-1. **Settled-PR watch, 600s.** The daemon nudge ladder is the one poke for every quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch joins that event to `manifest_session` and `owned` scope nodes, then reads `fno do pr status`. Ready with no blockers mails the crown the merge lever. A missing court row, unreadable event file or failed probe mails a named failure and exits.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm joins the court's owned nodes to their PR status reads. A green settled PR mails the crown the merge lever. A node that merged and closed mails the next-dispatch lever. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
 The deleted arms are demand reads. Each is read on demand. Mail arrives as a conversation turn and cannot be missed. The board and crown liveness are check-in body reads. A red row in `fno agents status` stays the mechanical trigger for the one dispatch exception. Main CI is read as one verdict token (`red`, `green`, `pending`), never a check-run count. Several of the most productive reign wakes began with "main flipped green". Capacity is the spawn gate's job. The gate refused twice in the measured reign, correctly. The band's five readings changed no decision.
 
@@ -44,7 +44,7 @@ The crown survives a compact. Its evidence does not. After a compaction the sess
 
 ## Stop semantics
 
-Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next heartbeat, mail or settled-PR watch wakes it. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook.
+Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next heartbeat or mail wakes it, and the daemon's settle mail is mail. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook.
 
 ## The dispatch exception and its journal row
 
@@ -71,6 +71,8 @@ Three different crown counts travel under similar words, and collapsing them is 
 Four bounds, each with a state of `exceeded`, `within`, or `absent`. `iterations` reads loop fires against the manifest's `budget_max_iterations`. When `respawn_ceiling` is 0, `respawns` reads absent. Otherwise it reads `respawn_count` against `respawn_ceiling`. For Claude, `compactions` counts the transcript's own `compact_boundary` lines at or after the crown start. It falls back to post-compact `context_snapshot` rows in the journal. Other harnesses keep the journal reading. `block_cap` reads the `loop_check_config` recording, absent with no row. An absent bound never prints as satisfied. An unset bound and a satisfied bound are different readings. A court crown older than two check-in intervals with no recent loop check-in reads `unknown`, not `converging`.
 
 The delivery trend splits the crown scope at the manifest `created_at`. Rows created before it are INHERITED. Rows created after are FILED by this reign. A king that files real work raises the raw undelivered count by working well. So `stalled` keys only on the inherited set. The last fire read a quiet board. Inherited nodes sit undelivered. None closed inside the window of three check-in intervals. Filing never makes a reign read stalled.
+
+The verdict also reports five hygiene checks from the holder's transcript: claim-before-read, spawn/abdication exit, crown verification, PR-watch kickoff, and context timing. An inherited crown passes crown verification when the holder reads `fno agents court` before its first ruling; a coronation call also qualifies. Delivery attribution starts at `generation_start`, the earlier of holder registry-row birth and manifest `created_at`. The reader caps each transcript at 4 MiB. A missing, unreadable, or over-cap transcript is `unmeasurable`, never clean. Hygiene is evidence and never changes the verdict or bound summary.
 
 One owner assembles the verdict's inputs. The native `king-verdict` verb resolves the caller crown, the canonical scope, the crown manifest, the config values, the graph scope, and the window. It reads the inherited/filed delivery split. It scans the journals, decides the verdict, and renders the JSON payload and the human page. The config keys are `king.checkin_interval` and `king.compaction_ceiling`. Every refusal names the failed reading, and none degrade to zero. An explicit scope reads that scope's own manifest at `<space>/kings/<scope>.md`, not the caller's. Python keeps only the Typer transport, the event-path enumeration, the binary resolution, and the durable operator-channel writes. The escalation question's words render natively beside the same inputs.
 

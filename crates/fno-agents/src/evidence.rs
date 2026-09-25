@@ -459,10 +459,12 @@ pub fn check_ruling_evidence(
         return Err(refusal(
             "unmeasured",
             format!(
-                "the ruling asserts a code fact ('{}') and carries no read. Attach \
-                 --read with the command that produced it; the command runs at \
-                 record time and its output is stored on the row. Example: --read \
-                 \"rg -c 'def record' cli/src/fno/law.py\". Pair a zero with a control.",
+                "the ruling asserts a code fact ('{}') and carries no read. Attach --read <command>: \
+                 it runs at record time and its output is stored on the row. fno inbox decide and \
+                 fno inbox law set take --read. fno inbox outstanding clear does not: record the answer \
+                 with fno inbox decide <subject> \"<answer>\" --question-id <q> --read \"<command>\", \
+                 then run fno inbox outstanding clear <q> with no --answer. Example: --read \
+                 \"rg -n '<term>' <file>\". Pair a zero with a control.",
                 claims[0]
             ),
         ));
@@ -820,6 +822,10 @@ mod tests {
         assert_eq!(err.kind, "unmeasured");
         assert!(err.message.contains("167 lines"));
         assert!(err.message.contains("Pair a zero with a control"));
+        assert!(err.message.contains("fno inbox decide"));
+        assert!(err.message.contains("--question-id"));
+        assert!(err.message.contains("fno inbox outstanding clear"));
+        assert!(err.message.contains("with no --answer"));
     }
 
     #[test]

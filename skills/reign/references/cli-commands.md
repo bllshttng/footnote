@@ -148,7 +148,7 @@ Answer a message with `fno agents mail reply --to <msg-id>`. It threads the repl
 
 | Receipt reads | What it means |
 |---|---|
-| `delivered (hosted)` | Confirmed. |
+| `delivered (hosted)` | Inject accepted. It does not prove it was read. Check `landed` in `fno agents mail sent`. |
 | `queued (durable)` | Can sit undrained. No receipt is no coordination. |
 | `[bus-only]` | Drains by design at the recipient's turn boundary. The receipt IS coordination. |
 

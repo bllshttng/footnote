@@ -12,7 +12,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -82,6 +81,52 @@ class FakeTracker:
     def close(self, id):
         raise AssertionError("close is not part of selection")
 
+    def _call(self, op, id=None):
+        """The door-shaped document: open entries joined with sidecar fields,
+        closed rows as tombstones."""
+        assert op == "snapshot"
+        import fno.tracker.sidecar as sidecar_store
+
+        entries = []
+        for c in self.list_open():
+            try:
+                sc = sidecar_store.load(c.id)
+            except Exception as exc:
+                raise RuntimeError(f"sidecar read failed for {c.id}: {exc}")
+            entries.append({
+                "id": c.id,
+                "title": c.title,
+                "state": "open",
+                "status": _open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
+                "parent": c.parent,
+                "blocked_by": list(c.blocked_by),
+                "priority": c.priority,
+                "rank": c.rank,
+                "created_at": c.created_at,
+                "cwd": sc.cwd,
+                "plan_path": sc.plan_path,
+                "pr_number": sc.pr_number,
+                "pr_url": sc.pr_url,
+                "additional_prs": sc.additional_prs,
+                "batch": sc.batch,
+                "contained_in": sc.contained_in,
+                "sessions": sc.sessions,
+                "claimed_at": sc.claimed_at,
+                "cost_usd": sc.cost_usd,
+            })
+        for r in self._rows:
+            if r.get("state", "open") != "open":
+                entries.append(
+                    {"id": r["id"], "state": "closed", "status": "done", "completed_at": "closed"}
+                )
+        return {"backend": self.name, "entries": entries}
+
+
+def _open_status(*, pr_number, plan_path):
+    if pr_number:
+        return "in_review"
+    return "ready" if plan_path else "idea"
+
 
 def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     """Point tracker, sidecar store, claims, and the local graph at fakes."""
@@ -117,6 +162,23 @@ def _rows_basic():
         {"id": "EXT-lo", "title": "Low prio leaf", "priority": "p3",
          "created_at": _days_ago(1)},
     ]
+
+
+def test_next_never_selects_a_closed_tombstone(tmp_path, monkeypatch):
+    """AC10-HP: a closed row rides the snapshot as a tombstone; selection
+    filters it out even when it ranks first."""
+    rows = [
+        {"id": "EXT-done", "title": "Already closed", "priority": "p0",
+         "state": "closed", "created_at": _days_ago(1)},
+        {"id": "EXT-hi", "title": "High prio leaf", "priority": "p1",
+         "created_at": _days_ago(2)},
+    ]
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+    })
+    r = runner.invoke(app, ["backlog", "next"], catch_exceptions=False)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
 
 
 def test_next_joins_once_and_ranks_over_the_open_set(tmp_path, monkeypatch):

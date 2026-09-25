@@ -1706,6 +1706,14 @@ def run_merge(
         return 1
     pr_number = int(pr_raw)
 
+    try:
+        from fno.pr._review_hold import resolve_pr_worktree
+
+        repo = resolve_pr_worktree(pr_number, repo)
+    except Exception as exc:
+        _emit(pr_number, "held", str(exc), "none", err=True)
+        return 2
+
     # The plan-level hold and the in-flight review hold used to be asked here,
     # ahead of every other gate. Both now belong to the authorized-merge owner,
     # which the terminal's auto-merge arm consults too - the arm never asked
