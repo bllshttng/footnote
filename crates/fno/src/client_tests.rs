@@ -611,6 +611,10 @@ pub(super) fn two_pane_view() -> View {
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
     view.frames.insert(11, text_frame(29, 36, 'b'));
+    // Pin the row shape: these helpers assert display-row geometry, and the
+    // card default (ambient config or no config at all) inserts a detail
+    // line per agent and moves every row index.
+    view.sideline_layout = sideline_color::SidelineLayout::List;
     view
 }
 
