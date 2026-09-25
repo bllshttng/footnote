@@ -366,14 +366,13 @@ pub fn list_in_strict(
     list_in_result_with_policy(dirs, prefix, include_stale, true, false).map(|(records, _)| records)
 }
 
-/// The projection listing: every record whose lease window has not lapsed,
-/// including the pid-less TTL leases a liveness classify reads Free. Liveness
-/// signalling belongs to the read-time recompute, not a filter here.
+/// The projection listing: in-window records plus the pid-less TTL leases a
+/// liveness classify reads Free. An expired claim must not project a holder.
 pub(crate) fn list_in_window(
     dirs: &[PathBuf],
     prefix: Option<&str>,
 ) -> Result<Vec<ClaimRecord>, String> {
-    list_in_result_with_policy(dirs, prefix, true, true, true).map(|(records, _)| records)
+    list_in_result_with_policy(dirs, prefix, false, true, true).map(|(records, _)| records)
 }
 
 /// Ok carries the records plus the directories whose `read_dir` succeeded,
@@ -940,11 +939,9 @@ pub fn classify_with_basis_and_exclusivity(
             return verdict;
         }
     }
-    // A blueprint-session claim is a lease on the PLANNING WINDOW, clock-only
-    // like a `review:branch:` hold: a native subagent planner shares its
-    // parent's pid and session id, so the hybrid arm and the witness would
-    // both heal the claim for the parent's whole life after a mid-flow
-    // TaskStop. The manual `claim release --holder` stays the fast path.
+    // A blueprint-session claim leases the PLANNING WINDOW, clock-only: a
+    // planner shares its parent's pid, so the hybrid arm and the witness
+    // would heal the claim for the parent's whole life after a TaskStop.
     if rec.holder.starts_with(BLUEPRINT_HOLDER_PREFIX)
         && now
             >= rec
@@ -2634,8 +2631,7 @@ pub fn release(
 }
 
 /// Release a claim and return the exact record removed under the recovery
-/// mutex. A pre-read cannot stand in for this receipt: the holder may have
-/// changed between status and release.
+/// mutex; a pre-read cannot stand in for it (the holder may have changed).
 pub(crate) fn release_with_receipt(
     key: &str,
     holder: &str,
@@ -2646,6 +2642,11 @@ pub(crate) fn release_with_receipt(
         return Err("key and holder must be non-empty".into());
     }
     let path = claim_path(key, root)?;
+    // Nothing to serialize when the claim is absent: the mutex lives beside
+    // the lockfile and would fail a release in a never-claimed root.
+    if !path.exists() {
+        return Ok(None);
+    }
     with_recovery_lock(&path, || {
         let existing = match read_claim_file(&path) {
             Ok(rec) => rec,

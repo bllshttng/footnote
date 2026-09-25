@@ -1504,9 +1504,10 @@ pub fn recompute_statuses_with_plan_rungs(
 
 /// The per-entry half of [`recompute_statuses_with_plan_rungs`]: normalize,
 /// migrate vocabulary, and derive each row's own status from its facts.
-/// Returns the children-by-parent map the container rollup needs. READ paths
-/// call THIS, never the full recompute: the rollup is a write-path cascade,
-/// and re-deriving parents from children on every read would flap board lanes.
+/// Returns the children-by-parent map the container rollup needs. WRITE-path
+/// only: reads never derive status (a projected claim projects the holder,
+/// never the word), so a read cannot invent a transition the write path
+/// never stamped.
 pub fn derive_entry_statuses(
     entries: &mut [Value],
     plan_rungs: Option<&BTreeMap<String, String>>,
@@ -2629,11 +2630,6 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         }
     };
     apply_defaults(&mut rows, false);
-    // The claim projection landed locked_by AFTER the last write-time
-    // recompute, so a lockfile-only claim (acquire without a graph write)
-    // otherwise reads with its stored status. Re-derive here; plan-derived
-    // statuses keep their stored values (plan_rungs None).
-    derive_entry_statuses(&mut rows, None);
     Ok(rows)
 }
 
@@ -2647,7 +2643,6 @@ pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreErr
     }
     let mut rows = crate::backlog::read_pr_entries(path, pr).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
-    derive_entry_statuses(&mut rows, None);
     Ok(rows)
 }
 

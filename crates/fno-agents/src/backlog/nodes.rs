@@ -357,6 +357,9 @@ fn project_claim(record: &crate::claims::ClaimRecord) -> Result<NodeClaim, Strin
             )
         })?
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let work = !record
+        .holder
+        .starts_with(crate::claims::BLUEPRINT_HOLDER_PREFIX);
     Ok(NodeClaim {
         locked_by: record
             .session_id
@@ -365,6 +368,7 @@ fn project_claim(record: &crate::claims::ClaimRecord) -> Result<NodeClaim, Strin
         harness: record.harness.clone(),
         harness_session: record.session_id.clone(),
         locked_at: Some(acquired_at),
+        work,
     })
 }
 
@@ -383,9 +387,12 @@ fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>,
             "SELECT key, holder, schema_version, acquired_at, expires_at, pid,
                     pid_unavailable, host, machine_id, reason, harness, session_id,
                     pid_provenance, metadata
-             FROM claims WHERE key LIKE 'node:%' ORDER BY key",
+             FROM claims WHERE key LIKE 'node:%'
+               AND (expires_at IS NULL OR expires_at > ?1)
+             ORDER BY key",
         )
         .map_err(|error| error.to_string())?;
+    let now = crate::claims::now_ms();
     let mut claims = std::collections::HashMap::new();
     struct Row {
         key: String,
@@ -404,7 +411,7 @@ fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>,
         metadata: String,
     }
     let mut rows = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params![now], |row| {
             Ok(Row {
                 key: row.get(0)?,
                 holder: row.get(1)?,
@@ -452,14 +459,19 @@ pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, No
     // Union of the claims db and the lockfile scan: the db is the holder
     // source of truth for claims it holds, and the lockfiles cover legacy
     // writers (the Python acquire path) plus readers that cannot open the
-    // db (a fenced worktree build). Shared keys answer from the db.
+    // db (a fenced worktree build). Shared keys answer from the db. Either
+    // source failing degrades to what the other saw: this map feeds the
+    // read projection, and a claims outage must not take the board read
+    // with it - the selection and territory gates re-check liveness on
+    // their own and refuse closed there (list_strict, never this map).
     let mut claims = node_claims_from_db().unwrap_or_default();
-    let records = list_node_claims(Some("node:"))?;
-    for record in records {
-        if let Some(node_id) = record.key.strip_prefix("node:") {
-            claims
-                .entry(node_id.to_string())
-                .or_insert_with(|| project_claim(&record).unwrap_or_default());
+    if let Ok(records) = list_node_claims(Some("node:")) {
+        for record in records {
+            if let Some(node_id) = record.key.strip_prefix("node:") {
+                claims
+                    .entry(node_id.to_string())
+                    .or_insert_with(|| project_claim(&record).unwrap_or_default());
+            }
         }
     }
     Ok(claims)

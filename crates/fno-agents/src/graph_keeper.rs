@@ -1004,11 +1004,6 @@ fn read_graph_gated(state: &StoreState, _strict: bool) -> Result<GraphRead, Stor
         // computed children summaries are exactly the part a raw
         // read_entries row lacks.
         graph_store::apply_defaults(&mut entries, false);
-        // export_rows projected the lockfile claims into these rows AFTER the
-        // last write-time recompute, so a lockfile-only claim (acquire with
-        // no graph write) otherwise reads with its stored status. Re-derive;
-        // plan-derived statuses keep their stored values (plan_rungs None).
-        graph_store::derive_entry_statuses(&mut entries, None);
         let entries = Arc::new(entries);
         let post = crate::backlog::version(&state.graph)
             .map_err(|error| sqlite_unreadable(state, error))?;
@@ -1579,6 +1574,38 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
 /// serialized result") is checkable on the wire. `read` is the soft path
 /// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
 /// diagnoses without writing.
+/// The one status read only the display surfaces carry: a live WORK claim
+/// reads its idea/ready node as in_progress while it holds; a
+/// blueprint-session claim leases the planning window only and never moves
+/// the word. Reply-only, over a private copy: the cached rows and every
+/// write snapshot (begin, the rank board lanes, wire_rows) keep the stored
+/// status.
+fn overlay_work_claim_statuses(entries: &mut [Value]) {
+    let Ok(claims) = crate::backlog::nodes::node_claims_by_id() else {
+        return;
+    };
+    for entry in entries.iter_mut() {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(claim) = claims.get(id) else {
+            continue;
+        };
+        if !claim.work {
+            continue;
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            if obj
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| matches!(status, "idea" | "ready"))
+            {
+                obj.insert("status".to_string(), Value::String("in_progress".into()));
+            }
+        }
+    }
+}
+
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let strict = params
         .get("strict")
@@ -1597,6 +1624,7 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // The cached rows are shared (Arc), so the reply carries a private copy:
     // the marker is reply-only and must never reach a write snapshot.
     let mut entries = (*entries).clone();
+    overlay_work_claim_statuses(&mut entries);
     crate::node_reading::attach_reading(&mut entries);
     Ok(json!({ "entries": entries }))
 }
@@ -1637,6 +1665,7 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             None => missing.push(token.clone()),
         }
     }
+    overlay_work_claim_statuses(&mut out);
     crate::node_reading::attach_reading(&mut out);
     Ok(json!({"entries": out, "missing": missing}))
 }

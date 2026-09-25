@@ -271,6 +271,11 @@ pub struct NodeClaim {
     pub harness: Option<String>,
     pub harness_session: Option<String>,
     pub locked_at: Option<String>,
+    /// A live work claim (any holder but `blueprint-session:`): idea/ready
+    /// read in_progress while it holds. A blueprint claim leases the
+    /// planning window only and projects the holder without moving the
+    /// status word.
+    pub work: bool,
 }
 
 /// The dispatch fields (one node_dispatch row).
@@ -640,6 +645,9 @@ impl Node {
                 harness: sub_opt_str(&claim_part, "locked_by_harness"),
                 harness_session: sub_opt_str(&claim_part, "locked_by_harness_session"),
                 locked_at: sub_opt_str(&claim_part, "locked_at"),
+                // The stored fallback never flips status; only a freshly
+                // projected claim carries the holder kind that decides it.
+                work: false,
             },
             dispatch: Dispatch {
                 verb: sub_opt_str(&dispatch_part, "dispatch_verb"),
