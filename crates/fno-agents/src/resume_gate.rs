@@ -49,7 +49,7 @@ fn session_nodes<'a>(entries: &'a [Value], session_id: &str) -> Vec<&'a Value> {
                 .and_then(Value::as_array)
                 .is_some_and(|rows| {
                     rows.iter().any(|r| {
-                        s_str(r, "phase").is_some_and(|p| p.eq_ignore_ascii_case("do"))
+                        s_str(r, "phase").is_some_and(|p| p.eq_ignore_ascii_case("execute"))
                             && s_str(r, "session_id")
                                 .is_some_and(|s| s.eq_ignore_ascii_case(session_id))
                     })

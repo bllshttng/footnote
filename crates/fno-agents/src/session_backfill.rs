@@ -34,7 +34,7 @@ fn phase_of(verb: &str) -> Option<&'static str> {
     match verb {
         "think" => Some("think"),
         "blueprint" => Some("blueprint"),
-        "target" | "execute" | "do" => Some("do"),
+        "target" | "execute" | "do" => Some("execute"),
         "review" => Some("review"),
         "pr" | "ship" => Some("ship"),
         _ => None,
@@ -160,7 +160,7 @@ pub fn run(args: &[String]) -> i32 {
 type Counts = BTreeMap<&'static str, BTreeMap<&'static str, u64>>;
 
 fn bump(counts: &mut Counts, phase: &str, key: &'static str) {
-    let phase = ["think", "blueprint", "do", "review", "ship"]
+    let phase = ["think", "blueprint", "execute", "review", "ship"]
         .into_iter()
         .find(|p| *p == phase)
         .unwrap_or("other");
@@ -247,7 +247,7 @@ fn plan(
             let (started, ended) = (field("started_at"), field("ended_at"));
             // A ship row's end is its merge (phase_close); a do row's end is
             // its gated settle.
-            let wants_end = ended.is_none() && !matches!(phase, "ship" | "do");
+            let wants_end = ended.is_none() && !matches!(phase, "ship" | "execute");
             if started.is_none() {
                 bump(&mut counts, phase, "start_missing");
             }

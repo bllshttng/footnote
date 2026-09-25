@@ -322,7 +322,7 @@ pub fn project(
             let Some(started) = s_field(row, "started_at") else {
                 continue;
             };
-            if phase == "do" {
+            if phase == "execute" {
                 rows.push(FeedRow {
                     ts: started.to_string(),
                     kind: "node_started".into(),
@@ -354,7 +354,7 @@ pub fn project(
                     });
                 }
             }
-            if phase == "do" || phase == "ship" {
+            if phase == "execute" || phase == "ship" {
                 let stamp = started.to_string();
                 let newer = latest_session
                     .as_ref()

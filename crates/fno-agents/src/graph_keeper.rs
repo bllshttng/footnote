@@ -2311,7 +2311,7 @@ pub(crate) fn session_row(
     observed: Option<Value>,
     merge_grant: Option<&Value>,
 ) -> Result<Value, StoreError> {
-    const SESSION_PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+    const SESSION_PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
     const STR_MAX: usize = 200;
     if !SESSION_PHASES.contains(&phase) {
         return Err(StoreError::Invalid(format!(
@@ -2642,7 +2642,7 @@ fn session_reap_open(
     session_id: &str,
     ended_at: Option<&str>,
 ) -> Result<Value, StoreError> {
-    const SESSION_PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+    const SESSION_PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
     if phase != "all" && !SESSION_PHASES.contains(&phase) {
         return Err(StoreError::Invalid(format!(
             "invalid phase {phase:?}; expected 'all' or one of {SESSION_PHASES:?}"
