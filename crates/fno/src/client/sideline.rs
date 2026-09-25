@@ -262,7 +262,7 @@ impl View {
                 paint_legacy_row(cells, r, cols, text_w, &text, flags);
             }
             if card {
-                Self::paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
+                self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
             }
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
@@ -705,6 +705,7 @@ impl View {
     /// Keep a fitting card PR visible at the right edge when its cells are
     /// otherwise empty, without overwriting the status or identity.
     fn paint_card_pr_if_it_fits(
+        &self,
         cells: &mut [Cell],
         row: usize,
         cols: usize,
@@ -730,9 +731,25 @@ impl View {
         let Some(style) = line.iter().find(|cell| cell.c != ' ').cloned() else {
             return;
         };
+        let lattice = agent_lattice_state(agent);
+        let quiet = if agent.external && lattice != LatticeState::Blocked {
+            cell_flags::DIM
+        } else {
+            0
+        };
+        let focus = if agent.pane_id == Some(self.layout.focus) {
+            if agent.exited {
+                cell_flags::DIM
+            } else {
+                cell_flags::INVERSE
+            }
+        } else {
+            0
+        };
         for (offset, ch) in label.chars().enumerate() {
             let mut cell = style.clone();
             cell.c = ch;
+            cell.flags = quiet | focus;
             line[start + offset] = cell;
         }
     }
