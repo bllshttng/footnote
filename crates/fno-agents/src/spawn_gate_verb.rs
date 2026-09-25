@@ -4,7 +4,9 @@
 //!
 //! Two modes, selected by the payload's `mode` field. `gate` runs the full
 //! admission gate over one JSON round trip; the gate's own prose streams on
-//! stderr passthrough, so `spawn queued: ...` still streams during a queue.
+//! stderr passthrough, so `spawn queued: ...` still streams during a queue,
+//! and a payload with `hold: false` releases the mutex before the answer so
+//! a long-lived caller holds nothing.
 //! `probe` is the read-only capacity reading `fno agents gate-status`, the
 //! lane readouts and the advance width all consume: no mutex, no claims, no
 //! events. The verb exits 0 whenever it produced an ANSWER, including a
@@ -281,6 +283,20 @@ fn gate_answer(payload: &Value) -> Value {
     };
     match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
         Ok(mut guard) => {
+            // A `hold: false` caller (the mux revival door) wants the verdict,
+            // not the keys: it is long-lived, so a mutex handed back to its
+            // pid would sit held until the TTL and block every other spawn.
+            // Release everything now; the answer carries null keys.
+            if !payload.get("hold").and_then(Value::as_bool).unwrap_or(true) {
+                guard.release();
+                return json!({
+                    "status": "admitted",
+                    "gate_key": Value::Null,
+                    "gate_holder": Value::Null,
+                    "worker_key": Value::Null,
+                    "worker_holder": Value::Null,
+                });
+            }
             // Take the keys BEFORE the guard drops: releasing them here would
             // free the very claims the caller must hold across dispatch.
             let (gate, worker) = guard.take_keys();
@@ -1807,6 +1823,90 @@ mod tests {
         assert_eq!(plain["exit_code"], spawn_gate::EXIT_NO_WAIT, "{plain}");
         assert_eq!(plain["receipt"]["axis"], "max_live", "{plain}");
         assert_eq!(answer["status"], "admitted", "{answer}");
+    }
+
+    /// The mux revival door asks with `hold: false`: the verb releases the
+    /// spawn-gate mutex before it answers, so a long-lived server never sits
+    /// on the check-dispatch mutex until the TTL. The positive control
+    /// without `hold` pins today's hand-back contract.
+    #[test]
+    fn gate_with_hold_false_releases_the_mutex_and_answers_no_keys() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnvRestore::capture(&[
+            crate::paths::HOME_ENV,
+            "FNO_CLAIMS_ROOT",
+            "FNO_CONFIG",
+            "FNO_SPAWN_GATE",
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            "FNO_NODE",
+        ]);
+        let dir = std::env::temp_dir().join(format!("fno-verb-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        std::env::remove_var("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_NODE");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let home = crate::paths::AgentsHome::from_env();
+        let registry = home.registry_json();
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(
+            &registry,
+            format!(
+                r#"{{"schema_version":{},"entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+
+        let held = gate_answer(&json!({
+            "mode": "gate",
+            "name": "revival",
+            "substrate": "pane",
+            "no_wait": true,
+            "hold": false,
+            "holder_pid": std::process::id(),
+        }));
+        let claims_dir = claims_root.join(".fno").join("claims");
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let handed = gate_answer(&json!({
+            "mode": "gate",
+            "name": "revival-two",
+            "substrate": "pane",
+            "no_wait": true,
+            "holder_pid": std::process::id(),
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(held["status"], "admitted", "{held}");
+        assert!(held["gate_key"].is_null(), "{held}");
+        assert!(held["gate_holder"].is_null(), "{held}");
+        assert!(held["worker_key"].is_null(), "{held}");
+        assert!(held["worker_holder"].is_null(), "{held}");
+        assert!(
+            leftovers.is_empty(),
+            "hold false leaves no claim behind: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+        assert_eq!(handed["status"], "admitted", "{handed}");
+        assert!(handed["gate_key"].is_string(), "{handed}");
     }
 
     /// AC1-HP: a gate payload with no `holder_pid` is refused before the gate
