@@ -757,4 +757,4 @@ pub(crate) fn live_permission_mode(entry: &RegistryEntry) -> Option<String> {
 }
 
 #[cfg(test)]
-mod transport_tests;
+mod tests;
