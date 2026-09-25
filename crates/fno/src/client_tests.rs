@@ -4117,8 +4117,10 @@ fn client_compose_hint_paints_over_bottom_row() {
 #[test]
 fn client_compose_keys_modal_renders_the_which_key_reference() {
     // prefix+? opens the centered which-key modal, built from the single-source binding table.
+    // Two rows of slack: the modal grows one row per binding (open-backlog-board
+    // spent the last one), and the 64-row fold pin is the budget that governs.
     let mut view = two_pane_view();
-    view.term = (40, 80);
+    view.term = (42, 80);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     assert!(text.contains("keybinds"), "modal title present");
