@@ -1586,6 +1586,13 @@ def _reopen_outranks_merge(node: dict, merged_at: object) -> bool:
     return merged is None or reopened > merged
 
 
+def reopen_held_reason(node: dict, pr_number: object) -> str:
+    """Hold-row reason for a reopen that outranks a merge: the reopener's own words."""
+    why = node.get("reopened_reason")
+    why = why.strip() if isinstance(why, str) else ""
+    return f"reopened after PR #{pr_number} merged: {why or 'no reopen reason recorded'}"
+
+
 def _merge_postdates_reopen(
     node: dict,
     *,
