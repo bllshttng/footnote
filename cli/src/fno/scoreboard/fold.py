@@ -613,13 +613,15 @@ def build_calibration(
 # loadable session). A row with neither is an explicit "unattributed" bucket,
 # never silently dropped (mirrors the calibration fold's honesty rule).
 
-# think/plan/do/review/docs/ship/external are /target's own phase names;
+# think/plan/execute/review/docs/ship/external are /target's own phase names;
 # ship+external both route through /pr (create vs check) so they collapse to
-# one skill id.
+# one skill id. "do" is the phase's retired spelling: ledger.json history rows
+# still carry it, so its key stays until those rows age out.
 _PHASE_TO_SKILL = {
     "think": "fno:think",
     "plan": "fno:blueprint",
     "do": "fno:do",
+    "execute": "fno:execute",
     "review": "fno:review",
     "docs": "fno:ship-docs",
     "ship": "fno:pr",
@@ -675,7 +677,7 @@ _SKILL_COMMIT_HISTORY_CACHE: dict[tuple[str, str], list[tuple[datetime, str]]] =
 
 # The ledger phase and skill directory are separate vocabularies. Keep old
 # phase rows pointed at the renamed skill until the compatibility shim retires.
-_PHASE_TO_SKILL_DIR = {"do": "execute"}
+_PHASE_TO_SKILL_DIR = {"do": "execute", "execute": "execute"}
 
 
 def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
@@ -2468,7 +2470,7 @@ if __name__ == "__main__":
     skill_rows = [
         {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 4.0,
          "sessions": ["11111111-1111-1111-1111-111111111111"]},
-        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["do"], "cost_usd": 1.0},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["execute"], "cost_usd": 1.0},
         {"completed": "2026-07-01T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-9", "cost_usd": 2.0},
     ]
     sb3 = build_skill_scoreboard(
