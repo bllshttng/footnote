@@ -155,12 +155,17 @@ def report(
 
 def _law_rows() -> "list[dict]":
     """Live law rows the Rust intake matches against (d-0fa92eb9: no agent
-    asks a question the operator already settled)."""
+    asks a question the operator already settled). ``lane`` is the verdict of
+    the same authority rule `backlog decide-retract` enforces, so the ask
+    gate reads the retraction constraint instead of re-deriving it."""
     from fno.decide import list_decisions
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
     return [
-        {key: row.get(key) for key in ("decision_id", "subject", "decision", "ts")}
+        {
+            key: row.get(key)
+            for key in ("decision_id", "subject", "decision", "ts", "lane")
+        }
         for row in rows
     ]
 
