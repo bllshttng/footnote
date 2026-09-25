@@ -37,7 +37,7 @@ pub struct Theme {
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
 /// Body roles cover modal content; the rest are chrome the frame adds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Role {
     Border,
     Title,
@@ -48,6 +48,7 @@ pub enum Role {
     Tab(bool),
     Footer,
     /// A body content cell (the inverse block).
+    #[default]
     Body,
     /// The selected row's cell - a cut-out under `terminal`, a `sel` highlight
     /// under a named theme.
@@ -59,6 +60,28 @@ pub enum Role {
     BodyDim,
     ScrollTrack,
     ScrollThumb,
+    /// A backlog panel's body cell: plain text on the terminal's own bg. The
+    /// old body was an INVERSE block, which read as one pale fill under a
+    /// named theme (the emulator's fg swapped in as bg), so the backlog
+    /// views dropped it: the panel carries no standing bg at all, under any
+    /// theme.
+    PanelBody,
+    /// A backlog panel's heading (lane name, column header, section label,
+    /// node title): bold, on the terminal's own bg. A named theme lifts the
+    /// fg to its `title` slot; `terminal` leaves Default and lets BOLD
+    /// carry the rank.
+    PanelHead,
+    /// A backlog panel's handle (node id) or field label: the distinct
+    /// accent slot. `Indexed(3)` follows the emulator's palette under
+    /// `terminal`, so no hard color enters.
+    PanelLabel,
+    /// A backlog panel's meta line: DIM. A named theme adds its `dim` fg.
+    PanelMeta,
+    /// A pill: the bracketed `status · priority` token on a detail title
+    /// line. Accent fg, bold, on the terminal's own bg.
+    PanelPill,
+    /// A thin rule under a heading or lane name.
+    PanelRule,
 }
 
 impl Theme {
@@ -116,6 +139,15 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
             ),
+            // The backlog panel sits on the terminal's own bg: attributes
+            // and the accent index only, never INVERSE, never a fixed pair.
+            // Meta uses index 8, not the DIM flag: the merged band evidence
+            // showed DIM washing the default fg out on a light terminal,
+            // while index 8 stays a readable gray under both.
+            Role::PanelBody | Role::PanelRule => (Color::Default, Color::Default, 0),
+            Role::PanelHead => (Color::Default, Color::Default, cell_flags::BOLD),
+            Role::PanelLabel | Role::PanelPill => (t.accent, Color::Default, 0),
+            Role::PanelMeta => (Color::Indexed(8), Color::Default, 0),
             // Body, Border: plain inverse.
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
@@ -124,6 +156,13 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     // stays the inverse block so content reads in the emulator's own colors.
     match role {
         Role::Body => (Color::Default, Color::Default, cell_flags::INVERSE),
+        // The backlog panel matches the terminal exactly: its bg, its fg,
+        // the theme's own slots for rank. No standing bg, no INVERSE.
+        Role::PanelBody => (Color::Default, Color::Default, 0),
+        Role::PanelHead => (t.title, Color::Default, cell_flags::BOLD),
+        Role::PanelLabel | Role::PanelPill => (t.accent, Color::Default, 0),
+        Role::PanelMeta => (t.dim, Color::Default, 0),
+        Role::PanelRule => (t.dim, Color::Default, 0),
         // The selected row's fg is the theme's `title` (a light color in every
         // shipped palette), not `Color::Default`: every shipped `sel` is a dark
         // background, so a `Default` fg would read dark-on-dark on a light
@@ -346,5 +385,67 @@ mod tests {
         assert_eq!(bg, theme_catppuccin().sel);
         assert_ne!(fg, Color::Default, "named-theme sel fg must be explicit");
         assert_eq!(fg, theme_catppuccin().title);
+    }
+
+    #[test]
+    fn panel_roles_never_carry_inverse_or_a_bg_under_any_theme() {
+        // The pale-panel fix: the backlog panel paints on the terminal's own
+        // bg. INVERSE would swap the emulator's fg in as the bg - the exact
+        // pale fill the user screenshotted - so no panel role may carry it,
+        // under the inherit theme or a named one, and no panel role may
+        // carry a bg.
+        for t in [
+            theme_terminal(),
+            theme_catppuccin(),
+            theme_tokyo_night(),
+            theme_gruvbox(),
+        ] {
+            for role in [
+                Role::PanelBody,
+                Role::PanelHead,
+                Role::PanelLabel,
+                Role::PanelMeta,
+                Role::PanelPill,
+                Role::PanelRule,
+            ] {
+                let (fg, bg, flags) = cell_style(role, &t);
+                assert_eq!(
+                    bg,
+                    Color::Default,
+                    "{role:?} bg must stay the terminal's under {}",
+                    t.name
+                );
+                assert!(
+                    flags & cell_flags::INVERSE == 0,
+                    "{role:?} must not carry INVERSE under {}",
+                    t.name
+                );
+                assert!(
+                    flags & cell_flags::DIM == 0 || role == Role::PanelMeta,
+                    "unexpected DIM on {role:?} under {}",
+                    t.name
+                );
+                let _ = fg;
+            }
+        }
+    }
+
+    #[test]
+    fn panel_hierarchy_roles_are_distinct_under_both_theme_kinds() {
+        // The whole point of the hierarchy: head, label, meta and body must
+        // resolve to DIFFERENT styles, or every line reads at one weight
+        // again (the defect the user reported).
+        for t in [theme_terminal(), theme_catppuccin()] {
+            let head = cell_style(Role::PanelHead, &t);
+            let label = cell_style(Role::PanelLabel, &t);
+            let meta = cell_style(Role::PanelMeta, &t);
+            let body = cell_style(Role::PanelBody, &t);
+            assert_ne!(head, body, "head vs body under {}", t.name);
+            assert_ne!(label, body, "label vs body under {}", t.name);
+            assert_ne!(meta, body, "meta vs body under {}", t.name);
+            assert_ne!(head, label, "head vs label under {}", t.name);
+            assert_ne!(head, meta, "head vs meta under {}", t.name);
+            assert_ne!(label, meta, "label vs meta under {}", t.name);
+        }
     }
 }

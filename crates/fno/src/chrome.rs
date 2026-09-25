@@ -216,10 +216,15 @@ pub struct BodyLine {
     pub text: String,
     pub header: bool,
     /// A greyed, inert row (a disabled `PopupRow::Entry`): every cell takes
-    /// [`Role::BodyDim`] regardless of selection, so it reads as inert.
+    /// [`Role::PanelBody`][crate::theme::Role::PanelBody] regardless of selection, so it reads as inert.
     pub disabled: bool,
     /// `(offset, len)` within `text` that is the selected cut-out.
     pub sel_span: Option<(usize, usize)>,
+    /// `(offset, len, role)` per-char role spans. A char a span covers takes
+    /// the span's role; one no span covers takes `pad_role`.
+    pub segs: Vec<(usize, usize, Role)>,
+    /// The role for chars no seg covers and for the tail pad.
+    pub pad_role: Role,
     /// `(target, offset, len)` hit spans within `text`, offsets relative to the
     /// line's first char.
     pub hits: Vec<(usize, usize, usize)>,
@@ -634,7 +639,11 @@ fn body_row(
         } else if in_sel(char_idx) {
             Role::BodySel
         } else {
-            Role::Body
+            line.segs
+                .iter()
+                .find(|(off, len, _)| char_idx >= *off && char_idx < *off + *len)
+                .map(|(_, _, r)| *r)
+                .unwrap_or(line.pad_role)
         };
         text.push(c);
         roles.push(role);
@@ -645,7 +654,7 @@ fn body_row(
         roles.push(if line.disabled {
             Role::BodyDim
         } else {
-            Role::Body
+            line.pad_role
         });
     }
 

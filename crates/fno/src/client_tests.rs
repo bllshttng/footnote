@@ -7902,9 +7902,9 @@ async fn update_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.aux = Some(build_update_modal(None));
     let r = v.aux.as_ref().unwrap().popup.render(v.term);
-    let footer = overlay_footer_cell(&OverlayLayout {
-        origin: r.origin,
-        framed: chrome::Framed {
+    let footer = overlay_footer_cell(&OverlayLayout::from_parts(
+        r.origin,
+        chrome::Framed {
             lines: r
                 .lines
                 .iter()
@@ -7916,7 +7916,7 @@ async fn update_modal_footer_esc_close_click_closes() {
                 .collect(),
             width: r.width,
         },
-    });
+    ));
     let mut buf: Vec<u8> = Vec::new();
     aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
         .await
