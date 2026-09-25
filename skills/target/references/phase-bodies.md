@@ -39,6 +39,8 @@ If a review you run does spawn agents (a peer review), do NOT emit `<promise>` w
 
 While the PR's CI is still polling, read posted optional bot reviews at first-post rather than deferring every read to green - the first-post review watch and its once-at-green backstop are specified in the "Watch for posted optional reviews" / "Drain a posted optional review" paragraphs of [SKILL.md](../SKILL.md). Same story on both surfaces: a real finding folds into the fix round in flight instead of adding a post-green round.
 
+When a lens row's condition holds for the diff under review, read that lens file and apply its question to the built code. These are the code lenses blueprint retired from drafting under lean dispatch. The review phase carries those checks now. The index: [review-lenses.md](review-lenses.md).
+
 ## Intent verification (no promise-time self-grade)
 
 There is no promise-time self-grade phase (control-plane step 6).

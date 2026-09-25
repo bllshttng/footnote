@@ -2815,7 +2815,7 @@ where
     Ok(result)
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
@@ -2824,7 +2824,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
 /// lock, blocking until acquired. The returned `File` holds the lock until it
 /// is unlocked or dropped.
-fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
+pub(crate) fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -2878,7 +2878,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateEr
     Ok(serde_json::from_str(&buf)?)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
