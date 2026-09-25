@@ -63,7 +63,7 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
-mod agent_launch;
+pub(crate) mod agent_launch;
 mod agent_rows_join;
 mod drift_retire;
 mod human_input;

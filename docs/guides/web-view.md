@@ -1,6 +1,6 @@
 # Watch your panes from a browser
 
-`fno mux serve --web` puts a read-only view of a running mux session on an HTTP port. You can open the URL on a phone, a tablet, or another machine, and watch any pane. You install nothing on the device that shows the page.
+`fno mux serve --web` puts a view of a running mux session on an HTTP port. You can open the URL on a phone, a tablet, or another machine, and watch any pane. You install nothing on the device that shows the page.
 
 The view is read-only by construction, not by policy. The bridge sends one attach message upstream, then releases the write half of the socket. No code path can carry a keystroke back to your terminal. The browser drops every inbound message and sends none.
 
@@ -14,7 +14,9 @@ fno mux serve --web --port 9000          # a different port
 
 The command prints the URL and a token once at bind. The token is in the query string. It is the only guard on the port. Anyone who has the URL can watch the session, so keep the URL secret.
 
-The page's **backlog** link renders the backlog live from the store through the same token. You get lanes by project or epic, six columns, stats, filters, and a node panel with sessions. It needs no render step and never caches. It is read-only: it shows each session's attach or resume command to copy. A missing or wrong token returns no backlog bytes.
+The page's **backlog** link renders the backlog live from the store through the same token. You get lanes by project or epic, six columns, stats, filters, and a node panel with sessions. It needs no render step and never caches. A missing or wrong token returns no backlog bytes.
+
+On a bridge bound to loopback, the node panel can also act. You can edit a node's title, priority, size and status. You can rank a card to the top or bottom of its column. You can launch a blueprint or a target for the node. Every write runs the same `fno` verb an agent runs, and the verb's own refusal is what you see. Every write answers to three conditions. The bridge must be bound to loopback. The request's Host header must name loopback. When your browser sends an Origin header, it must name loopback too. The reason is plain: a web page on another site must not be able to drive the bridge through your browser. On a bridge bound wider than loopback, the page shows no write controls at all.
 
 The bridge also serves the backlog as JSON through the same token. `/backlog/model.json` takes `lanes`, `project`, `epic`, `status`, `priority`, `size`, `king`, `q` and `all`. `/backlog/node.json?id=<id>` returns one node. When the store holds no such node, the answer is 404. When the store read failed, it is 503. Each body carries `"schema": 1`. The bridge re-reads at most every 30 seconds unless the store changed.
 
@@ -68,10 +70,10 @@ The bridge binds to loopback by default. This default is deliberate. It does not
 To reach the view from a phone, use one of these three methods.
 
 - **A private network such as tailscale.** Bind to the private address of the host, not to every interface: `fno mux serve --web --bind <tailscale-ip>`. Then open the printed URL. Only the private network can reach the port, and it authenticates the connection.
-- **An SSH tunnel.** Leave the bind address on loopback. Forward the port with `ssh -L 8722:127.0.0.1:8722 <host>`. Then open `http://127.0.0.1:8722/?t=<token>` on the local machine. Keep the token: a URL without it fails the check and shows no pane.
+- **An SSH tunnel.** Leave the bind address on loopback. Forward the port with `ssh -L 8722:127.0.0.1:8722 <host>`. Then open `http://127.0.0.1:8722/?t=<token>` on the local machine. Keep the token: a URL without it fails the check and shows no pane. The backlog writes keep working over a tunnel, because the bridge itself is still bound to loopback.
 - **A reverse proxy you already run.** Terminate TLS at the proxy. The bridge does no TLS of its own.
 
-CAUTION: Do not use `--bind 0.0.0.0`. It opens the port on every interface, including your LAN, where no private network authenticates the caller. The token is the only guard, and the URL carries it.
+CAUTION: Do not use `--bind 0.0.0.0`. It opens the port on every interface, including your LAN, where no private network authenticates the caller. The token is the only guard, and the URL carries it. A wide bind also puts the backlog page back into read-only mode: the write routes refuse everything that does not arrive on loopback.
 
 ## What you see
 
