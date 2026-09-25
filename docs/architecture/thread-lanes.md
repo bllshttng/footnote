@@ -27,9 +27,9 @@ The `attach` lane has two destinations. The lane alone cannot pick between them.
 | Harness | `interactive_attach` | Who owns the live session |
 |---|---|---|
 | codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
-| claude | no `pre_exec`, `claude attach {short_id}` | the detached client process itself |
+| claude | no `pre_exec`, `claude attach {short_id}` | the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host` |
 
-A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the session lives in the spawned client. The daemon does not host that client. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
+A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing, and the spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
 
 That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
 
@@ -38,6 +38,18 @@ That refusing arm is the reason the split is written down. A route that tested t
 One invariant governs the daemon's role, because the epic prose once said otherwise: the daemon does not HOST keepers, it DISCOVERS and REBINDS them. The keeper is a separate process whose parent is launchd, never the daemon; `handle_spawn` in `crates/fno-agents/src/daemon.rs` still states that the daemon hosts no agent PTYs, and the daemon-start sweep only walks existing keeper sockets and re-binds survivors to their registry rows.
 
 A `keeper` harness with no built lane still gets an honest refusal naming what is missing, never a verdict that the harness cannot thread.
+
+## What a thread survives
+
+Measured 2026-09-21, on the question of who owns a claude thread: the owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host`. The fno daemon hosts none, and the spawning `fno agents spawn` client parents nothing; it exits once the session is backgrounded.
+
+| Event | The thread | Evidence |
+|---|---|---|
+| Its spawner exits | survives | an isolated probe: a `claude daemon run --origin transient` whose spawner was killed kept running at ppid 1 (2026-09-21) |
+| A supervisor restart | survives | all 10 logged restarts from 2026-09-15 to 2026-09-19 read `dead=0` and adopted every worker |
+| Host power loss | dies | the 2026-09-20 outage: every claude session on the host stopped within three minutes, the next supervisor start read `dead=19`; the 2026-09-21 outage read `dead=17` |
+
+After a host restart the harness relaunches only some sessions. fno covers the rest: the daemon retire arm keeps a worker whose node reads `in_progress` and whose roster row lost its process under `dead open work`, and the nudge ladder's Resume rung resumes it with the commit-your-work order (law d-71d03643: a node that lost its worker is always resumed, never left stranded).
 
 ## Where each harness sits
 
