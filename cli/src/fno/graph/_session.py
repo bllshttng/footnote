@@ -92,7 +92,9 @@ def cmd_session_add(
         None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
     phase: str = typer.Option(
-        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
+        ...,
+        "--phase",
+        help="Lifecycle phase: think|blueprint|execute|review|ship (do accepted for one release).",
     ),
     pr: Optional[int] = typer.Option(
         None,
@@ -156,6 +158,9 @@ def cmd_session_add(
         find_nodes_for_pr,
         stamp_session_for_pr,
     )
+    from fno.graph.types import normalize_phase
+
+    phase = normalize_phase(phase)
 
     def _open_row_to_end(node_id: str):
         """The open (phase, session) row an --ended-at append would close,
@@ -703,10 +708,10 @@ def cmd_session_reap_open(
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
     phase: str = typer.Option(
-        "do",
+        "execute",
         "--phase",
         help=(
-            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
+            "Lifecycle phase of the open row. 'execute' removes the row (it wedges "
             "node status); any other phase (a spawn-opened review row) fills "
             "ended_at and keeps the provenance; 'all' settles every open row "
             "carrying the identity (the death-cascade spelling)."
@@ -714,13 +719,15 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open execute row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph import api as graph_api
     from fno.graph.api import wire_rows
     from fno.graph.store import reap_open_session_record
-    from fno.graph.types import SESSION_PHASES
+    from fno.graph.types import SESSION_PHASES, normalize_phase
+
+    phase = normalize_phase(phase)
 
     if node is None:
         try:

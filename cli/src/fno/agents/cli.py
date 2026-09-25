@@ -2078,9 +2078,10 @@ def cmd_spawn(
     # fail-closed, like the guards above, before anything spawns: silently
     # launching a worker nothing can bind to the node does not survive
     #.
-    from fno.graph.types import SESSION_PHASES
+    from fno.graph.types import SESSION_PHASES, normalize_phase
 
     if session_phase:
+        session_phase = normalize_phase(session_phase)
         if session_phase not in SESSION_PHASES:
             print(
                 f"--session-phase must be one of {sorted(SESSION_PHASES)} "
