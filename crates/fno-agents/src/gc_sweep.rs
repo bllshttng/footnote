@@ -1826,7 +1826,21 @@ pub(crate) fn run_with_release(
         // past the grace, so the subprocess read never fires for a row that
         // could not pass a later gate anyway.
         let is_spawn = e.origin.as_deref() == Some("spawn");
-        if !is_spawn {
+        // The adopted-retire carve-out mirrors gc_decide's origin gate: an
+        // adopted row whose registry status reads terminal flows into the
+        // normal pipeline (which judges the open-PR hold and the grace
+        // window) instead of keeping here as a phantom forever.
+        let adopted_finished = e.origin.as_deref() == Some("adopted")
+            && matches!(
+                e.status,
+                crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
+            );
+        // Only a row the corpse probe actually PASSED carries origin_corpse
+        // into the policy: the GcRow field must never lean on "reached here
+        // as a non-spawn", or the adopted carve-out below would read as a
+        // corpse and skip the very gate that judges it.
+        let mut corpse = false;
+        if !is_spawn && !adopted_finished {
             let quiet = matches!(staged_row, Some((_, Some(a))) if *a > grace_secs);
             if !origin_corpse(e, quiet, &agents_memo, agents_read) {
                 summary
@@ -1834,6 +1848,7 @@ pub(crate) fn run_with_release(
                     .push((id, e.origin.clone().unwrap_or_default()));
                 continue;
             }
+            corpse = true;
         }
         let Some(graph) = &graph else {
             summary.kept_graph_unreadable.push(id);
@@ -2122,7 +2137,7 @@ pub(crate) fn run_with_release(
             open_pr,
             peer_drives_pr,
             pr_settled,
-            origin_corpse: !is_spawn,
+            origin_corpse: corpse,
             registry_terminal: matches!(
                 e.status,
                 crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
