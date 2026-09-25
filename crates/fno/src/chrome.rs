@@ -76,6 +76,13 @@ impl Chrome {
         self.subtitle = Some(s.into());
         self
     }
+    /// The full level, for a caller that must opt an anchored chrome into
+    /// the title and footer rows (the composer's pickers). Construction-time
+    /// only - there is still no `set_level`.
+    pub fn full(mut self) -> Self {
+        self.level = Level::Full;
+        self
+    }
     pub fn tabs(mut self, tabs: Vec<(String, bool)>) -> Self {
         self.tabs = tabs;
         self
