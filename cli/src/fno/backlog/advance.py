@@ -486,7 +486,8 @@ def _held_questions() -> dict:
             return _held_cache[1]
         _held_cache = (time.monotonic(), _select_read("held", []) or {})
     except Exception:  # noqa: BLE001 - a held read never starves selection
-        return {}
+        _held_cache = (time.monotonic(), {})
+    return _held_cache[1]
     return _held_cache[1]
 
 
