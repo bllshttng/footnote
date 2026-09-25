@@ -72,6 +72,7 @@ def test_ensure_codex_daemon_does_not_wait_for_a_daemon_child_with_open_pipes(
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "CODEX_CHILD_PID_FILE": str(child_pid_file),
     }
+    monkeypatch.setenv("PATH", env["PATH"])
     monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_START_TIMEOUT_S", 1.0)
 
     failure = None
