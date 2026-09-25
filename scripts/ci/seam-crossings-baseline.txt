@@ -48,6 +48,8 @@ crossing	crates/fno-agents/src/restart_run.rs	327	let mux_out = std::process::Co
 crossing	crates/fno-agents/src/resume_wake.rs	157	let out = std::process::Command::new("fno").args(argv).output()?;
 crossing	crates/fno-agents/src/resume_wake.rs	168	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/resume_wake.rs	499	let mut command = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/retask/transport.rs	33	fn fno_bin() -> String {
+crossing	crates/fno-agents/src/retask/transport.rs	247	let mut cmd = Command::new(fno_bin());
 crossing	crates/fno-agents/src/route_slot.rs	2846	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	334	let bin = fno_bin();
@@ -105,6 +107,7 @@ resolver	crates/fno-agents/src/plugin_install.rs	776	fn restage_stage(source_dir
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	295	pub(crate) fn run_fno_output(
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	344	fn real_deps() -> crate::provider_cap::LeaveDeps {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn fno_plugin_dir(root: &Path) -> PathBuf {
+resolver	crates/fno-agents/src/retask/transport.rs	33	fn fno_bin() -> String {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {

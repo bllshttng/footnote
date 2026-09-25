@@ -1,6 +1,6 @@
 # The spawn gate: one gate, one answer
 
-There is ONE spawn gate: `crates/fno-agents/src/spawn_gate.rs`, with the lane axes in `spawn_gate_lanes.rs`. Every door asks the same gate: pane, routed, account, and the native bg/headless arms. Python's `cli/src/fno/agents/spawn_gate.py` is a TRANSPORT over the `fno-agents spawn-gate` verb. It carries the caller's identity in. It carries the refusal out, as data. This doc carries the long stories from the docstrings. The code keeps its prose short.
+There is ONE spawn gate: `crates/fno-agents/src/spawn_gate.rs`, with the lane axes in `spawn_gate_lanes.rs`. Every door asks the same gate: pane, routed, account, and the native bg/headless arms. Python's `cli/src/fno/agents/spawn_gate.py` is a TRANSPORT over the `fno-agents spawn-gate` verb. It carries the caller's identity in. It carries the refusal out, as data. This doc carries the long stories from the docstrings. The code keeps its prose short. The mux's own revival door asks through `crates/fno/src/server/revival_gate.rs`: the resume gesture and the held-pane focus ask in `gate` mode with `hold: false` (the verb releases the mutex before it answers), and the workspace restore asks once in `probe` mode and spends the headroom it grants.
 
 ## The verb contract
 

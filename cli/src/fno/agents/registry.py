@@ -784,8 +784,6 @@ def mint_agent_entry(
 # Exactly eight lowercase hex characters, used only when deciding whether a
 # Claude restamp may safely refresh a derived transport short id.
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
-_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
 _ACCEPTED_FORMS = "accepted forms: name, canonical handle, transport short id, or full session id"
 
 
@@ -2988,56 +2986,6 @@ def update_registry(
         return new_entries
 
 
-def rename_agent(
-    token: str,
-    new_name: str,
-    *,
-    node: Optional[str] = None,
-    registry_path: Optional[Path] = None,
-) -> AgentEntry:
-    """Change a row's label and, for retask, its node in one transaction."""
-    new_name = new_name.strip()
-    if not _REGISTRY_NAME_RE.fullmatch(new_name):
-        raise ValueError(
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens"
-        )
-    if node is not None:
-        node = node.strip()
-        if not node:
-            raise ValueError("registry node must be non-empty when provided")
-    resolved = resolve_agent(token, path=registry_path)
-    source = resolved.entry
-    identity = (source.harness, source.harness_session_id, source.short_id)
-    result: list[AgentEntry] = []
-
-    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        target = next(
-            (
-                entry
-                for entry in entries
-                if (entry.harness, entry.harness_session_id, entry.short_id) == identity
-                and entry.name == source.name
-            ),
-            None,
-        )
-        if target is None:
-            raise AgentResolutionError(
-                f"agent {source.name!r} changed before rename; retry with its full session id"
-            )
-        if any(entry is not target and entry.name == new_name for entry in entries):
-            raise ValueError(f"registry label {new_name!r} already names another worker")
-        if source.name != new_name and source.name not in target.aliases:
-            target.aliases.append(source.name)
-        target.name = new_name
-        if node is not None:
-            target.node = node
-        result.append(target)
-        return entries
-
-    update_registry(_updater, path=registry_path)
-    return result[0]
-
-
 def append_row_alias(
     token: str,
     alias: str,
@@ -3081,40 +3029,6 @@ def append_row_alias(
 
     update_registry(_updater, path=registry_path)
     return bool(appended)
-
-def project_verified_tier(
-    name: str,
-    session_id: str,
-    *,
-    model: str,
-    effort: str,
-    registry_path: Optional[Path] = None,
-) -> AgentEntry:
-    """Persist model and effort read from the same verified pane status."""
-    result: list[AgentEntry] = []
-
-    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        target = next(
-            (
-                entry
-                for entry in entries
-                if entry.name == name and entry.harness_session_id == session_id
-            ),
-            None,
-        )
-        if target is None:
-            raise AgentResolutionError(
-                f"registry row {name!r} was not restamped to session {session_id!r}"
-            )
-        target.model = model
-        target.model_basis = "verified"
-        target.effort = effort
-        result.append(target)
-        return entries
-
-    update_registry(_updater, path=registry_path)
-    return result[0]
-
 
 def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
     """Fields whose mutation can change what token addresses a registry row."""
