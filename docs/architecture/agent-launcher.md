@@ -52,4 +52,4 @@ The agent chip folds harness, model and effort into one value chip. With a model
 - `src/client/tests/agent_launcher_tests.rs`: the width rule, the agent list, the key rule and the sheet paint beside the editor, focus and retention units already pinned there.
 - `src/server/tests/agent_launcher_tests.rs`: pre-birth validation and desk dedup/replay at the Core.
 - `tests/agent_launcher_journey.rs`: real subprocess boundary with a recording fake door. Pins exact argv, verbatim stdin, refusal and unknown journeys, and no duplicate attempt.
-- `tests/agent_launcher_client_e2e.rs`: one real-client test per reported defect, each red at the branchpoint and green on the branch: the sheet, the project list, the agent list, the key and mouse ownership, the hint row, the prefix bar and the too-short refusal.
+- `tests/agent_launcher_client_e2e.rs`: one real-client test per reported defect. Each was red at the branchpoint and is green on the branch.
