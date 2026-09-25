@@ -14910,6 +14910,10 @@ mod esc_quiet_tests;
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
 
+#[cfg(test)]
+#[path = "client_tests/keys_modal_tests.rs"]
+mod keys_modal_tests;
+
 #[path = "client/court_block.rs"]
 mod court_block;
 

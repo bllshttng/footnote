@@ -4111,35 +4111,6 @@ fn client_compose_hint_paints_over_bottom_row() {
 }
 
 #[test]
-fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // prefix+? opens the centered which-key modal, built from the single-source binding table.
-    // 44 rows: the table is 48 chords, so the panes header sits at body row
-    // 40 and needs this height to render from scroll 0. Shorter terminals
-    // scroll to it (the title says so); the 64-row notes pin upstream is the
-    // budget the notes themselves must stay honest against.
-    let mut view = two_pane_view();
-    view.term = (44, 80);
-    view.open_keys_modal();
-    let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "modal title present");
-    assert!(text.contains("esc close"), "dismiss affordance present");
-    // Section headers + a sampling of bindings the table advertises.
-    assert!(text.contains("panes"), "section header");
-    assert!(text.contains("detach"), "the d binding's action");
-    assert!(
-        text.contains("find: goto squad/tab/pane/agent"),
-        "the f binding's action names every row class nav_rows emits"
-    );
-    // The digit row names the gesture and its resolve doors: an honest description of an input path the scanner really runs.
-    assert!(
-        text.contains("jump to tab by number")
-            && text.contains("Enter")
-            && text.contains("Alt works too"),
-        "the digit row names the gesture and its resolve doors"
-    );
-}
-
-#[test]
 fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
     // The default selection is the first binding; row_events[selected] must
     // be exactly the Event a direct chord of that key would produce (Locked
@@ -4149,37 +4120,6 @@ fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
     let ev = m.row_events[ri].clone().expect("first row is executable");
     // The first section is Global; its first binding is `w` -> OpenSelector.
     assert_eq!(ev, crate::keys::resolve_chord(b'w'));
-}
-
-#[tokio::test]
-async fn menu_only_surfaces_open_from_their_new_chords() {
-    // prefix+S / prefix+A / prefix+T reach the same surfaces the sideline
-    // menu rows open, through the one mutation point (`execute_aux_action`),
-    // so chord and menu can never disagree on what they open. All three are
-    // client-local: nothing reaches the wire.
-    let mut v = two_pane_view();
-    v.term = (40, 80);
-    let mut buf: Vec<u8> = Vec::new();
-    dispatch_event(&mut v, crate::keys::Event::OpenSettings, &mut buf)
-        .await
-        .unwrap();
-    assert!(v.aux.is_some(), "prefix+S opens the settings modal");
-    v.aux = None;
-    dispatch_event(&mut v, crate::keys::Event::OpenConnections, &mut buf)
-        .await
-        .unwrap();
-    assert!(
-        v.connections.is_some(),
-        "prefix+A opens connections in its loading state"
-    );
-    dispatch_event(&mut v, crate::keys::Event::OpenSweepThreads, &mut buf)
-        .await
-        .unwrap();
-    assert!(
-        matches!(v.sweep_action, Some(SweepAction::Counts)),
-        "prefix+T arms the sweep counts probe"
-    );
-    assert!(buf.is_empty(), "nothing to the wire");
 }
 
 #[tokio::test]
