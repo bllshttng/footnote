@@ -275,13 +275,35 @@ impl View {
             if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
-            let paired_card_row =
+            let card_pair =
                 card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(_));
+            let card_chosen = card_pair
+                && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a)
+                    if a.pane_id == Some(self.layout.focus) && !a.exited);
+            if card_chosen {
+                // The chosen card paints its color across BOTH lines, full
+                // width, hover included: the chosen color wins on hover.
+                highlit = true;
+            }
             if highlit {
-                for cell in &mut cells[r * cols..r * cols + text_w] {
-                    if paired_card_row {
-                        cell.flags |= cell_flags::INVERSE;
+                let row = &mut cells[r * cols..r * cols + text_w];
+                if card_pair {
+                    // One solid band across the full width of the card line,
+                    // gaps included: an explicit background, never per-span
+                    // inversion, so a span's own color cannot patch the
+                    // highlight.
+                    let (bg, fg, flags) = if card_chosen {
+                        (self.theme.accent, Color::Default, 0)
                     } else {
+                        (Color::Default, Color::Default, cell_flags::INVERSE)
+                    };
+                    for cell in row {
+                        cell.bg = bg;
+                        cell.fg = fg;
+                        cell.flags = flags;
+                    }
+                } else {
+                    for cell in row {
                         cell.flags ^= cell_flags::INVERSE;
                     }
                 }

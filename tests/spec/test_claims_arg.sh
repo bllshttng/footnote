@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# test_claims_arg.sh - parser + SKILL doc contract for /spec ab-id input.
+# test_claims_arg.sh - parser contract for /spec ab-id input.
 #
 # Acceptance criteria covered (from plan 2026-05-05-spec-claims-existing-idea):
 #   AC1.2-HP    parse-claims-arg.sh recognises ab-XXXXXXXX and resolves seed.
 #   AC1.2-FR    parse-claims-arg.sh emits empty CLAIMS_ID for non-ab-id input.
 #   AC1.2-EDGE  Unknown ab-id exits non-zero.
-#   AC2-DOC     SKILL.md has a Plan Claims Ingestion section with the
-#               regex, the parser invocation, and the post-write refusal.
-#   AC3-DOC     Both templates document the `claims:` frontmatter field.
+#
+# The former AC2-DOC/AC3-DOC sections grepped SKILL.md and the index/focused
+# templates for doc strings. The templates were deleted (single-doc is the
+# only authored plan shape) and the doc copies were junk patterns under the
+# test-audit authoring gate: exact source greps, not behavior.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PARSER="$REPO_ROOT/scripts/lib/parse-claims-arg.sh"
-SPEC_SKILL="$REPO_ROOT/skills/blueprint/SKILL.md"
-INDEX_TPL="$REPO_ROOT/skills/blueprint/references/index-template.md"
-FOCUSED_TPL="$REPO_ROOT/skills/blueprint/references/focused-template.md"
 
 PASS=0
 FAIL=0
@@ -45,9 +44,6 @@ assert_contains() {
 echo "Pre-flight: required artifacts exist"
 [[ -f "$PARSER"      ]] && { echo "  PASS: parser exists";          PASS=$((PASS+1)); } || { echo "  FAIL: $PARSER missing";          FAIL=$((FAIL+1)); }
 [[ -x "$PARSER"      ]] && { echo "  PASS: parser executable";      PASS=$((PASS+1)); } || { echo "  FAIL: $PARSER not executable";   FAIL=$((FAIL+1)); }
-[[ -f "$SPEC_SKILL"  ]] && { echo "  PASS: SKILL.md exists";        PASS=$((PASS+1)); } || { echo "  FAIL: $SPEC_SKILL missing";      FAIL=$((FAIL+1)); }
-[[ -f "$INDEX_TPL"   ]] && { echo "  PASS: index-template exists";  PASS=$((PASS+1)); } || { echo "  FAIL: $INDEX_TPL missing";       FAIL=$((FAIL+1)); }
-[[ -f "$FOCUSED_TPL" ]] && { echo "  PASS: focused-template exists"; PASS=$((PASS+1)); } || { echo "  FAIL: $FOCUSED_TPL missing";    FAIL=$((FAIL+1)); }
 
 if [[ $FAIL -gt 0 ]]; then
     echo ""
@@ -69,8 +65,11 @@ assert "raw description" 'CLAIMS_ID=""' "$OUT"
 OUT="$(bash "$PARSER" "/path/to/design.md")"
 assert "design-doc path" 'CLAIMS_ID=""' "$OUT"
 
-OUT="$(bash "$PARSER" "ab-1234567")"  # 7 chars, not 8
-assert "ab- prefix but wrong length" 'CLAIMS_ID=""' "$OUT"
+OUT="$(bash "$PARSER" "ab-123")"  # 3 hex, below the 4-hex floor
+assert "ab- prefix too short" 'CLAIMS_ID=""' "$OUT"
+
+OUT="$(bash "$PARSER" "ab-123456789")"  # 9 hex, above the 8-hex ceiling
+assert "ab- prefix too long" 'CLAIMS_ID=""' "$OUT"
 
 OUT="$(bash "$PARSER" "ab-NOTHEX12")"
 assert "ab- prefix but non-hex" 'CLAIMS_ID=""' "$OUT"
@@ -137,48 +136,33 @@ else
     echo "  SKIP: fno binary cannot read the sandbox graph.db"
 fi
 
-# --- AC1.2-EDGE: unknown ab-id exits non-zero ---
+# --- AC1.2-EDGE: unknown ab-id exits non-zero with a graceful, eval-able error ---
 echo ""
-echo "AC1.2-EDGE: unknown ab-id exits non-zero"
+echo "AC1.2-EDGE: unknown ab-id exits non-zero, error printed for the caller"
 
 # Use an ab-id whose hex is highly unlikely to exist on any user's graph.
-# Run with `set +e` because we expect a non-zero return.
+# Run with `set +e` because we expect a non-zero return. The parser used to
+# die silently under set -e before its graceful error path ran (swallowed
+# error text); assert BOTH the rc and the eval-able error output.
 set +e
-bash "$PARSER" "ab-deaddead" >/dev/null 2>&1
+EDGE_OUT="$(bash "$PARSER" "ab-deaddead" 2>/dev/null)"
 RC=$?
 set -e
-if [[ $RC -ne 0 ]]; then
-    echo "  PASS: unknown ab-id returns non-zero (rc=$RC)"
-    PASS=$((PASS+1))
-else
+EDGE_OK=1
+if [[ $RC -eq 0 ]]; then
     echo "  FAIL: unknown ab-id should return non-zero, got rc=0"
     FAIL=$((FAIL+1))
+    EDGE_OK=0
 fi
-
-# --- AC2-DOC: SKILL.md has the Plan Claims Ingestion section ---
-echo ""
-echo "AC2-DOC: SKILL.md has the Plan Claims Ingestion section"
-
-SKILL_TEXT="$(cat "$SPEC_SKILL")"
-assert_contains "Plan Claims Ingestion section heading" \
-    "## Plan Claims Ingestion (MANDATORY when input is an ab-id)" "$SKILL_TEXT"
-assert_contains "ab-id regex" "^ab-[0-9a-f]{8}\$" "$SKILL_TEXT"
-assert_contains "parser invocation" "parse-claims-arg.sh" "$SKILL_TEXT"
-assert_contains "post-write refusal block" \
-    "Refusing to adopt." "$SKILL_TEXT"
-assert_contains "claims grep guard" \
-    'grep -qE "^claims:[[:space:]]+$CLAIMS_ID' "$SKILL_TEXT"
-
-# --- AC3-DOC: templates document the claims field ---
-echo ""
-echo "AC3-DOC: both spec templates document the claims: frontmatter field"
-
-INDEX_TEXT="$(cat "$INDEX_TPL")"
-FOCUSED_TEXT="$(cat "$FOCUSED_TPL")"
-assert_contains "index template documents claims" \
-    "claims: ab-XXXXXXXX" "$INDEX_TEXT"
-assert_contains "focused template documents claims" \
-    "claims: ab-XXXXXXXX" "$FOCUSED_TEXT"
+if [[ "$EDGE_OUT" != *"not found"* && "$EDGE_OUT" != *"Error resolving"* ]]; then
+    echo "  FAIL: unknown ab-id should print an eval-able error, got: $EDGE_OUT"
+    FAIL=$((FAIL+1))
+    EDGE_OK=0
+fi
+if [[ $EDGE_OK -eq 1 ]]; then
+    echo "  PASS: unknown ab-id returns non-zero (rc=$RC) with an eval-able error"
+    PASS=$((PASS+1))
+fi
 
 echo ""
 echo "==="

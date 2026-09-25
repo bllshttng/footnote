@@ -173,13 +173,23 @@ pub(crate) fn build_sideline_menu(
     rows.push(entry("＋", "new agent"));
     // The experimental backlog board: a toggle row always, the open
     // row only when on. Off by default (the pref's own default), so the
-    // menu of an operator who never opted in is unchanged.
+    // menu of an operator who never opted in is unchanged. The open row's
+    // hint names the prefix chord that opens the board from anywhere the
+    // menu is not (the pref gates it; the keybinds table documents it).
+    let open_hint = crate::keys::key_for("open-backlog-board")
+        .map(|k| format!("prefix {k}"))
+        .unwrap_or_default();
     rows.push(entry(
         if backlog_on { "☑" } else { "☐" },
         "experimental: backlog view",
     ));
     if backlog_on {
-        rows.push(entry("▦", "backlog"));
+        rows.push(PopupRow::Entry {
+            glyph: "▦".into(),
+            label: "backlog".into(),
+            hint: open_hint,
+            enabled: true,
+        });
     }
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));

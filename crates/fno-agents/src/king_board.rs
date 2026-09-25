@@ -552,18 +552,13 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // would kill at once.
     let spent_err = budget.spent_error();
     // Held nodes: ONE fold over the question journals, computed once
-    // and read by the ready partition below. Fail-open: an unreadable journal
-    // is an empty map, the same posture the question scans elsewhere take.
-    // catch_unwind like the blocked-child read below: the fold resolves the
-    // state root, which panics under a test process with no declared root,
-    // and this function never panics on a source.
+    // and read by the ready partition below. needs::held_map is the
+    // fail-open door (an unreadable journal is an empty map, the same
+    // posture the question scans elsewhere take).
     let held_map = if budget.source_deadline().is_none() {
         Default::default()
     } else {
-        std::panic::catch_unwind(|| {
-            crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd))
-        })
-        .unwrap_or_default()
+        crate::needs::held_map(&home_dot_fno(), &cwd)
     };
     let (
         prs,

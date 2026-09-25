@@ -156,6 +156,43 @@ fn carry_referenced_scripts(old_stage: &Path, new_stage: &Path) -> usize {
     carried
 }
 
+/// The marketplace manifest path, relative to the stage root.
+const MARKETPLACE_REL: &str = ".claude-plugin/marketplace.json";
+
+/// The stage serves its own copy of the public manifest with the fno entry
+/// pointed at the stage root (`source: "./"`), so `claude plugin install
+/// fno@footnote` resolves in place and never clones a GitHub ref: the public
+/// pins (`stable`, `nightly`) are release-side refs a dev machine cannot rely
+/// on. The repo file stays verbatim. Anything that would leave the fno entry
+/// unserved is Err: a verbatim copy would silently resurrect the clone trap.
+fn staged_marketplace_bytes(source_bytes: &str) -> Result<String, String> {
+    let mut manifest: Value =
+        serde_json::from_str(source_bytes).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))?;
+    let Some(entries) = manifest.get_mut("plugins").and_then(Value::as_array_mut) else {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no plugins array; cannot serve the fno entry locally"
+        ));
+    };
+    let mut rewritten = false;
+    for entry in entries.iter_mut() {
+        if entry.get("name").and_then(Value::as_str) == Some("fno") {
+            if !entry.is_object() {
+                return Err(format!(
+                    "{MARKETPLACE_REL}: the fno entry is not an object; cannot serve it locally"
+                ));
+            }
+            entry["source"] = json!("./");
+            rewritten = true;
+        }
+    }
+    if !rewritten {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no fno entry; cannot serve the plugin locally"
+        ));
+    }
+    serde_json::to_string_pretty(&manifest).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+}
+
 /// Rebuild `<stage_parent>/fno` from `source_root` (git-tracked +
 /// untracked-but-not-ignored files). Builds into a sibling temp dir and swaps
 /// by rename so live sessions execing hooks from the stage never see a
@@ -207,6 +244,15 @@ fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usiz
             return Err(e);
         }
     };
+
+    let manifest = new_dir.join(MARKETPLACE_REL);
+    if manifest.is_file() {
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("stage: {MARKETPLACE_REL}: {e}"))?;
+        let rewritten = staged_marketplace_bytes(&text).map_err(|e| format!("stage: {e}"))?;
+        std::fs::write(&manifest, rewritten)
+            .map_err(|e| format!("stage: {MARKETPLACE_REL}: {e}"))?;
+    }
 
     if dest.exists() {
         carry_referenced_scripts(&dest, &new_dir);
@@ -323,7 +369,14 @@ fn check_stage_report(stage: &Path, source_dir: &Path) -> StageCheck {
 
     let mut missing: Vec<String> = Vec::new();
     let mut to_hash: Vec<(&str, &str)> = Vec::new(); // (stage path, HEAD sha)
+    let mut has_manifest = false;
     for (path, sha) in &tracked {
+        if *path == MARKETPLACE_REL {
+            // The stage serves a rewritten copy of this file
+            // (staged_marketplace_bytes), so no HEAD sha can match it.
+            has_manifest = true;
+            continue;
+        }
         if stage.join(path).is_file() {
             to_hash.push((path, sha));
         } else {
@@ -359,6 +412,27 @@ fn check_stage_report(stage: &Path, source_dir: &Path) -> StageCheck {
                 }
             }
             Err(e) => return unknown_check(stage, source_dir, e),
+        }
+    }
+
+    if has_manifest {
+        let stage_manifest = stage.join(MARKETPLACE_REL);
+        if !stage_manifest.is_file() {
+            missing.push(MARKETPLACE_REL.to_string());
+        } else {
+            let verdict = std::fs::read_to_string(root.join(MARKETPLACE_REL))
+                .map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+                .and_then(|t| staged_marketplace_bytes(&t))
+                .and_then(|expected| {
+                    std::fs::read_to_string(&stage_manifest)
+                        .map(|actual| actual == expected)
+                        .map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+                });
+            match verdict {
+                Err(e) => return unknown_check(stage, source_dir, e),
+                Ok(false) => differing.push(MARKETPLACE_REL.to_string()),
+                Ok(true) => {}
+            }
         }
     }
 
@@ -418,6 +492,31 @@ fn push_root(
     }
     seen.push(key);
     roots.push(PluginRoot { path, origin, live });
+}
+
+/// The installPath strings installed_plugins.json registers for fno@footnote,
+/// existence unchecked: the sweep's guard must fire on the registry's word
+/// alone, since a registered-but-deleted path is exactly the lie the sweep
+/// must never create.
+fn registry_install_paths(home: &Path) -> Vec<PathBuf> {
+    let text = match std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json")) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    v.get("plugins")
+        .and_then(|p| p.get("fno@footnote"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| e.get("installPath").and_then(Value::as_str))
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The footnote marketplace's `source.source` kind ("directory", "file",
@@ -895,6 +994,22 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
     }
     let cache = home.join(".claude/plugins/cache/footnote");
     if !cache.exists() {
+        return (removed, refused);
+    }
+    // installed_plugins.json is Claude's own registry: a tree it registers
+    // inside is never the sweep's to delete, whatever its staleness. Install
+    // registered cache/footnote/fno/<ver> here and this sweep deleted it in
+    // the same run, leaving the registry pointing at a missing tree and the
+    // review preflight's plugin-file check reading unknown.
+    if let Some(registered) = registry_install_paths(home)
+        .into_iter()
+        .find(|p| p.starts_with(&cache))
+    {
+        refused.push(format!(
+            "claude cache {} kept: installed_plugins.json registers {} inside it",
+            cache.display(),
+            registered.display()
+        ));
         return (removed, refused);
     }
     let live_roots: Vec<&PluginRoot> = roots.iter().filter(|r| r.live).collect();
@@ -1823,9 +1938,10 @@ mod tests {
         );
     }
 
-    /// A repo with one commit carrying a hook config and one script.
+    /// A repo with one commit carrying a hook config, one script, and the
+    /// public marketplace manifest with its GitHub release pins.
     fn new_repo(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
+        fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
         git_in(dir, &["init", "-b", "main", "-q"]);
         fs::create_dir_all(dir.join("hooks")).unwrap();
         fs::write(
@@ -1834,6 +1950,11 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("hooks/live.sh"), "live\n").unwrap();
+        fs::write(
+            dir.join(MARKETPLACE_REL),
+            r#"{"name":"footnote","plugins":[{"name":"fno","source":{"source":"github","repo":"bllshttng/footnote","ref":"stable"}},{"name":"fno-nightly","source":{"source":"github","repo":"bllshttng/footnote","ref":"nightly"}}]}"#,
+        )
+        .unwrap();
         git_in(dir, &["add", "-A"]);
         git_in(dir, &["commit", "-q", "-m", "c1"]);
     }
@@ -1937,6 +2058,66 @@ mod tests {
         assert_eq!(report.differing_count, 1);
         assert_eq!(report.sample, vec!["hooks/live.sh".to_string()]);
         assert!(report.remedy.contains("fno config plugin install claude"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The staged manifest serves the fno entry from the stage itself while
+    /// the source checkout keeps the public GitHub pins, and the rewrite is
+    /// not reported as drift.
+    #[test]
+    fn stage_serves_fno_entry_locally_without_drift() {
+        let base = std::env::temp_dir().join(format!("pi-mkt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        let staged: Value =
+            serde_json::from_str(&fs::read_to_string(stage.join(MARKETPLACE_REL)).unwrap())
+                .unwrap();
+        let entries = staged["plugins"].as_array().unwrap();
+        let fno = entries.iter().find(|p| p["name"] == "fno").unwrap();
+        assert_eq!(fno["source"], json!("./"));
+        let nightly = entries.iter().find(|p| p["name"] == "fno-nightly").unwrap();
+        assert_eq!(nightly["source"]["ref"], json!("nightly"));
+        let public: Value =
+            serde_json::from_str(&fs::read_to_string(source.join(MARKETPLACE_REL)).unwrap())
+                .unwrap();
+        assert_eq!(public["plugins"][0]["source"]["ref"], json!("stable"));
+        assert_eq!(check_stage_report(&stage, &source).status, "fresh");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A hand-tampered staged manifest still reads stale with a named sample:
+    /// the served copy is checked, not exempt.
+    #[test]
+    fn tampered_staged_manifest_reads_stale() {
+        let base = std::env::temp_dir().join(format!("pi-mkt2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        fs::write(stage.join(MARKETPLACE_REL), "{\"tampered\":true}").unwrap();
+        let report = check_stage_report(&stage, &source);
+        assert_eq!(report.status, "stale");
+        assert_eq!(report.sample, vec![MARKETPLACE_REL.to_string()]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A manifest that cannot serve the fno entry (entry renamed away) fails
+    /// the build loud instead of silently shipping the github pin back.
+    #[test]
+    fn build_refuses_manifest_without_fno_entry() {
+        let base = std::env::temp_dir().join(format!("pi-mkt3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("source");
+        new_repo(&source);
+        fs::write(
+            source.join(MARKETPLACE_REL),
+            r#"{"name":"footnote","plugins":[{"name":"fno-nightly","source":{"source":"github","repo":"bllshttng/footnote","ref":"nightly"}}]}"#,
+        )
+        .unwrap();
+        git_in(&source, &["add", "-A"]);
+        git_in(&source, &["commit", "-q", "-m", "c2"]);
+        let stage_parent = base.join("stage-parent");
+        fs::create_dir_all(&stage_parent).unwrap();
+        let err = build_stage(&source, &stage_parent).unwrap_err();
+        assert!(err.contains("no fno entry"), "err: {err}");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2160,7 +2341,14 @@ mod tests {
         let second = &report.roots[1];
         assert!(!second.live);
         assert_eq!(second.check.status, "stale");
-        assert_eq!(second.check.sample, vec!["hooks/live.sh".to_string()]);
+        // The registry copy also lacks the manifest HEAD tracks.
+        assert_eq!(
+            second.check.sample,
+            vec![
+                ".claude-plugin/marketplace.json".to_string(),
+                "hooks/live.sh".to_string()
+            ]
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2266,7 +2454,10 @@ mod tests {
         assert_eq!(report.roots[0].check.status, "stale");
         assert_eq!(
             report.roots[0].check.sample,
-            vec!["hooks/live.sh".to_string()]
+            vec![
+                ".claude-plugin/marketplace.json".to_string(),
+                "hooks/live.sh".to_string()
+            ]
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -2323,6 +2514,42 @@ mod tests {
             "{refused:?}"
         );
         assert!(cache.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The sweep must never delete a tree installed_plugins.json registers
+    /// inside: install registers cache/footnote/fno/<ver> and the same run's
+    /// sweep once deleted cache/footnote, leaving the registry pointing at a
+    /// missing tree and the review preflight's plugin-file check reading
+    /// unknown. The registry's word outranks the copy's staleness.
+    #[test]
+    fn sweep_keeps_the_cache_the_registry_registers_inside() {
+        let base = std::env::temp_dir().join(format!("pi-rm-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = fixture_home(&base);
+        let stage = base.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let cache = home.join(".claude/plugins/cache/footnote");
+        let install_path = cache.join("fno/0.4.0");
+        fs::create_dir_all(&install_path).unwrap();
+        write_registry(&home, &install_path);
+        write_marketplace(&home, "directory", &stage, &stage);
+        let live_stage = vec![PluginRoot {
+            path: stage.clone(),
+            live: true,
+            origin: "marketplace",
+        }];
+
+        let (removed, refused) = remove_stale_copies(&home, &live_stage);
+        assert!(removed.is_empty(), "removed: {removed:?}");
+        assert!(
+            refused.iter().any(|l| l.contains("installed_plugins.json")),
+            "{refused:?}"
+        );
+        assert!(
+            install_path.exists(),
+            "the registered installPath must survive the sweep"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

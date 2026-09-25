@@ -4949,7 +4949,8 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
+    No --hold holds all three scopes; status prints each scope as holds or admits.
     """
     import subprocess
 

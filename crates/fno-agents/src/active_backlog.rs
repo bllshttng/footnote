@@ -932,8 +932,10 @@ fn dispatch_member(
     // mid-incident takes this branch on its first tick, proving the stop is
     // durable state rather than a missed announcement. Reconciliation and tick
     // reporting continue; only new dispatch is refused. An unreadable state
-    // fails closed with its own reason, never as clear.
-    let incident = crate::fleet_incident::verdict();
+    // fails closed with its own reason, never as clear. The gate asks the
+    // spawns question: dispatch is automatic spawning, so a stop that holds
+    // only tests or merges keeps dispatching.
+    let incident = crate::fleet_incident::verdict_for("spawns");
     if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
         let (token, generation, detail) = match &incident {
             crate::fleet_incident::Verdict::Stopped(r) => (
@@ -1425,13 +1427,8 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 /// The held map for one config cwd: one fold over the question journals,
 /// failing open to an empty map (a missing journal holds nothing).
 fn held_for(cwd: &Path, registry_path: &Path) -> std::collections::BTreeMap<String, String> {
-    // catch_unwind: the fold resolves the state root, which can panic in a
-    // process with no declared hermetic root; a held read never kills a tick.
     match registry_path.parent().and_then(Path::parent) {
-        Some(fno_dir) => std::panic::catch_unwind(|| {
-            crate::needs::held_nodes(&crate::needs::question_journals(fno_dir, cwd))
-        })
-        .unwrap_or_default(),
+        Some(fno_dir) => crate::needs::held_map(fno_dir, cwd),
         None => Default::default(),
     }
 }
@@ -3395,6 +3392,7 @@ mod tests {
                 changed_at: "2026-09-13T01:07:00Z".into(),
                 changed_by: "op".into(),
                 reason: "load 385".into(),
+                holds: Vec::new(),
                 source: Some("file".into()),
             })
             .unwrap(),
@@ -3557,6 +3555,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(

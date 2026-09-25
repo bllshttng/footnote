@@ -934,6 +934,7 @@ fn rust_rows(ctx: &Ctx, case: &Case, dir: &Path) -> Value {
         repo_root: Some(ctx.repo.display().to_string()),
         staleness_days: None,
         claimed,
+        held: Default::default(),
         now_ms: ctx.now_ms,
     };
     match fno_agents::backlog_ready::select(&entries, &opts) {
