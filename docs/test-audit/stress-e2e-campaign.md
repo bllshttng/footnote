@@ -89,7 +89,7 @@ Three deterministic daemon waits stay in ordinary Cargo integration coverage. Th
 | `symptom_rename_and_removal_survive_restart` | R | Keeper restores the new workspace name, rejects the old name, and keeps a separately removed workspace absent. |
 | `symptom_hand_split_survives_restart` | R | Direct stop/restart preserves a two-pane hand-split tab; distinct from the CLI kill-server path. |
 | `symptom_kill_server_restores_the_exact_layout` | F | Keeper retains real CLI kill-server/restart and clean-store mtime check; assert restored pane rectangles and focus match the pre-kill layout. |
-| `symptom_worker_tab_position_and_pane_id_survive_tab_removal_and_restart` | F | Retain same pane identity and assert `pane ls` locates it in `squad=w` and `tab=crew` after restart. |
+| `symptom_worker_tab_position_and_pane_id_survive_tab_removal_and_restart` | F | Retain pane identity and assert `pane ls` maps it to workspace `w`'s restored squad ID and tab `crew`. |
 | `symptom_kill_server_captures_without_a_dirty_flag` | C | Folded into the exact-layout keeper; preserve clean-store precondition and teardown mtime advance. |
 | `symptom_stale_live_row_does_not_respawn_a_dead_worker` | R | A provably dead worker row never spawns `claude attach`; the positive boot control proves the instrument ran. |
 | `symptom_restore_rebuilds_no_thread_pane` | F | Keep the no-respawn proof; document that restart may rebuild a shell for topology but must not respawn the thread attach process. |
