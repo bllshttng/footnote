@@ -388,7 +388,7 @@ mod probe {
             out.insert("lanes".into(), lanes.clone());
         }
 
-        match crate::fleet_incident::verdict() {
+        match crate::fleet_incident::verdict_for("spawns") {
             crate::fleet_incident::Verdict::Clear(_) => {}
             crate::fleet_incident::Verdict::Stopped(record) => {
                 return refuse_with(
@@ -1413,6 +1413,7 @@ mod tests {
             changed_at: "2026-09-18T19:48:00Z".into(),
             changed_by: "test".into(),
             reason: "repro".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(&incident_path, serde_json::to_string(&record).unwrap()).unwrap();

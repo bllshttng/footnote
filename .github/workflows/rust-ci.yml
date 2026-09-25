@@ -115,6 +115,23 @@ jobs:
         working-directory: crates/fno
         run: cargo check --all-targets --locked
 
+  release-version-math:
+    name: release version math (sync-version + release-version)
+    # The nightly stamps a .devN version through these scripts; a PEP 440
+    # spelling reaching a Cargo.toml kills every release build. This table
+    # test is the gate that keeps the conversion honest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run the release version table test
+        run: bash tests/ci/test_release_version.sh
+
   stress:
     name: rust e2e concurrency stress (20 trials)
     # Pull requests only, like the `fmt` job above. The push trigger at the top

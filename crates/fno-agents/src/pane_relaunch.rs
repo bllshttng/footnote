@@ -140,7 +140,7 @@ pub(crate) fn mux_pane_run_failure_message(
 /// How long a relaunched pane gets to prove the worker stayed up (mirrors
 /// `_BINDING_WINDOW_S` in mux_spawn.py), and how often it is polled
 /// (`_BINDING_POLL_S`). Both fit inside the watchdog's 180s resume timeout.
-const PANE_PROOF_WINDOW: Duration = Duration::from_secs(8);
+pub(crate) const PANE_PROOF_WINDOW: Duration = Duration::from_secs(8);
 const PANE_PROOF_POLL: Duration = Duration::from_millis(750);
 
 /// The verdict of one pane-launch proof. The asymmetry is load-bearing: a
