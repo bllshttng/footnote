@@ -60,8 +60,7 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 # Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
 # nothing about how it stands toward the fno state root.
 EXIT_STATE_ROOT_UNGRANTED = 84
-# Rust gate only (crates/fno-agents/src/spawn_gate.rs): the Python transport
-# never raises these; advance's reader maps them for dispatched spawns.
+# Rust gate only (crates/fno-agents/src/spawn_gate.rs)
 EXIT_TERRITORY_CAP = 86
 EXIT_BLUEPRINT_CAP = 88
 EXIT_GATE_UNAVAILABLE = 87
@@ -1010,10 +1009,7 @@ def run_gate(
     try:
         answer = _call_gate_verb(payload)
     except Exception as exc:  # noqa: BLE001 - an unanswered gate never admits
-        _warn(
-            f"spawn-gate: refused on gate (gate_unavailable, "
-            f"exit {EXIT_GATE_UNAVAILABLE}): {exc}"
-        )
+        _warn(f"spawn-gate: refused on gate (gate_unavailable, exit {EXIT_GATE_UNAVAILABLE}): {exc}")
         _refuse(
             EXIT_GATE_UNAVAILABLE,
             {
