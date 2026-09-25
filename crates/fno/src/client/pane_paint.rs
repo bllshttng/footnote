@@ -208,20 +208,25 @@ impl View {
                     };
                     continue;
                 }
+                // Orthogonal neighbour probes; checked so a cell on the
+                // content-area edge cannot underflow the usize arithmetic.
                 let framed_by =
                     |rr: usize, cc: usize| rr < rows && cc < cols && framed_cell[rr * cols + cc];
-                let beside_framed = framed_by(r, c - 1)
+                let left = c.checked_sub(1);
+                let up = r.checked_sub(1);
+                let beside_framed = left.is_some_and(|cc| framed_by(r, cc))
                     || framed_by(r, c + 1)
-                    || framed_by(r - 1, c)
+                    || up.is_some_and(|rr| framed_by(rr, c))
                     || framed_by(r + 1, c);
                 // One-sided framing keeps the divider: a narrow unframed pane
                 // beside a framed one still owns its seam glyph (AC7-EDGE);
                 // only a gap BETWEEN frames reads blank.
                 let covered_by =
                     |rr: usize, cc: usize| rr < rows && cc < cols && covered[rr * cols + cc];
-                let has_unframed_nb = (covered_by(r, c - 1) && !framed_cell[r * cols + c - 1])
+                let has_unframed_nb = left
+                    .is_some_and(|cc| covered_by(r, cc) && !framed_cell[r * cols + cc])
                     || (covered_by(r, c + 1) && !framed_cell[r * cols + c + 1])
-                    || (covered_by(r - 1, c) && !framed_cell[(r - 1) * cols + c])
+                    || up.is_some_and(|rr| covered_by(rr, c) && !framed_cell[rr * cols + c])
                     || (covered_by(r + 1, c) && !framed_cell[(r + 1) * cols + c]);
                 // a divider cell that borders the focused pane paints in
                 // the lattice accent at full brightness (not the DIM chrome), so
@@ -241,9 +246,9 @@ impl View {
                         && focused[rr * cols + cc]
                         && !framed_cell[rr * cols + cc]
                 };
-                let outline = focused_by(r, c - 1)
+                let outline = left.is_some_and(|cc| focused_by(r, cc))
                     || focused_by(r, c + 1)
-                    || focused_by(r - 1, c)
+                    || up.is_some_and(|rr| focused_by(rr, c))
                     || focused_by(r + 1, c);
                 // the seam under the pointer (or held in a drag) reads
                 // BOLD, distinct from both idle DIM chrome and the focus
