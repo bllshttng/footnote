@@ -1259,10 +1259,38 @@ fn control_plane_attention(
             crate::loops_pause::DispatchPause::Manual { .. } => "fno do loops status",
             _ => "fno agents incident status",
         };
+        // The tail reads the breaker's typed reach, never a fixed claim:
+        // what is held and what proceeds come from the record the moment
+        // the summary renders.
+        let tail = match p {
+            crate::loops_pause::DispatchPause::Manual { .. } => {
+                "; loop dispatch is held; merges proceed".to_string()
+            }
+            crate::loops_pause::DispatchPause::FleetIncident { holds, .. } => {
+                let admits: Vec<String> = crate::fleet_incident::SCOPES
+                    .iter()
+                    .filter(|s| !holds.contains(&(*s).to_string()))
+                    .map(|s| s.to_string())
+                    .collect();
+                if admits.is_empty() {
+                    "; the breaker holds every scope until it clears".to_string()
+                } else {
+                    format!(
+                        "; the breaker holds {}; {} proceed until it clears",
+                        holds.join(", "),
+                        admits.join(" and ")
+                    )
+                }
+            }
+            // An unreadable breaker stays out of the summary (its rows stay
+            // overdue faults), so this arm never renders.
+            _ => String::new(),
+        };
         attention.push(format!(
-            "{} arms paused on purpose: {}; merges and dispatch are held until the breaker clears ({verb})",
+            "{} arms paused on purpose: {}{} ({verb})",
             paused.len(),
-            p.detail()
+            p.detail(),
+            tail
         ));
     }
     attention.extend(
@@ -4626,6 +4654,7 @@ mod tests {
             pause: Some(DispatchPause::FleetIncident {
                 generation: 5,
                 reason: "two cargo runs".to_string(),
+                holds: vec!["spawns".to_string(), "tests".to_string()],
             }),
             ..crate::tick_ledger::TickTrace::default()
         };
@@ -4642,6 +4671,19 @@ mod tests {
             "line: {}",
             out[0]
         );
+        // The reach is read, not claimed: holds from the record, and merges
+        // named as proceeding while they are not in the hold list.
+        assert!(
+            out[0].contains("the breaker holds spawns, tests"),
+            "line: {}",
+            out[0]
+        );
+        assert!(out[0].contains("merges proceed"), "line: {}", out[0]);
+        assert!(
+            out.iter()
+                .all(|l| !l.contains("merges and dispatch are held")),
+            "the false claim must be gone: lines {out:?}"
+        );
         assert!(
             out.iter().all(|l| !l.contains("tick_overdue")),
             "lines: {out:?}"
@@ -4650,6 +4692,32 @@ mod tests {
             out.iter().all(|l| !l.contains("pr watch refresh")),
             "lines: {out:?}"
         );
+    }
+
+    // AC-EDGE: a manual loops pause names what it holds, and the tail
+    // never claims merges are held.
+    #[test]
+    fn a_manual_pause_says_loop_dispatch_is_held_and_merges_proceed() {
+        use crate::loops_pause::DispatchPause;
+        let rows: Vec<crate::tick_ledger::ArmStatus> = ["king_wake", "watchdog"]
+            .iter()
+            .map(|a| pause_row(a))
+            .collect();
+        let trace = crate::tick_ledger::TickTrace {
+            pause: Some(DispatchPause::Manual {
+                state: "paused".to_string(),
+                detail: "loops paused by op".to_string(),
+            }),
+            ..crate::tick_ledger::TickTrace::default()
+        };
+        let out = control_plane_attention(&rows, &trace, &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(
+            out[0].contains("loop dispatch is held; merges proceed"),
+            "line: {}",
+            out[0]
+        );
+        assert!(out[0].contains("fno do loops status"), "line: {}", out[0]);
     }
 
     // AC10-EDGE: no pause, the output is today's: the row lines only.
