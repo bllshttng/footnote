@@ -1,5 +1,5 @@
-//! The work-item tracker seam: one interface, the graph and GitHub backends,
-//! and the stdin JSON door on `graph-get` that serves them.
+//! The work-item tracker seam: one interface, the graph, GitHub and Linear
+//! backends, and the stdin JSON door on `graph-get` that serves them.
 //!
 //! The Python seam (`cli/src/fno/tracker/`) was the only implementation of
 //! this surface, and `cli/src/fno` bars new Python, so the seam lives here and
@@ -13,12 +13,13 @@
 //! existing `graph-get` action: no positional ids plus a non-terminal stdin
 //! carrying `{"tracker": <op>, ...}`.
 
-use crate::tracker::{github::GitHubTracker, graph::GraphTracker};
+use crate::tracker::{github::GitHubTracker, graph::GraphTracker, linear::LinearTracker};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub mod github;
 pub mod graph;
+pub mod linear;
 pub mod sidecar;
 pub mod snapshot;
 #[cfg(test)]
@@ -95,8 +96,9 @@ pub fn backend(name: &str) -> Result<Box<dyn Tracker>, TrackerError> {
     match name {
         "graph" => Ok(Box::new(GraphTracker::new())),
         "github" => Ok(Box::new(GitHubTracker::from_env())),
+        "linear" => Ok(Box::new(LinearTracker::from_env())),
         other => Err(TrackerError::Refused(format!(
-            "unknown tracker backend: {other}. Available: graph, github"
+            "unknown tracker backend: {other}. Available: graph, github, linear"
         ))),
     }
 }
