@@ -27,10 +27,10 @@ Work every angle in this same context, in one pass - do not skip angles for lack
 | level | angles | cap | bias |
 |-------|--------|-----|------|
 | low | one careful pass (below) | 4 | precision |
-| medium | A B C Reuse Simplification Efficiency Altitude Conventions | 8 | precision |
-| high | the 8-angle set | 10 | recall |
-| xhigh | the 10-angle set, adds D and E | 15 | recall |
-| max | the 10-angle set, adds D and E | 15 | recall |
+| medium | A B C Reuse Simplification Efficiency Altitude Conventions Test value | 9 | precision |
+| high | the 9-angle set | 10 | recall |
+| xhigh | the 11-angle set, adds D and E | 15 | recall |
+| max | the 11-angle set, adds D and E | 15 | recall |
 
 Angle F (sibling answerer) runs at every level, low through max, on top of the sets above: it reads the plan's `surface:` block rather than more hunks, so it costs one grep, not a wider pass.
 
@@ -61,6 +61,10 @@ When the PR adds or modifies a type that wraps another (cache, proxy, decorator,
 ### Angle F - sibling answerer
 
 For the one question this diff answers (take it from the plan's `surface:` block when the PR has one; phrase it yourself when it does not), find one answerer the diff did not touch: another read or write of the same field, a second timeout on the same read, a second id format for the same thing, a second constant for the same limit. Grep the symbol, not the word. Grep it in every language tree, not only the diff's own. If you find one the block does not list, that is a candidate: the plan undercounted, and the next PR on this feature is already visible. If the block lists it as `out-of-scope`, check that the reason still holds against the diff.
+
+### Test value
+
+When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. A new test must name the observable behavior it protects, a credible regression, why existing coverage misses that failure, and no test-only production seam; a test matching a junk pattern (assertion-free probe, exact source grep, self-comparison, duplicate of an owner-boundary proof, fixture supplying the asserted receipt, a name promising more than the assertions check) is a candidate unless the retention bar there names the contract it independently guards. Costs nothing on a diff that touches no test.
 
 ### Reuse
 
