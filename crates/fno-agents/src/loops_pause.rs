@@ -107,9 +107,21 @@ impl PauseState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchPause {
     Clear,
-    Manual { state: String, detail: String },
-    FleetIncident { generation: u64, reason: String },
-    FleetIncidentUnavailable { detail: String },
+    Manual {
+        state: String,
+        detail: String,
+    },
+    FleetIncident {
+        generation: u64,
+        reason: String,
+        /// The scopes the record holds, as the readout speaks them. Arms
+        /// pause only when `spawns` is among them (the read goes through
+        /// `verdict_for("spawns")`), but the readout names the real reach.
+        holds: Vec<String>,
+    },
+    FleetIncidentUnavailable {
+        detail: String,
+    },
 }
 
 impl DispatchPause {
@@ -133,7 +145,9 @@ impl DispatchPause {
         match self {
             Self::Clear => String::new(),
             Self::Manual { detail, .. } => detail.clone(),
-            Self::FleetIncident { generation, reason } => {
+            Self::FleetIncident {
+                generation, reason, ..
+            } => {
                 format!("fleet incident stopped at generation {generation}: {reason}")
             }
             Self::FleetIncidentUnavailable { detail } => {
@@ -160,6 +174,7 @@ fn combine(manual: &PauseState, incident: crate::fleet_incident::Verdict) -> Dis
     match incident {
         crate::fleet_incident::Verdict::Clear(_) => DispatchPause::Clear,
         crate::fleet_incident::Verdict::Stopped(r) => DispatchPause::FleetIncident {
+            holds: r.held_scopes(),
             generation: r.generation,
             reason: r.reason,
         },
@@ -169,9 +184,11 @@ fn combine(manual: &PauseState, incident: crate::fleet_incident::Verdict) -> Dis
     }
 }
 
-/// The effective dispatch pause for this machine.
+/// The effective dispatch pause for this machine. The incident read is
+/// spawns-scoped: loop dispatch is automatic spawning, so a stop that holds
+/// only tests or merges never pauses it.
 pub fn dispatch_pause() -> DispatchPause {
-    combine(&read_state(), crate::fleet_incident::verdict())
+    combine(&read_state(), crate::fleet_incident::verdict_for("spawns"))
 }
 
 /// The combined `loops paused --json` answer: `paused`, `source`, `state`,
@@ -182,7 +199,7 @@ fn paused_json() -> Value {
     // could straddle a resume and print paused:false for a sentinel this
     // same call just saw paused.
     let manual = read_state();
-    match combine(&manual, crate::fleet_incident::verdict()) {
+    match combine(&manual, crate::fleet_incident::verdict_for("spawns")) {
         DispatchPause::Clear => json!({"paused": false, "source": "none", "state": "clear"}),
         DispatchPause::Manual { .. } => {
             let mut v = manual.json();
@@ -191,7 +208,9 @@ fn paused_json() -> Value {
             }
             v
         }
-        DispatchPause::FleetIncident { generation, reason } => json!({
+        DispatchPause::FleetIncident {
+            generation, reason, ..
+        } => json!({
             "paused": true,
             "source": "fleet_incident",
             "state": "fleet_stop",
@@ -308,7 +327,7 @@ pub fn is_paused() -> bool {
 /// A held worker whose stop hook missed any of them would count every fire
 /// as NoProgress and die on a hold it was told to obey.
 pub fn pause_message(cwd: &Path) -> Option<String> {
-    pause_message_for(&read_state(), crate::fleet_incident::verdict())
+    pause_message_for(&read_state(), crate::fleet_incident::verdict_for("spawns"))
         .or_else(|| crate::test_run::build_hold_message(cwd))
 }
 
@@ -881,6 +900,7 @@ mod tests {
             changed_at: "2026-09-13T01:07:00Z".into(),
             changed_by: "op".into(),
             reason: "load 385".into(),
+            holds: vec!["spawns".into(), "tests".into()],
             source: Some("file".into()),
         }
     }
@@ -900,6 +920,7 @@ mod tests {
             changed_at: String::new(),
             changed_by: String::new(),
             reason: String::new(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         let combined = combine(&paused, crate::fleet_incident::Verdict::Clear(clear_record));
@@ -983,6 +1004,7 @@ mod tests {
             DispatchPause::FleetIncident {
                 generation: 7,
                 reason: "load 385".into(),
+                holds: vec!["spawns".into(), "tests".into()],
             }
         );
         assert_eq!(combined.skip_reason(), "fleet_stop");

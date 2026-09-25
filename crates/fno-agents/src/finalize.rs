@@ -2137,6 +2137,30 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Option<String>) {
     use crate::authorized_merge::{Effect, Outcome, Request};
 
+    // The merges hold gates this door too: arming is a merge effect (the
+    // queue merges when checks pass). Best-effort like everything here, and
+    // the safe direction - a held arm leaves the green PR for a human.
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => {}
+        crate::fleet_incident::Verdict::Stopped(r) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident stop holds merges (generation {}, reason: {})",
+                    r.generation, r.reason
+                )),
+            );
+        }
+        crate::fleet_incident::Verdict::Unavailable(d) => {
+            return (
+                false,
+                Some(format!(
+                    "fleet incident state is unreadable ({d}); arm fails closed"
+                )),
+            );
+        }
+    }
+
     let outcome = crate::authorized_merge::run(
         &crate::authorized_merge::RealProbes,
         &Request {

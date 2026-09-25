@@ -3690,6 +3690,7 @@ mod tests {
             pause: Some(crate::loops_pause::DispatchPause::FleetIncident {
                 generation: 5,
                 reason: "two cargo runs".to_string(),
+                holds: vec!["spawns".to_string(), "tests".to_string()],
             }),
             ..TickTrace::default()
         };
