@@ -130,6 +130,13 @@ pub fn read_all_agents() -> ClaudeAgentsSnapshot {
     read_all_agents_with(run_all_agents_command)
 }
 
+/// Read `claude agents --json --all` under one account root. `None` preserves
+/// the ambient `CLAUDE_CONFIG_DIR`; a plan's explicit root pins both the
+/// roster and the daemon paths used by live resume.
+pub fn read_all_agents_in(config_dir: Option<&Path>) -> ClaudeAgentsSnapshot {
+    read_all_agents_with(|| run_all_agents_command_in(config_dir))
+}
+
 fn read_all_agents_with(
     run: impl FnOnce() -> Result<ClaudeCommandOutput, String>,
 ) -> ClaudeAgentsSnapshot {
@@ -531,8 +538,18 @@ pub fn config_dir() -> PathBuf {
 /// Resolve the Claude daemon directory (`<home>/.claude/daemon`). Honors
 /// [`DAEMON_DIR_ENV`] first so tests and alt-home setups redirect the whole tree.
 pub fn daemon_dir() -> PathBuf {
+    daemon_dir_in(None)
+}
+
+/// Resolve the Claude daemon directory for an explicit account root. The
+/// operator override remains highest priority so tests and alt-home setups
+/// can redirect the complete daemon tree.
+pub fn daemon_dir_in(config_dir: Option<&Path>) -> PathBuf {
     if let Some(v) = std::env::var_os(DAEMON_DIR_ENV) {
         return PathBuf::from(v);
+    }
+    if let Some(config_dir) = config_dir {
+        return config_dir.join("daemon");
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -557,7 +574,11 @@ pub fn control_key_path() -> PathBuf {
 /// client, allowed via peerUid"), so the caller treats this as optional, never an
 /// error. [corroborated]
 pub fn read_control_key() -> Option<String> {
-    let raw = std::fs::read_to_string(control_key_path()).ok()?;
+    read_control_key_in(&daemon_dir())
+}
+
+pub(crate) fn read_control_key_in(daemon_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(daemon_dir.join("control.key")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         None
@@ -774,6 +795,71 @@ mod tests {
             Some(std::path::Path::new("/")),
             "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
+    }
+
+    #[test]
+    fn pinned_agents_reader_uses_the_plan_config_dir() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = temp.path().join("config-dir");
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$FNO_TEST_CLAUDE_CONFIG_LOG\"\nprintf '%s\\n' '{\"agents\":[{\"kind\":\"background\",\"short_id\":\"abcd1234\",\"status\":\"idle\"}]}'\n",
+        );
+
+        let old_path = std::env::var_os("PATH");
+        let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let old_log = std::env::var_os("FNO_TEST_CLAUDE_CONFIG_LOG");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("CLAUDE_CONFIG_DIR", temp.path().join("ambient"));
+        std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", &log);
+        let alt = temp.path().join("alt");
+
+        let snapshot = read_all_agents_in(Some(&alt));
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", value),
+            None => std::env::remove_var("FNO_TEST_CLAUDE_CONFIG_LOG"),
+        }
+
+        assert!(snapshot.is_known(), "the pinned fake roster must parse");
+        assert_eq!(
+            snapshot
+                .find("abcd1234")
+                .and_then(|row| row.state.as_deref()),
+            Some("idle")
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), alt.to_string_lossy());
+    }
+
+    #[test]
+    fn pinned_daemon_dir_uses_config_root_and_keeps_the_override() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("account");
+        let old = std::env::var_os(DAEMON_DIR_ENV);
+        std::env::remove_var(DAEMON_DIR_ENV);
+        let account_dir = daemon_dir_in(Some(&config_dir));
+        let override_dir = temp.path().join("override");
+        std::env::set_var(DAEMON_DIR_ENV, &override_dir);
+        let redirected_dir = daemon_dir_in(Some(&config_dir));
+        match old {
+            Some(value) => std::env::set_var(DAEMON_DIR_ENV, value),
+            None => std::env::remove_var(DAEMON_DIR_ENV),
+        }
+        assert_eq!(account_dir, config_dir.join("daemon"));
+        assert_eq!(redirected_dir, override_dir);
     }
 
     // A 2-worker roster in the confirmed live shape (extra keys present, to prove
