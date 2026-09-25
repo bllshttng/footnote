@@ -93,20 +93,15 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     // restores forwarding is untested here, and a config line this text
     // cannot vouch for is the kind of confident wrong answer that cost a
     // whole diagnosis round already. Lines stay short: WIDTH_CAP is 60 and
-    // a setting name past it truncates into a wrong hint.
+    // a setting name past it truncates into a wrong hint. The tmux `m` /
+    // long-press fallbacks live in the right-click meta row above, so the
+    // tmux line carries only the setting it names.
     add(
-        PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
+        PopupRow::Header("Terminal.app never · iTerm2: report mouse · tmux: mouse off".into()),
         None,
     );
     add(
         PopupRow::Header("Ghostty binds it too · see right-click-action".into()),
-        None,
-    );
-    add(
-        PopupRow::Header(format!(
-            "in tmux set mouse off · else m, or hold Left {}ms",
-            MENU_LONG_PRESS.as_millis()
-        )),
         None,
     );
     // The glyph legend rides the modal tail, after the notes: the
@@ -121,4 +116,68 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         popup: Popup::new(rows, Anchor::Center),
         row_events: events,
     }
+}
+
+/// One mouse report while the which-key modal is open (US3): hover moves
+/// the selection, the wheel scrolls, a left click on a row runs it, a click off
+/// the popup dismisses (click-elsewhere).
+pub(crate) async fn keys_modal_mouse(
+    view: &mut View,
+    scanner: &mut Scanner,
+    rep: crate::mouse::MouseReport,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    match rep.kind {
+        MouseKind::Move => {
+            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.select(t);
+                }
+            }
+        }
+        MouseKind::WheelUp => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(-3);
+            }
+        }
+        MouseKind::WheelDown => {
+            if let Some(m) = view.keys_modal.as_mut() {
+                m.popup.scroll_by(3);
+            }
+        }
+        MouseKind::Press(MouseButton::Left) => {
+            // Any esc-close chrome target (footer words, title-bar chip)
+            // closes the modal; checked before the entry routers.
+            if view
+                .keys_modal
+                .as_ref()
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.keys_modal = None;
+                return Ok(StdinFlow::Continue);
+            }
+            match view.keys_modal_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.keys_modal.as_mut() {
+                        m.popup.select(t);
+                    }
+                    if matches!(
+                        super::keys_modal_execute_selected(view, scanner, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
+                }
+                None => {
+                    // A click inside the block that hit no target (a header, a border)
+                    // is swallowed; only a click OFF the modal dismisses.
+                    if !view.keys_modal_block_contains(rep.row, rep.col) {
+                        view.keys_modal = None;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(StdinFlow::Continue)
 }
