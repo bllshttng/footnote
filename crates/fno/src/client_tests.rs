@@ -9318,8 +9318,8 @@ fn the_placement_pickers_fold_shift_arrows_to_their_split_twin() {
         let mut esc = Vec::new();
         assert_eq!(
             fold_selector_keys_with_split_arrows(&mut esc, seq),
-            vec![*want],
-            "{:?} folds to its uppercase twin"
+            vec![want],
+            "{seq:?} folds to its uppercase twin"
         );
         assert!(esc.is_empty());
     }
@@ -9342,10 +9342,22 @@ fn every_split_key_has_its_hjkl_and_arrow_twin() {
     // exactly that set, so "shift+arrows/HJKL split" cannot silently lose a
     // direction. Movement is the same promise on the plain fold: arrows
     // produce exactly the hjkl set.
-    assert_eq!(split_dir(b'H'), Some(Dir::Left));
-    assert_eq!(split_dir(b'J'), Some(Dir::Down));
-    assert_eq!(split_dir(b'K'), Some(Dir::Up));
-    assert_eq!(split_dir(b'L'), Some(Dir::Right));
+    assert_eq!(
+        crate::client::placement_pickers::split_dir(b'H'),
+        Some(Dir::Left)
+    );
+    assert_eq!(
+        crate::client::placement_pickers::split_dir(b'J'),
+        Some(Dir::Down)
+    );
+    assert_eq!(
+        crate::client::placement_pickers::split_dir(b'K'),
+        Some(Dir::Up)
+    );
+    assert_eq!(
+        crate::client::placement_pickers::split_dir(b'L'),
+        Some(Dir::Right)
+    );
     let shift = [
         fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2A"),
         fold_selector_keys_with_split_arrows(&mut Vec::new(), b"\x1b[1;2B"),

@@ -3854,14 +3854,14 @@ unheard_of_field = true
         // `cc-<id>` foreign row is synthesized beside the row that is
         // already there (the mint-side fix lives in the registry store).
         let uuid = "49a80492-388e-44a3-bd91-017be26bcaa0";
-        let reg = derive_rows(
+        let owned = derive_rows(
             &reg(&format!(
                 r#"{{"name":"warden","cwd":"/w","status":"live","provider":"claude","short_id":"{uuid}"}}"#
             )),
             NOW,
         )
         .unwrap();
-        let rows = merge_rows(reg, &[worker("49a80492", "roster-warden", "/w")]);
+        let rows = merge_rows(owned, &[worker("49a80492", "roster-warden", "/w")]);
         assert_eq!(rows.len(), 1, "the roster worker is owned, not foreign");
         assert_eq!(rows[0].name, "warden");
         assert!(!rows[0].external);
