@@ -2135,39 +2135,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // receipt's `blockers` being empty, so the verb prints the list itself
     // instead of the joined-prose Outcome form the effect arms render.
     if request.effect == Effect::Preview {
-        let cwd = request.cwd.as_path();
-        let receipt = match RealProbes.pr_facts(cwd, request.pr) {
-            Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
-            Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
-                PreviewVerdict::Go { waiver } => {
-                    let mut receipt = serde_json::json!({
-                        "outcome": "authorized",
-                        "head": facts.head_sha,
-                        "blockers": [],
-                    });
-                    if let Some(note) = waiver {
-                        receipt["coverage_waiver"] = Value::String(note);
-                    }
-                    receipt
-                }
-                PreviewVerdict::Blocked(rows) => serde_json::json!({
-                    "outcome": "held",
-                    "head": facts.head_sha,
-                    "blockers": rows
-                        .iter()
-                        .map(|b| serde_json::json!({
-                            "code": b.code,
-                            "class": match b.class {
-                                BlockerClass::Held => "held",
-                                BlockerClass::Refused => "refused",
-                                BlockerClass::Unknown => "unknown",
-                            },
-                            "detail": b.detail,
-                        }))
-                        .collect::<Vec<_>>(),
-                }),
-            },
-        };
+        let receipt = preview_receipt(&request);
         return (0, format!("{}\n", receipt), String::new());
     }
     // The receipt is the verdict, so the exit code answers only whether the verb
@@ -2176,6 +2144,46 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // binary that could not start, and the caller reads the receipt either way.
     let outcome = run(&RealProbes, &request);
     (0, format!("{}\n", outcome.to_json()), String::new())
+}
+
+/// The preview receipt for one request, in process. The status composer and
+/// the verb share this one arm, so a status read pays no subprocess to its
+/// own owner, and both surfaces can never render two different ready
+/// verdicts.
+pub(crate) fn preview_receipt(request: &Request) -> Value {
+    let cwd = request.cwd.as_path();
+    match RealProbes.pr_facts(cwd, request.pr) {
+        Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
+        Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
+            PreviewVerdict::Go { waiver } => {
+                let mut receipt = serde_json::json!({
+                    "outcome": "authorized",
+                    "head": facts.head_sha,
+                    "blockers": [],
+                });
+                if let Some(note) = waiver {
+                    receipt["coverage_waiver"] = Value::String(note);
+                }
+                receipt
+            }
+            PreviewVerdict::Blocked(rows) => serde_json::json!({
+                "outcome": "held",
+                "head": facts.head_sha,
+                "blockers": rows
+                    .iter()
+                    .map(|b| serde_json::json!({
+                        "code": b.code,
+                        "class": match b.class {
+                            BlockerClass::Held => "held",
+                            BlockerClass::Refused => "refused",
+                            BlockerClass::Unknown => "unknown",
+                        },
+                        "detail": b.detail,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        },
+    }
 }
 
 fn read_payload(args: &[String]) -> Result<Value, String> {

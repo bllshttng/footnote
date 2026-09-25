@@ -590,3 +590,21 @@ pub(crate) fn error_payload(pr: &str, reason: &super::RestReason) -> (i32, Value
     let stderr = vec![verdict_line(&value)];
     (4, value, stderr)
 }
+
+/// The stderr notes a cache serve replays, in the Python `_serve` order:
+/// coverage recompute, failure detail, rerun recovery.
+pub(crate) fn serve_notes(payload: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(coverage) = payload.get("review_coverage") {
+        if let Some(note) = coverage.get("recompute").and_then(Value::as_str) {
+            if note != "recomputed" {
+                out.push(format!("note: coverage recompute: {note}"));
+            }
+        }
+    }
+    if let Some(obj) = payload.as_object() {
+        failures_note(obj, &mut out);
+        rerun_recovery_note(obj, &mut out);
+    }
+    out
+}

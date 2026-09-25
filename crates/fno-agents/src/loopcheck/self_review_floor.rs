@@ -129,7 +129,7 @@ pub(super) const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 /// the hermetic opt-out and stays unfloored. Mirrors `_harness_can_self_review`
 /// in cli/src/fno/pr/_merge.py so the stop gate and the merge gate cannot
 /// disagree on the same PR.
-pub(super) fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
+pub(crate) fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
     match author_harness {
         Some(h) => harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h),
         None => !pinned_none,
@@ -139,7 +139,7 @@ pub(super) fn self_review_floor_applies(author_harness: Option<&str>, pinned_non
 /// Pure payload classifier: CODE iff any changed path is not documentation.
 /// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
 /// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
-pub(super) fn payload_is_code(paths: &[String]) -> bool {
+pub(crate) fn payload_is_code(paths: &[String]) -> bool {
     paths.iter().any(|p| !is_documentation_path(p))
 }
 

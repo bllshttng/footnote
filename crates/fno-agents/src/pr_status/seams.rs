@@ -150,14 +150,9 @@ pub(crate) fn rerun_recovery<P: GhProbe>(
 /// rather than asserting "disabled" - a guessed NO is the direction a wedged
 /// fleet reads as a disarm, and a guessed YES is the dangerous one.
 pub(crate) fn merge_authority(cwd: &Path) -> Value {
-    let enabled = crate::agents_config::auto_merge_enabled(cwd);
     json!({
-        "config_auto_merge_enabled": enabled,
-        "grant": if enabled.is_some() {
-            json!(crate::agents_config::auto_merge_grant_dispatches(cwd))
-        } else {
-            Value::Null
-        },
+        "config_auto_merge_enabled": crate::agents_config::auto_merge_enabled(cwd),
+        "grant": crate::agents_config::auto_merge_grant_dispatches(cwd),
     })
 }
 
