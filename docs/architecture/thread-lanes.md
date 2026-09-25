@@ -41,7 +41,7 @@ A `keeper` harness with no built lane still gets an honest refusal naming what i
 
 ## What a thread survives
 
-Measured 2026-09-21, on the question of who owns a claude thread: the owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host`. The fno daemon hosts none, and the spawning `fno agents spawn` client parents nothing; it exits once the session is backgrounded.
+Measured 2026-09-21, on the question of who owns a claude thread: the owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host`. The fno daemon hosts none. The spawning `fno agents spawn` client parents nothing and exits once the session is backgrounded.
 
 | Event | The thread | Evidence |
 |---|---|---|

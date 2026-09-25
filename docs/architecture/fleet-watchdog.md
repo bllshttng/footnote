@@ -75,7 +75,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `stale`, `spent`, `contended`, `polling_settled` | report only, at every apply level |
 | `silence` | drive only (`fno agents resume`, same mechanism as `wake`). Ending a row past a drive cap and handing the node back through `fno backlog advance` is a deferred follow-up, not this lane |
 
-The watchdog is not the only quiet-row driver. The daemon's retire arm runs the nudge ladder (`pr_nudge.rs`) over any session the retirement sweep keeps on an open PR, and any dead session it keeps on an in_progress node. A live row gets mail, a dead one a resume. After 3 unanswered nudges it escalates to the operator. A recorded merge order (subject `merge-order:<node>:after:<lead>`) pauses it. The two lanes read each other's activity through the transcript, so a row the watchdog woke does not count toward the ladder's escalation. See [reaping-faq.md](../reaping-faq.md) for the ladder's rules.
+The watchdog is not the only quiet-row driver. The daemon's retire arm runs the nudge ladder (`pr_nudge.rs`) over any session the retirement sweep keeps on an open PR. It also runs the ladder over any dead session the sweep keeps on an in_progress node. A live row gets mail, a dead one a resume. After 3 unanswered nudges it escalates to the operator. A recorded merge order (subject `merge-order:<node>:after:<lead>`) pauses it. The two lanes read each other's activity through the transcript, so a row the watchdog woke does not count toward the ladder's escalation. See [reaping-faq.md](../reaping-faq.md) for the ladder's rules.
 
 ## The friction verdicts and their one question
 

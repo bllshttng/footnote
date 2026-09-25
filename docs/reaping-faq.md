@@ -167,15 +167,15 @@ The remedy is merge, not reap. If another node must merge first, record a merge 
 
 ### dead open work
 
-The full line reads `kept {id} (dead open work: {node})`. The node reads `in_progress`, the row is a claude spawn row, and its roster row is a stale pre-death row: a non-terminal state with no pid in a listing that carries pids. The worker's process is gone and its state never went terminal, so the state alone would read live and lie. The keep holds the row so the handle survives, because the remedy is resume, not reap: a dead worker on an in_progress node is always resumed, never left stranded.
+The full line reads `kept {id} (dead open work: {node})`. The node reads `in_progress`, and the row is a claude spawn row. Its roster row is a stale pre-death row: a non-terminal state with no pid in a listing that carries pids. The worker's process is gone and its state never went terminal, so the state alone reads live and lies. The keep holds the row so the handle survives. The remedy is resume, not reap: a dead worker on an in_progress node is always resumed, never left stranded.
 
-A `done` or `stopped` roster state never reaches this keep - those take the terminal paths whatever the pid says. A live newer registry row on the same node releases the row as before, and a row whose process answers still keeps under `open work` with no ladder. A `failed` state DOES reach this keep: the death of the worker does not finish the node's work, and the ladder's Resume rung is the owner.
+A `done` or `stopped` roster state never reaches this keep - those take the terminal paths whatever the pid says. A live newer registry row on the same node releases the row as before. A row whose process answers still keeps under `open work` with no ladder. A `failed` state DOES reach this keep: the death of the worker does not finish the node's work, and the ladder's Resume rung is the owner.
 
 The nudge ladder takes the row on its Resume rung only. It runs `fno agents resume <full-session-id> --message "continue: node <node> is in_progress and its session died with uncommitted work in <cwd>. Commit what is there and drive the node to a PR."` No `fno do pr status` read happens - the row carries no PR yet. After 3 resumes that never landed, one operator question files on the marker `pr-nudge: dead worker on <node>` and the ladder waits for activity.
 
 ### the nudge ladder
 
-A kept open-PR row is a session that is not driving, and so is a kept dead-worker row. The daemon's retire arm runs a nudge ladder over the concatenation of both (`pr_nudge.rs` `run_ladder`). An open-PR row takes every rung. A dead-worker row takes the Resume rung only: it carries no PR, so it never reads `fno do pr status`, its events carry `pr: null`, and its escalation files on `pr-nudge: dead worker on <node>`. The rules, in order:
+A kept open-PR row is a session that is not driving, and so is a kept dead-worker row. The daemon's retire arm runs a nudge ladder over the concatenation of both (`pr_nudge.rs` `run_ladder`). An open-PR row takes every rung. A dead-worker row takes the Resume rung only. It carries no PR, so it never reads `fno do pr status`. Its events carry `pr: null`. Its escalation files on `pr-nudge: dead worker on <node>`. The rules, in order:
 
 1. **Reset.** Transcript activity newer than the last nudge clears the budget: the session answered.
 2. **Red head.** A settled red at a new head leaves exactly one nudge in the budget. The same head never re-arms it.
