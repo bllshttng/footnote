@@ -1247,7 +1247,7 @@ fn provider_and_model_choices_come_from_configured_rows() {
         .popup
         .rows
         .iter()
-        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter-qwen"))
+        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter/qwen/qwen3-coder"))
         .unwrap();
     let action = l.picker.as_ref().unwrap().actions[model_row]
         .clone()
@@ -1734,7 +1734,7 @@ fn open_with_binds_message_project_and_node() {
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
     assert_eq!(l.draft.request(9).node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
-    assert_eq!(l.focus, Focus::Model);
+    assert_eq!(l.focus, Focus::Harness);
 }
 
 #[test]
