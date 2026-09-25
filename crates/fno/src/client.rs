@@ -144,9 +144,9 @@ const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
 /// panel is wide enough (see [`View::footer_menu_range`]).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
 const FOOTER_MENU: &str = "☰ menu";
-/// How long a pending prefix chord waits before the which-key hint paints
-/// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
-const HINT_DELAY: Duration = Duration::from_millis(400);
+/// How long a pending prefix chord waits before the hint bar paints.
+/// Zero: the bar paints at once; `prefix+?` shows the full table.
+const HINT_DELAY: Duration = Duration::ZERO;
 /// (fix) How long a held global-chord candidate (a lone Esc so far)
 /// waits for the chord's remaining bytes before flushing to the pane - the
 /// tmux escape-time analog. A terminal delivers a whole CSI in one read, so
@@ -2209,7 +2209,8 @@ impl View {
             launcher_esc: Default::default(),
             launch_attempt: None,
             launcher_catalog: None,
-            catalog_want: false,
+            // Prefetch at attach: the whole session serves the first list.
+            catalog_want: true,
             catalog_inflight: false,
         }
     }
@@ -5747,8 +5748,7 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
+        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -10011,21 +10011,18 @@ async fn attach_and_run(
                 }
             }
             Some(outcome) = catalog_rx.recv() => {
-                // Last-outcome-wins like the update probe: sync the
-                // popup's harness names (first landing or a retained draft)
-                // and redraw so an open popup shows the fresh field.
+                // Last-outcome-wins like the update probe: sync the draft's
+                // harness names (first landing or a retained draft) through
+                // the launcher's own sync (the one implementation), and
+                // redraw so an open popup shows the fresh field.
                 view.catalog_inflight = false;
-                if let agent_launcher::CatalogOutcome::Ok(rows, _) = &outcome {
-                    if let Some(l) = view.launcher.as_mut() {
-                        if l.draft.harnesses.is_empty() && !rows.is_empty() {
-                            l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
-                            if l.draft.harness_idx >= rows.len() {
-                                l.draft.harness_idx = 0;
-                            }
-                        }
-                    }
-                }
                 view.launcher_catalog = Some(outcome);
+                if let Some(l) = view.launcher.as_mut() {
+                    agent_launcher::sync_harness_names(l, &view.launcher_catalog);
+                }
+                // A list open before this read landed shows "reading
+                // models...": reopen it so the rows re-derive.
+                agent_launcher::refresh_open_picker(&mut view);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
