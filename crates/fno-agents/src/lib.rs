@@ -339,6 +339,7 @@ pub mod terminal_stop;
 pub mod territory;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tracker;
 pub mod transcript_activity;
 pub mod truth_probe;
 pub mod usage;
