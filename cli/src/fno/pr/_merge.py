@@ -889,7 +889,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
     Delegates entirely to ``fno backlog reconcile --pr-number --repo`` (the
     same plural mode the post-merge ritual uses): it binds every node this
-    PR's exact ``Backlog-Closure`` trailer names, THEN runs the existing
+    PR's exact closure line names, THEN runs the existing
     forward scan (which also finds a node stamped at creation the old
     ``_find_pr_node_id`` match used to backfill by hand) plus the reverse
     branch-name map. A single-node PR with no trailer at all still closes via
@@ -931,7 +931,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             pr_url = view.stdout.strip()
 
         if external:
-            # External selection has no Backlog-Closure trailer concept of its
+            # External selection has no closure-trailer concept of its
             # own yet (that is graph-only) - resolve the ONE node this
             # PR's ref matches via the tracker-agnostic sidecar projection,
             # backfill its primary link, and close through the shared
@@ -1699,6 +1699,14 @@ def run_merge(
         _emit(0, "failed", f"invalid pr number: {pr_raw}", "none", err=True)
         return 1
     pr_number = int(pr_raw)
+
+    try:
+        from fno.pr._review_hold import resolve_pr_worktree
+
+        repo = resolve_pr_worktree(pr_number, repo)
+    except Exception as exc:
+        _emit(pr_number, "held", str(exc), "none", err=True)
+        return 2
 
     # The plan-level hold and the in-flight review hold used to be asked here,
     # ahead of every other gate. Both now belong to the authorized-merge owner,

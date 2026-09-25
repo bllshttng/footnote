@@ -1,6 +1,10 @@
-"""Unit tests for the exact Backlog-Closure trailer (x-59a6).
+"""Unit tests for the exact closure line (Fixes; the retired Backlog-Closure
+spelling still reads).
 
-Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR, AC4-EDGE (idempotent rebind).
+The LINE FORMAT lives in the Rust leg (`fno-agents pr closure`), tested there
+against the shared corpus fixture. This file pins the Python forwarder wiring
+and the consumers. Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR,
+AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
@@ -8,10 +12,12 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from fno.rust_binary import VerbUnavailable, verb_call as _REAL_VERB_CALL
 from fno.pr.closure import (
     bind_created_pr,
     BranchResolutionError,
@@ -26,6 +32,8 @@ from fno.pr.closure import (
     render_pr_closure_trailer,
     resolve_branch_node_id,
 )
+
+REPO = Path(__file__).resolve().parents[3]
 
 
 def _node(**kw) -> dict:
@@ -183,8 +191,61 @@ def test_bind_created_pr_refuses_unknown_ambiguous_and_malformed_without_mutatio
 
 
 # ---------------------------------------------------------------------------
-# parse_closure_trailer
+# parse_closure_trailer / render_closure_trailer: the Rust-leg forwarders
 # ---------------------------------------------------------------------------
+
+
+def test_parse_forwarder_sends_the_body_to_the_rust_leg(monkeypatch):
+    calls = []
+
+    def _call(verb, payload, unavailable=None, **kwargs):
+        calls.append((verb, payload))
+        return {"ids": ["x-aaaa"]}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _call)
+    assert parse_closure_trailer("Fixes x-aaaa") == ["x-aaaa"]
+    assert calls[0][0] == "pr-closure-parse"
+    assert calls[0][1] == {"body": "Fixes x-aaaa"}
+
+
+def test_render_forwarder_passes_the_ids_to_the_rust_leg(monkeypatch):
+    calls = []
+
+    def _call(verb, payload, unavailable=None, **kwargs):
+        calls.append((verb, payload))
+        return {"line": "Fixes x-aaaa"}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _call)
+    assert render_closure_trailer(["x-aaaa"]) == "Fixes x-aaaa"
+    assert calls[0][0] == "pr-closure-render"
+    assert calls[0][1] == {"ids": ["x-aaaa"]}
+
+
+def test_a_missing_rust_leg_stops_loudly(monkeypatch):
+    def _missing(verb, payload, unavailable=None, **kwargs):
+        raise VerbUnavailable("fno-agents binary not found")
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _missing)
+    with pytest.raises(VerbUnavailable):
+        parse_closure_trailer("Fixes x-aaaa")
+
+
+def test_the_shared_corpus_parses_through_the_real_leg(monkeypatch):
+    # AC15: the Python forwarder over the REAL binary returns the corpus's
+    # claim column, the same rows the Rust unit test reads. Skips without a
+    # dev build (the smoke CI shard deletes it on purpose).
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setattr("fno.pr.closure.verb_call", _REAL_VERB_CALL)
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    corpus = json.loads(
+        (REPO / "tests" / "fixtures" / "pr-closure-cases.json").read_text(encoding="utf-8")
+    )
+    for case in corpus["cases"]:
+        assert parse_closure_trailer(case["body"]) == case["claims"], case["body"]
 
 
 def test_parse_exact_trailer_two_ids():
@@ -214,9 +275,12 @@ def test_parse_last_trailer_line_wins():
     assert parse_closure_trailer(body) == ["x-2222", "x-3333"]
 
 
-def test_parse_drops_malformed_tokens_on_a_good_line():
-    body = "Backlog-Closure: x-5b99 not-an-id x-62a1\n"
-    assert parse_closure_trailer(body) == ["x-5b99", "x-62a1"]
+def test_parse_voids_a_line_with_a_malformed_token():
+    # The corpus rule: one bad token makes the line prose - it claims nothing
+    # AND does not win, so an earlier good line keeps its claims.
+    body = "Backlog-Closure: x-aaaa\nFixes x-5b99 not-an-id x-62a1\n"
+    assert parse_closure_trailer(body) == ["x-aaaa"]
+    assert parse_closure_trailer("Fixes not-an-id") == []
 
 
 def test_parse_empty_or_none_body():
@@ -231,7 +295,7 @@ def test_parse_empty_or_none_body():
 
 def test_render_round_trips_with_parse():
     line = render_closure_trailer(["x-1234", "x-5678"])
-    assert line == "Backlog-Closure: x-1234 x-5678"
+    assert line == "Fixes x-1234 x-5678"
     assert parse_closure_trailer(line) == ["x-1234", "x-5678"]
 
 
@@ -259,13 +323,13 @@ def test_render_pr_closure_trailer_target_plus_contained():
         _node(id="x-3333", contained_in="x-1111"),
     ]
     line = render_pr_closure_trailer(entries, "x-1111")
-    assert line == "Backlog-Closure: x-1111 x-2222 x-3333"
+    assert line == "Fixes x-1111 x-2222 x-3333"
 
 
 def test_render_pr_closure_trailer_with_extra():
     entries = [_node(id="x-1111")]
     line = render_pr_closure_trailer(entries, "x-1111", extra_ids=["x-9999"])
-    assert line == "Backlog-Closure: x-1111 x-9999"
+    assert line == "Fixes x-1111 x-9999"
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +744,7 @@ def test_open_binding_untracked_detail_names_the_inputs_consulted():
     assert "chore/tidy-docs" in detail
     assert "branch" in detail
     assert "carries #5" in detail
-    assert "Backlog-Closure" in detail
+    assert "closure line" in detail
 
 
 def test_open_binding_untracked_detail_names_a_missing_url():

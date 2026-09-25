@@ -9425,7 +9425,7 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let notice = match action {
                     backlog_board::WriteAction::Args(args, stdin) => {
-                        backlog_board::run_backlog_verb(&args, stdin).await
+                        crate::backlog_write::run_verb(&args, stdin).await.1
                     }
                     backlog_board::WriteAction::Append { id, text } => {
                         let id_for_read = id.clone();
@@ -9450,7 +9450,7 @@ async fn attach_and_run(
                             "--details-file".into(),
                             "-".into(),
                         ];
-                        backlog_board::run_backlog_verb(&args, Some(stdin)).await
+                        crate::backlog_write::run_verb(&args, Some(stdin)).await.1
                     }
                 };
                 let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));

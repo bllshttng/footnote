@@ -449,6 +449,9 @@ def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
 
 
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
     _graph(
         tmp_path,
         monkeypatch,

@@ -482,7 +482,7 @@ def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_
     assert result.exit_code == 0
     assert "warning: dropping malformed --extra id(s)" in result.output
     assert "not-an-id" in result.output
-    assert "Backlog-Closure: x-1111" in result.output
+    assert "Fixes x-1111" in result.output
 
 
 def test_closure_trailer_bare_invocation_resolves_from_branch(monkeypatch, tmp_path):
@@ -502,7 +502,7 @@ def test_closure_trailer_bare_invocation_resolves_from_branch(monkeypatch, tmp_p
     result = runner.invoke(app, ["do", "pr", "closure-trailer"])
 
     assert result.exit_code == 0
-    assert "Backlog-Closure: x-1111" in result.output
+    assert "Fixes x-1111" in result.output
 
 
 def test_closure_trailer_bare_invocation_refusal_is_loud(monkeypatch):
