@@ -162,7 +162,7 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
             .chain(ids.into_iter().map(|id| {
                 // parent: the manifest scope compiles to the epic plus its
                 // descendants, so a workable row is a child of `drain`.
-                serde_json::json!({"id": id, "slug": id.clone(), "title": id.clone(), "type": "feature", "status": "ready",
+                serde_json::json!({"id": id.clone(), "slug": id.clone(), "title": id.clone(), "type": "feature", "status": "ready",
                                    "priority": "p0", "plan_path": "/plans/p.md",
                                    "parent": "drain"})
             }))
