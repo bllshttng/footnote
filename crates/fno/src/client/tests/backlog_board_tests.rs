@@ -252,3 +252,133 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     let notice = v.notice.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
     assert!(notice.contains("holds a draft"), "notice: {notice}");
 }
+
+// ----: the docked sideline + full screen ----
+
+// The dock's narrow render is the stacked one-column shape: each column
+// header carries its count, card rows beneath - never the six-wide cells.
+#[test]
+fn render_at_dock_width_groups_by_column_with_counts() {
+    let b = board_with(board_inputs());
+    let text_w = super::BOARD_DOCK_W as usize - crate::chrome::Chrome::FRAME_COLS;
+    assert!(text_w < WIDE_CELLS_AT, "the dock renders stacked");
+    let (lines, follow) = render(&b, text_w);
+    assert!(follow.is_some(), "the cursor card is the follow line");
+    assert!(
+        lines.iter().any(|l| l.starts_with("In Progress")),
+        "column group headers: {lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.contains("First card")));
+}
+
+// `x` cycles off -> left -> right -> off on the View (persistence is the
+// view store's own test).
+#[test]
+fn x_key_cycles_the_dock_side() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
+    });
+    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Left));
+    assert!(v
+        .notice
+        .as_ref()
+        .map(|(t, _)| t.contains("left"))
+        .unwrap_or(false));
+    rt.block_on(async {
+        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
+    });
+    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Right));
+    rt.block_on(async {
+        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
+    });
+    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Off));
+}
+
+// `F` toggles the full-screen board and back.
+#[test]
+fn f_key_toggles_full_screen() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, b"F", &mut sock).await.expect("F folds");
+    });
+    assert!(v.board_full);
+    rt.block_on(async {
+        board_keys(&mut v, b"F", &mut sock).await.expect("F folds");
+    });
+    assert!(!v.board_full);
+}
+
+// Docked left: the column sits right of the agent sideline at the full
+// dock width; full screen or a closed board gives the width back.
+#[test]
+fn dock_left_reserves_width_right_of_the_sideline() {
+    let mut v = key_view(board_with(board_inputs()));
+    assert_eq!(v.board_left_w(), 0, "closed board docks nothing");
+    v.backlog_board = None;
+    v.board_dock = crate::view_store::BoardDock::Left;
+    assert_eq!(v.board_left_w(), 0, "a closed board never docks");
+    v.backlog_board = Some(BoardView::new(0));
+    assert_eq!(v.board_left_w(), super::BOARD_DOCK_W);
+    assert_eq!(v.board_right_w(), 0);
+    assert_eq!(v.left_chrome_w(), v.panel_w() + super::BOARD_DOCK_W);
+    v.board_full = true;
+    assert_eq!(v.board_left_w(), 0, "full screen is not docked");
+}
+
+// The dock rect: left pins to the sideline's right edge; right hugs the
+// terminal's right edge (no feed panel open); full screen is None.
+#[test]
+fn dock_rect_pins_to_the_chosen_side() {
+    let mut v = key_view(board_with(board_inputs()));
+    v.board_dock = crate::view_store::BoardDock::Left;
+    let ((row, col), (_h, w)) = v.backlog_dock_rect().expect("docked");
+    assert_eq!(col, v.panel_w() as usize);
+    assert_eq!(row, TAB_BAR_ROWS as usize);
+    assert_eq!(w, super::BOARD_DOCK_W as usize);
+    v.board_dock = crate::view_store::BoardDock::Right;
+    let ((_row, col), _) = v.backlog_dock_rect().expect("docked");
+    assert_eq!(
+        col,
+        80 - super::BOARD_DOCK_W as usize,
+        "right dock hugs the right edge (feed closed)"
+    );
+    v.board_full = true;
+    assert!(
+        v.backlog_dock_rect().is_none(),
+        "full screen paints the overlay"
+    );
+    v.board_full = false;
+    v.board_dock = crate::view_store::BoardDock::Off;
+    assert!(v.backlog_dock_rect().is_none());
+}
+
+// The composed frame paints the docked column with the board chrome.
+#[test]
+fn compose_paints_the_docked_board_column() {
+    let mut v = key_view(board_with(board_inputs()));
+    v.board_dock = crate::view_store::BoardDock::Left;
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(text.contains("backlog"), "chrome title: {text}");
+    assert!(text.contains("x side"), "dock footer hint: {text}");
+    assert!(text.contains("In Progress"), "column group header: {text}");
+}
+
+// Full screen paints the board box at column 0 (the docked column paints
+// it right of the sideline), never the dock hint.
+#[test]
+fn compose_full_screen_board_fills_the_terminal() {
+    let mut v = key_view(board_with(board_inputs()));
+    v.board_dock = crate::view_store::BoardDock::Left;
+    v.board_full = true;
+    let text = crate::vt::frame_text(&v.compose());
+    assert!(
+        text.lines().any(|l| l.starts_with("┌─ backlog")),
+        "board box at column 0: {text}"
+    );
+    assert!(!text.contains("x side"), "no dock when full screen");
+}

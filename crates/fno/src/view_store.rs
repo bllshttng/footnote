@@ -178,6 +178,84 @@ struct StoreFile {
     /// clean value. Same contract as `confirm_lifecycle`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     experimental_backlog_view: Option<serde_json::Value>,
+    /// The backlog board's docked-sideline side. Default absent = off
+    /// (the centered overlay). Same contract as `experimental_backlog_view`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_dock: Option<serde_json::Value>,
+    /// The backlog board's full-screen toggle. Default absent = false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_full: Option<serde_json::Value>,
+}
+
+/// Which side the backlog board docks on when the operator sidelines it.
+/// `Off` is the centered overlay the board shipped with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardDock {
+    #[default]
+    Off,
+    Left,
+    Right,
+}
+
+impl BoardDock {
+    /// One press of the dock key: off -> left -> right -> off, so every
+    /// press changes the board's geometry - no press is inert.
+    pub fn next(self) -> BoardDock {
+        match self {
+            BoardDock::Off => BoardDock::Left,
+            BoardDock::Left => BoardDock::Right,
+            BoardDock::Right => BoardDock::Off,
+        }
+    }
+
+    /// The word the notice line shows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BoardDock::Off => "off",
+            BoardDock::Left => "left",
+            BoardDock::Right => "right",
+        }
+    }
+}
+
+/// Read the board dock pref. Absent, corrupt, or unknown reads as `Off` -
+/// the centered overlay - and the next press persists a clean value.
+pub fn load_board_dock() -> BoardDock {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return BoardDock::default();
+    }
+    read_raw()
+        .board_dock
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the board dock pref. Best-effort like every other write here.
+pub fn save_board_dock(dock: BoardDock) {
+    mutate(|file| {
+        file.board_dock = serde_json::to_value(dock).ok();
+    });
+}
+
+/// Read the board full-screen pref. Absent or corrupt reads as `false`.
+pub fn load_board_full() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .board_full
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Persist the board full-screen pref. Best-effort like every other write.
+pub fn save_board_full(full: bool) {
+    mutate(|file| {
+        file.board_full = serde_json::to_value(full).ok();
+    });
 }
 
 /// Read the operator's stop/remove confirm pref. Absent, corrupt, or
@@ -693,6 +771,34 @@ mod tests {
         assert!(load_experimental_backlog_view());
         save_experimental_backlog_view(false);
         assert!(!load_experimental_backlog_view());
+    }
+
+    // The board dock pref: absent reads off, a corrupt or unknown value
+    // reads off, the cycle is closed, and save/load round-trips.
+    #[test]
+    fn board_dock_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("board-dock");
+        assert_eq!(load_board_dock(), BoardDock::Off, "absent reads off");
+        std::fs::write(view_path(), r#"{"board_dock":"up"}"#).unwrap();
+        assert_eq!(load_board_dock(), BoardDock::Off, "unknown reads off");
+        save_board_dock(BoardDock::Left);
+        assert_eq!(load_board_dock(), BoardDock::Left);
+        save_board_dock(BoardDock::Right);
+        assert_eq!(load_board_dock(), BoardDock::Right);
+    }
+
+    // The board full-screen pref: absent or corrupt reads false, and
+    // save/load round-trips.
+    #[test]
+    fn board_full_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("board-full");
+        assert!(!load_board_full(), "absent reads false");
+        std::fs::write(view_path(), r#"{"board_full":"wide"}"#).unwrap();
+        assert!(!load_board_full(), "corrupt reads false");
+        save_board_full(true);
+        assert!(load_board_full());
+        save_board_full(false);
+        assert!(!load_board_full());
     }
 
     // An unknown key or value is dropped entry-wise, not fatally: a file
