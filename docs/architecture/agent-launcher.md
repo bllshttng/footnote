@@ -28,7 +28,7 @@ The agent chip folds harness, model and effort into one value chip. With a model
 ## What the composer owns, and what it does not
 
 - The harness catalog is the compiled-in `harness_capabilities.toml` the spawn door itself enforces, plus a PATH check per name. No UI-only list.
-- Model rows come from one bounded read of `fno config route inventory --json` (30s budget, prefetched at attach). While the read runs, the list shows `reading models...`; after a failure it shows the reason as a disabled row. The `<harness> default` rows launch either way, and a failure re-probes on the next open.
+- Model rows come from one bounded read of `fno config route inventory --json` (30s budget, prefetched at attach). While the read runs, the list shows `reading models...`. After a failure it shows the reason as a disabled row. The `<harness> default` rows launch either way, and a failure re-probes on the next open.
 - Advanced pins are explicit values only. An empty pin reads as "harness default". The composer never displays an invented resolved value.
 - Routing, provider capacity, permission gates and seed acceptance stay with canonical spawn. The composer renders refusals verbatim.
 - The current mux session is the only draft memory. Esc hides the composer and retains the draft. If the client exits, the draft is lost.
