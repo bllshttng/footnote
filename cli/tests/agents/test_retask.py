@@ -187,7 +187,7 @@ def test_run_retask_converts_a_transport_failure_into_a_refused_receipt(monkeypa
         retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row)
     )
 
-    def fail(verb, payload, unavailable, *, timeout):
+    def fail(verb, payload, unavailable, *, timeout=30):
         raise RetaskTransportError("pane_send_timeout", detail="pane 12 went away")
 
     monkeypatch.setattr("fno.rust_binary.verb_call", fail)

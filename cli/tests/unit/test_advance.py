@@ -743,6 +743,36 @@ def test_gate_refusal_maps_the_gate_exit_family():
     )
 
 
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (82, "gate-unavailable"),  # fleet incident stop: no spawn passes while it stands
+        (83, "gate-unavailable"),
+        (86, "capacity-refused"),  # territory cap: frees when a slot frees
+        (88, "capacity-refused"),  # blueprint cap
+    ],
+)
+def test_gate_refusal_maps_fleet_and_cap_exits(code, reason):
+    """d-6846ed1c: 82/83 read gate-unavailable (the row is skipped, never
+    struck); 86/88 read capacity-refused (the row stays ready for the next
+    pass). The spawn-gate: marker stays required provenance either way."""
+    from fno.agents import spawn_gate
+
+    assert spawn_gate.EXIT_FLEET_STOP == 82 and spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE == 83
+    assert spawn_gate.EXIT_TERRITORY_CAP == 86 and spawn_gate.EXIT_BLUEPRINT_CAP == 88
+    verdict = f"spawn-gate: refused on axis (reason, exit {code}): figures"
+    refusal = adv.gate_refusal(
+        adv.SpawnError(f"exited {code}", exit_code=code, detail=verdict)
+    )
+    assert refusal is not None and refusal.reason == reason
+    assert refusal.exit_code == code and refusal.detail == verdict
+    # Without the marker the number alone proves nothing.
+    assert (
+        adv.gate_refusal(adv.SpawnError(f"exited {code}", exit_code=code, detail="Traceback ..."))
+        is None
+    )
+
+
 def test_gate_refusal_reads_the_sandbox_probe_exit_as_lane_scoped():
     """A sandbox that blocks gh blocks it for every node the codex lane takes,
     so the refusal skips instead of charging the node."""

@@ -2330,7 +2330,7 @@ def cmd_spawn(
                 raise
             if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
                 sys.stderr.write(
-                    f"spawn-gate: {reason}; --wait retries for "
+                    f"spawn-gate note: {reason}; --wait retries for "
                     f"{int(wait_deadline - now)}s more\n"
                 )
                 last_wait_note = now
