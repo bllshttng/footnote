@@ -29,7 +29,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 resolve node  →  fno do target start <node>   worktree off origin/main + claim + init prints the orienter
               →  Step 0 (only if STALE)     orienter says boundary-reconcile: STALE -> read blocker diffs, append landed-facts sections
               →  implement                  edit the plan; atomic commits as you go
-              →  validate                    fno doctor test  (real exit code; not bare pytest)
+              →  validate                    fno doctor test <changed test files>  (real exit code; not bare pytest; never the whole suite - CI runs it)
               →  review                      /fno:review <size> --comment on local HEAD, in this session (held; posts when the PR opens)
               →  fix + re-review             only when the round raised findings; one clean round is enough
               →  /pr create                  runs inline in this session; the body carries the reviewed-at line

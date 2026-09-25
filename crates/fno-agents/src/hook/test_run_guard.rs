@@ -110,12 +110,15 @@ const CARGO_REASON: &str = "[fno test-run guard] `{cmd}` runs the crates suite u
 
 const WHOLE_RUST_REASON: &str = "[fno test-run guard] `{cmd}` runs a whole crate test suite. CI runs every suite on every PR. Here a whole run holds the one machine-wide test:suite slot for many minutes while one-test runs queue behind it.\n\nRun the narrowest target instead: `fno doctor test rust --manifest-path crates/<crate>/Cargo.toml --lib <module>::` for unit tests, or `--test <file stem>` for one integration file. To run the whole suite anyway, prefix the command with `FNO_TEST_FULL=1`; it then waits while targeted runs are queued.";
 
+const WHOLE_DOOR_REASON: &str = "[fno test-run guard] `{cmd}` selects no target, so it runs the whole default suite in the foreground and this turn blocks on the test:suite queue for up to the run's whole budget. CI runs every suite on every PR.\n\nRun only the tests covering the files you changed: `fno doctor test <changed test files>`. A whole-suite run that is truly needed starts as a background task: it queues on test:suite and this turn never blocks. To run it in the foreground anyway, prefix the command with `FNO_TEST_FULL=1`.";
+
 /// Which blessed door the refusal names.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Pytest,
     Cargo,
     WholeRust,
+    WholeDoor,
 }
 
 /// Entry: read the payload once, decide, print, always exit 0.
@@ -153,7 +156,16 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("no-repo");
     };
 
-    match decide_at(cmd, Some(&root)) {
+    // A background call never blocks its turn, so the whole-default-suite
+    // refusal is foreground-only. Every other kind refuses regardless: a
+    // backgrounded raw pytest is still an unadmitted run.
+    let foreground = payload
+        .get("tool_input")
+        .and_then(|ti| ti.get("run_in_background"))
+        .and_then(Value::as_bool)
+        != Some(true);
+
+    match decide_at_bg(cmd, Some(&root), foreground) {
         Some(reason) => {
             super::emit_guard_decision(&cwd, "test-run-guard", "Bash", true);
             super::emit_block(&reason)
@@ -168,8 +180,13 @@ pub fn run(_args: &[String]) -> i32 {
 /// The whole verdict for one command string against one repository root:
 /// the refusal text, or None to allow. `root` of None (no resolvable repo)
 /// always allows. Separated from `run` so the tests exercise the same
-/// predicate the hook does, with no git subprocess in the loop.
+/// predicate the hook does, with no git subprocess in the loop. Reads as a
+/// foreground call; `decide_at_bg` is the form that takes one.
 fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
+    decide_at_bg(command, root, true)
+}
+
+fn decide_at_bg(command: &str, root: Option<&Path>, foreground: bool) -> Option<String> {
     let Some(tokens) = lex(command) else {
         return None; // unbalanced quotes: cannot tell command position, allow
     };
@@ -178,10 +195,14 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     if !is_footnote_checkout(root) {
         return None;
     }
+    if kind == Kind::WholeDoor && !foreground {
+        return None; // a background whole-suite run queues without blocking
+    }
     let reason = match kind {
         Kind::Pytest => PYTEST_REASON,
         Kind::Cargo => CARGO_REASON,
         Kind::WholeRust => WHOLE_RUST_REASON,
+        Kind::WholeDoor => WHOLE_DOOR_REASON,
     };
     Some(reason.replace("{cmd}", &shown))
 }
@@ -316,6 +337,9 @@ fn refused_head(head: &str, argv: &[String]) -> Option<Kind> {
                 return Some(Kind::WholeRust);
             }
         }
+        if doctor_test_whole_python(argv).is_some() {
+            return Some(Kind::WholeDoor);
+        }
     }
     if head == "fno-agents" && argv.first().map(String::as_str) == Some("test-run") {
         if let Some(dd) = argv.iter().position(|t| t == "--") {
@@ -369,6 +393,58 @@ fn doctor_test_rust_cargo_argv(argv: &[String]) -> Option<Vec<String>> {
     let mut out = vec!["cargo".to_string(), "test".to_string()];
     out.extend(tail);
     Some(out)
+}
+
+/// Some when `argv` is a bare default-suite `fno doctor test`: the python
+/// door with no `rust`/`smoke` door token and no positional target, only
+/// flags. The default suite queues on test:suite for its whole budget, so a
+/// foreground call blocks the turn; that shape is what the caller refuses.
+/// `None` for every other shape - a named target is a direct set, and the
+/// rust and smoke doors carry their own refusals.
+fn doctor_test_whole_python(mut argv: &[String]) -> Option<()> {
+    for expected in ["doctor", "test"] {
+        if argv.first().map(String::as_str) != Some(expected) {
+            return None;
+        }
+        argv = &argv[1..];
+    }
+    const VALUE_FLAGS: &[&str] = &[
+        "--log",
+        "-n",
+        "-k",
+        "-m",
+        "-p",
+        "-c",
+        "-o",
+        "-W",
+        "--maxprocesses",
+        "--dist",
+        "--maxfail",
+        "--deselect",
+        "--tb",
+        "--rootdir",
+        "--basetemp",
+        "--junitxml",
+        "--html",
+        "--cov",
+        "--result-log",
+    ];
+    let mut skip = false;
+    for tok in argv {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if tok == "--stream" || tok.starts_with("--log=") {
+            continue;
+        }
+        if tok.starts_with('-') {
+            skip = VALUE_FLAGS.contains(&tok.as_str());
+            continue;
+        }
+        return None; // a positional: a file or nodeid target, a direct set
+    }
+    Some(())
 }
 
 /// True when this token ends one command and starts the next. Redirect
@@ -528,7 +604,7 @@ fn refused_segment(
                     continue;
                 };
                 if let Some(kind) = refused_head(&head, &argv) {
-                    if kind == Kind::WholeRust && full_escape {
+                    if matches!(kind, Kind::WholeRust | Kind::WholeDoor) && full_escape {
                         continue;
                     }
                     return Some((kind, part.join(" ")));
@@ -587,6 +663,42 @@ mod tests {
 
     fn decide(cmd: &str, root: &Path) -> Option<String> {
         decide_at(cmd, Some(root))
+    }
+
+    #[test]
+    fn a_foreground_default_suite_refuses_and_names_both_remedies() {
+        let root = footnote_root();
+        let refusal = decide("fno doctor test", root.path()).expect("bare default suite refuses");
+        assert!(refusal.contains("background task"), "{refusal}");
+        assert!(refusal.contains("FNO_TEST_FULL=1"), "{refusal}");
+        let refusal = decide("fno doctor test --stream", root.path())
+            .expect("transport flags alone still select the whole suite");
+        assert!(refusal.contains("background task"), "{refusal}");
+    }
+
+    #[test]
+    fn a_background_default_suite_allows() {
+        let root = footnote_root();
+        assert_eq!(
+            decide_at_bg("fno doctor test", Some(root.path()), false),
+            None
+        );
+        assert_eq!(
+            decide_at_bg("fno doctor test --stream", Some(root.path()), false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_targeted_or_full_prefixed_default_suite_allows() {
+        let root = footnote_root();
+        assert_eq!(
+            decide("fno doctor test cli/tests/unit/x.py", root.path()),
+            None
+        );
+        assert_eq!(decide("FNO_TEST_FULL=1 fno doctor test", root.path()), None);
+        // A worker-count flag never becomes a target.
+        assert!(decide("fno doctor test -n auto", root.path()).is_some());
     }
 
     #[test]
