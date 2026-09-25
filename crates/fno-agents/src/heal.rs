@@ -257,7 +257,7 @@ const SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "closure-trailer",
-        plan: "edit-body: write ONE Backlog-Closure line naming every node the branch names",
+        plan: "edit-body: write ONE Fixes line naming every node the branch names",
         matches: |c| {
             c.check.contains("check-pr-node-closure")
                 && c.log.contains("the exact trailer claims none")
@@ -1041,28 +1041,11 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
     healed
 }
 
-/// True when the line IS a `Backlog-Closure:` trailer line (anchored at the
-/// line start, case-insensitive - the same match the gate's grep makes).
-fn is_trailer_line(line: &str) -> bool {
-    let prefix = "backlog-closure:";
-    line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
-}
-
-/// The ids one `Backlog-Closure:` line claims: the label's own colon
-/// stripped, tokens split on whitespace and comma - the grammar
-/// `parse_closure_trailer` reads.
+/// The ids one closure line claims: the keyword and its optional colon
+/// stripped, tokens split on whitespace and comma, malformed tokens making
+/// the line prose. The grammar `pr_closure::parse` reads.
 fn closure_line_ids(line: &str) -> Vec<String> {
-    let Some((label, rest)) = line.split_once(':') else {
-        return Vec::new();
-    };
-    if !label.eq_ignore_ascii_case("backlog-closure") {
-        return Vec::new();
-    }
-    rest.split([' ', '\t', ','])
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::king_board::pr_closure::line_ids(line)
 }
 
 /// The remedy's own node ids, across every EditBody finding, in order.
@@ -1083,11 +1066,7 @@ fn edit_body_nodes(findings: &[Finding]) -> Vec<String> {
 /// where append-per-node lost every id but the last to the last-line rule.
 fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     let mut union = edit_body_nodes(findings);
-    for id in body
-        .lines()
-        .filter(|line| is_trailer_line(line))
-        .flat_map(closure_line_ids)
-    {
+    for id in body.lines().flat_map(closure_line_ids) {
         if !union.contains(&id) {
             union.push(id);
         }
@@ -1095,11 +1074,12 @@ fn closure_union(findings: &[Finding], body: &str) -> Vec<String> {
     union
 }
 
-/// The body with every trailer line removed - the base the one new line is
-/// appended to, so no stale line can outrank it.
+/// The body with every CLAIMING closure line removed - the base the one new
+/// line is appended to, so no stale line can outrank it. A keyword-led line
+/// whose tokens void it ("Fixes the thing.") is prose: the sweep leaves it.
 fn body_without_trailer_lines(body: &str) -> String {
     body.lines()
-        .filter(|line| !is_trailer_line(line))
+        .filter(|line| closure_line_ids(line).is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1121,8 +1101,8 @@ fn edit_body_cmd(nodes: &[String]) -> String {
     }
 }
 
-/// Edit the PR body so exactly ONE Backlog-Closure line names every node the
-/// heal covers plus every id the body's existing trailer lines held. No
+/// Edit the PR body so exactly ONE closure line names every node the
+/// heal covers plus every id the body's existing closure lines held. No
 /// commit and no push: the closure workflow re-fires on an `edited` event.
 fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Result<bool, String> {
     let union = closure_union(findings, body);
@@ -3730,13 +3710,14 @@ exit 0
         );
         let gh = log_of(d, "gh.log");
         assert_eq!(gh.matches("run rerun 1 --failed").count(), 1, "{gh}");
-        let store_before = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store_before =
+            crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert!(
             !store_before.contains("fleet_task"),
             "no task before the rerun answers: {store_before}"
         );
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,
@@ -3749,7 +3730,7 @@ exit 0
         assert!(store.contains(r#""run":"fno do pr heal 1""#), "{store}");
         // The next tick re-files nothing: the open task dedups on its key.
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,

@@ -484,9 +484,10 @@ pub fn mail_send_receipt(stdout: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Did the send land? Exit 0 covers both `delivered (hosted)` and
-/// `queued (durable)`, so only the receipt says which.
-pub fn mail_send_landed(code: i32, stdout: &str) -> bool {
+/// Did the send get accepted? Exit 0 covers both `delivered (hosted)` and
+/// `queued (durable)`, so only the receipt says which. Acceptance is not landing:
+/// see `fno agents mail sent`.
+pub fn mail_send_accepted(code: i32, stdout: &str) -> bool {
     code == 0 && mail_send_receipt(stdout).contains("delivered (hosted)")
 }
 
@@ -1660,23 +1661,26 @@ mod tests {
     }
 
     #[test]
-    fn mail_send_landed_hosted_receipt_is_true() {
-        assert!(mail_send_landed(0, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_hosted_receipt_is_true() {
+        assert!(mail_send_accepted(0, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_queued_receipt_is_false() {
-        assert!(!mail_send_landed(0, "msg-1 queued (durable) [live-miss]\n"));
+    fn mail_send_accepted_queued_receipt_is_false() {
+        assert!(!mail_send_accepted(
+            0,
+            "msg-1 queued (durable) [live-miss]\n"
+        ));
     }
 
     #[test]
-    fn mail_send_landed_nonzero_exit_is_false() {
-        assert!(!mail_send_landed(1, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_nonzero_exit_is_false() {
+        assert!(!mail_send_accepted(1, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_empty_stdout_is_false() {
-        assert!(!mail_send_landed(0, "\n"));
+    fn mail_send_accepted_empty_stdout_is_false() {
+        assert!(!mail_send_accepted(0, "\n"));
         assert_eq!(mail_send_receipt("  \n"), "");
     }
 

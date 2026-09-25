@@ -145,7 +145,7 @@ have crates/fno/src/bootstrap.rs 'install_verified_within(uv, VERIFY_ATTEMPTS, V
 # reads the shared constant's definition - one literal, no sibling can shadow
 # it - and both call sites are counted so a bare timeout= literal cannot
 # quietly return.
-have hooks/git-protection.py '_VETO_PROBE_TIMEOUT = 25' "shared veto timeout definition"
+have hooks/git-protection.py '_VETO_PROBE_TIMEOUT = 24' "shared veto timeout definition"
 _v=$(grep -c 'timeout=_VETO_PROBE_TIMEOUT' "$REPO/hooks/git-protection.py")
 [ "$_v" -eq 2 ] || fail "expected both veto call sites on _VETO_PROBE_TIMEOUT, found $_v"
 _hook_veto=$(grep -oE '_VETO_PROBE_TIMEOUT = [0-9]+' "$REPO/hooks/git-protection.py" | head -n 1)

@@ -30,8 +30,6 @@ fn pad(seg: &str, w: usize) -> String {
 
 /// How often the kick re-probes the store version while the board is open.
 const PROBE_EVERY: Duration = Duration::from_secs(2);
-/// One `fno backlog ...` write verb's budget (the old node-detail read's).
-const VERB_BUDGET: Duration = Duration::from_secs(10);
 /// The stacked layout below this width, side-by-side cells at or above it.
 const WIDE_CELLS_AT: usize = 90;
 
@@ -189,12 +187,13 @@ pub(crate) enum PickKind {
 }
 
 impl PickKind {
-    /// The picker's rows (label, write value).
+    /// The picker's rows (label, write value); [`crate::backlog_write`]'s
+    /// lists, so both boards offer the same values the verb accepts.
     pub(crate) fn values(self) -> &'static [&'static str] {
         match self {
-            PickKind::Priority => &["p0", "p1", "p2", "p3"],
-            PickKind::Size => &["S", "M", "L"],
-            PickKind::Status => &["idea", "design", "ready", "deferred", "done"],
+            PickKind::Priority => crate::backlog_write::PRIORITIES,
+            PickKind::Size => crate::backlog_write::SIZES,
+            PickKind::Status => crate::backlog_write::STATUSES,
         }
     }
 }
@@ -728,6 +727,7 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b'f') => open_facet(view),
 
             ModalKey::Byte(b'b') => dispatch_plan(view, sock_w).await?,
+            ModalKey::Byte(b't') => launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => ask_the_king(view, sock_w).await?,
             ModalKey::Byte(b'e') => edit_title(view)?,
             ModalKey::Byte(b'p') => edit_priority(view)?,
@@ -915,13 +915,19 @@ fn input_commit(view: &mut View) {
             let Some(id) = edit_target(b) else {
                 return;
             };
-            queue_write(
-                b,
-                WriteAction::Args(
-                    vec!["backlog".into(), "update".into(), id, "-t".into(), text],
-                    None,
-                ),
-            );
+            let args = match crate::backlog_write::field_argv(
+                &id,
+                crate::backlog_write::Field::Title,
+                &text,
+                "the mux backlog view",
+            ) {
+                Ok(args) => args,
+                Err(e) => {
+                    view.set_notice(e);
+                    return;
+                }
+            };
+            queue_write(b, WriteAction::Args(args, None));
         }
         BoardInputKind::Append => {
             if text.is_empty() {
@@ -1074,18 +1080,19 @@ fn rank_move(view: &mut View, word: &str, up: Option<bool>) -> Result<(), String
         ));
         return Ok(());
     }
-    let mut args: Vec<String> = vec!["backlog".into(), "rank".into(), id, word.to_string()];
-    if let Some(u) = up {
-        if let Some(a) = anchor {
-            args.push(if u {
-                "--before".into()
-            } else {
-                "--after".into()
-            });
-            args.push(a);
+    let place = match (word, up) {
+        ("top", _) => crate::backlog_write::Place::Top,
+        ("before", _) => crate::backlog_write::Place::Before,
+        ("after", _) => crate::backlog_write::Place::After,
+        _ => return Ok(()),
+    };
+    let args = match crate::backlog_write::rank_argv(&id, place, anchor.as_deref()) {
+        Ok(args) => args,
+        Err(e) => {
+            view.set_notice(e);
+            return Ok(());
         }
-    }
-    args.push("--operator".into());
+    };
     let _ = queue_write(b, WriteAction::Args(args, None));
     Ok(())
 }
@@ -1129,6 +1136,64 @@ pub(crate) async fn dispatch_plan(
     )
     .await
     .map_err(|e| format!("plan spawn send failed: {e}"))
+}
+
+/// `t`: open the launcher prefilled to launch the drill-down node (or the
+/// cursor card) as a target. Nothing spawns here: the board closes, the
+/// dock opens with `/fno:target {id}` and the node's project, and the
+/// operator picks harness, model and effort before any Launch. The launch
+/// carries `--node`, so the door's dispatch guard judges the node and the
+/// worker joins its roster row and card. A card already being worked
+/// refuses before the dock opens (the plan-refusal wording), and a kept
+/// draft is never overwritten.
+pub(crate) async fn launch_target(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let (id, cwd, busy) = {
+        let b = view
+            .backlog_board
+            .as_ref()
+            .expect("board open while its keys fold");
+        let Some(id) = edit_target(b) else {
+            return Ok(());
+        };
+        // No gathered inputs yet: the card flags and the node's cwd are
+        // unreadable, so no prefill can be trusted.
+        let Some(inputs) = b.inputs.as_ref() else {
+            view.set_notice("the board is still loading".to_string());
+            return Ok(());
+        };
+        let nv = backlog_model::node(inputs, &id);
+        let busy = nv
+            .as_ref()
+            .map(|n| n.card.claimed || n.card.live)
+            .unwrap_or(false);
+        (id, nv.and_then(|n| n.cwd), busy)
+    };
+    if busy {
+        view.set_notice(format!(
+            "{id} is already being worked; open its session instead"
+        ));
+        return Ok(());
+    }
+    close_board(view);
+    if !super::sideline::show_composer(view, sock_w).await? {
+        return Ok(());
+    }
+    if let Err(e) = agent_launcher::open_with(
+        view,
+        format!("/fno:target {id}"),
+        cwd.as_deref(),
+        id.clone(),
+    ) {
+        view.set_notice(e);
+        return Ok(());
+    }
+    if cwd.as_deref().unwrap_or_default().is_empty() {
+        view.set_notice(format!("{id} records no project path; pick the project"));
+    }
+    Ok(())
 }
 
 /// `A`: ask the king for a blueprint. The king is the model's
@@ -1544,26 +1609,18 @@ fn pick_commit(view: &mut View) {
     if value.is_empty() {
         return;
     }
-    let flag = match p.kind {
-        PickKind::Priority => "-p",
-        PickKind::Size => "--size",
-        PickKind::Status => "--status",
+    let field = match p.kind {
+        PickKind::Priority => crate::backlog_write::Field::Priority,
+        PickKind::Size => crate::backlog_write::Field::Size,
+        PickKind::Status => crate::backlog_write::Field::Status,
     };
-    let mut extra: Vec<String> = Vec::new();
-    if p.kind == PickKind::Status && value == "deferred" {
-        extra.push("--set".into());
-        extra.push("deferred_reason=deferred from the mux backlog view".into());
-    }
-    let mut args: Vec<String> = vec![
-        "backlog".into(),
-        "update".into(),
-        id,
-        flag.into(),
-        value.into(),
-    ];
-    args.extend(extra);
-    if !queue_write(b, WriteAction::Args(args, None)) {
-        view.set_notice("a write is already queued".into());
+    match crate::backlog_write::field_argv(&id, field, value, "the mux backlog view") {
+        Ok(args) => {
+            if !queue_write(b, WriteAction::Args(args, None)) {
+                view.set_notice("a write is already queued".into());
+            }
+        }
+        Err(e) => view.set_notice(e),
     }
 }
 
@@ -1585,62 +1642,6 @@ pub(crate) fn open_detail(view: &mut View) {
             details_open: false,
         });
     }
-}
-
-/// The one bounded shell-out for every board write: argv as an array,
-/// off the UI loop, `kill_on_drop`, a 10 s budget. The notice is the last
-/// stderr line on a non-zero exit (the verb's refusal, verbatim), else the
-/// last stdout line, else the updated fallback. Shaped like
-/// [`super::update_menu::run_restart_verb`].
-pub(crate) async fn run_backlog_verb(args: &[String], stdin: Option<String>) -> String {
-    use std::process::Stdio;
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .kill_on_drop(true);
-    let fut = async {
-        let mut child = command.spawn().ok()?;
-        if let Some(text) = stdin {
-            let mut w = child.stdin.take()?;
-            use tokio::io::AsyncWriteExt;
-            w.write_all(text.as_bytes()).await.ok()?;
-            w.shutdown().await.ok()?;
-            drop(w);
-        }
-        child.wait_with_output().await.ok()
-    };
-    let output = match tokio::time::timeout(VERB_BUDGET, fut).await {
-        Ok(Some(o)) => o,
-        Ok(None) => return "the verb could not start".into(),
-        Err(_) => {
-            return format!(
-                "fno {} timed out after 10s; re-read to see if it landed",
-                args.first().map(String::as_str).unwrap_or("verb")
-            )
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return last_line(&stderr).unwrap_or_else(|| "the verb refused".into());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    last_line(&stdout).unwrap_or_else(|| "updated".into())
-}
-
-/// The last non-blank line of a verb's output.
-fn last_line(text: &str) -> Option<String> {
-    text.lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(str::to_string)
 }
 
 #[cfg(test)]

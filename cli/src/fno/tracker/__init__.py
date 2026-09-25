@@ -9,14 +9,12 @@ must work offline.
 Backend selection is env-driven so it works with no config-schema machinery:
 ``FNO_TRACKER_BACKEND=github`` opts into GitHub Issues, and
 ``FNO_TRACKER_GITHUB_REPO=owner/repo`` scopes its ``list_open``. Default is
-``graph``.
+``graph``. Every backend answers in Rust through ``fno-agents graph-get``'s stdin door.
 """
 from __future__ import annotations
 
 import os
 
-from .graph_backend import GraphTracker
-from .github_backend import GitHubIssuesTracker
 from .types import (
     NodeNotFound,
     NodeTracker,
@@ -25,6 +23,7 @@ from .types import (
     TrackerNode,
     TrackerState,
 )
+from fno import rust_binary
 
 
 def active_backend_name(name: str | None = None) -> str:
@@ -43,19 +42,32 @@ def get_tracker(name: str | None = None) -> NodeTracker:
     ``name`` selects a backend explicitly (used by tests). Otherwise the
     ``FNO_TRACKER_BACKEND`` env var selects, defaulting to ``"graph"``.
     """
-    backend = active_backend_name(name)
-    if backend == "graph":
-        return GraphTracker()
-    if backend == "github":
-        return GitHubIssuesTracker(
-            default_repo=os.environ.get("FNO_TRACKER_GITHUB_REPO")
-        )
-    raise ValueError(f"unknown tracker backend: {backend!r}. Available: graph, github")
+    return _RustTracker(active_backend_name(name))
+
+
+class _RustTracker:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def _call(self, op: str, id: str | None = None) -> dict:
+        out = rust_binary.verb_call("graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
+        if out.get("not_found"):
+            raise NodeNotFound(id)
+        if out.get("error"):
+            raise TrackerError(out["error"])
+        return out
+
+    def read(self, id: str) -> TrackerNode:
+        return TrackerNode(**self._call("read", id)["node"])
+
+    def list_open(self) -> list[TrackerCandidate]:
+        return [TrackerCandidate(**c) for c in self._call("list-open")["candidates"]]
+
+    def close(self, id: str) -> None:
+        self._call("close", id)
 
 
 __all__ = [
-    "GitHubIssuesTracker",
-    "GraphTracker",
     "NodeNotFound",
     "NodeTracker",
     "TrackerCandidate",

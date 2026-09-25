@@ -48,24 +48,19 @@ With `--once` the crown rules one wave and expires. Run Who runs this and On cro
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat and a shell watch; the watch runs with `claude --bg --exec`, so a quiet interval invokes no model. Codex uses provider-backed goal actions, not raw prompt-line `/goal` or `/loop`; read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state; Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
 
-The old rule “On Claude, arm ONE monitor, not six” is retired; Claude now arms the loop and settled-PR watch.
+The daemon mails the settle push on every harness:
 
-The old “Nudge-escalation wake” arm label is retired; its event-driven behavior now lives in the settled-PR watch. Codex uses provider-backed goal state and a separate Stop receipt; raw prompt-line commands do not arm it.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks. Codex arms nothing native: its provider goal and Stop receipts are the beat.
 
-1. **Settled-PR watch, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch reads that event, the crown row whose `manifest_session` matches, and its `scope_nodes.nodes` rows marked `owned: true`. A matching node with a ready, blocker-free `fno do pr status <n>` mails the crown one wrapped merge-lever line and exits. A missing crown row, `unreadable_files`, or any failed probe mails `reign watch probe failed: <reading>` and exits 1. The watch lock makes a second launch print its live pid and exit 0. Other matches stay quiet until the next poll.
-
-The watch is a demand arm, not a second board reader. Mail, board, crown liveness, CI, capacity and the tenure verdict remain check-in readings. A red settle stays with the daemon nudge ladder, which names the failing checks.
-
-On Claude, inject the loop as the cheap heartbeat, then launch the watch as a background shell job:
+On Claude, inject the loop as the cheap heartbeat:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
-claude --bg --exec "bash <skill-dir>/scripts/settled-pr-watch.sh <scope> <harness-session-id>"
 ```
 
-The watch's lock makes relaunching it after each check-in or watch wake safe. Confirm the Claude loop and watch receipts and journal them with `reign_armed` (`fno doctor event emit`). For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`; use the beat table for every other harness. A quiet watch costs zero king turns; only an event, mail or the heartbeat wakes the reign.
+Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it. For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`. Use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -79,7 +74,7 @@ Then run `fno agents king checkin` (bare from the crowned session, or `--scope <
 
 - `User notes:` the canon doc's user block (read through `fno config paths handoff --scope <scope>`), verbatim. Never summarized or paraphrased. Nothing when the block is empty or placeholder-only.
 - `board:` the open PR count, the PRs with a free claim and no driver, and the blocked rows with what they are blocked on.
-- `blueprint:` the blueprint subagents this session runs against the ceiling (the provider subagent budget, else 2), then one `start` line per node to plan and one `skip` line per node left, each with its reason. The verb journals the same starts and skips in `reign_checkin`.
+- `blueprint:` the blueprint subagents this session runs against the ceiling. The ceiling is one per king, and a provider subagent budget can only lower it. Then one `start` line per node to plan and one `skip` line per node left, each with its reason. A start prints only while plans ready are fewer than the king's worker slots. Slots is the king's worker share from the spawn gate. The verb journals the same starts and skips in `reign_checkin`.
 - `blocked_child:` a child under this crown emitted `<help>` and nothing answered it inside the grace window - the node, the session, and the age.
  - `held:` this crown's open questions, oldest first, read from the question pages' frontmatter. The crown was frozen at page-write time. A question that names a node carries the `fno backlog decide <node> "<ruling>" --question-id <id>` command. A question with no node carries the `fno inbox outstanding clear <id> --answer "<answer>" --authority crown` command. When this crown has no open question, the line reads `held: none`.
  - `scope <scope>:` leads with the owned active count. These are the active nodes no deeper live crown holds. Next: the active count in scope and the node total. Then the active rows with worker, PR and session (the `fno agents court -n` join).
@@ -89,6 +84,8 @@ Then run `fno agents king checkin` (bare from the crowned session, or `--scope <
 - `workers:` live worker count and oldest worker activity, both read from the `fno agents top --json` payload and from nothing else: live-worker count is `workers | length` only when the payload carries the non-empty positive `predicate` string and a `workers` array; oldest activity is the maximum non-null `workers[].status_age_s`, reported as an age beside that worker's `handle` or `name`, never converted into a timestamp and never invented. When the payload cannot answer, the line reads `worker activity unmeasured` with the reason: neither a zero-worker fleet nor a zero age is ever reported from an unread payload, because an instrument that did not answer is not a fleet that does not exist. The `status` word in `fno agents status` is stored lifecycle state, not this served activity age; the two are different instruments and are never averaged, merged, or substituted for each other.
 - `crown:` liveness including `split`. When a member of this crown reads done or superseded, drop it in this session. Run `fno agents crown <own handle> --scope <each live member>`. No attended shell is needed, and the grantor stays as recorded.
 - `refusal_rate:` the machine declining, as a percent, over the trailing 200 tool calls in this session's own transcript - the cheapest available proxy for context degradation, no model introspection needed. A rise across two consecutive check-ins (not one noisy tick) prints `RISING (handoff signal)`: treat it as a reason to hand off, the same way a `blocked_child` or `attention:` line is. Reads `unmeasured` on a harness with no per-session transcript file (opencode) or when the transcript cannot be found.
+- `wake_ratio:` machine wakes to typed turns in this session's own transcript, read with the same provenance classifier `fno-agents intel` uses. Relay rows, loop wakeups, stop hooks and keepalives are wakes. Typed and unwitnessed turns are user. Over 3 to 1 prints `OVER 3 to 1` and journals an attention item. Treat it as a reason to shorten the reign. Fails on a harness with no per-session transcript file, the same posture as `refusal_rate`.
+- `subagent_tokens:` subagent token spend carried by task notifications, summed per task id: since the last beat, and the session total. With no previous beat it reads the session total twice.
 - `drain:` undelivered mail as one number.
 - `main ci:` one verdict token, never a count, for the merge decision. `fno-agents` reduces the shared check reader. That reader holds every check-run page, the legacy commit statuses, and runs that failed before minting a job. A workflow file GitHub cannot parse completes as `failure` with zero jobs. It mints no check run, so the row names its workflow path. `red` on any `fail` or `cancel` row. `green` on a row set where all rows pass or skip. `pending` on every other row set, including no rows. A failed read is loud, never green: an unreadable status or runs listing names the fault instead of answering. The combined status left the reduce. GitHub answers `pending` for a commit with zero legacy statuses. No green on this repo ever survived it. `total_count` and any per-conclusion tally are never compared. Measured 09:11Z to 09:23Z on one push: a count-based reader woke three times. The success counts ran 5, then 16, then 20, with zero failures and one identical verdict. A count moves on every finishing job. When the fleet's merge posture changes, the verdict moves. That is the only thing this read exists to answer.
 - `escalations:` open and overdue escalation notes in this scope's escalations directory, filtered to the crown fold. Take the recommended option, or wait; irreversible always waits.
@@ -122,7 +119,7 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
-Read `fno agents king verdict` and print its first line. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
+Read `fno agents king verdict` and print its first line and its `hygiene:` line. The `hygiene:` line is evidence about this session's own ordering, never a stop. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
 
 ## Recording a ruling
 
@@ -154,7 +151,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or one waiting only on the user, CI or a worker, exits `NoWork`; the next beat, mail or settled-PR watch wakes the reign. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective; the wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires escalates and parks the session; the answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
+Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective. The wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
 
 ## The three halts
 

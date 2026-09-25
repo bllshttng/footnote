@@ -2611,3 +2611,180 @@ fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The equal-version trap (see `registry_schema.toml`): PR 2090 minted v33
+/// and PR 2091 then added
+/// `spawn_id`/`spawn_provenance` AT v33 without a bump, so an fno built
+/// between the two merges called itself v33, read the new rows as its own
+/// version, and Python's strict reader refused the whole registry. This test
+/// pins the struct's serde field set to `registry_schema.toml`'s `fields`
+/// array; scripts/ci/check-registry-schema-bump.sh turns a `fields` change
+/// without a version bump into a CI refusal.
+#[test]
+fn registry_schema_fields() {
+    use serde::de::value::Error as DeError;
+    use serde::de::Error as _;
+    use serde::de::Visitor;
+    use serde::Deserializer;
+
+    /// Captures the `fields` slice serde_derive passes to
+    /// `deserialize_struct`. Every value method refuses: only the declared
+    /// field names matter here, never a value.
+    #[derive(Default)]
+    struct FieldCapture {
+        fields: Option<&'static [&'static str]>,
+    }
+
+    macro_rules! refuse {
+        ($($name:ident),* $(,)?) => {
+            $(
+                fn $name<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+                where
+                    V: Visitor<'de>,
+                {
+                    Err(DeError::custom("field names captured"))
+                }
+            )*
+        };
+    }
+
+    impl<'de> Deserializer<'de> for &mut FieldCapture {
+        type Error = DeError;
+
+        fn deserialize_struct<V>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            self.fields = Some(fields);
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_enum<V>(
+            self,
+            _name: &'static str,
+            _variants: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_newtype_struct<V>(
+            self,
+            _name: &'static str,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_tuple_struct<V>(
+            self,
+            _name: &'static str,
+            _len: usize,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        fn deserialize_unit_struct<V>(
+            self,
+            _name: &'static str,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(DeError::custom("field names captured"))
+        }
+
+        refuse!(
+            deserialize_any,
+            deserialize_bool,
+            deserialize_i8,
+            deserialize_i16,
+            deserialize_i32,
+            deserialize_i64,
+            deserialize_i128,
+            deserialize_u8,
+            deserialize_u16,
+            deserialize_u32,
+            deserialize_u64,
+            deserialize_u128,
+            deserialize_f32,
+            deserialize_f64,
+            deserialize_char,
+            deserialize_str,
+            deserialize_string,
+            deserialize_bytes,
+            deserialize_byte_buf,
+            deserialize_option,
+            deserialize_unit,
+            deserialize_seq,
+            deserialize_map,
+            deserialize_identifier,
+            deserialize_ignored_any
+        );
+    }
+
+    let raw = include_str!("../../registry_schema.toml");
+    let parsed: toml::Value = toml::from_str(raw).expect("registry_schema.toml must parse as TOML");
+    let toml_names: Vec<String> = parsed
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .expect("registry_schema.toml must carry a `fields` array")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .expect("fields entries must be strings")
+                .to_string()
+        })
+        .collect();
+
+    let mut cap = FieldCapture::default();
+    let _ = RegistryEntry::deserialize(&mut cap);
+    let mut struct_names: Vec<String> = cap
+        .fields
+        .expect("serde_derive must pass RegistryEntry's fields to deserialize_struct")
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    struct_names.sort();
+    struct_names.dedup();
+
+    let mut pinned = toml_names.clone();
+    pinned.sort();
+    pinned.dedup();
+
+    let added: Vec<&String> = struct_names
+        .iter()
+        .filter(|n| !pinned.contains(n))
+        .collect();
+    let removed: Vec<&String> = pinned
+        .iter()
+        .filter(|n| !struct_names.contains(n))
+        .collect();
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "RegistryEntry's serde field set no longer matches `fields` in crates/fno-agents/src/registry_schema.toml.\n  added to the struct: {added:?}\n  removed from the struct: {removed:?}\n  Fix: update `fields`, then bump `version` in crates/fno-agents/src/registry_schema.toml in the same PR, so an fno built before the field landed can never read the new rows as its own version."
+    );
+}

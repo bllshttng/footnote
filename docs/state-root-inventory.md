@@ -20,7 +20,7 @@ One file per install. These belong at the root.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog status --snapshot`, `fno backlog find` | written only when exported |
+| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog find`, or the tracker snapshot door (`fno-agents graph-get` stdin) | written only when exported |
 | `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
 | `graph.json.lock` | `crates/fno-agents/src/graph_store.rs::BoundedLock` | the publish cycle's bounded lock beside the store; the keeper holds it for the duration of one mutation |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
@@ -47,6 +47,8 @@ One file per install. These belong at the root.
 | `recovery/provider-canaries/*.json` | `agents/watchdog.py` | bounded health proofs for audit; exact marker, provider/account IDs, pane ID, and timestamp only, never pane dumps or credentials |
 | `recovery/canary-work/` | `agents/watchdog.py` | permanent empty neutral cwd reused by canaries; owns no node claim or project data |
 | `claims/dispatch%3A*.lock`, `.recovery.d/` | `claims/core.py` for provider handoff | transaction lease for one attempt; released at terminal return, recovery mutex removed by the claim primitive; contains holder/process metadata only |
+| `claims/<key>.lock.queue.d/`, `.priority.d/`, `.full.d/` | `crates/fno-agents/src/claim_queue.rs` owns the ticket format; waiters live in `crates/fno-agents/src/test_run.rs` and `scripts/ci/preflight.sh` | one ticket dir per live waiter on one admission door, named `NNNNNN/holder`; removed by its own waiter on every exit path and reaped by the next scan when its recorded pid is gone. The three dirs are the lanes: `priority` (a live `test:priority` claim names the checkout), `queue` (arrival order), `full` (whole-suite runs, suite door only) |
+| `claims/build-waiters/` | `crates/fno-agents/src/test_run.rs` `CargoWait` | one marker per waiting checkout, removed when the wait ends and by the reader when its pid is gone; read by the stop hook to allow a stop during a held build |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock`, `squads.json.tmp.*` | `crates/fno/src/squad_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent; the pid-suffixed tmp is replaced on every locked write and a stale one is safe to remove |
 | `agents/squads.json` | no writer in this build: a historical store location beside the live agent files (`registry.json` there IS authoritative, which is what makes the dead file read as real). `fno mux doctor` names it and its live replacement. | dead: nothing reads it, so it can only mislead; delete on sight (`fno mux doctor` prints the `rm`) |

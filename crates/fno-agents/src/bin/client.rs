@@ -144,6 +144,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("question-intake") {
         std::process::exit(fno_agents::question_intake::run_question_intake());
     }
+    if args.first().map(String::as_str) == Some("question-clear") {
+        std::process::exit(fno_agents::question_clear::run_question_clear());
+    }
     // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
     if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
         std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
@@ -164,6 +167,11 @@ fn main() {
         std::process::exit(fno_agents::sync_canonical::run_sync_canonical_verb(
             &args[1..],
         ));
+    }
+    // PR-scoped callers resolve the local checkout from the head branch;
+    // transport-only, so this adds no client action to the curated menu.
+    if args.first().map(String::as_str) == Some("pr-worktree") {
+        std::process::exit(fno_agents::pr_worktree::run());
     }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
     // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
@@ -940,6 +948,12 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
+    }
+    // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
+    // the PR-body closure line; the Python readers forward here (JSON payload
+    // in, JSON answer out, binary-direct like `pr-body-check`).
+    if matches!(verb, "pr-closure-parse" | "pr-closure-render") {
+        return fno_agents::king_board::pr_closure::run(&args);
     }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);

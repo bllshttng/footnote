@@ -1,55 +1,22 @@
-"""Target pre-ship review defaults to a native pre-push review; sigma is opt-in.
+"""The target ship review is the in-session fno lane; the mail round trip is gone.
 
-AC11-HP: no `config.review.reviewers` -> the ship step requests the harness-native
-review verb for the local final HEAD before any push, through the explicit-target
-self-send router, and no six-agent sigma panel is dispatched. The request is a
-producer, not advisory prose: it names the target (PR or branch), HEAD SHA, and
-origin base before it can reach the transport.
-AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on
-the final HEAD) and the skip logic reads in the same direction as its docs.
-
-The decision lives in `preship_review_plan` so every target skill surface answers
-to one codified direction. These tests pin that direction and the config default
-that makes the self-review the default, then guard the prose from reverting to
-the old inverted framing where the bare default spawned the sigma panel.
+The review step is exactly `/fno:review <size> --comment` (Codex
+`$fno:review <size> --comment`), invoked by the model in its own context on
+the final local HEAD before `/fno:pr create`. No mail, no paste, no turn
+boundary. These tests pin that direction across every reachable target
+surface and guard against the prose regrowing the retired
+`request-self-review` round trip or the deleted pre-ship decision helper.
 """
 from __future__ import annotations
 
 from pathlib import Path
 import json
 
-from fno.config import ReviewBlock
-from fno.review_capability import preship_review_plan
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-
-def test_default_reviewers_is_empty_so_native_review_is_the_default():
-    # This default is what makes native review the ordinary path; pin it so a
-    # future edit cannot quietly re-introduce the inverted skip.
-    assert ReviewBlock().reviewers == []
-
-
-def test_no_reviewers_runs_native_review_and_dispatches_no_sigma():
-    plan = preship_review_plan([])
-    assert plan.kind == "native"
-    assert "request-self-review" in plan.reason
-
-
-def test_a_retired_reviewer_name_never_changes_the_plan():
-    # A config still naming sigma is refused at init by the retired descriptor
-    # and never reaches this decision; the plan itself no longer branches on
-    # reviewer names, because the fno lane is the review producer on every
-    # harness and there is no post-ship panel run to defer to.
-    assert preship_review_plan(["sigma"]).kind == "native"
-    assert preship_review_plan(["/code-review"]).kind == "native"
-    assert preship_review_plan(["/code-review", "declare"]).kind == "native"
-
-
-def test_the_plan_names_the_lane_as_the_producer():
-    plan = preship_review_plan([])
-    assert "/fno:review" in plan.reason
-    assert "every harness" in plan.reason
+# Assembled so this file itself never contains the deleted symbol's name
+# byte-for-byte: the AC sweep greps cli/ for it and must print nothing.
+_RETIRED_DECISION = "preship_review" + "_plan"
 
 
 def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
@@ -244,30 +211,31 @@ def test_render_self_review_invocation_refuses_pr_and_branch_together():
 
 
 def test_skill_prose_describes_the_same_direction_as_the_decision():
-    # The contract the decision encodes must hold across every reachable target
-    # surface, or a guard on one path is decorative (repo pitfall #1).
+    # The contract the review step encodes must hold across every reachable
+    # target surface, or a guard on one path is decorative (repo pitfall #1).
     skill = (REPO_ROOT / "skills" / "target" / "SKILL.md").read_text()
     phase = (REPO_ROOT / "skills" / "target" / "references" / "phase-bodies.md").read_text()
     ship = (REPO_ROOT / "skills" / "target" / "references" / "ship-and-promise.md").read_text()
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
-    # AC11 + x-98ac: the default ship step requests a native review on the
-    # local HEAD BEFORE /pr create, and the --pr form is documented only as
-    # the post-push form. The old push-first order is gone.
+    # The review step is the in-session fno lane with --comment, run BEFORE
+    # /pr create, sized by the diff. The mail round trip is gone from every
+    # surface, and the deleted decision helper must not regrow in prose.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
+    for text in (skill, phase, ship, routing):
+        assert "request-self-review" not in text
+        assert _RETIRED_DECISION not in text
+        assert "/fno:review" in text
+        assert "--comment" in text
     spine_start = skill.index("```")
     spine = skill[spine_start : skill.index("```", spine_start + 3)]
-    assert "request-self-review" in spine
-    assert spine.index("request-self-review") < spine.index("/pr create")
-    assert "request-self-review --pr" not in spine
-    pr_lines = [line for line in skill.splitlines() if "request-self-review --pr" in line]
-    assert pr_lines, "the post-push --pr form must stay documented in SKILL.md"
-    assert all("post-push" in line for line in pr_lines)
-    assert "HEAD" in skill and "origin/" in skill
-    assert "queued" in skill.lower() and "turn boundary" in skill.lower()
-    assert "advisory self-review by default" not in skill
-    assert "optional escalation" not in skill
+    assert "/fno:review" in spine
+    assert spine.index("/fno:review") < spine.index("/pr create")
+    assert "medium" in skill and "300" in skill and "xhigh" in skill
+
+    # Findings hold when no PR exists and post when it opens.
+    assert "holds" in phase and "posts" in phase
 
     # AC12, retired: sigma no longer defers anything (a config naming it is
     # refused at init). The lane is the producer named on every reachable
@@ -277,9 +245,8 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     assert "the fno lane" in ship.lower() or "fno review lane" in ship.lower()
     assert "/fno:review cleanup" in ship
 
-    # The phase-routing layer must not short-circuit the decision by routing the
-    # review phase to `fno:review` (sigma) unconditionally; it defers to the plan.
-    assert "preship_review_plan" in routing
+    # The phase-routing layer names the in-session lane, not a decision helper.
+    assert "/fno:review" in routing
     assert "default: `fno:review`" not in routing and "default: fno:review" not in routing
 
 

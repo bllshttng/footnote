@@ -4,7 +4,7 @@
 //! file-budget gate names this module the answer to "how does the sideline
 //! column paint".
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::*;
 
@@ -16,16 +16,17 @@ use super::*;
 /// message keeps the Fill(3) surplus. Read by the Table and - through
 /// [`sideline_column_rects`] - by the callers that need the solver's answer
 /// beside the paint: one geometry authority, and it is the solver.
+const SIDELINE_RIGHT_SLOT_W: u16 = 6;
 pub(super) const SIDELINE_COLUMNS: [Constraint; 5] = [
     Constraint::Length(5),
     Constraint::Min(22),
     Constraint::Fill(3),
-    Constraint::Length(6),
+    Constraint::Length(SIDELINE_RIGHT_SLOT_W),
     // 6, not the plan's 4: the density button overlays the last two
     // columns, and a 4-wide age cell leaves the sort arrow nowhere to hide
     // under it (the regression `age_sort_arrow_survives_the_density_button`
     // pins). The two spare columns are the padding the old COL_TIME=6 gave.
-    Constraint::Length(6),
+    Constraint::Length(SIDELINE_RIGHT_SLOT_W),
 ];
 
 /// The solver's column rects for a text width: the same call the Table makes
@@ -88,6 +89,7 @@ impl View {
         // Full-screen sideline forces the Extended table (the full column
         // list) for this paint; the stored density returns untouched on exit.
         let full = self.sideline_full;
+        let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
         let density = if full {
             Density::Extended
         } else {
@@ -142,12 +144,15 @@ impl View {
                 .enumerate()
                 .map(|(i, drow)| {
                     let depth = row_depths.get(i).copied().unwrap_or(0);
-                    self.sideline_table_row(drow, depth, name_w, now)
+                    self.sideline_table_row(drow, depth, name_w, rects[4].width as usize, now)
                 })
                 .collect();
-            let table = RtTable::new(table_rows, SIDELINE_COLUMNS)
+            let mut table = RtTable::new(table_rows, SIDELINE_COLUMNS)
                 .flex(Flex::Start)
                 .highlight_spacing(HighlightSpacing::Never);
+            if card {
+                table = table.row_highlight_style(RtStyle::new());
+            }
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, table_area, &mut buf, &mut st);
             off = st.offset();
@@ -173,10 +178,9 @@ impl View {
         // (bands, sublines, the idle fold, the footer, the empty state - see
         // the catch-all in `sideline_table_row`), the active-squad caret
         // accent, the row-scoped outcome stamp, and the selector / hover
-        // bar. The bar XORs INVERSE - a focused row's standing band
-        // de-inverts under the cursor - and ratatui's patch-based highlight
-        // can only add a modifier, never subtract one, so the bar lands
-        // here, after the blit, on the same cells the old painter wrote.
+        // bar. The list bar XORs INVERSE so a focused row's standing band
+        // de-inverts under the cursor. Card mode clears the Table's selection
+        // style; its Agent and CardDetail rows use one paired overlay here.
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off;
             if r >= table_rows_n {
@@ -257,6 +261,9 @@ impl View {
             if let Some((text, flags)) = legacy {
                 paint_legacy_row(cells, r, cols, text_w, &text, flags);
             }
+            if card {
+                self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
+            }
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
             }
@@ -265,12 +272,18 @@ impl View {
             }
             let mut highlit =
                 !row_is_inert(drow) && (self.selector == Some(i) || self.hover_row == Some(i));
-            if self.sideline_layout == sideline_color::SidelineLayout::Card {
+            if card {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
+            let paired_card_row =
+                card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(_));
             if highlit {
-                for j in 0..text_w {
-                    cells[r * cols + j].flags ^= cell_flags::INVERSE;
+                for cell in &mut cells[r * cols..r * cols + text_w] {
+                    if paired_card_row {
+                        cell.flags |= cell_flags::INVERSE;
+                    } else {
+                        cell.flags ^= cell_flags::INVERSE;
+                    }
                 }
             }
             let row_stamp = self.row_stamp_for(drow);
@@ -346,6 +359,7 @@ impl View {
         drow: &DisplayRow<'_>,
         depth: usize,
         name_w: usize,
+        right_slot_w: usize,
         now: u64,
     ) -> RtRow<'static> {
         // The focused pane's owning row is the sole standing full-width
@@ -474,16 +488,26 @@ impl View {
                 let tail = row_message_text(a)
                     .map(|t| format!("\u{b7} {t}"))
                     .unwrap_or_default();
+                let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
                 let pr =
                     a.pr.map(|n| format!("#{n}"))
                         .unwrap_or_else(|| "\u{2014}".into());
                 let age = row_age(a, now);
+                let (pr_cell, age_cell) = if card {
+                    let pr_cell = if pr.width() <= right_slot_w {
+                        pr
+                    } else {
+                        String::new()
+                    };
+                    (String::new(), pr_cell)
+                } else {
+                    (pr, age)
+                };
                 let quiet = if flags & cell_flags::DIM != 0 {
                     cell_flags::DIM
                 } else {
                     0
                 };
-                let card = self.sideline_layout == sideline_color::SidelineLayout::Card;
                 (
                     vec![
                         // Card line 1: glyph in the status column, the word
@@ -510,13 +534,8 @@ impl View {
                             quiet | focus_bit,
                             false,
                         ),
-                        rt_cell(pr, cell_fg, quiet | focus_bit, true),
-                        rt_cell(
-                            if card { String::new() } else { age },
-                            cell_fg,
-                            quiet | focus_bit,
-                            true,
-                        ),
+                        rt_cell(pr_cell, cell_fg, quiet | focus_bit, true),
+                        rt_cell(age_cell, cell_fg, quiet | focus_bit, true),
                     ],
                     0,
                 )
@@ -682,6 +701,59 @@ impl View {
         paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
     }
 
+    /// A narrow Regular panel can clip every Table column after the name.
+    /// Keep a fitting card PR visible at the right edge when its cells are
+    /// otherwise empty, without overwriting the status or identity.
+    fn paint_card_pr_if_it_fits(
+        &self,
+        cells: &mut [Cell],
+        row: usize,
+        cols: usize,
+        text_w: usize,
+        drow: &DisplayRow<'_>,
+    ) {
+        let DisplayRow::Agent(agent) = drow else {
+            return;
+        };
+        let Some(number) = agent.pr else {
+            return;
+        };
+        let label = format!("#{number}");
+        let width = label.width();
+        if width > SIDELINE_RIGHT_SLOT_W as usize || width > text_w {
+            return;
+        }
+        let line = &mut cells[row * cols..row * cols + text_w];
+        let start = text_w - width;
+        if line[start..].iter().any(|cell| cell.c != ' ') {
+            return;
+        }
+        let Some(style) = line.iter().find(|cell| cell.c != ' ').cloned() else {
+            return;
+        };
+        let lattice = agent_lattice_state(agent);
+        let quiet = if agent.external && lattice != LatticeState::Blocked {
+            cell_flags::DIM
+        } else {
+            0
+        };
+        let focus = if agent.pane_id == Some(self.layout.focus) {
+            if agent.exited {
+                cell_flags::DIM
+            } else {
+                cell_flags::INVERSE
+            }
+        } else {
+            0
+        };
+        for (offset, ch) in label.chars().enumerate() {
+            let mut cell = style.clone();
+            cell.c = ch;
+            cell.flags = quiet | focus;
+            line[start + offset] = cell;
+        }
+    }
+
     /// Line 2 of a card: two spaces, then `harness · king · message`, with
     /// the age right-aligned to the panel edge. Segments that are `None`
     /// drop out of the join; a worker with no harness, king or message
@@ -703,8 +775,28 @@ impl View {
             text.push_str(&segments.join(" \u{b7} "));
         }
         let age = row_age(a, now);
-        let head_w = text.width().min(text_w.saturating_sub(age.width()));
-        format!("{}{}", pad_to(&text, head_w), age)
+        let head_w = text_w.saturating_sub(age.width());
+        let head = if text.width() <= head_w {
+            text
+        } else {
+            let limit = head_w.saturating_sub(1);
+            let mut fitted = String::new();
+            let mut width = 0;
+            for ch in text.chars() {
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + char_width > limit {
+                    break;
+                }
+                fitted.push(ch);
+                width += char_width;
+            }
+            if head_w > 0 {
+                fitted.push('…');
+            }
+            fitted
+        };
+        let padding = " ".repeat(head_w.saturating_sub(head.width()));
+        format!("{head}{padding}{age}")
     }
 
     /// The card-mode highlight pairing: a card's lower half inverts when
@@ -719,12 +811,14 @@ impl View {
     ) -> bool {
         match display.get(i) {
             Some(DisplayRow::CardDetail(_)) => {
-                base || self.selector == Some(i.saturating_sub(1))
+                base || self.selector == Some(i)
+                    || self.hover_row == Some(i)
+                    || self.selector == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
             }
             Some(DisplayRow::Agent(_)) => {
                 base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(_)))
-                    && self.hover_row == Some(i + 1)
+                    && (self.selector == Some(i + 1) || self.hover_row == Some(i + 1))
             }
             _ => base,
         }
@@ -859,22 +953,37 @@ pub(super) async fn toggle_composer(
     if view.launcher.is_some() {
         agent_launcher::close(view);
     } else {
-        let was_on = view.panel_on;
-        view.panel_on = true;
-        if view.panel_w() == 0 {
-            view.panel_on = was_on;
-            view.set_notice("terminal too narrow for the composer".into());
-        } else {
-            if !was_on {
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
-            agent_launcher::open(view);
-        }
+        show_composer(view, sock_w).await?;
     }
     Ok(())
+}
+
+/// The show half of [`toggle_composer`], shared with the board's `t` key:
+/// turn the sideline on, refuse a too-narrow terminal (notice + `false`),
+/// send the Resize when the sideline was hidden, then open the dock.
+/// `true` when the dock is open.
+pub(super) async fn show_composer(
+    show: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<bool, String> {
+    let was_on = show.panel_on;
+    show.panel_on = true;
+    if show.panel_w() == 0 {
+        show.panel_on = was_on;
+        show.set_notice("terminal too narrow for the composer".into());
+        return Ok(false);
+    }
+    if !was_on {
+        let (r, c) = show.content_dims();
+        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+            .await
+            .map_err(|e| format!("resize send failed: {e}"))?;
+    }
+    // An already-open dock keeps its held draft; open() replaces it.
+    if show.launcher.is_none() {
+        agent_launcher::open(show);
+    }
+    Ok(true)
 }
 
 /// The agent-view pattern: entering full-screen opens the composer (a list

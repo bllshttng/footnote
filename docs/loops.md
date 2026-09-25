@@ -16,6 +16,7 @@ The control plane runs every scheduled loop below. One row names its scheduler, 
 | `retire` | `daemon` | 300 | always | `control_plane_tick` | `fno agents loops table` |
 | `machine_watch` | `daemon` | 300 | always | `control_plane_tick` | `fno agents loops table` |
 | `arm_watch` | `daemon` | 300 | always | `control_plane_tick` | `fno agents loops table` |
+| `king_settle` | `daemon` | 300 | always | `control_plane_tick` | `fno agents court --nodes` |
 | `provider_cap` | `daemon` | 120 | always | `control_plane_tick` | `fno agents loops table` |
 | `merge_close` | `daemon` | 900 | always | `control_plane_tick` | `fno agents loops table` |
 | `crown_ledger` | `daemon` | 300 | always | `control_plane_tick` | `fno agents loops table` |
@@ -72,6 +73,10 @@ Start: daemon fires, every 300s. End: a `control_plane_tick` receipt lands in th
 ### arm_watch
 
 Start: daemon fires, every 300s. End: a `control_plane_tick` receipt lands in the journal. If it looks wrong, run `fno agents loops table`. If the row reads red, its `cause=` suffix names the next read.
+
+### king_settle
+
+Start: daemon fires, every 300s. End: a `control_plane_tick` receipt lands in the journal. If it looks wrong, run `fno agents court --nodes`. If the row reads red, its `cause=` suffix names the next read.
 
 ### provider_cap
 

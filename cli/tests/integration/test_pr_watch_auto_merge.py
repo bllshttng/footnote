@@ -57,6 +57,9 @@ def _arm_world(
         "fno.pr._merge_grant.resolve_durable_grant",
         lambda pr, repo: _grant_verdict(),
     )
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
     monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(merge_mod.shutil, "which", lambda _x: "/usr/bin/gh")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))

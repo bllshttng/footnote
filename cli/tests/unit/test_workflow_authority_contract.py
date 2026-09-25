@@ -181,7 +181,8 @@ def test_reign_branches_on_harness_capability_before_arming():
     text = _skill("skills/reign/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "Claude gets the native `/loop` heartbeat and a shell watch" in arm
+    assert "king_settle" in arm  # the daemon settle mail pushes on every harness
+    assert "arms no watch" in arm  # the king arms nothing; the daemon mails
     assert "Codex uses provider-backed goal actions" in arm
     assert "positive `provider_goal` receipt" in arm
     assert "separate positive `stop` receipt" in arm

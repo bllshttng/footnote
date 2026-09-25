@@ -284,7 +284,8 @@ fn short_id(id: &str) -> String {
 /// The overlay's keys. j/k (and arrows) move the selection, Enter runs
 /// the selected row (a link drills in, a session launches through the hit
 /// cascade, a dim row answers with its reason), `d` toggles the whole
-/// details text, `b` plans and `A` asks the king (the board's own sends).
+/// details text, `b` plans, `t` launches the node as a target through the
+/// prefilled launcher, and `A` asks the king (the board's own sends).
 pub(crate) async fn detail_keys(
     view: &mut View,
     bytes: &[u8],
@@ -324,6 +325,7 @@ pub(crate) async fn detail_keys(
                 }
             }
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
+            ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => backlog_board::ask_the_king(view, sock_w).await?,
             ModalKey::Byte(b'e') => backlog_board::edit_title(view)?,
             ModalKey::Byte(b'p') => backlog_board::edit_priority(view)?,
