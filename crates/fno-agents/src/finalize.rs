@@ -1795,6 +1795,22 @@ pub(crate) fn resolve_project_name(
     repo_project_name(cwd)
 }
 
+/// True when [`resolve_project_name`] would fall back to the cwd's basename:
+/// no project id in the cwd or home config and no git remote slug. The vault
+/// writer refuses such a name for a temp-dir cwd, where a fallback scatters
+/// pages like `internal/fnoe123_0/questions` into the real vault.
+pub(crate) fn project_name_is_basename_fallback(home: Option<&Path>, cwd: &Path) -> bool {
+    if read_project_id(&cwd.join(".fno/config.toml")).is_some() {
+        return false;
+    }
+    if let Some(h) = home {
+        if read_project_id(&h.join(".fno/config.toml")).is_some() {
+            return false;
+        }
+    }
+    slug_from_git_remote(cwd).is_none()
+}
+
 /// Read the project id from a flat config.toml (`[project]\nid = "..."`). The
 /// legacy top-level `project.id` and the canonical `config.project.id` both map
 /// to the same flat `project.id`, so one lookup covers both. An empty/`null`

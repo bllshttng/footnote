@@ -98,10 +98,30 @@ pub(crate) fn vault_dir_with_home(cwd: &Path, home: Option<&Path>, leaf: &str) -
     if let Some(vault) = resolve_obsidian_vault(&candidates) {
         if let Some(vroot) = resolve_vault_root(&vault, home) {
             let project = resolve_project_name(None, home, cwd);
+            // A temp-dir cwd whose project name is a basename fallback is a
+            // test or probe process (a leaked test daemon once wrote 203
+            // `internal/fnoe<pid>_<n>/questions` dirs into the real vault).
+            // Contain such writes in the space dir.
+            if cwd_is_temporary(cwd)
+                && crate::finalize::project_name_is_basename_fallback(home, cwd)
+            {
+                return crate::paths::space_dir(cwd).join(leaf);
+            }
             return vroot.join("internal").join(project).join(leaf);
         }
     }
     crate::paths::space_dir(cwd).join(leaf)
+}
+
+/// A cwd under any standard temp root: the OS temp dir, or the macOS scratch
+/// trees (`/tmp`, `/private/tmp`, `/var/folders`) that `std::env::temp_dir()`
+/// does not cover. Tests and leaked daemons run there; real projects do not.
+fn cwd_is_temporary(cwd: &Path) -> bool {
+    let mut roots = vec![std::env::temp_dir()];
+    roots.push(PathBuf::from("/tmp"));
+    roots.push(PathBuf::from("/private/tmp"));
+    roots.push(PathBuf::from("/var/folders"));
+    roots.iter().any(|r| cwd.starts_with(r))
 }
 
 /// Tolerant parse: anything missing is empty/None and [`problems`] names it.
@@ -549,6 +569,42 @@ The king waits. A force push cannot be undone.
             questions_fallback.display()
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn vault_branch_refuses_temp_cwd_basename_fallback() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-escalation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // A vault only the HOME-side config knows: the throwaway cwd has none.
+        std::fs::create_dir_all(base.join(".fno")).unwrap();
+        std::fs::write(
+            base.join(".fno/config.toml"),
+            "[obsidian]\nenabled = true\nvault = \"c3po\"\n",
+        )
+        .unwrap();
+        // A throwaway cwd under a temp root, no project id, no git remote:
+        // without the refusal the vault branch names it by its basename into
+        // the REAL vault (the stray-dir leak this test pins).
+        let cwd = std::env::temp_dir().join(format!("fnoe{}_", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let refused = vault_dir_with_home(&cwd, Some(&base), "questions");
+        assert_eq!(
+            refused,
+            crate::paths::space_dir(&cwd).join("questions"),
+            "a temp cwd with a fallback name writes the space dir, never the vault"
+        );
+        // A declared project id still takes the vault branch, unchanged.
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(cwd.join(".fno/config.toml"), "[project]\nid = \"fno\"\n").unwrap();
+        let with_id = vault_dir_with_home(&cwd, Some(&base), "questions");
+        assert_eq!(
+            with_id,
+            base.join("c3po/internal/fno/questions"),
+            "a declared project id keeps the vault branch"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

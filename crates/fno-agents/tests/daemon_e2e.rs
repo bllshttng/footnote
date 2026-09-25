@@ -128,6 +128,7 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
@@ -160,6 +161,7 @@ fn start_daemon_env_in(home: &AgentsHome, dir: &Path, extra: &[(&str, &str)]) ->
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -895,6 +897,7 @@ async fn status_client_exits_13_when_daemon_down() {
         .arg("status")
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client runs");
     assert_eq!(
@@ -1132,6 +1135,7 @@ fn daemon_on_sandbox_home_runs_no_fleet_arm() {
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3")
@@ -1394,6 +1398,7 @@ exit 2
         .args(["rm", "three-surface-worker"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("rm client runs");
     assert!(
@@ -1541,6 +1546,7 @@ exit 2
         .args(["rm", "pinned-worker"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("rm client runs");
     assert!(
@@ -1801,6 +1807,7 @@ async fn restart_force_recovers_a_wedged_holder() {
         tokio::process::Command::new(CLIENT_BIN)
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
             .args(["status"])
             .kill_on_drop(true)
@@ -1971,6 +1978,7 @@ async fn drift_warned_on_list_stderr_only() {
     let spawn_daemon = || {
         Command::new(&dcopy)
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
             .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -2030,6 +2038,7 @@ async fn drift_warned_on_list_stderr_only() {
         .args(["list", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .env("FNO_AGENTS_DAEMON_BIN", &dcopy)
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .output()
@@ -2168,6 +2177,7 @@ async fn registry_startup_refuses_a_divergent_nonempty_registry() {
 
     let mut child = Command::new(DAEMON_BIN)
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -2242,6 +2252,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
         .args(["list", "--all", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client list runs");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2273,6 +2284,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
             .args(args)
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .output()
             .expect("client list runs");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2452,6 +2464,7 @@ async fn registry_true_empty_registry_still_serves_zero() {
         .args(["list", "--all", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client list runs");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2525,6 +2538,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
             .args(["list", "--json"])
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .output()
             .expect("client list runs");
         if !out.status.success() {
@@ -2670,6 +2684,7 @@ async fn status_json_carries_the_drift_label() {
         .args(["status", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client runs");
     assert!(
