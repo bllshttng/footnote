@@ -2,7 +2,10 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
-use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
+use crate::client::{
+    input_folds::MAX_ESC_CARRY,
+    keys_modal::{build_keys_modal, keys_modal_mouse},
+};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 

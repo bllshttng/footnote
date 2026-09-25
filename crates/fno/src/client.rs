@@ -10533,7 +10533,9 @@ async fn handle_stdin(
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
+            if let StdinFlow::Detach =
+                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
+            {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -11798,70 +11800,6 @@ async fn keys_modal_execute_selected(
             Ok(DispatchFlow::Continue)
         }
     }
-}
-
-/// One mouse report while the which-key modal is open (US3): hover moves
-/// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (click-elsewhere).
-async fn keys_modal_mouse(
-    view: &mut View,
-    scanner: &mut Scanner,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::WheelUp => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(-3);
-            }
-        }
-        MouseKind::WheelDown => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(3);
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
-            match view.keys_modal_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.keys_modal.as_mut() {
-                        m.popup.select(t);
-                    }
-                    if matches!(
-                        keys_modal_execute_selected(view, scanner, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-                None => {
-                    // A click inside the block that hit no target (a header, a border)
-                    // is swallowed; only a click OFF the modal dismisses.
-                    if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(StdinFlow::Continue)
 }
 
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
