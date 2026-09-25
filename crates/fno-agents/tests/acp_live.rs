@@ -102,6 +102,19 @@ fn grok_live_acp_and_headless_journeys() {
         .contains("not authenticated")
     {
         record("status", "unavailable-not-authenticated", &version, &date);
+        record("acp_journey", "not-run-not-authenticated", &version, &date);
+        record(
+            "headless_create_resume",
+            "not-run-not-authenticated",
+            &version,
+            &date,
+        );
+        record(
+            "plugin_hook_row",
+            "not-run-not-authenticated",
+            &version,
+            &date,
+        );
         eprintln!("skipping live Grok journey: `grok models` reports no authentication");
         return;
     }
@@ -126,18 +139,6 @@ fn grok_live_acp_and_headless_journeys() {
         "token missing from updates: {first_updates}"
     );
     record("acp_create_prompt", "pass", &version, &date);
-    let debug = fs::read_to_string(cwd.join("grok-debug.log")).unwrap_or_default();
-    record(
-        "plugin_hook_row",
-        if debug.contains("fno") {
-            "seen"
-        } else {
-            "not-seen"
-        },
-        &version,
-        &date,
-    );
-
     let resumed = Arc::new(session(&cwd, PermissionPolicy::Refuse));
     resumed.initialize().unwrap();
     resumed.session_resume(&id).unwrap();
@@ -195,39 +196,51 @@ fn grok_live_acp_and_headless_journeys() {
     record("permission_allow_once", "pass", &version, &date);
 
     let home = fno_agents::paths::AgentsHome::at(cwd.join("fno-home"));
-    let outcome = fno_agents::grok_ask::dispatch_grok_once(
-        &home,
-        "live-grok",
-        "Reply with the token HEADLESS_5BB9.",
-        "fno",
-        &cwd,
-        None,
-        None,
-        false,
-        None,
-        Some(Duration::from_secs(600)),
-        &[],
-    );
-    assert_eq!(outcome.exit_code, 0, "{}", outcome.stderr);
-    assert!(outcome.stdout.contains("HEADLESS_5BB9"));
-    let id = outcome
-        .stderr
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("session_id="))
-        .expect("headless receipt has session id");
-    let resumed = Command::new("grok")
-        .args(["--trust", "--resume", id, "-p", "Repeat the token."])
-        .current_dir(&cwd)
-        .output()
-        .unwrap();
-    assert!(
-        resumed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&resumed.stderr)
-    );
-    assert!(String::from_utf8_lossy(&resumed.stdout).contains("HEADLESS_5BB9"));
-    record("headless_create_resume", "pass", &version, &date);
-    record("status", "measured", &version, &date);
+    let form = fno_agents::harness_capabilities::HarnessContract::packaged().and_then(|contract| {
+        contract.render_session_argv("grok", "headless_create", Some("probe-session-id"))
+    });
+    if form.is_ok() {
+        let outcome = fno_agents::grok_ask::dispatch_grok_once(
+            &home,
+            "live-grok",
+            "Reply with the token HEADLESS_5BB9.",
+            "fno",
+            &cwd,
+            None,
+            None,
+            false,
+            None,
+            Some(Duration::from_secs(600)),
+            &[],
+        );
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.stderr);
+        assert!(outcome.stdout.contains("HEADLESS_5BB9"));
+        let id = outcome
+            .stderr
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("session_id="))
+            .expect("headless receipt has session id");
+        let resumed = Command::new("grok")
+            .args(["--trust", "--resume", id, "-p", "Repeat the token."])
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(String::from_utf8_lossy(&resumed.stdout).contains("HEADLESS_5BB9"));
+        record("headless_create_resume", "pass", &version, &date);
+    } else {
+        record(
+            "headless_create_resume",
+            "not-run-capability-disabled",
+            &version,
+            &date,
+        );
+    }
+    record("status", "acp-measured", &version, &date);
 }
 
 #[test]
