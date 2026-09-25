@@ -708,5 +708,6 @@ fn truncate(text: &str, cap: usize) -> String {
 }
 
 pub(crate) mod compose;
+pub(crate) mod seams;
 #[cfg(test)]
 mod tests;
