@@ -1,6 +1,5 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
 use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting, Budget};
-use super::queues::NODE_ID_BODY;
 use super::{is_terminal, s_i64, s_str, SourceRead};
 use crate::graph_store::entry_id;
 use serde_json::{json, Value};
@@ -387,31 +386,11 @@ fn normalized_pr_url(url: &str) -> String {
         .to_lowercase()
 }
 
-/// Well-formed node ids named on the LAST exact `Backlog-Closure:` line of a
-/// body, order-preserved, deduplicated (mirrors closure.parse_closure_trailer).
-/// Case-insensitive key, token split on whitespace and commas, malformed
-/// tokens dropped.
+/// Well-formed node ids named on the LAST closure line of a body,
+/// order-preserved, deduplicated. The line format lives in
+/// [`super::pr_closure`]; this wrapper keeps the board's one call shape.
 fn trailer_node_ids(body: &str) -> Vec<String> {
-    let id_re = regex::Regex::new(&format!("^{NODE_ID_BODY}$")).expect("static regex");
-    let mut last: Option<&str> = None;
-    for line in body.lines() {
-        let is_trailer = line
-            .get(..16)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Backlog-Closure:"));
-        if is_trailer {
-            last = Some(&line[16..]);
-        }
-    }
-    let Some(rest) = last else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = Vec::new();
-    for token in rest.split(|c: char| c == ',' || c.is_whitespace()) {
-        if !token.is_empty() && id_re.is_match(token) && !ids.iter().any(|i| i == token) {
-            ids.push(token.to_string());
-        }
-    }
-    ids
+    super::pr_closure::parse(body)
 }
 
 /// The three binding keys of one PR, filtered to real graph ids. Shared by
@@ -425,8 +404,7 @@ pub(crate) struct PrBinding {
     /// scoped by normalized URL because a pr_number is only unique within
     /// one repository. Sorted.
     pub backrefs: Vec<String>,
-    /// Node ids on the LAST exact `Backlog-Closure:` body line
-    /// (`trailer_node_ids`).
+    /// Node ids on the LAST closure body line (`trailer_node_ids`).
     pub trailer: Vec<String>,
 }
 
@@ -435,8 +413,8 @@ impl PrBinding {
     pub(crate) fn unbound_detail(&self) -> Option<String> {
         if self.branch.is_empty() && self.backrefs.is_empty() && self.trailer.is_empty() {
             Some(
-                "branch names no node; no node carries this PR; body carries no Backlog-Closure \
-                 trailer"
+                "branch names no node; no node carries this PR; body carries no closure \
+                 line"
                     .to_string(),
             )
         } else {
@@ -999,7 +977,7 @@ mod tests {
                 keys.unbound_detail().as_deref(),
                 Some(
                     "branch names no node; no node carries this PR; body carries no \
-                     Backlog-Closure trailer"
+                     closure line"
                 ),
                 "body {body:?}"
             );

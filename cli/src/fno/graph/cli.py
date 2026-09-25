@@ -2917,7 +2917,7 @@ def cmd_encounter(
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "evidence": evidence,
     }
     if as_operator:
@@ -8673,8 +8673,8 @@ def cmd_reconcile(
     pr_number: Optional[int] = typer.Option(
         None,
         "--pr-number",
-        help="Bind every node named in this merged PR's exact Backlog-Closure "
-        "trailer to the PR (filling an absent primary or appending to "
+        help="Bind every node named in this merged PR's exact closure line "
+        "(Fixes, or the retired Backlog-Closure: spelling) to the PR (filling an absent primary or appending to "
         "additional_prs) BEFORE the drift scan below runs, so a PR naming "
         "several nodes closes all of them in this one invocation rather than "
         "only the one node stamped at creation. All-or-nothing: an "
@@ -8837,7 +8837,7 @@ def _reconcile_once(
         commit_rows_via_store(_graph_path(), _mutator)
         return (_box["refusal"], _box["bound"])
 
-    # --pr-number: bind every exact Backlog-Closure claim on this PR to its
+    # --pr-number: bind every exact closure-line claim on this PR to its
     # node BEFORE the scan below, so the forward scan (which needs a PR ref to
     # query) can see a node that was named in the body but never individually
     # stamped at creation. Reuses the unchanged scan/close pipeline that

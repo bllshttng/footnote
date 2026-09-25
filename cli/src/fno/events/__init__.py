@@ -725,18 +725,18 @@ def validate(event: dict[str, Any]) -> None:
                 )
         # The producer's disposition obligation, enforced where every writer
         # already passes (the script with or without a findings file, the
-        # hooks, the sanctioned manual emit): a findings-free pass attests
-        # nothing about EARLIER findings, so emitting one over a branch whose
-        # chain still holds non-terminal blocking findings leaves them
-        # non-terminal forever - the silent deadlock that surfaces rounds
-        # later as an impossible merge. A `fixed` disposition carried by
+        # hooks, the sanctioned manual emit): a pass disposes nothing by
+        # itself, so emitting one over a branch whose chain still holds
+        # non-terminal blocking findings leaves them non-terminal forever -
+        # the silent deadlock that surfaces rounds later as an impossible
+        # merge. A pass carrying only nonblocking findings disposes nothing
+        # about those earlier ones either, so the obligation reads the chain,
+        # not this row's findings array. A `fixed` disposition carried by
         # THIS record leaves the outstanding set, and so does a `declined`
         # one: the shape check above already refuses a decline without its
-        # reason, so what reaches here records a judgment, and recording it
-        # mints no pass - corroboration stays the merge gate's call, and an
-        # uncorroborated decline still blocks the merge there. `nonblocking`
-        # never disposes: the producer claimed harmless where the gate
-        # re-derives blocking.
+        # reason, and a decline with a reason is terminal whoever declined
+        # it. `nonblocking` never disposes: the producer claimed harmless
+        # where the gate re-derives blocking.
         # Enforced HERE rather than in the classify builder so no producer
         # surface needs new flags or a newer caller to be covered, and an
         # older deployment without this check degrades to today's behavior
@@ -744,7 +744,7 @@ def validate(event: dict[str, Any]) -> None:
         # scope the chain and is not asked; an unreadable log produces
         # rather than refuses, because an instrument failure must not wedge
         # every reviewer on the machine.
-        if data.get("verdict") == "pass" and not findings:
+        if data.get("verdict") == "pass":
             branch = data.get("branch")
             head = data.get("head_sha")
             if isinstance(branch, str) and branch.strip():
@@ -773,14 +773,13 @@ def validate(event: dict[str, Any]) -> None:
                 outstanding = [key for key in nonterminal if key not in disposing]
                 if outstanding:
                     raise ValidationError(
-                        "review_attestation refused: a findings-free pass "
-                        "disposes nothing, and branch "
+                        "review_attestation refused: a pass disposes nothing "
+                        "by itself, and branch "
                         f"{branch} still holds blocking finding(s) without a "
                         f"disposition here: "
                         f"{', '.join(outstanding)}; dispose each one here as "
                         "fixed, or as declined carrying a reason (a decline "
-                        "needs a reason; the merge gate still corroborates a "
-                        "decline before it clears it)"
+                        "with a reason is terminal)"
                     )
 
     # Same chokepoint rationale: mail_escalation's reason drives the overlay

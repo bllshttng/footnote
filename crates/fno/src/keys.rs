@@ -1345,6 +1345,12 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "rename-agent",
         key: b'l',
     },
+    // `c` closes the portal seat only - the viewer, never the row it
+    // shows; `x` stays the destructive row verb.
+    MenuKeyBinding {
+        action: "close-portal",
+        key: b'c',
+    },
 ];
 
 /// The one resolver both menu-scope projections read: the binding registered

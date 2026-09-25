@@ -73,7 +73,6 @@ pub(crate) fn fresh_store_state(
         cache: std::sync::RwLock::new(None),
         fill: std::sync::Mutex::new(()),
         file_opens: std::sync::atomic::AtomicU64::new(0),
-        snapshots: std::sync::Mutex::new(std::collections::VecDeque::new()),
         write_ledger: std::sync::Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: std::sync::Mutex::new(crate::graph_keeper::GateMetrics::new()),
         last_write: std::sync::Mutex::new(None),

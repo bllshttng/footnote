@@ -198,8 +198,10 @@ Write the array to a temp file, classify it, and attest in the same command. The
 fno do review classify --findings-file "$FINDINGS" --emit-record --attest code-review
 ```
 
+When earlier rounds on this branch raised blocking findings, the payload carries them and their dispositions: `{"findings": [...], "dispositions": [{"finding_key", "disposition", "reason"}]}`. Dispose each blocking finding as `fixed`, or as `declined` with a reason. A pass that leaves one out is refused at emit. Never drop a finding from the array to reach a pass. A round that declines its own finding stays a fail, and under the two-round law a fail row counts once the cap is reached. `nonblocking` never clears a finding the gate reads as blocking.
+
 ## Flags
 
-`--comment`: when the target is a GitHub PR, post each finding as an inline PR comment (`gh api repos/{owner}/{repo}/pulls/<n>/comments`, one call per finding, a suggestion block only when it fully fixes the issue). When the target is not a PR, print the findings and note the flag was ignored.
+`--comment`: on a GitHub PR target, post each finding as an inline PR comment, one call per finding (`gh api repos/{owner}/{repo}/pulls/<n>/comments`). Add a suggestion block only for a fix that resolves the finding whole. On any other target the findings are HELD, not dropped. The `review_attestation` row the attest step writes already carries the branch and HEAD. When the branch's PR opens, the create flow's `fno do pr publish-review` step posts the held findings as one PR comment. The post is idempotent by marker. A reviewed head behind the PR head posts with both shas named. Print `held for PR: branch <b> head <sha>, N findings`. If HEAD later moves, review the new head as owed.
 
 `--fix`: apply the findings to the working tree after the report: fix each one directly - correctness bugs and reuse/simplification/efficiency cleanups alike. Skip any finding whose fix would change intended behavior, require changes well outside the reviewed diff, or that you judge to be a false positive - note the skip rather than arguing with it. Then emit on the NEW head after the fix commit: a pass on a superseded commit is discarded, so the attestation must name the head the fixes landed on. Verify the fix delta first.

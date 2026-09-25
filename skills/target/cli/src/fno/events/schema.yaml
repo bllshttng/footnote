@@ -366,7 +366,7 @@ event_types:
                 type: string
               summary:
                 type: string
-                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it requires text the schema never stored, and `declined` (which needs corroboration a solo author cannot mint) becomes the only reachable disposition. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
+                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it means knowing what the finding says. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
         findings_truncated:
           type: boolean
           description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."
@@ -375,7 +375,7 @@ event_types:
           description: "The declared round this verdict is, as a running max across the PR's life. A round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds. A row carrying this field bypasses the head collapse, because the declared number is already the round's identity. The round budget (config.review.max_rounds) counts these. OPTIONAL."
         dispositions:
           type: array
-          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined BLOCKING finding is terminal only with corroboration the author cannot mint alone - see docs/architecture/review-coverage-termination.md. OPTIONAL."
+          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined finding with a non-empty reason is terminal whoever declined it, and `nonblocking` over a finding the gate re-derives as blocking stays non-terminal - see docs/architecture/review-coverage-termination.md. OPTIONAL."
           items:
             type: object
             properties:
@@ -881,15 +881,15 @@ event_types:
     consumers: [hooks/target-stop-hook.sh]
 
   - name: target_denominator
-    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
+    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), a count derived from the node's own details (denominator=derived), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration; a derived count is its own kind so it never reads as a declaration in the ratio."
     sources: [target]
     data:
       required: [denominator]
       properties:
         session_id: { type: string, description: "The run's fno_id; best-effort (used to dedup retried inits in the ratio)." }
-        denominator: { type: string, enum: [plan, deliverables, none] }
-        count: { type: integer, description: "The declared deliverable count when denominator=deliverables; absent otherwise." }
-        enumerated: { type: boolean, description: "Whether enumerated_scope fired on the node (withdrawing the cheap exit)." }
+        denominator: { type: string, enum: [plan, deliverables, derived, none] }
+        count: { type: integer, description: "The declared or derived deliverable count; absent only when denominator=none." }
+        enumerated: { type: boolean, description: "Whether the node's own prose reads as an unambiguous enumeration." }
     consumers: [operator]
 
   - name: phase_rolled_back

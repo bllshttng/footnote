@@ -168,6 +168,11 @@ fn main() {
             &args[1..],
         ));
     }
+    // PR-scoped callers resolve the local checkout from the head branch;
+    // transport-only, so this adds no client action to the curated menu.
+    if args.first().map(String::as_str) == Some("pr-worktree") {
+        std::process::exit(fno_agents::pr_worktree::run());
+    }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
     // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
     // no client action (the shrink law allows none); Python's
@@ -797,6 +802,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
+    if verb == "session-backfill" {
+        return fno_agents::session_backfill::run(&args[1..]);
+    }
     // `intel`: the session-provenance fold, daemon-free read, == dispatch
     // like board/reclaim: never registered in ALL_CLIENT_ACTIONS (the action
     // list is shrink-only, d-fe66560a) and never routed by `fno agents`;
@@ -943,6 +951,12 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
+    }
+    // `pr-closure-parse` / `pr-closure-render`: the one parser/renderer for
+    // the PR-body closure line; the Python readers forward here (JSON payload
+    // in, JSON answer out, binary-direct like `pr-body-check`).
+    if matches!(verb, "pr-closure-parse" | "pr-closure-render") {
+        return fno_agents::king_board::pr_closure::run(&args);
     }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
