@@ -3,21 +3,60 @@
 //! - no SQL against `findings` outside this file).
 
 use super::model::Finding;
+use super::schema_v4::{iso, iso_sql, norm_sql, touch, updated, NOW};
 use rusqlite::{params, Connection};
 
-pub const DDL: &str = "CREATE TABLE IF NOT EXISTS findings (
+/// Schema 4. created_at is the finding's own wire time, so the table gains
+/// only updated_at.
+pub fn ddl() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS findings (
   finding_id TEXT PRIMARY KEY,
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   created_at TEXT, body TEXT NOT NULL, block_cmd TEXT, block_excerpt TEXT,
-  source_session_id TEXT, source_harness TEXT, resolved_at TEXT,
-  resolved_by_session_id TEXT
+  source_session_id TEXT REFERENCES agent_sessions(id),
+  source_harness TEXT REFERENCES harnesses(id), resolved_at TEXT,
+  resolved_by_session_id TEXT REFERENCES agent_sessions(id){},
+  {},
+  {}
 );
-CREATE INDEX IF NOT EXISTS findings_node_open_idx ON findings(node_id, resolved_at);";
+CREATE INDEX IF NOT EXISTS findings_node_open_idx ON findings(node_id, resolved_at);",
+        updated("findings"),
+        iso("findings", "created_at"),
+        iso("findings", "resolved_at"),
+    )
+}
+
+pub fn triggers() -> String {
+    touch("findings")
+}
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
-        .execute_batch(DDL)
+        .execute_batch(&ddl())
         .map_err(|error| error.to_string())
+}
+
+/// Schema-4 migration copy from `findings_v3`. A stamp that is not UTC
+/// ISO-8601 is normalized. A resolved finding whose stamp does not parse
+/// stays resolved at the migration time, so it never reopens.
+pub(crate) fn copy_from_v3(connection: &Connection) -> Result<(), String> {
+    let (created_ok, resolved_ok) = (iso_sql("created_at"), iso_sql("resolved_at"));
+    let (created, resolved) = (norm_sql("created_at"), norm_sql("resolved_at"));
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO findings (rowid, finding_id, node_id, created_at, body, block_cmd,
+                 block_excerpt, source_session_id, source_harness, resolved_at,
+                 resolved_by_session_id, updated_at)
+             SELECT rowid, finding_id, node_id,
+                    CASE WHEN {created_ok} THEN created_at ELSE {created} END,
+                    body, block_cmd, block_excerpt, source_session_id, source_harness,
+                    CASE WHEN resolved_at IS NULL THEN NULL WHEN {resolved_ok} THEN resolved_at
+                         ELSE COALESCE({resolved}, {NOW}) END,
+                    resolved_by_session_id, COALESCE({resolved}, {created}, {NOW})
+             FROM findings_v3;"
+        ))
+        .map_err(|error| format!("schema v4 findings copy: {error}"))
 }
 
 /// Replace one node's finding rows. The caller owns the transaction; a save
@@ -133,7 +172,7 @@ pub fn id_exists(connection: &Connection, finding_id: &str) -> Result<bool, Stri
     Ok(taken > 0)
 }
 
-fn finding_ids_in(row: &serde_json::Value) -> Vec<String> {
+pub(crate) fn finding_ids_in(row: &serde_json::Value) -> Vec<String> {
     row.get("findings")
         .and_then(serde_json::Value::as_array)
         .map(|items| {

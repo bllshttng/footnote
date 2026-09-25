@@ -387,6 +387,8 @@ auto_merge = false
 on_exhaustion = "defer"
 # Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.
 cutover_low_after_minutes = 0
+# The blueprint floor for a plan-less node (lean dispatch). 'high' (the default) routes a plan-less node to /blueprint only when its difficulty is high, its size is L, or an open premise question blocks it (the premise-question tag); every other plan-less node goes straight to /target, which states its own scope. 'medium' restores the pre-lean table (blueprint for medium and up). Any unknown value degrades to 'high'.
+blueprint_floor = "high"
 
 [routing]
 # How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.
