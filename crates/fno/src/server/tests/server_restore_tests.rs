@@ -1217,11 +1217,20 @@ fn restore_self_heal_sweeps_an_unnamed_dead_origin_orphan() {
 }
 
 fn run_workspace_restore(core: &mut Core, dry_run: bool) -> Vec<RestoreRow> {
+    run_workspace_restore_headroom(core, dry_run, Ok(revival_gate::unbounded_headroom()))
+}
+
+fn run_workspace_restore_headroom(
+    core: &mut Core,
+    dry_run: bool,
+    headroom: Result<revival_gate::ProbeHeadroom, String>,
+) -> Vec<RestoreRow> {
     let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     core.handle(CoreMsg::WorkspaceRestoreApply {
         dry_run,
         harness: None,
         plans: HashMap::new(),
+        headroom,
         reply: tx,
     });
     match rx.blocking_recv().expect("a reply") {
@@ -1672,6 +1681,7 @@ fn workspace_restore_fills_a_held_claude_portal_from_its_plan() {
         dry_run: false,
         harness: None,
         plans,
+        headroom: Ok(revival_gate::unbounded_headroom()),
         reply: tx,
     });
     let rows = match rx.blocking_recv().expect("a reply") {
@@ -2175,4 +2185,208 @@ fn two_live_holders_of_one_identity_never_shrink_the_stored_row() {
         HashSet::from([key.clone()]),
         "one notice names the shared key"
     );
+}
+
+#[test]
+fn workspace_restore_at_the_cap_refuses_the_tail_by_name() {
+    // Three dead codex members, one slot of headroom: exactly one
+    // resumes, the tail reads refused with the probe's own numbers
+    // and the rerun remedy.
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _gate = revival_gate::GateOverrideGuard;
+    revival_gate::set_gate_override(revival_gate::GateOverride::Ask);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-cap-one", "t-cap-two", "t-cap-three"]);
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-ws-restore-cap");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        leaf_tab(70, shell),
+    );
+    let cap_row = |name: &str, sid: &str| RegistryAgent {
+        harness_session_id: Some(sid.into()),
+        harness: Some("codex".into()),
+        name: name.into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        exited: true,
+        liveness: agents_view::Liveness::Dead,
+        ..Default::default()
+    };
+    core.agents = vec![
+        cap_row("t-cap-one", "cap-session-one"),
+        cap_row("t-cap-two", "cap-session-two"),
+        cap_row("t-cap-three", "cap-session-three"),
+    ];
+    core.squad_members.insert(
+        7u64,
+        vec![
+            stored_worker(
+                "t-cap-one",
+                "codex",
+                "cap-session-one",
+                cwd.to_string_lossy().as_ref(),
+            ),
+            stored_worker(
+                "t-cap-two",
+                "codex",
+                "cap-session-two",
+                cwd.to_string_lossy().as_ref(),
+            ),
+            stored_worker(
+                "t-cap-three",
+                "codex",
+                "cap-session-three",
+                cwd.to_string_lossy().as_ref(),
+            ),
+        ],
+    );
+    let headroom = Ok(revival_gate::ProbeHeadroom {
+        left: 1,
+        slots: 6,
+        cap: 7,
+    });
+    let rows = run_workspace_restore_headroom(&mut core, false, headroom);
+    let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
+    let refused_rows: Vec<&RestoreRow> = rows.iter().filter(|r| r.outcome == "refused").collect();
+    assert_eq!(resumed, 1, "{rows:?}");
+    assert_eq!(refused_rows.len(), 2, "{rows:?}");
+    for row in &refused_rows {
+        let why = row.reason.as_deref().unwrap_or("");
+        assert!(why.contains("spawn gate"), "{why}");
+        assert!(why.contains("rerun fno mux workspace restore"), "{why}");
+    }
+    let new_panes: Vec<u64> = core
+        .panes
+        .keys()
+        .filter(|&&p| p != shell)
+        .copied()
+        .collect();
+    assert_eq!(new_panes.len(), 1, "exactly one pane spawned: {rows:?}");
+    for pid in new_panes {
+        core.reap_pane(pid);
+    }
+    core.reap_pane(shell);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn workspace_restore_refuses_every_member_when_the_probe_refused() {
+    // A refused probe refuses every remaining candidate with the
+    // gate's own message; no pane spawns.
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _gate = revival_gate::GateOverrideGuard;
+    revival_gate::set_gate_override(revival_gate::GateOverride::Ask);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-cap-one", "t-cap-two"]);
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-ws-restore-probe-refused");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        leaf_tab(70, shell),
+    );
+    let cap_row = |name: &str, sid: &str| RegistryAgent {
+        harness_session_id: Some(sid.into()),
+        harness: Some("codex".into()),
+        name: name.into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        exited: true,
+        liveness: agents_view::Liveness::Dead,
+        ..Default::default()
+    };
+    core.agents = vec![
+        cap_row("t-cap-one", "cap-session-one"),
+        cap_row("t-cap-two", "cap-session-two"),
+    ];
+    core.squad_members.insert(
+        7u64,
+        vec![
+            stored_worker(
+                "t-cap-one",
+                "codex",
+                "cap-session-one",
+                cwd.to_string_lossy().as_ref(),
+            ),
+            stored_worker(
+                "t-cap-two",
+                "codex",
+                "cap-session-two",
+                cwd.to_string_lossy().as_ref(),
+            ),
+        ],
+    );
+    let why = "spawn gate: RAM floor 1.2 GB below min 8 GB";
+    let rows = run_workspace_restore_headroom(&mut core, false, Err(why.into()));
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.outcome, "refused", "{rows:?}");
+        assert_eq!(row.reason.as_deref(), Some(why), "{rows:?}");
+    }
+    assert!(core.panes.keys().all(|&p| p == shell), "no pane spawns");
+    core.reap_pane(shell);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn workspace_restore_focus_spends_no_headroom_at_zero() {
+    // A member whose pane is already live reads focused even with no
+    // headroom: a focus starts no worker, so it spends nothing. The first
+    // restore (unbounded) is the setup: it spawns the pane the rerun then
+    // focuses.
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _gate = revival_gate::GateOverrideGuard;
+    revival_gate::set_gate_override(revival_gate::GateOverride::Ask);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-cap-live"]);
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-ws-restore-focus-spend");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core.spawn_pane(24, 80, cwd.to_string_lossy().as_ref()).unwrap();
+    core.session.add_squad(7, vec![cwd.to_string_lossy().into_owned()], None, leaf_tab(70, shell));
+    core.agents = vec![RegistryAgent {
+        harness_session_id: Some("cap-session-live".into()),
+        harness: Some("codex".into()),
+        name: "t-cap-live".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        exited: true,
+        liveness: agents_view::Liveness::Dead,
+        ..Default::default()
+    }];
+    core.squad_members.insert(
+        7u64,
+        vec![stored_worker("t-cap-live", "codex", "cap-session-live", cwd.to_string_lossy().as_ref())],
+    );
+    let first = run_workspace_restore_headroom(&mut core, false, Ok(revival_gate::unbounded_headroom()));
+    assert_eq!(first[0].outcome, "resumed", "{first:?}");
+    let live_pane = first[0].pane.expect("the first restore names its pane");
+
+    let rows = run_workspace_restore_headroom(&mut core, false, Ok(revival_gate::ProbeHeadroom {
+        left: 0,
+        slots: 7,
+        cap: 7,
+    }));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].outcome, "focused", "{rows:?}");
+    assert_eq!(rows[0].pane, Some(live_pane), "the live pane is focused, not respawned");
+    for pid in [live_pane, shell] {
+        core.reap_pane(pid);
+    }
+    let _ = std::fs::remove_dir_all(&cwd);
 }

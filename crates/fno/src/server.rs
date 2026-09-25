@@ -75,10 +75,10 @@ mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
 mod portal_reach;
-mod revival_gate;
 mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
+mod revival_gate;
 mod row_set;
 mod session_guard;
 mod shutdown_capture;
@@ -752,12 +752,14 @@ pub(crate) enum CoreMsg {
     },
     /// The bulk apply half of a workspace restore: the plans are in
     /// hand (keyed by member worker name, `Err` being that member's visible
-    /// refusal), so every gate runs on the core loop through
+    /// refusal), and the revival gate's probed headroom is in hand (`Err`
+    /// refusing every member), so every gate runs on the core loop through
     /// [`Core::resume_one`].
     WorkspaceRestoreApply {
         dry_run: bool,
         harness: Option<String>,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
+        headroom: Result<revival_gate::ProbeHeadroom, String>,
         reply: ControlReply,
     },
     /// (v71) `ControlVerb::SquadReload`: re-read `squads.json` into
@@ -10301,9 +10303,7 @@ impl Core {
                         // resolution. A refusal keeps the held pane held
                         // (a retry after a worker finishes is one click)
                         // and names the gate's verdict on the seat itself.
-                        match self
-                            .revival_admitted(client_id, &facts, ResumeReplay::Held { pid })
-                        {
+                        match self.revival_admitted(client_id, &facts, ResumeReplay::Held { pid }) {
                             None => return Flow::Continue,
                             Some(Err(reason)) => {
                                 self.write_restore_message(
@@ -12032,9 +12032,10 @@ impl Core {
                 dry_run,
                 harness,
                 plans,
+                headroom,
                 reply,
             } => {
-                self.workspace_restore_apply(dry_run, harness, plans, reply);
+                self.workspace_restore_apply(dry_run, harness, plans, headroom, reply);
                 Flow::Continue
             }
             CoreMsg::SquadReload { reply } => {
