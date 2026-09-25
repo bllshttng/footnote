@@ -696,11 +696,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .push(node_id.to_string());
             }
-            // Locked Decision 3: every `do` row, ended or not - a session
+            // Locked Decision 3: every `execute` row, ended or not - a session
             // that ever did the work on a node is the session whose PR it
             // is. The open-do map above stays the obligation question; this
             // one is the attribution question.
-            if row.get("phase").and_then(Value::as_str) == Some("do") {
+            if row.get("phase").and_then(Value::as_str) == Some("execute") {
                 do_nodes
                     .entry(sid.to_ascii_lowercase())
                     .or_default()

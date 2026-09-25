@@ -833,7 +833,7 @@ pub fn derive_session_map(raw: &str) -> HashMap<String, String> {
                             .find(|s| {
                                 matches!(
                                     s.get("phase").and_then(|p| p.as_str()),
-                                    Some("do") | Some("ship")
+                                    Some("execute") | Some("ship")
                                 )
                             })
                             .and_then(|s| s.get("session_id"))

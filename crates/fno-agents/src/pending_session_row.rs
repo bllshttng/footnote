@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// The session phases a parked row may name, mirroring Python store's
 /// `_SESSION_PHASES`. A phase out of this vocabulary is a producer bug and
 /// refuses rather than stamping a row no reader understands.
-const PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+const PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
 
 /// The transport arm. Reads the JSON payload on stdin, dispatches to
 /// [`park`]/[`open`], prints the JSON answer, and maps the result to an
