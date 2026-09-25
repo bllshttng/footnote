@@ -2250,7 +2250,16 @@ fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
             cwd: "/repo".into(),
         },
     ]));
-    let out = render_list_json(&agents, &filters, &json!([]), &[], None, None, Some(&block), &Value::Null);
+    let out = render_list_json(
+        &agents,
+        &filters,
+        &json!([]),
+        &[],
+        None,
+        None,
+        Some(&block),
+        &Value::Null,
+    );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["codex_loaded"]["available"], true);
     assert_eq!(
