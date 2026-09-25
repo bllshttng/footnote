@@ -1503,9 +1503,10 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         // The hard-coded, non-rebindable chords: the global sideline chord
         // (a multi-byte CSI the scanner's ChordEsc branch dispatches, not
-        // chord()) and the prefix-free arrow ladder. The rows derive from
-        // [`hardcoded_chords`], so the table and the guard test read one
-        // source and a chord without a table row fails CI.
+        // chord()) and the prefix-free arrow ladder. The guard test
+        // (`every_hardcoded_chord_scans_to_a_listed_event`) fails when a
+        // scanner chord has no row here, so this table cannot lag the
+        // dispatch path.
         (
             "Ctrl+Opt+Left".into(),
             "open the sideline row selector".into(),
