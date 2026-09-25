@@ -253,7 +253,7 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     assert!(notice.contains("holds a draft"), "notice: {notice}");
 }
 
-// ----: the docked sideline + full screen (x-0d06) ----
+// ----: the docked sideline + full screen ----
 
 // The dock's narrow render is the stacked one-column shape: each column
 // header carries its count, card rows beneath - never the six-wide cells.
