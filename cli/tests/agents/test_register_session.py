@@ -42,7 +42,10 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     )
 
     assert entry.harness == "claude"
-    assert entry.short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
+    # The transport short id is claude's own 8-hex attach/job key (the uuid's
+    # leading segment), NOT the full uuid: `claude attach <short_id>` refuses a
+    # full uuid, so a row carrying one was unattachable from the mux tap.
+    assert entry.short_id == "ef9982cc"
     # Registered NON-live: a hand-started session has no live transport, so it
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
