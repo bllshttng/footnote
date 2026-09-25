@@ -120,6 +120,7 @@ pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;
 pub mod crown_alarm;
+pub mod crown_names;
 pub mod crown_reap;
 pub mod crown_settle;
 pub mod crown_split;

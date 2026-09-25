@@ -135,6 +135,10 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
+    /// The crown's display name (`Barnaby II`), read from the crown-name
+    /// store's file contract (`crate::crown_names`); `None` = unnamed or
+    /// no store file.
+    pub crown_name: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
     /// parent (a root, as far as the renderer can know). Distinct from
@@ -1752,6 +1756,9 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// cannot safely ignore it.
 pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    // One store read for the whole derive: the crown-name file contract
+    // (`crate::crown_names`). Missing or malformed reads as no names.
+    let (crown_names, crown_names_by_node) = crate::crown_names::read_crown_names();
     let rows = doc
         .get("agents")
         .or_else(|| doc.get("entries"))?
@@ -1974,6 +1981,12 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let crown_name = crate::crown_names::crown_name_for(
+            &crown_names,
+            &crown_names_by_node,
+            crown_scope.as_deref(),
+            row.get("node").and_then(|v| v.as_str()),
+        );
         let spawned_by_session = row
             .get("spawned_by_session")
             .and_then(|v| v.as_str())
@@ -2166,6 +2179,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             updated_at,
             crown_level,
             crown_scope,
+            crown_name,
             spawned_by_session,
             lineage_kind,
             spawned_by_name: None,
@@ -2388,6 +2402,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             spawned_by_session: None,
             lineage_kind: None,
             spawned_by_name: None,
@@ -2452,6 +2467,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             spawned_by_session: r.harness_session_id.clone(),
             // A parked fork belongs to its own worker: a CHILD of it.
             lineage_kind: Some("child".into()),
@@ -4277,6 +4293,7 @@ config_dir = "~/.claude-alt"
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             liveness: if exited {
                 Liveness::Dead
             } else {
