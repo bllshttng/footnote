@@ -150,6 +150,13 @@ pub struct HarnessCapabilities {
     /// verb absent from this list; absent means the harness declares none.
     #[serde(default)]
     pub native_verbs: Vec<String>,
+    /// Per-verb teaching metadata keyed by the roster verb: when to reach
+    /// for it and the risk class the raw-mail guard enforces. `use_when`
+    /// lines marked name-derived in the TOML comments say so there; the
+    /// risk class is the guard's authority either way. `default` keeps an
+    /// older packaged copy parseable.
+    #[serde(default)]
+    pub native_verb_meta: BTreeMap<String, VerbMeta>,
     /// The subset the mail lane maps to a structured review RPC on a daemon
     /// thread; empty when the harness has no such transport.
     #[serde(default)]
@@ -212,6 +219,46 @@ pub struct ProviderAction {
     pub transport: String,
     pub method: String,
     pub proof: String,
+}
+
+/// The raw-mail guard's risk vocabulary for a native verb (x-d156). A
+/// `session-ending` or `context-destroying` verb is refused on
+/// `mail send --raw` unless the send names it with `--ack-verb-risk`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerbRisk {
+    Safe,
+    ContextDestroying,
+    SessionEnding,
+}
+
+impl VerbRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerbRisk::Safe => "safe",
+            VerbRisk::ContextDestroying => "context-destroying",
+            VerbRisk::SessionEnding => "session-ending",
+        }
+    }
+
+    /// True when the raw-mail lane refuses the verb without an explicit ack.
+    pub fn is_guarded(self) -> bool {
+        matches!(self, VerbRisk::ContextDestroying | VerbRisk::SessionEnding)
+    }
+}
+
+/// One verb's row in `[harness.<name>.native_verb_meta]`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerbMeta {
+    /// One line: when an agent reaches for this verb.
+    pub use_when: String,
+    pub risk: VerbRisk,
+    /// opencode only: a user-defined command can override a built-in by
+    /// name, so the roster names built-ins and a custom override is
+    /// invisible to this table by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_in: Option<bool>,
 }
 
 /// One harness's `[harness.<name>.conversion]` stanza: HOW a live pane of
@@ -1291,6 +1338,38 @@ mod tests {
         "grok",
         "agy",
     ];
+
+    /// Roster and teaching metadata cannot drift apart: every native verb
+    /// carries a meta row (the render verb promises one line per verb) and
+    /// every meta key names a roster verb (a stale meta row would render a
+    /// verb the harness does not declare).
+    #[test]
+    fn native_verb_meta_covers_the_roster_exactly() {
+        let contract = HarnessContract::packaged().unwrap();
+        for (name, caps) in &contract.harness {
+            for verb in &caps.native_verbs {
+                assert!(
+                    caps.native_verb_meta.contains_key(verb),
+                    "{name}: roster verb {verb} has no native_verb_meta row"
+                );
+            }
+            for verb in caps.native_verb_meta.keys() {
+                assert!(
+                    caps.native_verbs.iter().any(|v| v == verb),
+                    "{name}: native_verb_meta row {verb} is not in the roster"
+                );
+            }
+        }
+        // The mail guard's dangerous classes exist in the packaged table,
+        // so the refusal path is not dead code.
+        let claude = contract.capabilities("claude").unwrap();
+        assert_eq!(
+            claude.native_verb_meta["/clear"].risk,
+            VerbRisk::ContextDestroying
+        );
+        assert!(claude.native_verb_meta["/clear"].risk.is_guarded());
+        assert!(!claude.native_verb_meta["/compact"].risk.is_guarded());
+    }
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
