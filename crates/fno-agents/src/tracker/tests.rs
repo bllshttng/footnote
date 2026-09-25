@@ -267,7 +267,9 @@ fn a_gh_io_fault_surfaces_as_backend_naming_the_id() {
 #[test]
 fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock();
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
@@ -309,7 +311,9 @@ fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
 #[test]
 fn a_scope_switch_never_serves_another_scope_cache() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock();
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
