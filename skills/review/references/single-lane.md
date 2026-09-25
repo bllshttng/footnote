@@ -64,7 +64,7 @@ For the one question this diff answers (take it from the plan's `surface:` block
 
 ### Test value
 
-When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. When authoring answers are incomplete or a junk-pattern match lacks a verified retention-bar contract, raise a BLOCKING finding. Do not label it advisory or cleanup. Retain a matching test only when its independent retention-bar contract is named and verified. Check assertion-free probes, exact source greps, self-comparisons, duplicate owner-boundary proofs, and fixtures supplying the asserted receipt. This angle costs nothing on a diff that touches no test.
+When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. When authoring answers are incomplete or a junk-pattern match lacks a verified retention-bar contract, raise a BLOCKING finding. Do not label it advisory or cleanup. When a test matches a junk pattern, retain it only if its independent retention-bar contract is named and verified. Check assertion-free probes, exact source greps, self-comparisons, duplicate owner-boundary proofs, and fixtures supplying the asserted receipt. This angle costs nothing on a diff that touches no test.
 
 ### Reuse
 
