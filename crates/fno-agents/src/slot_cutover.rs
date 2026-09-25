@@ -394,8 +394,8 @@ mod tests {
         let _env = SavedEnv::set(&config, &usage, &stub, &global_dir.join("settings.json"));
         let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
         super::tick_once(&home, dir.path(), 1000, |_, _| {});
-        let event = std::fs::read_to_string(home.events_jsonl()).unwrap();
-        let event: Value = serde_json::from_str(event.lines().next().unwrap()).unwrap();
+        let text = crate::events::committed_journal_text(&home.events_jsonl());
+        let event: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(event["data"]["arm"], "slot_cutover");
         assert_eq!(event["data"]["skip_reason"], "use_failed");
         assert_eq!(event["data"]["acted"], 0);
@@ -419,8 +419,8 @@ mod tests {
         let _env = SavedEnv::set(&config, &usage, &stub, &global);
         let home = crate::paths::AgentsHome::at(dir.path().join("agents"));
         super::tick_once(&home, dir.path(), 1000, |_, _| {});
-        let event = std::fs::read_to_string(home.events_jsonl()).unwrap();
-        let event: Value = serde_json::from_str(event.lines().next().unwrap()).unwrap();
+        let text = crate::events::committed_journal_text(&home.events_jsonl());
+        let event: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(event["data"]["skip_reason"], "slot_cutover_off");
         assert_eq!(event["data"]["acted"], 0);
         assert!(!home.root().join("slot-cutover.json").exists());
