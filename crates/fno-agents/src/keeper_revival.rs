@@ -514,18 +514,26 @@ fn launch_keeper(spec: &LaunchSpec) -> Result<u32, String> {
 /// Stop a keeper this revival started or named: SIGTERM, then SIGKILL once
 /// the grace passes, so a wedged keeper never outlives its refusal.
 fn terminate_keeper(pid: u32) {
-    // SAFETY: pid targets the keeper this process launched; SIGTERM/SIGKILL
-    // carry no payload.
+    // SAFETY: pid targets the keeper this process launched; SIGTERM carries
+    // no payload.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
     for _ in 0..20 {
-        // SAFETY: signal 0 is the existence probe; nothing is delivered.
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        // This process launched the keeper, so waitpid reaps the corpse a
+        // kill(pid, 0) probe would still see (a zombie answers the existence
+        // probe). ECHILD means it was never ours: fall back to the probe.
+        // SAFETY: WNOHANG wait and signal 0 deliver nothing.
+        let reaped =
+            unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+        let gone = reaped == pid as libc::pid_t
+            || (reaped < 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } != 0);
+        if gone {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // SAFETY: SIGKILL carries no payload.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGKILL);
     }
