@@ -316,6 +316,10 @@ def _project_identity(cwd: Optional[str]) -> "tuple[Optional[str], Optional[str]
             from fno.inbox.store import ProjectIdentificationError, resolve_project
 
             pid = resolve_project(cwd=Path(cwd))
+        except ImportError:
+            # The import itself failed (module or dep missing); naming
+            # ProjectIdentificationError here would raise UnboundLocalError.
+            pid = None
         except ProjectIdentificationError:
             pid = None
         except Exception:  # noqa: BLE001 - membership must degrade, never crash the verb
