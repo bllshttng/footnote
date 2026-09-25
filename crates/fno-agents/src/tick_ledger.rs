@@ -736,7 +736,10 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
-/// action failed, has not skipped - it has failed. `select-unmeasured` is a
+/// action failed, has not skipped - it has failed. `budget_spent` fails
+/// because the arm stopped before it covered every unit it enumerated (the
+/// king wake's `budget spent after k of N crowns`, the watchdog's skipped
+/// leg); its detail carries the count. `select-unmeasured` is a
 /// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
@@ -749,6 +752,7 @@ const FAILURE_SKIPS: &[&str] = &[
     "select-unmeasured",
     "spawn-failed",
     "env_broken",
+    "budget_spent",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -2345,6 +2349,64 @@ mod tests {
         let line = render_row(ab);
         assert!(line.contains(" ok"), "line: {line}");
         assert!(line.contains("skip=degraded"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn budget_spent_short_pass_reads_fail_with_its_count() {
+        // A king_wake pass that ran out of its slice before covering every
+        // crown it enumerated is a failure, not an ok skip: the detail
+        // carries the shortfall count (evaluated=0/5).
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        let mut short = tick_envelope(
+            "2026-09-04T11:58:00Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("budget_spent"),
+            900,
+        );
+        short["data"]["detail"] =
+            json!("crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "king_wake",
+                    SCHED_DAEMON,
+                    0,
+                    json!("no_trigger"),
+                    900,
+                ),
+                short.clone(),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal.clone()], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        assert!(needs_attention(kw));
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=budget_spent"), "line: {line}");
+        assert!(line.contains("evaluated=0/5"), "line: {line}");
+        assert!(line.contains("failing_for="), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
+
+        // No earlier non-failure row for the arm: still FAIL, and the line
+        // names the missing baseline instead of a failing_for count.
+        let bare = dir.join("bare.jsonl");
+        write_rows(&bare, &[short]);
+        let rows = read_arms(&[bare], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("no_ok_in_journal"), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
