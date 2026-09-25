@@ -82,7 +82,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CURSOR_AGENT_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:326 |
 | `FNO_CURSOR_AGENT_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:321 |
 | `FNO_DEBUG` | py | unclear: cli/src/fno/agents/mux_spawn.py:1854 |
-| `FNO_DIE_WITH_PARENT` | py | Names the spawner pid a flight-holder watchdog compares getppid() against; when the spawner is gone the holder releases its flight and exits, so a killed parent never orphans the child. Opt-in: unset means never trip on parent death. |
+| `FNO_DIE_WITH_PARENT` | py | Names the spawner pid; only a direct child honors it. The reader removes the var from its own environment when the flight arms, so descendants never inherit it. A value that does not name the reader's parent is ignored, unless that parent is already gone (ppid 1). When the named parent dies the holder releases its flight and exits 129; the `FNO_FLIGHT_BUDGET_S` budget trip keeps 124. Opt-in: unset means the holder never trips on parent death. |
 | `FNO_DISPATCH_ACCOUNT_ENV` | py | unclear: cli/src/fno/agents/cli.py:1905 |
 | `FNO_DRIVER_LIB` | rs | unclear: crates/fno-agents/src/finalize.rs:849 |
 | `FNO_DRIVER_LIB_DIR` | rs | unclear: crates/fno-agents/src/loop_target.rs:616 |
@@ -195,6 +195,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_TRACKER_BACKEND` | py+rs | unclear: cli/src/fno/outstanding/core.py:457 |
 | `FNO_TRACKER_GITHUB_REPO` | rs | unclear: crates/fno-agents/src/tracker/github.rs:113 |
 | `FNO_UX_SHOTS` | rs | unclear: crates/fno/src/frame_html.rs:356 |
+| `FNO_V4_REHEARSAL_BEFORE` | rs | The node export taken from the rehearsal copy before it migrates; the ignored rehearsal test compares every node against it. |
+| `FNO_V4_REHEARSAL_DB` | rs | A copy of a schema-3 graph.db that the ignored schema-4 rehearsal test migrates. Never the live store. |
 | `FNO_VERIFY_GIT_BIN` | rs | unclear: crates/fno-agents/src/verify_evidence.rs:906 |
 | `FNO_WORKER_ADD_DIRS` | rs | unclear: crates/fno-agents/src/claude_ask.rs:687 |
 | `FNO_WORKER_NAME` | py | unclear: cli/src/fno/agents/cli.py:2314 |

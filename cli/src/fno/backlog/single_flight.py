@@ -199,9 +199,9 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
 def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     """Bound a live holder (: LIVE at 0.0 pct CPU, invisible to a pid
     probe): a SIGUSR1 stack file plus a thread that releases the flight and
-    exits when the budget trips or an opted-in parent dies. The thread stops
-    once the claim file is gone; os._exit is safe because graph writes commit
-    server-side and reconcile is idempotent."""
+    exits 129 when an opted-in parent dies, 124 when the budget trips. The
+    thread stops once the claim file is gone; os._exit is safe because graph
+    writes commit server-side and reconcile is idempotent."""
     root = flight.root or claims_root_for(flight.key) or Path.home()
     stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
     fh = None
@@ -212,9 +212,10 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     except OSError:
         fh = None
     budget_s = float(r) if (r := os.environ.get("FNO_FLIGHT_BUDGET_S", "")).replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
-    parent_pid = int(p) if (p := os.environ.get("FNO_DIE_WITH_PARENT", "")).isdigit() else None
-    if parent_pid is not None and (ppid := os.getppid()) != parent_pid:
-        parent_pid = ppid  # inherited stale var (a merge pid): watch the real parent instead
+    p = os.environ.pop("FNO_DIE_WITH_PARENT", "")  # binds this process only; its children never inherit it
+    parent_pid = int(p) if p.isdigit() else None
+    if parent_pid is not None and os.getppid() not in (parent_pid, 1):
+        parent_pid = None  # an ancestor's pid, not an opt-in by this parent
     start = time.monotonic()
     claim_file = claim_path(flight.key, root=flight.root or claims_root_for(flight.key))
 
@@ -230,7 +231,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
                     faulthandler.dump_traceback(file=fh, all_threads=True)
                     fh.flush()
                 sys.stderr.write(
-                    f"backlog {verb}: {'parent-gone' if gone else f'budget {int(budget_s)}s'} "
+                    f"{verb}: {'parent-gone' if gone else f'budget {int(budget_s)}s'} "
                     f"after {int(elapsed)}s; flight {flight.key} released; stack at {stack_path}\n"
                 )
             flight.release()
@@ -239,7 +240,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
                 # the awaited subtree with us, never our parent
                 with contextlib.suppress(OSError):
                     os.killpg(os.getpid(), signal.SIGKILL)
-            os._exit(124)
+            os._exit(129 if gone else 124)
 
     threading.Thread(target=_watch, name=f"flight-watchdog-{os.getpid()}", daemon=True).start()
     return fh

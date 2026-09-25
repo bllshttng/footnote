@@ -739,6 +739,16 @@ pub fn court_fold(
     );
     let stuck = stuck_verdict(&folds);
     let line = stuck_line(&stuck);
+    // The crown's display name on each fold, read once from the store. A
+    // store read fault leaves the key ABSENT (the ledger treats absence as
+    // "no name change"), a genuinely unnamed crown carries `null`.
+    if let Some(store) = crate::paths::AgentsHome::from_env_opt().map(|h| h.crown_names_json()) {
+        if let Ok(names) = crate::crown_names::live_names(&store, registry_path) {
+            for (scope, fold) in folds.iter_mut() {
+                fold["name"] = names.get(scope).map(|n| json!(n)).unwrap_or(Value::Null);
+            }
+        }
+    }
     Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
 }
 

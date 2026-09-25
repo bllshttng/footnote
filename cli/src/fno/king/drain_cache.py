@@ -17,22 +17,13 @@ def cache_file() -> Path:
 
 
 def graph_ident(path: Path) -> "tuple | None":
-    """The store's identity for the rows it serves: json keys on the file's
-    stat (the file IS the store; ctime catches a same-size same-mtime
-    overwrite), sqlite on the store version (the file lags until export).
-    Backend-tagged so a flip invalidates; no keeper, no identity."""
+    """The SQLite version identifies the rows the store serves."""
     try:
         from fno.graph.store import store_export_status
-        status = store_export_status(Path(path))
-        if not status:
-            return None
-        if status.get("backend") == "sqlite":
-            version = status.get("version")
-            return ("sqlite", version) if version else None
-        st = Path(path).stat()
-    except OSError:
+        version = store_export_status(Path(path)).get("version")
+        return ("sqlite", version) if version else None
+    except Exception:  # noqa: BLE001 - a cache identity never blocks the read
         return None
-    return ("json", st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
 def load(scope: str, ident: tuple) -> "int | None":

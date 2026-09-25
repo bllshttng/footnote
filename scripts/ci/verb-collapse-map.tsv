@@ -237,6 +237,7 @@ backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7
 backlog roadmap	T1	backlog roadmap	1
 backlog stuck-epics	T1	backlog stuck-epics	1
 backlog session add	T1	backlog session add	4
+backlog session backfill	T1	backlog session backfill	1
 backlog session close	T1	backlog session close	3
 backlog session open	T1	backlog session open	1
 backlog session reap-open	T1	backlog session reap-open	3

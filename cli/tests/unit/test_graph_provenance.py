@@ -1676,12 +1676,17 @@ def test_cli_session_close_leaves_foreign_blueprint_claim_intact(tmp_path, monke
     status = claim_status("node:x-open011")
     assert status["state"] == "live"
     assert status["holder"] == "blueprint-session:other-sess"
-    assert read_graph_strict(g)[0]["sessions"][0]["session_id"] == "sess-open11"
+    row = read_graph_strict(g)[0]["sessions"][0]
+    assert row["session_id"] == "sess-open11"
+    assert row.get("started_at") is None, "another session's claim never dates this row"
 
 
 def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
     """The blueprint terminal releases the exact handover claim it was
-    launched under; the receipt names the holder and the claim answers free."""
+    launched under; the receipt names the holder and the claim answers free.
+    The planner joined that claim, so its acquire time is the row's start."""
+    from datetime import datetime, timezone
+
     from typer.testing import CliRunner
     import fno.graph.cli as C
     from fno.claims.core import acquire_claim, claim_status
@@ -1694,7 +1699,10 @@ def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close3")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setenv("FNO_NODE_CLAIM_HOLDER", holder)
-    acquire_claim("node:x-close003", holder, ttl_ms=60_000)
+    claim = acquire_claim("node:x-close003", holder, ttl_ms=60_000)
+    expected_start = datetime.fromtimestamp(
+        claim.acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     r = CliRunner().invoke(C.cli, [
         "session", "close", "x-close003",
@@ -1708,7 +1716,9 @@ def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
     assert out["claim_released"] is True
     assert out["claim_holder"] == holder
     assert claim_status("node:x-close003")["state"] == "free"
-    assert read_graph_strict(g)[0].get("dispatch_verb") == "/fno:target"
+    node = read_graph_strict(g)[0]
+    assert node.get("dispatch_verb") == "/fno:target"
+    assert node["sessions"][0]["started_at"] == expected_start
 
 
 def test_cli_session_close_leaves_foreign_holder_claim_intact(tmp_path, monkeypatch):

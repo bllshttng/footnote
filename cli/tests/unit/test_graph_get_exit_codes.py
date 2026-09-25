@@ -42,18 +42,16 @@ def test_ac2hp_cmd_get_clean_miss_is_exit_1_unchanged(scratch_graph):
     _populated(scratch_graph)
     result = runner.invoke(app, ["backlog", "get", "--strict", "x-zzzz"])
     assert result.exit_code == 1, result.output
-    # Under the sqlite backend the miss names graph.db; the json path may not
-    # even exist. The db-naming form is pinned by the next test.
+    # The miss names graph.db; the anchor need not exist.
     assert "No node matching 'x-zzzz' (id/slug/bare-hex)" in result.output
 
 
 def test_cmd_get_miss_names_served_store_db_under_sqlite_backend(scratch_graph, monkeypatch):
-    # The read answers through the keeper: on the sqlite backend the store is
-    # graph.db, so a miss must name it, not the exported json mirror.
+    # A miss names graph.db, the store that answered the read.
     import fno.graph.store as store_mod
 
     _populated(scratch_graph)
-    monkeypatch.setattr(store_mod, "store_export_status", lambda path: {"backend": "sqlite"})
+    monkeypatch.setattr(store_mod, "store_export_status", lambda path: {"version": "v1"})
     result = runner.invoke(app, ["backlog", "get", "--strict", "x-zzzz"])
     assert result.exit_code == 1, result.output
     db = scratch_graph.with_suffix(".db")

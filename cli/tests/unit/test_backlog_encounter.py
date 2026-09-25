@@ -187,7 +187,7 @@ def test_operator_vote_does_not_require_session_identity(probe):
     assert "operator" in result.stdout
     assert _encounters(probe) == [
         {
-            "ts": _encounters(probe)[0]["ts"],
+            "created_at": _encounters(probe)[0]["created_at"],
             "voter_key": "operator",
             "voter_kind": "operator",
             "evidence": "the operator hit the same seam.",
@@ -208,7 +208,7 @@ def test_operator_vote_is_deduped_by_voter_key(probe):
         session_id="",
     )
     assert first.returncode == 0, first.stderr
-    first_ts = _encounters(probe)[0]["ts"]
+    first_ts = _encounters(probe)[0]["created_at"]
 
     second = probe(
         "backlog",
@@ -362,7 +362,7 @@ def test_one_session_votes_once(probe):
 
     second = probe("backlog", "encounter", "zz-0001", "--evidence", "hit the same wall again.")
     assert second.returncode == 3, second.stderr
-    assert recorded[0]["ts"] in second.stderr
+    assert recorded[0]["created_at"] in second.stderr
     assert len(_encounters(probe)) == 1
 
 
@@ -400,7 +400,7 @@ def test_a_vote_is_readable_back_to_a_transcript(probe):
     assert record["voter_kind"] == "agent"
     assert record["harness"] == "claude"
     assert record["evidence"] == "cost a CI cycle."
-    assert record["ts"].endswith("+00:00") or record["ts"].endswith("Z")
+    assert record["created_at"].endswith("+00:00") or record["created_at"].endswith("Z")
 
     from fno.harness_identity import canonical_handle
 

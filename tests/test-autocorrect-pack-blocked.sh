@@ -83,7 +83,7 @@ printf '%s | S1 | test | test.md | fixture event\n' \
 # that must NOT appear. Seed the store through its stable path anchor.
 cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$TMP/graph.json"
 {"entries":[
-  {"id":"tst-block01","title":"blocked by status","status":"blocked","blocked_count":0,
+  {"id":"tst-block01","title":"blocked by status","status":"blocked","blocked_by":["tst-upstream"],"blocked_count":0,
    "last_blocked_reason":"waiting on upstream"},
   {"id":"tst-block02","title":"blocked by count","status":"ready","blocked_count":3,
    "last_blocked_reason":null},

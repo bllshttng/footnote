@@ -315,10 +315,9 @@ fi
    ```bash
    CLOSE_RECEIPT="$(mktemp)"
    test -n "${NODE_ID:-}" || { echo "Blueprint close refused: intake produced no node." >&2; exit 2; }
-   fno backlog session close "$NODE_ID" \
-     --summary "<short plan summary>" \
-     --launch "/fno:target $NODE_ID" \
-     --json >"$CLOSE_RECEIPT"
+   set -- --summary "<short plan summary>" --launch "/fno:target $NODE_ID" --json
+   if [ -n "${BLUEPRINT_STARTED_AT:-}" ]; then set -- --started-at "$BLUEPRINT_STARTED_AT" "$@"; fi
+   fno backlog session close "$NODE_ID" "$@" >"$CLOSE_RECEIPT"
    ```
 
    This is an identity-guarded write. An unresolved harness or session id is a hard refusal, not a skipped provenance stamp. Raw-prose plans with `no-adopt` stop before this close because they have no adopted node.

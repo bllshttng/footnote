@@ -20,7 +20,6 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -378,9 +377,20 @@ def test_html_views_refuse_stale_local_graph_under_external_tracker(
     ],
 )
 def test_html_views_refuse_corrupt_live_graph_even_with_healthy_archive(
-    tmp_graph, tmp_path, argv
+    tmp_graph, tmp_path, monkeypatch, argv
 ):
-    tmp_graph.write_text("{broken", encoding="utf-8")
+    from fno.graph import _constants as graph_constants
+    from fno.graph import store as graph_store
+
+    bad_graph = tmp_path / "corrupt-graph.json"
+    bad_db = bad_graph.with_suffix(".db")
+    bad_db.write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(graph_constants, "GRAPH_JSON", bad_graph)
+    monkeypatch.setattr(graph_store, "GRAPH_JSON", bad_graph)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: bad_graph)
+    monkeypatch.setattr(
+        graph_constants, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json"
+    )
     (tmp_path / "graph-archive.json").write_text(
         json.dumps({"entries": [
             {"id": "ab-archive1", "title": "ARCHIVE-ONLY-SUCCESS-MARKER",

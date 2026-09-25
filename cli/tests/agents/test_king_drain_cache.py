@@ -84,7 +84,12 @@ def _ident(graph: Path) -> tuple:
 def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> None:
     entries = [
         # idea, not intake: the typed model refuses intake as a status.
-        _entry(f"filler-{i}", type="feature", status="idea", project="web")
+        _entry(
+            f"filler-{i}",
+            type="feature",
+            status="idea",
+            project="web",
+        )
         for i in range(FILLER)
     ]
     entries.append(
@@ -275,22 +280,17 @@ def test_graph_memo_none_ident_reads_and_never_caches(graph, monkeypatch):
     assert wake._GRAPH_ENTRIES_MEMO["ident"] is None
 
 
-def test_sqlite_backend_keys_on_the_store_version(graph, monkeypatch):
+def test_graph_cache_keys_on_the_store_version(graph, monkeypatch):
     from fno.king import drain_cache
 
-    assert drain_cache.graph_ident(graph) is not None  # json backend: stat identity
+    initial = drain_cache.graph_ident(graph)
+    assert initial and initial[0] == "sqlite"
     import fno.graph.store as store
 
-    monkeypatch.setattr(
-        store,
-        "store_export_status",
-        lambda p: {"backend": "sqlite", "version": "v1"},
-    )
+    monkeypatch.setattr(store, "store_export_status", lambda p: {"version": "v1"})
     assert drain_cache.graph_ident(graph) == ("sqlite", "v1")
-    # The file's stat is irrelevant under sqlite: the version is the store.
-    monkeypatch.setattr(
-        store, "store_export_status", lambda p: {"backend": "sqlite"}
-    )
+    # No readable store version means no cache identity.
+    monkeypatch.setattr(store, "store_export_status", lambda p: {})
     assert drain_cache.graph_ident(graph) is None
     # An unreachable keeper names no identity at all: no cache may key on a
     # stat of a file the store does not serve.

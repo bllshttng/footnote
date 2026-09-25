@@ -71,7 +71,6 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)

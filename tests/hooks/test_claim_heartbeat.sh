@@ -654,7 +654,7 @@ mkdir -p "$REAL_REPO/.fno" "$REAL_BIN"
 git init -q "$REAL_REPO"
 git -C "$REAL_REPO" checkout -q -b feature/x-a166-real
 printf '{"entries":[{"id":"x-a166","status":"ready","title":"live node","priority":"p1","type":"feature","blocked_by":[],"locked_by":null,"session_id":null,"pr_number":null,"pr_url":null}]}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$REAL_GRAPH"
-printf '[paths]\nstate_dir = "%s"\n' "$REAL_TMP" > "$REAL_CONFIG"
+printf 'state_dir = "%s"\n' "$REAL_TMP" > "$REAL_CONFIG"
 cat > "$REAL_BIN/fno" <<EOF
 #!/usr/bin/env bash
 exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"

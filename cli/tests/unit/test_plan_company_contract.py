@@ -194,14 +194,17 @@ def test_graph_store_rejects_invalid_company_work_without_writing(
     from fno.graph.store import commit_rows_via_store
 
     graph = tmp_path / "graph.json"
-    seed_graph(graph, json.dumps({"entries": [{"id": "x-owner", "company_work": company_work}]})
-        + "\n")
+    seed_graph(graph, [{"id": "x-owner"}])
     from fno.graph.store import read_graph_strict, store_export_status
 
     original = (read_graph_strict(graph), store_export_status(graph))
 
+    def attach_invalid_company_work(entries: list[dict]) -> list[dict]:
+        entries[0]["company_work"] = company_work
+        return entries
+
     with pytest.raises(ValueError, match=error):
-        commit_rows_via_store(graph, lambda entries: entries)
+        commit_rows_via_store(graph, attach_invalid_company_work)
 
     assert (read_graph_strict(graph), store_export_status(graph)) == original
 

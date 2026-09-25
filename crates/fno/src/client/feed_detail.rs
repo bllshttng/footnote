@@ -217,10 +217,17 @@ pub(crate) fn detail_fields(
             "king",
             match row.and_then(|a| a.crown_scope.as_deref()) {
                 Some(scope) => match row.and_then(|a| a.crown_level) {
-                    Some(level) => format!("L{level} {scope}"),
+                    Some(level) => match row.and_then(|a| a.crown_name.as_deref()) {
+                        Some(name) => format!("L{level} {scope} ({name})"),
+                        None => format!("L{level} {scope}"),
+                    },
                     None => scope.to_string(),
                 },
-                None => NOT_RECORDED.to_string(),
+                // A worker row rolling up to a named crown carries the name.
+                None => row
+                    .and_then(|a| a.crown_name.as_deref())
+                    .unwrap_or(NOT_RECORDED)
+                    .to_string(),
             },
         ),
     ]

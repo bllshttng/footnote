@@ -214,7 +214,6 @@ def test_receipt_leaves_contained_and_in_review_classifications_alone():
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh empty graph.json routed to tmp_path."""
     g = tmp_path / "graph.json"
-    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 

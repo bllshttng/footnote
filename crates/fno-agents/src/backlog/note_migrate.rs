@@ -908,7 +908,11 @@ fn run_import(graph: &std::path::Path, journals: &[PathBuf], apply: bool, json_o
                 }
                 let finding = crate::backlog::model::Finding {
                     finding_id: fid.to_string(),
-                    created_at: ev.get("ts").and_then(Value::as_str).map(str::to_string),
+                    created_at: ev
+                        .get("ts")
+                        .and_then(Value::as_str)
+                        .filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts))
+                        .map(str::to_string),
                     body: text.to_string(),
                     block_cmd: data
                         .get("block_cmd")
@@ -929,12 +933,18 @@ fn run_import(graph: &std::path::Path, journals: &[PathBuf], apply: bool, json_o
                     Err(_) => errors += 1,
                 }
             } else {
-                let when = ev.get("ts").and_then(Value::as_str).unwrap_or("");
+                // The resolved_at CHECK refuses a stamp that is not UTC; a
+                // refused resolution would leave the finding holding the gate.
+                let when = ev
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts))
+                    .map_or_else(crate::graph_store::now_isoformat, str::to_string);
                 if !apply {
                     resolutions += 1;
                     continue;
                 }
-                match crate::backlog::findings::import_resolve(graph, fid, when, None) {
+                match crate::backlog::findings::import_resolve(graph, fid, &when, None) {
                     Ok(true) => resolutions += 1,
                     Ok(false) => duplicates += 1,
                     Err(_) => errors += 1,

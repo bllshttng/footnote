@@ -2556,9 +2556,8 @@ fn operator_review_finding_blocks_until_resolved() {
     let restore_home = std::env::var_os("FNO_HOME").unwrap_or_default();
     let home = TempDir::new().unwrap();
     std::env::set_var("FNO_HOME", home.path());
-    let graph = home.path().join("graph.json");
-    fno_agents::graph_store::seed_rows(&graph, &[serde_json::json!({"id": "x-gate", "slug": "x-gate", "title": "n", "type": "feature", "status": "ready", "priority": "p1"})]).unwrap();
-    let store = fno_agents::backlog::api::Store::new(&graph);
+    fno_agents::graph_store::seed_rows(&home.path().join("graph.json"), &[serde_json::json!({"id": "x-gate", "slug": "x-gate", "title": "n", "type": "feature", "status": "ready", "priority": "p1"})]).unwrap();
+    let store = fno_agents::backlog::api::Store::new(&home.path().join("graph.json"));
     let input = fno_agents::backlog::api::FindingInput {
         body: "operator says fix the retry".into(),
         ..Default::default()

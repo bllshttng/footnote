@@ -24,9 +24,11 @@ def seed_graph(path: Path, entries: Iterable[dict] | str | bytes | dict) -> list
     if not isinstance(entries, list):
         raise TypeError("graph seed must be an entries list or an entries document")
     rows = [dict(entry) for entry in entries]
-    from fno.graph.store import commit_rows_via_store
+    from fno.graph.store import _client_for, _commit_rows, _read_snapshot
 
-    commit_rows_via_store(path, lambda _current: rows)
+    client = _client_for(path)
+    version, current, digests = _read_snapshot(client)
+    _commit_rows(client, version, digests, current, rows, {}, 1)
     return rows
 
 

@@ -24,7 +24,6 @@ def _node(node_id: str, **overrides: object) -> dict:
         "id": node_id,
         "title": f"node {node_id}",
         "slug": f"node-{node_id}",
-        "details": "",
         "project": "fno",
         "type": "feature",
         "parent": None,
@@ -46,7 +45,6 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from fno.graph import store
 
     graph = tmp_path / "graph.json"
-    seed_graph(graph, json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(constants, "GRAPH_JSON", graph)
     monkeypatch.setattr(constants, "GRAPH_ARCHIVE_JSON", tmp_path / "archive.json")
     monkeypatch.setattr(store, "GRAPH_JSON", graph)

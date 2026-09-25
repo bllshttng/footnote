@@ -443,7 +443,7 @@ def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
     assert 'status: "done"' in p.read_text()
 
 
-def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
+def test_a_corrupt_working_store_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
     """The stand-down keys on an EMPTY map, so the corrupt working graph must not
     be topped up into a non-empty one by the archive read-through.
 
@@ -457,7 +457,7 @@ def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_pat
 
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text("{ not json at all")
+    (home / "graph.db").write_text("not sqlite")
     (home / "graph-archive.json").write_text(
         json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
     )

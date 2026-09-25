@@ -254,9 +254,10 @@ def test_map_covers_current_surface_once():
     # The feed verb retired with the territory blueprinter (x-701c): 612 -> 611.
     # The store flip then deletes the `backlog archive-dedupe-ids` action
     # with the json leg it belonged to: 611 -> 610.
-    # The graph-json retirement removes `doctor graph backend` and
-    # `doctor graph export`: 610 -> 608.
-    assert len(mapped) == 608, (
+    # The schema-4 branch allocates `backlog session backfill`, the verb
+    # that fills missing session stamps from transcripts: 610 -> 611.
+    # Retiring `doctor graph backend` and `doctor graph export` frees two: 611 -> 609.
+    assert len(mapped) == 609, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

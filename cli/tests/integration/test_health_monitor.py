@@ -779,8 +779,6 @@ def _write_nodes(graph_path: Path, nodes: list[dict]) -> None:
 def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):
     """AC3-HP: pending node with mapped project and cwd != work-map root is
     counted in project_cwd_mismatch and listed in project_cwd_mismatch_nodes."""
-    import os
-
     mapped_root = "/real/project/root"
     wrong_cwd = "/wrong/cwd"
 
@@ -936,8 +934,6 @@ def test_health_mismatch_ac3_fr_evaluate_thresholds_breach():
 
 def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
     """--check exits 4 when project_cwd_mismatch breaches threshold=0."""
-    import os
-
     mapped_root = "/real/root"
     wrong_cwd = "/wrong/cwd"
 
