@@ -118,12 +118,18 @@ def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
     assert checked == 2, "both full-gate lanes must declare shard matrices"
 
 
-def test_full_gate_shards_cover_main_changed_packet_is_pr_only() -> None:
+def test_full_gate_shards_follow_affected_selector_changed_packet_is_pr_only() -> None:
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     jobs = workflow["jobs"]
 
-    assert jobs["smoke-pytest"].get("if") is None
-    assert jobs["smoke-rest"].get("if") is None
+    assert jobs["smoke-pytest"].get("if") == (
+        "needs.pr-affected.outputs.python_full == 'true'"
+    )
+    assert jobs["smoke-rest"].get("if") == (
+        "needs.pr-affected.outputs.python_full == 'true'"
+    )
+    assert "pr-affected" in jobs["smoke"].get("needs", [])
+    assert jobs["pr-affected"].get("if") == "${{ !cancelled() }}"
     assert jobs["changed-smoke"].get("if") == "github.event_name == 'pull_request'"
 
 
