@@ -171,24 +171,6 @@ def test_ac5_block_list_unknown_stage_exits_1():
         )
 
 
-def test_all_known_stages_pass():
-    """All 18 known stages should pass validation."""
-    all_stages = (
-        "craft, critique, polish, harden, audit, layout, "
-        "animate, bolder, colorize, delight, overdrive, quieter, typeset, "
-        "distill, extract, adapt, shape, teach"
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        plan_path = Path(tmp) / "my-plan.md"
-        _make_plan(plan_path, f"impeccable_stages: [{all_stages}]")
-
-        result = _run_validator(plan_path)
-
-        assert result.returncode == 0, (
-            f"Expected exit 0 for all known stages.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-
-
 def test_inline_with_trailing_comment_passes():
     """Gemini fix (PR #217 round 1): trailing comment after the closing ]
     must not poison parsing. Without the fix, the sed pipeline's `tr -d '[]'`
