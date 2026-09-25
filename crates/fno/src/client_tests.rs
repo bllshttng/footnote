@@ -639,21 +639,29 @@ fn client_compose_places_panes_divider_and_chrome() {
     // sits on line 1 and squad 2 follows on line 2.
     assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
     assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
-    // Content row 1 (pane a at content origin): the sideline cols are the
-    // blank spacer, then the divider and pane content.
+    // Content row 1 is now the pane FRAMES' top edge (x-bf4a): each pane
+    // wears a rounded border with its name; the pty content blits one cell
+    // in, and the gap between the frames paints blank.
     let row1: Vec<char> = lines[1].chars().collect();
     assert_eq!(row1[27], '│', "panel divider column");
-    assert_eq!(row1[28], 'a', "pane 10 starts at content origin");
-    assert_eq!(row1[28 + 35], '│', "pane divider between the panes");
-    assert_eq!(row1[28 + 36], 'b', "pane 11 after the divider");
-    // Cursor: focused pane 11's (0,0) offset by chrome + rect.
-    assert_eq!(frame.cursor_row, 1);
-    assert_eq!(frame.cursor_col, 28 + 36);
+    assert_eq!(row1[28], '╭', "pane 10's frame corner at its rect origin");
+    assert_eq!(row1[28 + 35], ' ', "the gap between the two frames");
+    assert_eq!(row1[28 + 36], '╭', "pane 11's frame corner");
+    // Content row 2: the blit at the content origin.
+    let row2: Vec<char> = lines[2].chars().collect();
+    assert_eq!(row2[29], 'a', "pane 10's content one cell in");
+    assert_eq!(row2[65], 'b', "pane 11's content one cell in");
+    // Cursor: focused pane 11's (0,0) offset by chrome + content rect.
+    assert_eq!(frame.cursor_row, 2);
+    assert_eq!(frame.cursor_col, 28 + 37);
     assert!(frame.cursor_visible);
 }
 
 #[path = "client_tests/pane_id_reveal_tests.rs"]
 mod pane_id_reveal_tests;
+
+#[path = "client_tests/pane_border_tests.rs"]
+mod pane_border_tests;
 
 #[path = "client/tests/focus_outline_tests.rs"]
 mod focus_outline_tests;
@@ -1141,7 +1149,7 @@ fn draw_lines_overlay_centers_within_viewport() {
     );
     assert_eq!(cells[(origin_r + 2) * cols + a_col].c, 'c');
     // The top border corner sits one row up and one col left of the body.
-    assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '┌');
+    assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '╭');
     // Nothing painted at the old hardcoded top-left corner.
     assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
 }
@@ -1220,7 +1228,7 @@ fn draw_lines_overlay_zero_body_budget_paints_no_body() {
         "no body row should paint at zero body budget"
     );
     // Positive control: the chrome border still paints within the viewport.
-    assert!(painted('┌'), "the chrome border must still paint");
+    assert!(painted('╭'), "the chrome border must still paint");
 }
 
 #[test]
@@ -6934,6 +6942,7 @@ async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
     squad.tabs[0].panes.push(crate::proto::PaneMeta {
         id: focus,
         label: "focused".into(),
+        ..Default::default()
     });
     let ((tr, tc), _) = tab_and_new_tab_cells(&v);
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
@@ -7806,7 +7815,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
         assert!(
             r.lines
                 .iter()
-                .any(|l| l.text.starts_with('┌') || l.text.starts_with('└')),
+                .any(|l| l.text.starts_with('╭') || l.text.starts_with('╰')),
             "a border corner was drawn"
         );
     };
@@ -12149,10 +12158,12 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         PaneMeta {
             id: 10,
             label: "claude".into(),
+            ..Default::default()
         },
         PaneMeta {
             id: 20,
             label: "htop".into(),
+            ..Default::default()
         },
     ];
     v.layout.agents = vec![AgentRow {
@@ -12221,6 +12232,7 @@ async fn nav_goto_pane_cross_squad_sends_squad_tab_focus() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 55,
         label: "vim".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -12257,6 +12269,7 @@ async fn nav_goto_pane_active_view_is_bare_focus() {
     v.layout.squads[0].tabs[1].panes = vec![PaneMeta {
         id: 77,
         label: "shell".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -12289,6 +12302,7 @@ async fn nav_goto_pane_same_squad_other_tab_selects_tab_only() {
     v.layout.squads[0].tabs[0].panes = vec![PaneMeta {
         id: 88,
         label: "logs".into(),
+        ..Default::default()
     }]; // tab idx 0, id 0
     let idx = v
         .nav_rows()
@@ -15034,6 +15048,7 @@ async fn move_pick_keys_pane_sends_cross_squad_move_pane() {
     v.layout.squads[1].tabs[0].panes.push(PaneMeta {
         id: 200,
         label: "dst".into(),
+        ..Default::default()
     });
     v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
     let mut buf: Vec<u8> = Vec::new();
@@ -16786,6 +16801,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
                 .map(|p| crate::proto::PaneMeta {
                     id: (t * 10 + p) as u64,
                     label: String::new(),
+                    ..Default::default()
                 })
                 .collect();
         }
@@ -16824,6 +16840,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
         .map(|p| crate::proto::PaneMeta {
             id: p,
             label: String::new(),
+            ..Default::default()
         })
         .collect();
     let view = shot_view((24, 100), vec![squad], vec![]);
