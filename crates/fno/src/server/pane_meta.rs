@@ -54,6 +54,27 @@ pub(crate) fn pane_meta(
     }
 }
 
+/// The context reading for one pane, joined through the registry row that
+/// hosts it: the row whose `mux` names this session and pane, keyed by the
+/// same transcript identity the tail pass reads. `None` reads as "no
+/// reading" and the frame drops the field.
+pub(crate) fn pane_ctx(
+    agents: &[crate::agents_view::RegistryAgent],
+    session_name: &str,
+    ctx_by_session: &std::collections::HashMap<String, String>,
+    pid: u64,
+) -> Option<String> {
+    agents
+        .iter()
+        .find(|a| matches!(&a.mux, Some((s, p)) if s == session_name && *p == pid))
+        .and_then(|a| {
+            a.claude_session_uuid
+                .clone()
+                .or_else(|| a.harness_session_id.clone())
+        })
+        .and_then(|uuid| ctx_by_session.get(&uuid).cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,7 +85,7 @@ mod tests {
         let m = pane_meta(
             3,
             None,
-            Some("x-0e67"),
+            Some("node7"),
             "/home/u/proj",
             Some("claude"),
             Some("main"),
@@ -72,7 +93,7 @@ mod tests {
         );
         assert_eq!(m.id, 3);
         assert_eq!(m.label, "claude");
-        assert_eq!(m.node.as_deref(), Some("x-0e67"));
+        assert_eq!(m.node.as_deref(), Some("node7"));
         assert_eq!(m.branch.as_deref(), Some("main"));
         assert_eq!(m.ctx.as_deref(), Some("49%"));
     }

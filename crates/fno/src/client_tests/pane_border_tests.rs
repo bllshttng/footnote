@@ -2,6 +2,36 @@
 
 use super::*;
 
+#[test]
+fn client_compose_places_panes_divider_and_chrome() {
+    let view = two_pane_view();
+    let frame = view.compose();
+    assert!(frame.geometry_ok());
+    let text = frame_text(&frame);
+    let lines: Vec<&str> = text.lines().collect();
+    // Tab strip: scoped to the content columns on row 0, so line 0 carries
+    // both the sideline's squad-1 row (cols 0..27) and the strip (cols 28+).
+    assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
+    assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
+    assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
+    // Content row 1 is the pane FRAMES' top edge: each pane wears a rounded
+    // border with its name; the pty content blits one cell in, and the gap
+    // between the frames paints blank.
+    let row1: Vec<char> = lines[1].chars().collect();
+    assert_eq!(row1[27], '│', "panel divider column");
+    assert_eq!(row1[28], '╭', "pane 10's frame corner at its rect origin");
+    assert_eq!(row1[28 + 35], ' ', "the gap between the two frames");
+    assert_eq!(row1[28 + 36], '╭', "pane 11's frame corner");
+    // Content row 2: the blit at the content origin.
+    let row2: Vec<char> = lines[2].chars().collect();
+    assert_eq!(row2[29], 'a', "pane 10's content one cell in");
+    assert_eq!(row2[65], 'b', "pane 11's content one cell in");
+    // Cursor: focused pane 11's (0,0) offset by chrome + content rect.
+    assert_eq!(frame.cursor_row, 2);
+    assert_eq!(frame.cursor_col, 28 + 37);
+    assert!(frame.cursor_visible);
+}
+
 /// A PaneMeta row.
 fn meta_row(id: u64, label: &str, node: &str, branch: &str, ctx: &str) -> crate::proto::PaneMeta {
     crate::proto::PaneMeta {

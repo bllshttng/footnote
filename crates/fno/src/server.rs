@@ -8873,18 +8873,12 @@ impl Core {
                             .iter()
                             .map(|pid| {
                                 let e = self.panes.get(pid);
-                                let ctx = self
-                                    .agents
-                                    .iter()
-                                    .find(|a| {
-                                        matches!(&a.mux, Some((s, p)) if s == &self.session_name && *p == *pid)
-                                    })
-                                    .and_then(|a| {
-                                        a.claude_session_uuid
-                                            .clone()
-                                            .or_else(|| a.harness_session_id.clone())
-                                    })
-                                    .and_then(|uuid| self.ctx_by_session.get(&uuid).cloned());
+                                let ctx = pane_meta::pane_ctx(
+                                    &self.agents,
+                                    &self.session_name,
+                                    &self.ctx_by_session,
+                                    *pid,
+                                );
                                 pane_meta::pane_meta(
                                     *pid,
                                     e.and_then(|e| e.name.as_deref()),

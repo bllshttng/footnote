@@ -146,7 +146,7 @@ fn top_right(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
     row
 }
 
-/// The bottom-left node span: ` x-0e67 · main `. Step 2 drops the branch.
+/// The bottom-left node span: ` node7 · main `. Step 2 drops the branch.
 fn bottom_left(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
     let Some(node) = f.node else {
         return Vec::new();
@@ -341,7 +341,7 @@ mod tests {
             name: "king-5317-succeed-g3",
             status: Some(('●', "Work")),
             model: Some("opus-5"),
-            node: Some("x-0e67"),
+            node: Some("node7"),
             branch: Some("main"),
             ctx: Some("49%"),
         }
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(cols_of(&e.top), 100);
         let bottom = s(&e.bottom);
         assert!(
-            bottom.starts_with("╰─ x-0e67 · main ─") && bottom.ends_with(" ctx 49% ─╯"),
+            bottom.starts_with("╰─ node7 · main ─") && bottom.ends_with(" ctx 49% ─╯"),
             "{bottom}"
         );
         assert_eq!(cols_of(&e.bottom), 100);
@@ -390,7 +390,7 @@ mod tests {
         let e = edges(&full(), rect(24, 12), false, true);
         assert_eq!(e.bottom_step, 1, "{:?}", s(&e.bottom));
         assert!(!s(&e.bottom).contains("49%"));
-        assert!(s(&e.bottom).contains("x-0e67 · main"));
+        assert!(s(&e.bottom).contains("node7 · main"));
     }
 
     #[test]
