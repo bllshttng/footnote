@@ -1538,18 +1538,8 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         // them instead of leaving an operator to discover them by accident,
         // or not at all.
         (
-            format!("{p} w then r"),
-            "rename the focused workspace row".into(),
-            KeySection::SidelineRows,
-        ),
-        (
-            format!("{p} w then J/K"),
-            "move the focused workspace row down/up".into(),
-            KeySection::SidelineRows,
-        ),
-        (
-            format!("{p} w then x"),
-            "remove the focused workspace (confirm)".into(),
+            format!("{p} w then r/J/K/x"),
+            "rename · move · remove (confirm) the workspace row".into(),
             KeySection::SidelineRows,
         ),
     ]

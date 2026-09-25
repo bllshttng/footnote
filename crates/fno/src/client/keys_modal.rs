@@ -93,20 +93,15 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     // restores forwarding is untested here, and a config line this text
     // cannot vouch for is the kind of confident wrong answer that cost a
     // whole diagnosis round already. Lines stay short: WIDTH_CAP is 60 and
-    // a setting name past it truncates into a wrong hint.
+    // a setting name past it truncates into a wrong hint. The tmux `m` /
+    // long-press fallbacks live in the right-click meta row above, so the
+    // tmux line carries only the setting it names.
     add(
-        PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
+        PopupRow::Header("Terminal.app never · iTerm2: report mouse · tmux: mouse off".into()),
         None,
     );
     add(
         PopupRow::Header("Ghostty binds it too · see right-click-action".into()),
-        None,
-    );
-    add(
-        PopupRow::Header(format!(
-            "in tmux set mouse off · else m, or hold Left {}ms",
-            MENU_LONG_PRESS.as_millis()
-        )),
         None,
     );
     // The glyph legend rides the modal tail, after the notes: the
