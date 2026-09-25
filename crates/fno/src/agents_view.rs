@@ -1761,7 +1761,7 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// passes through untouched - the 8-hex gesture gate stays the judge.
 fn attach_job_id(raw: &str) -> String {
     if raw.len() > 8 {
-        let lead = raw.split('-', 1).next().unwrap_or(raw);
+        let lead = raw.split('-').next().unwrap_or(raw);
         if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
             return lead.to_ascii_lowercase();
         }

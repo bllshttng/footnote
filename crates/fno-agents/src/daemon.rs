@@ -1434,6 +1434,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
 
+    // One migration pass, fail-open: claude rows whose short_id is a
+    // byte-copy of the session uuid get the uuid's own 8-hex lead, the
+    // transport key `claude attach` addresses. A row left unhealed keeps a
+    // full uuid the attach verb refuses, so the heal runs before serving.
+    let _ = state::heal_full_uuid_short_ids(&home.registry_json());
+
     // State: cold_start.
     // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
     // for the rest of this function so the flock is held for the daemon's
