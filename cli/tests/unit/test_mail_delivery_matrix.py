@@ -411,7 +411,7 @@ def test_cell4_inject_boundary_parses_the_reason_side_channel(monkeypatch):
         dispatch_mod.subprocess, "run", _verb('{"delivered": false, "reason": "attach-failed"}')
     )
     assert dispatch_mod._mail_inject_claude("ses-1", "hi", reason_out=reason) is False
-    assert reason == ["attach-failed"]
+    assert reason == ["attach-failed", "waited-0s"]
 
     reason.clear()
     monkeypatch.setattr(

@@ -1269,7 +1269,7 @@ def test_mail_inject_codex_preserves_rust_refusal_reason(monkeypatch):
     reason = []
 
     assert not dispatch._mail_inject_codex(SID_CODEX, "/compact", reason_out=reason)
-    assert reason == [expected]
+    assert reason == [expected, "waited-0s"]
 
 
 def test_review_start_codex_uses_structured_binary_argv(monkeypatch):
