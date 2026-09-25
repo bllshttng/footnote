@@ -119,6 +119,7 @@ def record_command(
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
+    is_global: bool = typer.Option(False, "--global", help="Rule every project; default stamps this one."),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (
@@ -130,7 +131,7 @@ def record_command(
         require_marked_caller,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
-    from fno.rust_binary import VerbUnavailable
+    from fno.rust_binary import VerbUnavailable, verb_call
     from fno.text_or_file import read_text_arg
 
     decision = read_text_arg(decision, decision_file, what="the decision") or ""
@@ -149,6 +150,11 @@ def record_command(
     try:
         authority = require_marked_caller()
         graduation_data = graduation_or_guidance(graduation, graduation_ref)
+        # The door fails closed: no project, no stamp, no row.
+        answer = verb_call("law-match", {"mode": "record-scope", "global": is_global})
+        scope = answer.get("scope")
+        if not scope:
+            raise ValueError(str(answer.get("refusal") or "no project to stamp under; pass --global"))
         result = record_decision(
             subject=subject,
             decision=decision,
@@ -158,6 +164,7 @@ def record_command(
             authority_source=authority,
             graduation=graduation_data,
             reads=list(read) or None,
+            scope=scope,
         )
     except (InvalidGraduationError, ValueError, VerbUnavailable) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no

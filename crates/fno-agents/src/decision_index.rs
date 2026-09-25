@@ -311,6 +311,34 @@ pub fn live_laws(path: &Path) -> Result<Index, String> {
     Ok(laws_of(read_live(path)?))
 }
 
+/// The scope a row reads as: the stamp, else the pre-scope legacy value.
+/// Every row recorded before the field existed was recorded in fno.
+pub fn row_scope(row: &Value) -> &str {
+    row.get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("project:fno")
+}
+
+/// The session-scope test (x-0c70): `global` always governs; a
+/// `project:<slug>` row governs only the matching slug.
+pub fn row_in_scope(row: &Value, project: &str) -> bool {
+    match row_scope(row) {
+        "global" => true,
+        scoped => scoped == format!("project:{project}"),
+    }
+}
+
+/// Keep only the rows the session's project may see, returning the withheld
+/// count. `None` fails open: a project that cannot be resolved hides nothing.
+pub fn retain_in_scope(index: &mut Index, project: Option<&str>) -> usize {
+    let Some(project) = project else {
+        return 0;
+    };
+    let before = index.rows.len();
+    index.rows.retain(|row| row_in_scope(row, project));
+    before - index.rows.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +619,67 @@ mod tests {
         let reason = read_store_live(&graph, &jsonl).expect_err("no store is the Err");
         assert!(reason.contains("graph.db"), "{reason}");
         assert!(reason.contains("decisions.jsonl"), "{reason}");
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    fn law(id: &str, scope: Option<&str>) -> Value {
+        let mut row = serde_json::json!({
+            "decision_id": id,
+            "subject": "topic",
+            "decision": "Ruling.",
+            "_event_type": "operator_decision",
+            "authority_source": "operator",
+        });
+        if let Some(scope) = scope {
+            row["scope"] = serde_json::json!(scope);
+        }
+        row
+    }
+
+    #[test]
+    fn absent_scope_reads_project_fno() {
+        assert_eq!(row_scope(&law("d-1", None)), "project:fno");
+    }
+
+    #[test]
+    fn global_passes_every_project() {
+        assert!(row_in_scope(&law("d-1", Some("global")), "demo"));
+        assert!(row_in_scope(&law("d-1", Some("global")), "fno"));
+    }
+
+    #[test]
+    fn a_foreign_project_row_hides_and_the_count_names_it() {
+        let mut index = Index {
+            rows: vec![
+                law("d-1", Some("global")),
+                law("d-2", Some("project:demo")),
+                law("d-3", Some("project:etl")),
+                law("d-4", None),
+            ],
+            damaged: 0,
+        };
+        let hidden = retain_in_scope(&mut index, Some("demo"));
+        let kept: Vec<&str> = index
+            .rows
+            .iter()
+            .map(|r| r.get("decision_id").and_then(Value::as_str).unwrap_or(""))
+            .collect();
+        // d-4 carries no scope, so it reads project:fno and hides here too.
+        assert_eq!(kept, vec!["d-1", "d-2"]);
+        assert_eq!(hidden, 2);
+    }
+
+    #[test]
+    fn an_unresolvable_project_hides_nothing() {
+        let mut index = Index {
+            rows: vec![law("d-1", Some("project:etl"))],
+            damaged: 0,
+        };
+        assert_eq!(retain_in_scope(&mut index, None), 0);
+        assert_eq!(index.rows.len(), 1);
     }
 }
