@@ -49,7 +49,7 @@ Measured 2026-09-21, on the question of who owns a claude thread: the owner is t
 | A supervisor restart | survives | all 10 logged restarts from 2026-09-15 to 2026-09-19 read `dead=0` and adopted every worker |
 | Host power loss | dies | the 2026-09-20 outage: every claude session on the host stopped within three minutes, the next supervisor start read `dead=19`; the 2026-09-21 outage read `dead=17` |
 
-After a host restart the harness relaunches only some sessions. fno covers the rest: the daemon retire arm keeps a worker whose node reads `in_progress` and whose roster row lost its process under `dead open work`, and the nudge ladder's Resume rung resumes it with the commit-your-work order (law d-71d03643: a node that lost its worker is always resumed, never left stranded).
+After a host restart the harness relaunches only some sessions. fno covers the rest. The daemon retire arm keeps a worker whose node reads `in_progress` and whose roster row lost its process under `dead open work`. The nudge ladder's Resume rung resumes it with the commit-your-work order. The law: a node that lost its worker is always resumed, never left stranded.
 
 ## Where each harness sits
 
