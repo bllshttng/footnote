@@ -1017,10 +1017,13 @@ async fn fleet(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
 
 /// `GET /backlog/model.json`: the whole board as JSON behind the token.
 async fn backlog_model(
-    Query(raw): Query<HashMap<String, String>>,
+    Query(raw): Query<Vec<(String, String)>>,
     State(st): State<AppState>,
 ) -> Response {
-    if !token_ok(raw.get("t").map(String::as_str), &st.token) {
+    if !token_ok(
+        raw.iter().find(|(k, _)| k == "t").map(|(_, v)| v.as_str()),
+        &st.token,
+    ) {
         return unauthorized();
     }
     let q = match backlog_model::Query::from_pairs(&raw) {
@@ -2223,6 +2226,8 @@ const eq = (got, want, what) => {
 };
 // cellHead: "<column> <total>"
 eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
+// laneTotal: the lane's whole count from its cells' (uncapped) totals.
+eq(laneTotal({cells: [{total: 3}, {total: 4}, {}]}), 7, "lane total");
 // sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
 eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
 eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
@@ -2240,11 +2245,12 @@ const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
 eq(good.lanes.length, 1, "a good answer lanes carry");
 eq(good.errors.length, 0, "a good answer clears the errors");
 eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
-console.log("backlog page helpers: 11 cases ok");
+console.log("backlog page helpers: 12 cases ok");
 "#;
         let src = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             lift_js_fn(BACKLOG_PAGE, "cellHead"),
+            lift_js_fn(BACKLOG_PAGE, "laneTotal"),
             lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
             lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
             asserts

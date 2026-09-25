@@ -17,22 +17,129 @@ fn row(harness_session: Option<&str>) -> AgentRow {
 
 #[test]
 fn lanes_query_refuses_unknown_and_parses_known_values() {
-    let mut p: HashMap<String, String> = HashMap::new();
-    p.insert("lanes".into(), "sideways".into());
+    let p = vec![("lanes".to_string(), "sideways".to_string())];
     assert!(Query::from_pairs(&p).is_err(), "unknown lanes refused");
-    p.clear();
-    p.insert("lanes".into(), "epic".into());
+    let p = vec![("lanes".to_string(), "epic".to_string())];
     assert!(matches!(
         Query::from_pairs(&p).unwrap().lanes,
         LanesBy::Epic
     ));
-    p.clear();
-    p.insert("t".into(), "secret".into());
-    p.insert("node".into(), "x-1".into());
-    p.insert("all".into(), "".into());
+    let p = vec![
+        ("t".to_string(), "secret".to_string()),
+        ("node".to_string(), "x-1".to_string()),
+        ("all".to_string(), "".to_string()),
+    ];
     let q = Query::from_pairs(&p).unwrap();
     assert!(q.all, "empty all reads true");
-    assert!(q.project.is_none());
+    assert!(q.project.is_empty());
+}
+
+#[test]
+fn repeated_filter_pairs_accumulate_any_of_sets() {
+    let p = vec![
+        ("status".to_string(), "ready".to_string()),
+        ("status".to_string(), "idea".to_string()),
+        ("status".to_string(), "ready".to_string()),
+        ("priority".to_string(), "p1".to_string()),
+        ("status".to_string(), "".to_string()),
+    ];
+    let q = Query::from_pairs(&p).unwrap();
+    assert_eq!(q.status, ["ready", "idea"], "dup dropped, blank skipped");
+    assert_eq!(q.priority, ["p1"]);
+}
+
+#[test]
+fn any_of_status_filter_keeps_either_status() {
+    let rows = vec![
+        json!({"id": "x-a", "slug": "a", "status": "ready", "priority": "p2"}),
+        json!({"id": "x-b", "slug": "b", "status": "idea", "priority": "p2"}),
+        json!({"id": "x-c", "slug": "c", "status": "done", "priority": "p2"}),
+    ];
+    let inp = fixture(rows);
+    let q = Query {
+        status: vec!["ready".into(), "idea".into()],
+        ..Default::default()
+    };
+    let b = board(&inp, &q);
+    let kept: Vec<&str> = b.lanes[0]
+        .cells
+        .iter()
+        .flat_map(|c| c.cards.iter().map(|card| card.id.as_str()))
+        .collect();
+    assert_eq!(kept, ["x-a", "x-b"], "either status stays");
+}
+
+#[test]
+fn status_tiles_count_the_pre_filter_set() {
+    // The tiles double as filters, so their counts stay the whole scoped
+    // board's: selecting a status must yield exactly what the tile said.
+    let rows = vec![
+        json!({"id": "x-a", "slug": "a", "status": "ready", "priority": "p2"}),
+        json!({"id": "x-b", "slug": "b", "status": "ready", "priority": "p2"}),
+        json!({"id": "x-c", "slug": "c", "status": "idea", "priority": "p2"}),
+        json!({"id": "x-d", "slug": "d", "status": "done", "priority": "p2"}),
+    ];
+    let inp = fixture(rows);
+    let q = Query {
+        status: vec!["done".into()],
+        ..Default::default()
+    };
+    let b = board(&inp, &q);
+    let tiles: Vec<(String, usize)> = b
+        .stats
+        .statuses
+        .iter()
+        .map(|t| (t.status.clone(), t.total))
+        .collect();
+    assert_eq!(
+        tiles,
+        [("done".into(), 1), ("idea".into(), 1), ("ready".into(), 2)],
+        "counts are the scoped board's, not the filtered answer's"
+    );
+    assert_eq!(b.stats.totals.iter().filter(|c| c.total > 0).count(), 1);
+}
+
+#[test]
+fn list_view_answers_uncapped_cells() {
+    // One more card than CELL_CAP: the kanban cell truncates at the cap and
+    // says so, the list answers every row.
+    let rows: Vec<Value> = (0..CELL_CAP + 1)
+        .map(|i| {
+            json!({
+                "id": format!("x-{i}"), "slug": format!("s{i}"),
+                "status": "ready", "priority": "p2"
+            })
+        })
+        .collect();
+    let inp = fixture(rows);
+    let qk = Query::from_pairs(&vec![]).unwrap();
+    let b = board(&inp, &qk);
+    let drawn: usize = b.lanes[0].cells.iter().map(|c| c.cards.len()).sum();
+    assert_eq!(drawn, CELL_CAP, "kanban capped at the cell cap");
+    let q = Query {
+        view: View::List,
+        ..Default::default()
+    };
+    let b = board(&inp, &q);
+    let drawn: usize = b.lanes[0].cells.iter().map(|c| c.cards.len()).sum();
+    assert_eq!(drawn, CELL_CAP + 1, "list uncapped");
+}
+
+#[test]
+fn cards_carry_created_at_for_the_list_rows() {
+    let rows = vec![json!({
+        "id": "x-a", "slug": "a", "status": "ready",
+        "priority": "p2", "created_at": "2026-09-24T18:00:00Z"
+    })];
+    let inp = fixture(rows);
+    let b = board(&inp, &Query::default());
+    let card = b.lanes[0]
+        .cells
+        .iter()
+        .flat_map(|c| c.cards.iter())
+        .next()
+        .expect("the fixture's one card is on the board");
+    assert_eq!(card.created_at.as_deref(), Some("2026-09-24T18:00:00Z"));
 }
 
 fn epic_fixture() -> Vec<Value> {
@@ -89,8 +196,8 @@ fn project_and_priority_filters_narrow_cards_and_totals() {
     ];
     let inp = fixture(rows);
     let q = Query {
-        project: Some("fno".into()),
-        priority: Some("p1".into()),
+        project: vec!["fno".into()],
+        priority: vec!["p1".into()],
         ..Default::default()
     };
     let b = board(&inp, &q);
