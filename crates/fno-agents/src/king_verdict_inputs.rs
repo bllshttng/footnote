@@ -46,16 +46,16 @@ fn ts_key(raw: &str) -> String {
 /// The delivery trend split so filing cannot inflate it (Python `scope_split`,
 /// king/scope.py). A king filing real nodes raises undelivered by working
 /// well, so the convergence signal is the INHERITED set (created before
-/// `crowned_at`) only. A row with no birth date reads as inherited: an old
+/// `generation_start`) only. A row with no birth date reads as inherited: an old
 /// undated backlog is work the reign can be stalled on, never fresh filing
 /// that excuses it.
 pub(crate) fn scope_split(
     ids: &std::collections::HashSet<String>,
     entries: &[Value],
-    crowned_at: &str,
+    generation_start: &str,
     window_start: &str,
 ) -> (u64, u64, u64) {
-    let crowned = ts_key(crowned_at);
+    let generation_start = ts_key(generation_start);
     let window = ts_key(window_start);
     let mut inherited_undelivered: u64 = 0;
     let mut filed_undelivered: u64 = 0;
@@ -68,7 +68,7 @@ pub(crate) fn scope_split(
             continue;
         }
         let created = ts_key(row.get("created_at").and_then(Value::as_str).unwrap_or(""));
-        let inherited = created < crowned;
+        let inherited = created < generation_start;
         if !crate::graph_store::is_terminal_entry(row) {
             if inherited {
                 inherited_undelivered += 1;
@@ -116,6 +116,10 @@ pub(crate) struct VerdictInputs {
     pub window: String,
     pub checkin_interval_secs: i64,
     pub crown_age_secs: i64,
+    pub generation_start: String,
+    pub generation_start_source: String,
+    pub crown_inherited: Option<bool>,
+    pub crown_from_session: Option<String>,
     pub compaction_ceiling: u64,
     pub inherited_undelivered: u64,
     pub filed_undelivered: u64,
@@ -196,6 +200,38 @@ fn resolve_manifest(
         return Err(format!("{}: manifest not found", path.display()));
     }
     Ok(path)
+}
+
+fn generation_start(
+    registry: &crate::state::Registry,
+    harness: &str,
+    manifest: &crate::loopcheck::KingManifest,
+    manifest_created_at: &str,
+    manifest_created: &chrono::DateTime<chrono::FixedOffset>,
+    registry_path: &Path,
+) -> Result<(String, String), String> {
+    let Some(session_id) = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty())
+    else {
+        return Ok((manifest_created_at.to_string(), "manifest".to_string()));
+    };
+    let Some(row) = registry.find_by_session(harness, session_id) else {
+        return Ok((manifest_created_at.to_string(), "manifest".to_string()));
+    };
+    let row_created = chrono::DateTime::parse_from_rfc3339(&row.created_at).map_err(|error| {
+        format!(
+            "{}: registry row for session {session_id} has invalid created_at: {error}",
+            registry_path.display()
+        )
+    })?;
+    let (start, source) = if row_created < manifest_created.clone() {
+        (row.created_at.clone(), "registry")
+    } else {
+        (manifest_created_at.to_string(), "manifest")
+    };
+    Ok((start, source.to_string()))
 }
 
 /// Alias members (a project's `short_name` spelling) resolve to their
@@ -282,6 +318,35 @@ pub(crate) fn resolve_verdict_inputs(
             manifest_path.display()
         )
     })?;
+    let registry = crate::state::load_registry(registry_path)
+        .map_err(|error| format!("{}: registry unreadable: {error}", registry_path.display()))?;
+    let holder_row = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty())
+        .and_then(|session_id| registry.find_by_session(&harness, session_id));
+    let (generation_start, generation_start_source) = generation_start(
+        &registry,
+        &harness,
+        &manifest,
+        &crowned_at,
+        &created_at,
+        registry_path,
+    )?;
+    let (crown_inherited, crown_from_session) = match holder_row {
+        Some(row) => {
+            let parent = row
+                .spawned_by_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty());
+            let inherited = parent.is_some() && row.crown_grantor.as_deref() != Some("human");
+            (
+                Some(inherited),
+                inherited.then(|| parent.map(str::to_string)).flatten(),
+            )
+        }
+        None => (None, None),
+    };
     let current = now();
     let crown_age_secs = current
         .signed_duration_since(created_at.with_timezone(&chrono::Utc))
@@ -298,7 +363,7 @@ pub(crate) fn resolve_verdict_inputs(
     let ids = crate::territory::compile_scope_ids(&scope, &entries, &projects)
         .map_err(|e| format!("scope {scope} unreadable: {e}"))?;
     let (inherited_undelivered, filed_undelivered, inherited_closed_in_window) =
-        scope_split(&ids, &entries, &crowned_at, &window_start);
+        scope_split(&ids, &entries, &generation_start, &window_start);
 
     Ok(VerdictInputs {
         scope,
@@ -309,6 +374,10 @@ pub(crate) fn resolve_verdict_inputs(
         window: window_display(window_secs),
         checkin_interval_secs: interval,
         crown_age_secs,
+        generation_start,
+        generation_start_source,
+        crown_inherited,
+        crown_from_session,
         compaction_ceiling: ceiling as u64,
         inherited_undelivered,
         filed_undelivered,
@@ -517,6 +586,62 @@ mod tests {
         path
     }
 
+    fn generation_setup(dir: &Path, registry_rows: &[Value]) -> (PathBuf, PathBuf) {
+        let manifest = dir.join("kings/x-root.md");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            "---\nscope: x-root\nshape: pass\nfno_id: kd-test\n\
+             created_at: 2026-09-18T20:48:22Z\nharness: claude\nharness_session_id: sess-k\n---\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(dir.join(".fno")).unwrap();
+        let graph = dir.join("home/graph.json");
+        fs::create_dir_all(graph.parent().unwrap()).unwrap();
+        fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "[paths]\ngraph_json = {:?}\n[[work.workspaces.t.projects]]\nname = \"fno\"\n",
+                graph.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [
+                    entry("x-root", "", "2026-09-18T01:00:00Z", serde_json::json!({"type": "epic", "project": "fno"})),
+                    entry("x-delivery", "x-root", "2026-09-18T01:14:01Z", serde_json::json!({"project": "fno", "status": "ready"})),
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let registry = dir.join("registry.json");
+        fs::write(
+            &registry,
+            serde_json::json!({"schema_version": 11, "agents": registry_rows}).to_string(),
+        )
+        .unwrap();
+        (manifest, registry)
+    }
+
+    fn inherited_holder_row(created_at: &str) -> Value {
+        serde_json::json!({
+            "name": "king",
+            "cwd": "/tmp",
+            "status": "busy",
+            "created_at": created_at,
+            "harness": "claude",
+            "harness_session_id": "sess-k",
+            "spawned_by_session": "grantor-session",
+            "crown_level": 2,
+            "crown_scope": "x-root",
+            "crown_grantor": "spawn"
+        })
+    }
+
     #[test]
     fn an_explicit_empty_scope_refuses() {
         let _guard = crate::claims::test_env_lock()
@@ -674,6 +799,62 @@ mod tests {
         )
         .expect("a zero ceiling is declared, not refused");
         assert_eq!(inputs.compaction_ceiling, 0);
+    }
+
+    #[test]
+    fn delivery_split_starts_at_the_holder_generation() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("FNO_CONFIG");
+        let dir = tmp("holder-generation-start");
+        let (manifest, registry) =
+            generation_setup(&dir, &[inherited_holder_row("2026-09-17T22:47:08Z")]);
+        let inputs =
+            resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
+                .expect("the holder generation makes the split measurable");
+        assert_eq!(inputs.generation_start, "2026-09-17T22:47:08Z");
+        assert_eq!(inputs.generation_start_source, "registry");
+        assert_eq!(inputs.crown_inherited, Some(true));
+        assert_eq!(
+            inputs.crown_from_session.as_deref(),
+            Some("grantor-session")
+        );
+        assert_eq!(inputs.inherited_undelivered, 0);
+        assert_eq!(inputs.filed_undelivered, 2);
+    }
+
+    #[test]
+    fn generation_start_falls_back_to_manifest_without_holder_row() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("FNO_CONFIG");
+        let dir = tmp("missing-holder-generation");
+        let (manifest, registry) = generation_setup(&dir, &[]);
+        let inputs =
+            resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
+                .expect("a missing holder row keeps the manifest split");
+        assert_eq!(inputs.generation_start, "2026-09-18T20:48:22Z");
+        assert_eq!(inputs.generation_start_source, "manifest");
+        assert_eq!(inputs.inherited_undelivered, 2);
+        assert_eq!(inputs.filed_undelivered, 0);
+    }
+
+    #[test]
+    fn generation_start_source_names_the_selected_timestamp() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("FNO_CONFIG");
+        let dir = tmp("later-holder-generation-start");
+        let (manifest, registry) =
+            generation_setup(&dir, &[inherited_holder_row("2026-09-20T00:00:00Z")]);
+        let inputs =
+            resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
+                .expect("the earlier manifest timestamp bounds the generation");
+        assert_eq!(inputs.generation_start, "2026-09-18T20:48:22Z");
+        assert_eq!(inputs.generation_start_source, "manifest");
     }
 
     #[test]
