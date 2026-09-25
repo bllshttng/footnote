@@ -586,7 +586,8 @@ pub fn gc_sweep(
     // wrote, so a filled row reads closed and its session falls through to
     // the ordinary quiet and receipt gates. A refused settle leaves the row
     // kept under its existing reason.
-    let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
+    let (settled, mut refused) = gc_sweep::settle_stale_do_rows(home);
+    refused.extend(crate::phase_close::settle_ship_rows(home));
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
     let mut summary = gc_sweep::run(
         home,

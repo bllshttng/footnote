@@ -3391,6 +3391,15 @@ pub(crate) fn commit_retirements(
                     }
                 }
             }
+            let retired = entries
+                .iter()
+                .filter(|e| report.retired_names.contains(&e.name));
+            for (node, error) in crate::phase_close::close_retired_rows(home, retired) {
+                let _ = emitter.emit(
+                    "daemon_recovery_error",
+                    &json!({"op": "close_retired_rows", "node": node, "error": error}),
+                );
+            }
         }
         Err(err) => {
             let _ = emitter.emit(

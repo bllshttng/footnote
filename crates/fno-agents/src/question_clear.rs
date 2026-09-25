@@ -640,28 +640,8 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
 }
 
 fn live_decision(req: &ClearRequest, qid: &str) -> Result<Option<(Value, Value, String)>, String> {
-    use rusqlite::OptionalExtension;
-
     let connection = crate::backlog::open(&req.graph)?;
-    let stored: Option<(String, Option<String>, String)> = connection
-        .query_row(
-            "SELECT d.ts, d.source, d.data
-             FROM decisions d
-             WHERE d.event_type = 'operator_decision'
-               AND json_extract(d.data, '$.question_id') = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM decisions r
-                   WHERE r.event_type = 'decision_retracted'
-                     AND json_extract(r.data, '$.target_decision_id') =
-                         json_extract(d.data, '$.decision_id')
-               )
-             ORDER BY d.seq DESC LIMIT 1",
-            [qid],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let Some((ts, source, data)) = stored else {
+    let Some((ts, source, data)) = crate::backlog::decisions::live_answer(&connection, qid)? else {
         return Ok(None);
     };
     let data: Value = serde_json::from_str(&data).map_err(|error| error.to_string())?;

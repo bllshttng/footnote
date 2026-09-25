@@ -26,8 +26,6 @@ fn session_row(session_id: &str) -> SessionRecord {
         ended_at: None,
         ended_by: None,
         effort: None,
-        at: None,
-        claimed_at: None,
         observed_model: None,
         merge_grant: None,
         extras: Map::new(),
