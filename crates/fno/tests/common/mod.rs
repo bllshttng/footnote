@@ -207,6 +207,21 @@ impl Drop for Scratch {
     }
 }
 
+/// Replace the fixture graph through the mux crate's store client.
+pub fn seed_graph(graph: &Path, rows: &[serde_json::Value]) -> Result<(), String> {
+    let snapshot = fno::store_client::call(graph, "begin", serde_json::json!({}))?;
+    let version = snapshot
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "the store returned no snapshot version".to_string())?;
+    fno::store_client::call(
+        graph,
+        "commit",
+        serde_json::json!({"version": version, "entries": rows}),
+    )?;
+    Ok(())
+}
+
 /// The `fno` client running on a real PTY, plus a human-eye view of it.
 pub struct ClientHarness {
     pub child: Box<dyn portable_pty::Child + Send + Sync>,

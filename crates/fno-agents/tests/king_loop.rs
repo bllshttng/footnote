@@ -1253,7 +1253,8 @@ fn every_king_noprogress_terminal_escalates() {
     let blind_log = blind_cwd.join("escalations.log");
     let blind_state = king_manifest(blind_cwd, "k-blind");
     let blind_events = blind_cwd.join("events.jsonl");
-    let blind_bin = king_escalate_bin(bin_dir.path(), "not json at all", &blind_log);
+    let blind_bin_dir = TempDir::new().unwrap();
+    let blind_bin = king_escalate_bin(blind_bin_dir.path(), "not json at all", &blind_log);
 
     let mut blind = (0, serde_json::Value::Null);
     for _ in 0..3 {
@@ -1314,7 +1315,8 @@ fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
     let boards = [BOARD_TWO_ACTIONABLE, BOARD_ONE_CLEARED, BOARD_REFILLED];
     let mut last = (0, serde_json::Value::Null);
     for (i, payload) in boards.iter().enumerate() {
-        let fno = king_board_bin(bin_dir.path(), payload, 0);
+        let board_home = TempDir::new().unwrap();
+        let fno = king_board_bin(board_home.path(), payload, 0);
         last = king_fire(&state, cwd, &events, &fno);
         if i < boards.len() - 1 {
             assert_eq!(

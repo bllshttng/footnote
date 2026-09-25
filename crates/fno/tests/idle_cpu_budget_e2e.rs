@@ -138,11 +138,8 @@ fn seed_graph(path: &std::path::Path) -> u64 {
             "details": details.clone(),
         }));
     }
-    fno_agents::graph_store::seed_rows(path, &rows).unwrap();
-    fno_agents::backlog::database_path(path)
-        .metadata()
-        .unwrap()
-        .len()
+    common::seed_graph(path, &rows).unwrap();
+    path.with_extension("db").metadata().unwrap().len()
 }
 
 #[test]

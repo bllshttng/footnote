@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{spawn_server, FakeClient, Scratch};
+use common::{seed_graph, spawn_server, FakeClient, Scratch};
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -52,8 +52,9 @@ fn kill_server(sock: &Path) {
 /// (done + in-flight) and three trees (done slot, in-flight slot, plain
 /// shell).
 fn write_fixture(iso: &Path) {
-    fno_agents::graph_store::seed_rows(
-        &iso.join("iso-graph.json"),
+    let graph = iso.join("iso-graph.json");
+    seed_graph(
+        &graph,
         &[serde_json::json!({
             "id": "x-done", "slug": "x-done", "title": "done member",
             "type": "feature", "status": "done", "priority": "p2",

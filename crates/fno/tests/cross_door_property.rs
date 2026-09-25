@@ -17,6 +17,8 @@
 //! and the full pass re-runs every door and must change nothing. A reap
 //! that clears a view and not the store reads green here otherwise.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
@@ -114,7 +116,7 @@ impl Fleet {
     fn seed(&self) {
         std::fs::create_dir_all(self.dir.join("work")).unwrap();
         let agents = self.dir.join("agents");
-        fno_agents::graph_store::seed_rows(
+        common::seed_graph(
             &self.dir.join("graph.json"),
             &[serde_json::json!({
                 "id": NODE,

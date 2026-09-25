@@ -86,5 +86,4 @@ tokio = { version = "1", features = [
 ] }
 
 [dev-dependencies]
-fno-agents = { path = "../fno-agents" }
 tempfile = "3"
