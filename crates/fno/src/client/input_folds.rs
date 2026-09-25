@@ -22,6 +22,44 @@ pub(super) enum ModalKey {
 /// A real CSI is far shorter, so this only ever fires on a pathological stream,
 /// and it is what stops one from growing the carry without limit.
 pub(super) const MAX_ESC_CARRY: usize = 16;
+
+/// One byte inside a CSI (`ESC [ ...`) or SS3 (`ESC O ...`) sequence: the
+/// whole-sequence swallow rule every fold shares. A final byte (0x40..=0x7e)
+/// or the [`MAX_ESC_CARRY`] ceiling ends the sequence; a parameter or
+/// intermediate byte (0x20..=0x3f) accumulates; anything else is malformed
+/// and abandons the sequence.
+pub(super) enum EscStep {
+    /// The byte belongs to the sequence; keep carrying.
+    Carried,
+    /// The sequence is complete, final byte included (the carry holds it all):
+    /// dispatch off `esc[1..]`, then clear.
+    Final,
+    /// Malformed mid-sequence byte: the carry was abandoned and the byte must
+    /// be reprocessed as if fresh.
+    Reprocess,
+}
+
+pub(super) fn esc_step(esc: &mut Vec<u8>, b: u8) -> EscStep {
+    if (0x40..=0x7e).contains(&b) {
+        esc.push(b);
+        return EscStep::Final;
+    }
+    if (0x20..=0x3f).contains(&b) {
+        if esc.len() >= MAX_ESC_CARRY {
+            // A pathological run of parameter bytes: drop the sequence rather
+            // than grow the carry without limit. The byte is consumed.
+            esc.clear();
+        } else {
+            esc.push(b);
+        }
+        return EscStep::Carried;
+    }
+    if esc.len() >= MAX_ESC_CARRY {
+        esc.clear();
+        return EscStep::Carried;
+    }
+    EscStep::Reprocess
+}
 /// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
 /// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
 /// PageUp/PageDown become navigation tokens; a bare Esc becomes `Esc` - the

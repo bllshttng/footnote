@@ -156,39 +156,26 @@ fn esc_hides_and_reopening_restores_the_draft() {
 }
 
 #[test]
-fn tab_walks_the_chip_order_and_skips_collapsed_pins() {
+fn tab_walks_the_field_order() {
     let mut v = view_with_launcher();
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Harness -> Project -> Model -> Effort -> More -> Message (5 tabs, the
-    // two pins are collapsed).
+    // Agent -> Project -> Permission -> Placement -> Message (4 tabs; every
+    // field is always in the walk - the pins no longer fold away).
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
         Focus::Message,
-        "Harness -> Project -> Model -> Effort -> More -> Message (5 tabs)"
+        "Agent -> Project -> Permission -> Placement -> Message (4 tabs)"
     );
-    // A sixth tab reaches Launch.
+    // A fifth tab reaches Launch.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
     });
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Launch);
-    // Expanding the pins: Tab past More lands on Permission, then Placement.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.expanded = true;
-        l.focus = Focus::More;
-    }
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t", &mut sock).await;
-    });
-    assert_eq!(
-        v.launcher.as_ref().unwrap().focus,
-        Focus::Placement,
-        "expanded: More -> Permission -> Placement"
-    );
 }
 
 #[test]
@@ -389,16 +376,18 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
         .collect();
     let row_text: String = labels.iter().map(|(s, x)| format!("{s}@{x} ")).collect();
     assert!(
-        row_text.contains("claude@"),
-        "harness chip carries the catalog name: {row_text}"
+        row_text.contains("claude default@"),
+        "the agent chip carries the pick: {row_text}"
     );
-    let launch_x = labels.iter().find(|(s, _)| s == "Launch").map(|(_, x)| *x);
+    let launch_x = labels
+        .iter()
+        .find(|(s, _)| s.starts_with("Launch"))
+        .map(|(_, x)| *x);
     let Some(launch_x) = launch_x else {
         panic!("launch chip on the primary row: {row_text}");
     };
     let after: Vec<_> = labels.iter().filter(|(_, x)| *x > launch_x).collect();
     assert!(after.is_empty(), "nothing right of Launch: {row_text}");
-    assert_eq!(rects.chips.len(), labels.len(), "collapsed: no pin chips");
 }
 
 #[test]
@@ -412,7 +401,7 @@ fn chips_paint_in_the_popup_control_vocabulary() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Effort;
+        l.focus = Focus::Agent;
     }
     let l = v.launcher.as_ref().unwrap();
     let area = RtRect::new(0, 0, 80, 3);
@@ -420,7 +409,7 @@ fn chips_paint_in_the_popup_control_vocabulary() {
     let mut buf = RtBuffer::empty(area);
     l.paint(&v, &mut buf, area);
     for (f, _, r) in &rects.chips {
-        let focused = *f == Focus::Effort;
+        let focused = *f == Focus::Agent;
         assert!(
             !buf[(r.x, r.y)].modifier.contains(Modifier::DIM),
             "chip {f:?} must not read as a dim caption"
@@ -518,30 +507,30 @@ fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
     v.term = (24, 80);
     // A 120-character line wraps to 4 rows at the editor's 38 wrap columns
     // (40 minus the prompt gutter): the bar grows to 1 chip + 4 message +
-    // 1 footer = 6 and shrinks when it clears.
+    // 1 hint + 1 lifecycle = 7 and shrinks when it clears.
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message = "x".repeat(120);
     }
     let l = v.launcher.as_ref().unwrap();
     let (total, editor) = l.dock_layout(60, 40);
-    assert_eq!((total, editor), (6, 4), "grows with wrapped rows");
+    assert_eq!((total, editor), (7, 4), "grows with wrapped rows");
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message.clear();
     }
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(
         l.dock_layout(60, 40),
-        (3, 1),
+        (4, 1),
         "clearing gives the rows back"
     );
-    // 800 characters against a 30-row panel: capped at a third (editor 8,
+    // 800 characters against a 30-row panel: capped at a third (editor 7,
     // total 10) and the window holds the cursor row.
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message = "y".repeat(20 * 40);
     }
     let l = v.launcher.as_ref().unwrap();
     let (total, editor) = l.dock_layout(30, 40);
-    assert_eq!((total, editor), (10, 8), "capped at a third of the panel");
+    assert_eq!((total, editor), (10, 7), "capped at a third of the panel");
     let area = RtRect::new(0, 0, 40, 10);
     let rects = l.dock_layout_rects(&v, area);
     let (cur_row, _) =
@@ -559,8 +548,8 @@ fn dock_layout_floors_at_one_editor_line_on_tiny_panels() {
     let mut v = view_with_launcher();
     v.term = (24, 80);
     let l = v.launcher.as_ref().unwrap();
-    // 8 rows: cap = 8/3 - 1 chip - 1 footer = 0, floored to 1.
-    assert_eq!(l.dock_layout(8, 40), (3, 1));
+    // 8 rows: cap = 8/3 - chips - hint - lifecycle floored to 1.
+    assert_eq!(l.dock_layout(8, 40), (4, 1));
 }
 
 #[test]
@@ -644,11 +633,12 @@ fn degraded_catalog_reprobes_on_reopen() {
 #[test]
 fn launcher_mouse_clicks_launch_and_submits() {
     let mut v = view_with_launcher();
+    v.sideline_full = true;
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let pw = v.panel_w() as usize;
-    let chrome = v.bottom_row_is_chrome() as usize;
+    let pw = v.term.1 as usize;
+    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
     let body = 24 - chrome;
     let (total, _) = l.dock_layout(body, pw - 1);
     let top = body - total;
@@ -685,11 +675,12 @@ fn launcher_mouse_clicks_launch_and_submits() {
 #[test]
 fn launcher_mouse_click_on_footer_is_unconsumed() {
     let mut v = view_with_launcher();
+    v.sideline_full = true;
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let pw = v.panel_w() as usize;
-    let chrome = v.bottom_row_is_chrome() as usize;
+    let pw = v.term.1 as usize;
+    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
     let body = 24 - chrome;
     let (total, _) = l.dock_layout(body, pw - 1);
     let top = body - total;
@@ -714,11 +705,12 @@ fn launcher_mouse_click_on_footer_is_unconsumed() {
 #[test]
 fn launcher_mouse_click_in_message_rect_focuses_the_editor() {
     let mut v = view_with_launcher();
+    v.sideline_full = true;
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let pw = v.panel_w() as usize;
-    let chrome = v.bottom_row_is_chrome() as usize;
+    let pw = v.term.1 as usize;
+    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
     let body = 24 - chrome;
     let (total, _) = l.dock_layout(body, pw - 1);
     let top = body - total;
@@ -797,25 +789,20 @@ fn caret_survives_chip_truncation() {
 }
 
 #[test]
-fn labels_name_their_field_and_never_say_default() {
-    // R3 + AC3-UI: every empty pin reads "<harness> decides" (placement:
-    // the door's thread default) and NO label anywhere contains the bare
-    // word "default" - the operator could not tell which default was which.
+fn chips_carry_values_not_labels() {
+    // The chips carry VALUES, not field labels - the agent chip
+    // folds harness/model/effort (`claude default` with nothing pinned),
+    // permission names who decides, placement shows where.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.expanded = true;
-    }
     let l = v.launcher.as_ref().unwrap();
     let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
     let joined = texts.join(" | ");
     for want in [
-        "harness: claude",
-        "model: claude decides",
-        "effort: claude decides",
-        "permission: claude decides",
-        "where: thread",
+        "claude default",
+        "claude decides",
+        "thread",
     ] {
         assert!(
             texts.iter().any(|t| t.contains(want)),
@@ -823,8 +810,8 @@ fn labels_name_their_field_and_never_say_default() {
         );
     }
     assert!(
-        !joined.split_whitespace().any(|w| w == "default"),
-        "no bare default: {joined}"
+        texts.iter().all(|t| !t.contains(": ")),
+        "no field labels anywhere: {joined}"
     );
 }
 
@@ -840,11 +827,13 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
             super::agent_launcher::ModelChoice {
                 name: "claude-opus-5".into(),
                 model: "claude-opus-5".into(),
+                route: String::new(),
                 verdict: "ok".into(),
             },
             super::agent_launcher::ModelChoice {
                 name: "zai-flash".into(),
                 model: "glm-5.3-flash[1m]".into(),
+                route: "zai/glm-5.3-flash[1m]".into(),
                 verdict: "ok".into(),
             },
         ];
@@ -852,7 +841,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
+    l.focus = Focus::Agent;
     assert!(
         super::agent_launcher::open_picker(&mut l, &v),
         "picker opens"
@@ -870,11 +859,12 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
         })
         .collect();
     assert!(
-        labels.contains(&"claude decides".to_string()) && labels.contains(&"zai-flash".to_string()),
-        "picker lists decides + rows: {labels:?}"
+        labels.contains(&"claude default".to_string())
+            && labels.contains(&"zai-flash".to_string()),
+        "picker lists defaults + routing rows: {labels:?}"
     );
-    // Pick zai-flash: the chip reads `model: zai-flash`, the draft carries
-    // the row's model id.
+    // Pick zai-flash: the chip reads the ROW name, the draft carries the
+    // row's model id, and the harness moves to the row's harness.
     let target = picker
         .popup
         .rows
@@ -902,10 +892,10 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
 }
 
 #[test]
-fn degraded_inventory_leaves_free_text_and_names_the_failure() {
-    // AC3-EDGE: when the inventory read fails, the model picker shows a
-    // disabled entry carrying the reason and a working `type a model...`;
-    // the harness chip still lists every catalog harness.
+fn degraded_inventory_names_the_failure_and_keeps_defaults() {
+    // When the inventory read fails, the agent list shows a disabled entry
+    // carrying the reason and the `<harness> default` rows stay launchable;
+    // no free-text model row exists.
     let mut v = view_with_launcher();
     v.launcher_catalog = Some(CatalogOutcome::Ok(
         vec![HarnessChoice {
@@ -920,7 +910,7 @@ fn degraded_inventory_leaves_free_text_and_names_the_failure() {
     ));
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
+    l.focus = Focus::Agent;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let l = v.launcher.as_ref().unwrap();
@@ -956,8 +946,12 @@ fn degraded_inventory_leaves_free_text_and_names_the_failure() {
         "the failure is named: {disabled:?}"
     );
     assert!(
-        enabled.contains(&"type a model..."),
-        "free text still works: {enabled:?}"
+        enabled.contains(&"claude default"),
+        "the default row still launches: {enabled:?}"
+    );
+    assert!(
+        !enabled.iter().any(|d| d.contains("type a model")),
+        "no free-text model row: {enabled:?}"
     );
     assert!(
         !v.launcher.as_ref().unwrap().draft.harnesses.is_empty(),
@@ -976,7 +970,6 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Placement;
-    l.draft.expanded = true;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let l = v.launcher.as_ref().unwrap();
@@ -1019,7 +1012,7 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     assert!(
         texts
             .iter()
-            .any(|t| t.contains("where: thread split beside")),
+            .any(|t| t.contains("thread split beside")),
         "the chip shows the picked view: {texts:?}"
     );
 }
@@ -1078,7 +1071,7 @@ fn typing_in_an_open_picker_filters_the_rows() {
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
+    l.focus = Focus::Agent;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
@@ -1098,7 +1091,11 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(labels, vec!["codex"], "the query narrows the rows");
+    assert_eq!(
+        labels,
+        vec!["codex default"],
+        "the query narrows the rows"
+    );
     assert!(matches!(
         picker.popup.rows.first(),
         Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
@@ -1117,7 +1114,7 @@ fn typing_in_an_open_picker_filters_the_rows() {
             _ => None,
         })
         .collect();
-    assert_eq!(still, vec!["codex"], "`co` still filters: {still:?}");
+    assert_eq!(still, vec!["codex default"], "`co` still filters: {still:?}");
     // Clearing the query fully restores every row.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
@@ -1145,7 +1142,7 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
+    l.focus = Focus::Agent;
     assert!(super::agent_launcher::open_picker(&mut l, &v));
     v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
@@ -1155,6 +1152,25 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"co", &mut sock).await;
     });
+    {
+        let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+        assert_eq!(picker.filter, "co", "the query is live");
+        assert_eq!(
+            picker.popup.rows.len(),
+            2,
+            "narrowed to header + row: {:?}",
+            picker.popup.rows
+        );
+        let (ri, _) = picker.popup.selected().unwrap();
+        let action = picker.actions.get(ri).cloned().flatten();
+        assert!(
+            matches!(
+                action,
+                Some(super::agent_launcher::PickerAction::SetHarness(ref h)) if h == "codex"
+            ),
+            "the highlighted row resolves SetHarness(codex): {action:?}"
+        );
+    }
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x0d], &mut sock).await;
     });
@@ -1256,7 +1272,7 @@ fn open_with_binds_message_project_and_node() {
     assert_eq!(l.draft.node.as_deref(), Some("x-1"));
     assert_eq!(l.draft.request(9).node.as_deref(), Some("x-1"));
     assert_eq!(l.phase, Phase::Editing);
-    assert_eq!(l.focus, Focus::Harness);
+    assert_eq!(l.focus, Focus::Agent);
 }
 
 #[test]

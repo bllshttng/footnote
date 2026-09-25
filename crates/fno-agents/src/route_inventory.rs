@@ -62,12 +62,18 @@ pub fn inventory_leg(payload: &Value) -> Value {
         };
         let model_cell = match row.get("family").and_then(Value::as_str) {
             Some(family) if !family.is_empty() => format!("{family} -> {model}"),
-            _ => model,
+            _ => model.clone(),
         };
         rows.push(json!({
             "name": name,
             "harness": harness,
             "model": model_cell,
+            // The raw id before the family display rewrite, and the row's
+            // route: the mux composer's agent list needs both to show the
+            // launch truth (the launchable model and who resolves it) - the
+            // display cell alone collapses them.
+            "model_id": model,
+            "route": get("route"),
             "band": if band.is_empty() { json!("unbanded") } else { json!(band) },
             // f64 Display prints the shortest round-trip decimal, not `:g`.
             "percentile": percentile.map(|p| format!("{p}")).unwrap_or_default(),
@@ -206,5 +212,43 @@ mod tests {
         assert_eq!(out["rows"], json!([]));
         assert_eq!(out["refusals"], json!([]));
         assert_eq!(out["drift"], json!([]));
+    }
+
+    #[test]
+    fn rows_carry_model_id_and_route_beside_the_display_cell() {
+        // The composer's agent list needs the raw model id
+        // (before the family rewrite) and the row's route. The existing
+        // display cell keeps its shape, so every current reader is unchanged.
+        let out = leg_with(
+            json!([
+                {"name": "zai-flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
+                 "route": "zai/glm-5.3-flash[1m]", "band": "high", "effort": ""},
+                {"name": "luna", "harness": "codex", "model": "gpt-6-luna",
+                 "band": "high", "family": "luna", "effort": ""},
+            ]),
+            json!({}),
+        );
+        let rows = out["rows"].as_array().unwrap();
+        // Rows sort by name: luna first, zai-flash second.
+        assert_eq!(rows[1]["model"], "glm-5.3-flash[1m]");
+        assert_eq!(rows[1]["model_id"], "glm-5.3-flash[1m]");
+        assert_eq!(rows[1]["route"], "zai/glm-5.3-flash[1m]");
+        // The family rewrite touches only the display cell, never model_id.
+        assert_eq!(rows[0]["model"], "luna -> gpt-6-luna");
+        assert_eq!(rows[0]["model_id"], "gpt-6-luna");
+        assert_eq!(rows[0]["route"], "");
+        // Old keys byte-identical: name, harness, model cell, band,
+        // percentile, effort, verdict all still there.
+        for key in [
+            "name",
+            "harness",
+            "model",
+            "band",
+            "percentile",
+            "effort",
+            "verdict",
+        ] {
+            assert!(rows[0].get(key).is_some(), "old key {key} still present");
+        }
     }
 }
