@@ -74,6 +74,7 @@ The gated table: one row per arm the readout can show. The scheduler cell is the
 | `arm_watch` | `daemon` | `fno-agents-daemon` | pages the operator when arms stay broken past the threshold | 300 s |
 | `king_settle` | `daemon` | `fno-agents-daemon` | mails the owning king when a covered PR settles green or its node closes | 300 s |
 | `provider_cap` | `daemon` | `fno-agents-daemon` | provider cap accounting | 120 s |
+| `slot_cutover` | `daemon` | `fno-agents-daemon` | switches to a globally declared managed Claude account when the proven account is low or exhausted | 120 s |
 | `merge_close` | `daemon` | `fno-agents-daemon` | merge-close sweeps | 900 s |
 | `crown_ledger` | `daemon` | `fno-agents-daemon` | renders reign.html | 300 s |
 | `fleet_page` | `daemon` | `fno-agents-daemon` | renders fleet.html | 1800 s |
