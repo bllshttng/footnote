@@ -50,6 +50,8 @@ on:
       - .github/workflows/rust-ci.yml
   pull_request:
     paths: *cli_ci_paths
+  schedule:
+    - cron: '17 9 * * *'
 
 jobs:
   real-codex-0145:
@@ -91,10 +93,9 @@ jobs:
   # packet scales with the diff, so a fixed cap either starves a large rebase
   # (killed at the cap, reported as an unattributable `cancelled`) or idles
   # over a small one. Selection only: `--list` maps and prints, it runs
-  # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
-  # the raw estimate (the run job's fit assertion compares against it) and the
-  # ceiling actually applied, the estimate scaled by headroom and clamped
-  # at 75.
+  # nothing, so this job needs no smoke-setup and costs seconds. Three outputs:
+  # the raw estimate, the ceiling applied, and whether the packet fits that
+  # ceiling. The estimate and fit output are read by the full-suite selector.
   changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -131,7 +132,6 @@ jobs:
             echo "no changed-estimate line in the selector output; refusing to size"
             exit 1
           fi
-          echo "estimate_minutes=$est" >> "$GITHUB_OUTPUT"
           # The ceiling needs headroom over its own estimate, or a packet that
           # runs one percent over its price dies on every push. Two measured
           # underprices forced this factor up twice: the cargo rebuild a
@@ -144,18 +144,58 @@ jobs:
           # The fit assertion refuses a packet whose estimate exceeds the
           # ceiling itself, so the effective bound is: estimates above 75
           # refuse, everything under runs with doubled room.
-          echo "timeout_minutes=$(( est * 2 > 75 ? 75 : est * 2 ))" >> "$GITHUB_OUTPUT"
+          timeout_minutes=$(( est * 2 > 75 ? 75 : est * 2 ))
+          {
+            echo "estimate_minutes=$est"
+            echo "timeout_minutes=$timeout_minutes"
+            if [ "$est" -le "$timeout_minutes" ]; then
+              echo "packet_fits=true"
+            else
+              echo "packet_fits=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
     outputs:
       estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
       timeout_minutes: ${{ steps.estimate.outputs.timeout_minutes }}
+      packet_fits: ${{ steps.estimate.outputs.packet_fits }}
+
+  # The Rust selector owns lane routing. On non-PR events it selects every
+  # full lane; a missing PR diff also fails closed to the full set.
+  pr-affected:
+    needs: [changed-packet-size]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cargo: ${{ steps.select.outputs.cargo }}
+      python_full: ${{ steps.select.outputs.python_full }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Select affected lanes
+        id: select
+        env:
+          CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
+          PACKET_FITS: ${{ needs.changed-packet-size.outputs.packet_fits }}
+        run: |
+          rustc --edition=2021 crates/fno-agents/src/bin/pr-affected.rs -o "$RUNNER_TEMP/pr-affected"
+          "$RUNNER_TEMP/pr-affected" "${{ github.event_name }}" "$CHANGED_BASE" "$CHANGED_HEAD" "$PACKET_FITS" | tee -a "$GITHUB_OUTPUT"
 
   # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
   # never in front of it: only `smoke` satisfies the merge gate - a green here
   # means the selected packet passed and nothing more. Its one needs edge is
   # the sizer above, which runs no tests; nothing can make this job delay the
-  # gate. Coverage boundary: `smoke-pytest` and `smoke-rest` are the full-gate
-  # shards on main and pull requests. `changed-smoke` is PR-only and is
+  # gate. Coverage boundary: `smoke-pytest` and `smoke-rest` run as the
+  # full-gate shards on main, nightly, and PRs whose selector requires them.
+  # `changed-smoke` is PR-only and is
   # skipped on main; its changed-subset selector never supplies main-branch
   # coverage.
   changed-smoke:
@@ -208,6 +248,7 @@ jobs:
           date +%s > "$RUNNER_TEMP/changed-start"
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh changed-smoke "$(( SECONDS - start ))" "$CAP_MINUTES" || true; touch "$RUNNER_TEMP/smoke-duration-reported"' EXIT
+          : "$start"
           # The estimate is raw (unclamped). A packet that cannot fit the
           # ceiling does not run: the cap kill would report an
           # unattributable cancelled, and a partial packet killed at the
@@ -310,6 +351,8 @@ jobs:
   # If a shard approaches the step cap below, split again or cut work. Do not
   # raise either cap.
   smoke-pytest:
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.python_full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -381,9 +424,12 @@ jobs:
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true' EXIT
+          : "$start"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/10
 
   smoke-rest:
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.python_full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -422,6 +468,7 @@ jobs:
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 30 || true' EXIT
+          : "$start"
           uv run --project cli fno-py doctor test smoke --skip 'Pytest*' --shard ${{ matrix.shard }}/4
 
       # Static dead-import guard: a module move down a layer can leave
@@ -462,13 +509,14 @@ jobs:
   # above is about. `!cancelled()` gives the same protection: a failed shard
   # does not make the run cancelled, so the gate still runs and still blocks.
   #
-  # The assertion is positive per shard, because `cancelled` and `skipped` are
-  # neither success nor failure and both must block.
+  # Each shard must pass unless the PR selector deliberately skipped the full
+  # Python lane. Cancelled and unexpected skipped results still block.
   smoke:
-    needs: [smoke-pytest, smoke-rest]
+    needs: [pr-affected, smoke-pytest, smoke-rest]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # Two string compares. A cap this tight is a real alarm on a job that can
+    # These result checks stay in a short aggregator. A cap this tight is a
+    # real alarm on a job that can
     # only ever hang, and this whole change exists because a job outran its
     # cap unnoticed; the required check itself must not be the one job with no
     # cap at all.
@@ -493,8 +541,16 @@ jobs:
           echo "smoke-pytest=${{ needs.smoke-pytest.result }} smoke-rest=${{ needs.smoke-rest.result }}"
           capped smoke-pytest "${{ needs.smoke-pytest.result }}"
           capped smoke-rest "${{ needs.smoke-rest.result }}"
-          [ "${{ needs.smoke-pytest.result }}" = "success" ] || exit 1
-          [ "${{ needs.smoke-rest.result }}" = "success" ] || exit 1
+          [ "${{ needs.smoke-pytest.result }}" = "success" ] || {
+            [ "${{ needs.smoke-pytest.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.python_full }}" = "false" ]
+          } || exit 1
+          [ "${{ needs.smoke-rest.result }}" = "success" ] || {
+            [ "${{ needs.smoke-rest.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.python_full }}" = "false" ]
+          } || exit 1
 
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
@@ -517,17 +573,20 @@ jobs:
       - name: Note drift in summary
         if: steps.drift.outputs.drift == 'true'
         run: |
-          echo "## Prompt Drift Detected" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "One or more bundled CLI agent prompts have drifted from their" >> "$GITHUB_STEP_SUMMARY"
-          echo "canonical plugin agents. Run \`bash cli/scripts/check-prompt-drift.sh\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "locally to see the diff. This check is non-blocking for now." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Prompt Drift Detected"
+            echo ""
+            echo "One or more bundled CLI agent prompts have drifted from their"
+            echo "canonical plugin agents. Run \`bash cli/scripts/check-prompt-drift.sh\`"
+            echo "locally to see the diff. This check is non-blocking for now."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
           bash cli/scripts/check-prompt-drift.sh || true
 
   hook-latency:
     name: per-turn hook latency budgets
-    needs: [smoke-pytest]
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.cargo == 'true'
     runs-on: ubuntu-latest
     # Widest of 14 passing runs sampled 2026-09-24: 6.9m.
     timeout-minutes: 10
@@ -577,7 +636,8 @@ jobs:
 
   test-agents:
     name: cargo test (fno-agents) + schema parity
-    needs: [smoke-pytest]
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.cargo == 'true'
     runs-on: ubuntu-latest
     # This job once held the whole cargo suite, and on 2026-09-17 two runs
     # (main at 37da45e9, PR 2137) that could pass were cancelled at its cap.
@@ -821,6 +881,8 @@ jobs:
         run: cargo test --lib --bins --no-fail-fast
 
   test-agents-integration:
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.cargo == 'true'
     name: cargo test integration (fno-agents) ${{ matrix.shard }}/4
     strategy:
       fail-fast: false
@@ -916,6 +978,8 @@ jobs:
         run: bash scripts/ci/cargo-test-shard.sh crates/fno-agents ${{ matrix.shard }} 4 --test-threads=1
 
   test-mux:
+    needs: [pr-affected]
+    if: needs.pr-affected.outputs.cargo == 'true'
     name: cargo test (fno mux)
     runs-on: ubuntu-latest
     # 20 against a load measured in single minutes: the mux lib suite, the
@@ -1000,7 +1064,7 @@ jobs:
 
   test:
     name: cargo test + schema parity
-    needs: [test-agents, test-agents-integration, test-mux]
+    needs: [pr-affected, test-agents, test-agents-integration, test-mux]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # The check name this workflow has always reported, now an aggregator over
@@ -1013,6 +1077,18 @@ jobs:
       - name: All shards passed
         run: |
           echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }}"
-          [ "${{ needs.test-agents.result }}" = "success" ] || exit 1
-          [ "${{ needs.test-agents-integration.result }}" = "success" ] || exit 1
-          [ "${{ needs.test-mux.result }}" = "success" ] || exit 1
+          [ "${{ needs.test-agents.result }}" = "success" ] || {
+            [ "${{ needs.test-agents.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
+          } || exit 1
+          [ "${{ needs.test-agents-integration.result }}" = "success" ] || {
+            [ "${{ needs.test-agents-integration.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
+          } || exit 1
+          [ "${{ needs.test-mux.result }}" = "success" ] || {
+            [ "${{ needs.test-mux.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
+          } || exit 1
