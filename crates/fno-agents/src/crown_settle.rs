@@ -904,7 +904,10 @@ mod tests {
                     "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["king-old"],
                 },
-                "rows": [],
+                "rows": [{
+                    "name": "king-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "harness_session_id": "sess-old",
+                }],
             }),
             &crown_store(tmp.path()),
         )
@@ -956,7 +959,10 @@ mod tests {
                     "holder_ids": [{"name": "king-old", "harness_session_id": "sess-old"}],
                     "outcome": "succeeded", "vacate": ["king-old"],
                 },
-                "rows": [],
+                "rows": [{
+                    "name": "king-old", "crown_scope": "x-aaaa", "status": "busy",
+                    "harness_session_id": "sess-old",
+                }],
             }),
             &store,
         )
