@@ -276,7 +276,8 @@ fn render_at_column_width_groups_by_column_with_counts() {
 #[test]
 fn v_key_cycles_the_sideline_view() {
     let mut v = key_view(board_with(board_inputs()));
-    let mut sock: Vec<u8> = Vec::new();
+    v.backlog_board = None;
+    v.experimental_backlog = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
     assert!(v.backlog_board.is_none(), "agents view starts closed");
     rt.block_on(async {
@@ -333,7 +334,7 @@ fn f_key_toggles_full_screen() {
 fn compose_paints_the_backlog_inside_the_sideline_column() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
-    cycle_sideline_view(&mut v);
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     let text = crate::vt::frame_text(&v.compose());
     assert!(text.contains("In Progress"), "column header: {text}");
     assert!(text.contains("First card"), "card row: {text}");
@@ -348,7 +349,7 @@ fn compose_paints_the_backlog_inside_the_sideline_column() {
 fn compose_full_screen_board_fills_the_terminal() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
-    cycle_sideline_view(&mut v);
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
@@ -356,7 +357,7 @@ fn compose_full_screen_board_fills_the_terminal() {
         "board box at column 0: {text}"
     );
     assert!(
-        text.contains("e title") || text.contains("e/p/s/S"),
+        text.contains("e/p/s/S/D/N/E"),
         "footer lists the edit keys: {text}"
     );
 }
@@ -434,7 +435,10 @@ fn backlog_panel_cells_carry_distinct_attributes() {
         .map(|(i, _)| i)
         .last()
         .expect("no column head row");
-    let body_row = find_row("x-1");
+    let body_row = text
+        .lines()
+        .position(|l| l.contains("x-2"))
+        .expect("no card row for x-2");
     // A column header cell is BOLD.
     let head = cell_at(&frame, head_row, 2, cols);
     assert!(
@@ -444,8 +448,16 @@ fn backlog_panel_cells_carry_distinct_attributes() {
     // A meta (summary/counts) cell is the dim slot, no INVERSE.
     let meta = cell_at(&frame, meta_row, 2, cols);
     assert_eq!(meta.fg, crate::proto::Color::Indexed(8), "meta dim slot");
-    // A card id cell takes the accent slot.
-    let id_row = body_row;
+    // The CURSOR row (x-2) wears the explicit band pair across its full
+    // width, id included: the band is the one place a color pair is legal.
+    let band = cell_at(&frame, body_row, 1, cols);
+    assert_eq!(band.bg, crate::proto::Color::Indexed(7), "band bg");
+    assert_eq!(band.fg, crate::proto::Color::Rgb(0, 0, 0), "band text");
+    // A NON-cursor card id takes the accent slot, and its title is plain.
+    let id_row = text
+        .lines()
+        .position(|l| l.contains("x-1"))
+        .expect("no card row for x-1");
     let line = text.lines().nth(id_row).expect("id row");
     let id_col = line.find("x-1").expect("id on its row") + 1;
     let id_cell = cell_at(&frame, id_row, id_col + 1, cols);
@@ -454,15 +466,10 @@ fn backlog_panel_cells_carry_distinct_attributes() {
         crate::proto::Color::Indexed(3),
         "id accent slot"
     );
-    // A title cell is plain: default fg, no flags.
     let title_col = line.find("First card").expect("title on its row") + 1;
     let title_cell = cell_at(&frame, id_row, title_col + 1, cols);
     assert_eq!(title_cell.fg, crate::proto::Color::Default, "title plain");
     assert_eq!(title_cell.flags, 0, "title plain");
-    // The cursor row wears the explicit band pair.
-    let band = cell_at(&frame, id_row, 1, cols);
-    assert_eq!(band.bg, crate::proto::Color::Indexed(7), "band bg");
-    assert_eq!(band.fg, crate::proto::Color::Rgb(0, 0, 0), "band text");
     // Nothing in the painted column is inverse, and no second border.
     for r in 0..24usize {
         for c in 0..27usize {
@@ -490,13 +497,12 @@ fn full_board_panel_cells_match_the_theme_bg() {
     view.board_full = true;
     let frame = view.compose();
     let text = crate::vt::frame_text(&frame);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("\u{250c}\u{2500} backlog")),
+        "board box at column 0: {text}"
+    );
     assert!(text.contains("In Progress"), "{text}");
-    for line in text.lines() {
-        assert!(
-            !line.starts_with('\u{2502}'),
-            "no leftover dock column: {text}"
-        );
-    }
 }
 
 // Evidence shots (FNO_UX_SHOTS): the sideline column, the full board and
@@ -600,10 +606,10 @@ fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
     if let Some(b) = v.backlog_board.as_mut() {
         focus_card(b, Some("x-1"));
     }
-    let target = {
+    {
         let b = v.backlog_board.as_ref().expect("board");
-        edit_target(b).expect("a target card")
-    };
+        edit_target(b).expect("a target card");
+    }
     rt.block_on(async {
         if from_detail {
             node_detail::detail_keys(&mut v, key, &mut sock)
@@ -619,11 +625,6 @@ fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
         Some(kind),
         "key {key:?} from detail={from_detail} opens its input"
     );
-    assert!(
-        b.input.is_some() || b.write_action.is_some(),
-        "key {key:?} from detail={from_detail} opened an input or queued a write"
-    );
-    let _ = target;
 }
 
 #[test]

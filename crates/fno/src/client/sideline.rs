@@ -89,6 +89,7 @@ impl View {
         if self.sideline_view == crate::view_store::SidelineView::Backlog {
             if let Some(b) = &self.backlog_board {
                 if !self.board_full {
+                    let chrome_rows = self.bottom_row_is_chrome() as usize;
                     let (lines, follow) = backlog_board::render(b, text_w);
                     backlog_style::paint_panel(
                         cells,
@@ -96,7 +97,7 @@ impl View {
                         cols,
                         0,
                         text_w,
-                        rows,
+                        rows - chrome_rows,
                         &lines,
                         follow,
                         &self.theme,

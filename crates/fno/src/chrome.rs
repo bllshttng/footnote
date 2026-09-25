@@ -216,7 +216,7 @@ pub struct BodyLine {
     pub text: String,
     pub header: bool,
     /// A greyed, inert row (a disabled `PopupRow::Entry`): every cell takes
-    /// [`Role::PanelBody`][crate::theme::Role::PanelBody] regardless of selection, so it reads as inert.
+    /// [`Role::BodyDim`] regardless of selection, so it reads as inert.
     pub disabled: bool,
     /// `(offset, len)` within `text` that is the selected cut-out.
     pub sel_span: Option<(usize, usize)>,

@@ -580,9 +580,7 @@ fn push_lanes(
                     role: BRole::Meta,
                 });
             }
-            let mut hl = BLine::of(&segs);
-            hl = hl.trunc(w);
-            lines.push(hl);
+            lines.push(BLine::of(&segs).trunc(w));
             lines.push(BLine::meta(rule(w)));
         }
         if expanded {
@@ -792,7 +790,6 @@ fn push_stacked_cells(
     }
 }
 
-/// The shown cell at shown index `si`, or None when the lane lacks it.
 /// Just the count part of a header: `12`, or `20/900` when the cap hides
 /// cards. The column name itself is the bold head.
 fn cell_total(cell: &backlog_model::Cell) -> String {
@@ -803,6 +800,7 @@ fn cell_total(cell: &backlog_model::Cell) -> String {
     }
 }
 
+/// The shown cell at shown index `si`, or None when the lane lacks it.
 fn shown_cell_at<'a>(
     b: &BoardView,
     lane: &'a backlog_model::Lane,
@@ -835,7 +833,12 @@ impl View {
         let Some(b) = &self.backlog_board else {
             return;
         };
-        if b.detail.is_some() {
+        if b.keys_overlay {
+            // Checked before the drill-down: `?` opens this from the detail
+            // too, so it must paint over it, and its Esc must land here.
+            let m = board_keys_popup();
+            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
+        } else if b.detail.is_some() {
             let w = overlay_dims
                 .1
                 .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
@@ -843,7 +846,7 @@ impl View {
             let lines: Vec<chrome::BodyLine> =
                 body.iter().map(backlog_style::to_body_line).collect();
             let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
-                .footer("enter open - b plan - A king - e/p/s/S edit - N note - D append - E $EDITOR - d details - esc back");
+                .footer("enter open - e/p/s/S edit - D append - N note - E $EDITOR - esc back");
             draw_body_overlay(
                 cells,
                 rows,
@@ -862,16 +865,13 @@ impl View {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if let Some(m) = colpick_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
-        } else if b.keys_overlay {
-            let m = board_keys_popup();
-            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if self.board_full {
             let w = cols.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
             let (lines, follow) = render(b, w);
             let body: Vec<chrome::BodyLine> =
                 lines.iter().map(backlog_style::to_body_line).collect();
             let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
-                .footer("hjkl move - [ ] lane - L lanes - / find - f filter - r re-read - enter detail - c columns - e/p/s/S edit - N note - D append - E $EDITOR - ? keys - F column - esc close");
+                .footer("j/k move - enter detail - e/p/s/S/D/N/E edit - c cols - ? keys - F full");
             draw_body_overlay(
                 cells,
                 rows,
@@ -1000,7 +1000,11 @@ pub(crate) async fn board_keys(
     // A lone-Esc chunk closes at once (the old node-detail contract: the
     // modal fold would otherwise hold the byte pending a sequence).
     if bytes == [0x1b] && b.board_esc.is_empty() {
-        esc_or_close(view);
+        if b.keys_overlay {
+            b.keys_overlay = false;
+        } else {
+            esc_or_close(view);
+        }
         return Ok(StdinFlow::Continue);
     }
     let mut esc = std::mem::take(&mut b.board_esc);
@@ -2292,10 +2296,16 @@ fn run_editor(text: &str) -> Option<String> {
     let _ = execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    let status = std::process::Command::new(&editor)
-        .arg(&path)
-        .status()
-        .ok()?;
+    let status = match std::process::Command::new(&editor).arg(&path).status() {
+        Ok(status) => status,
+        // The terminal is already suspended: restore it on THIS path too,
+        // or the client keeps running cooked and unpainted.
+        Err(_) => {
+            let _ = terminal::enable_raw_mode();
+            let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+            return None;
+        }
+    };
     let _ = terminal::enable_raw_mode();
     let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
     let edited = std::fs::read_to_string(&path).ok();

@@ -9,7 +9,7 @@
 //! time so a worker that exited between paint and press answers with its
 //! reason, never a stale launch.
 
-use super::backlog_board::{rule, BoardView};
+use super::backlog_board::{rule, trunc, BoardView};
 use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
@@ -56,12 +56,10 @@ fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
     v
 }
 
-/// The overlay body: header, meta, column and rank, epic, plan, details
-/// (first 12 lines until `d` opens the whole text), the links block, PRs,
-/// the session table, and the newest notes. `w` truncates every line.
 /// The drill-down's body: the styled title (id, bold title, the
-/// status/priority pill), dim fields, and every section under a bold
-/// header with a thin rule. `w` truncates every line.
+/// status/priority pill), dim fields, and every section (body, links,
+/// sessions, notes) under a bold header with a thin rule. `w` truncates
+/// every line.
 pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usize>) {
     let mut lines: Vec<BLine> = Vec::new();
     let Some(o) = &b.detail else {
@@ -87,7 +85,7 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usiz
     };
     let mut k: usize = 0;
     let mut follow: Option<usize> = None;
-    let t = |s: &str| s.chars().take(w).collect::<String>();
+    let t = |s: &str| trunc(s, w);
     // Title: the id (accent), the title (bold), and the status/priority pill.
     let status = view.card.status.clone().unwrap_or_else(|| "none".into());
     let prio = view.card.priority.clone().unwrap_or_else(|| "none".into());
@@ -366,7 +364,20 @@ pub(crate) async fn detail_keys(
         .map(|b| b.detail_esc.is_empty())
         .unwrap_or(true);
     if bytes == [0x1b] && esc_carry_empty {
-        pop_or_close(view);
+        // The keys overlay opened from the detail closes first; the second
+        // Esc pops the detail itself.
+        let overlay_open = view
+            .backlog_board
+            .as_ref()
+            .map(|b| b.keys_overlay)
+            .unwrap_or(false);
+        if overlay_open {
+            if let Some(b) = view.backlog_board.as_mut() {
+                b.keys_overlay = false;
+            }
+        } else {
+            pop_or_close(view);
+        }
         return Ok(StdinFlow::Continue);
     }
     let toks = {

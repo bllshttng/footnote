@@ -1085,7 +1085,6 @@ struct View {
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
     sideline_view: crate::view_store::SidelineView,
-    /// The board's docked-sideline side (persisted in the view store).
     /// The board's full-screen toggle (persisted in the view store).
     board_full: bool,
     /// The persisted experimental toggle for the backlog board view.
