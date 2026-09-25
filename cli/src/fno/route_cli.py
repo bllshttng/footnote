@@ -359,7 +359,7 @@ def inventory_cmd(
     else:
         typer.echo(f"objective={inv.objective}"
                    + (f" prefer_harness={inv.prefer_harness}" if inv.prefer_harness else ""))
-        cols = ("name", "harness", "model", "band", "percentile", "effort", "verdict")
+        cols = ("name", "harness", "model", "band", "percentile", "effort", "window", "verdict")
         widths = {
             c: max(len(c), *(len(r[c]) for r in rows)) if rows else len(c)
             for c in cols

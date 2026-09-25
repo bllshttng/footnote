@@ -138,6 +138,151 @@ pub fn window_for_model(model: &str) -> u64 {
     }
 }
 
+/// One window answer: the token count plus provenance when a dated
+/// `[[routing.models]]` row supplied it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowReading {
+    pub tokens: u64,
+    pub measured_at: Option<String>,
+    pub evidence: Option<String>,
+}
+
+/// Match key: a trailing `[...]` bracket suffix is a request marker, not a
+/// different model, and ids differ in case across harnesses.
+fn normalize_model(model: &str) -> String {
+    let base = match model.find('[') {
+        Some(open) if model.ends_with(']') => &model[..open],
+        _ => model,
+    };
+    base.trim().to_ascii_lowercase()
+}
+
+/// The window a dated routing row supplies, or the id-based ladder default.
+/// A row counts only when its model matches (suffix-stripped, case-folded),
+/// its `context` is a positive integer AND `context_measured_at` parses as a
+/// date; an undated `context` number is ignored on purpose - it is the
+/// unmeasured guess this resolver exists to replace. Of the kept rows the
+/// smallest window wins: a smaller window over-reports usage, which nudges
+/// early, the safe direction.
+pub fn window_from_rows(model: &str, rows: &[toml::Value]) -> WindowReading {
+    let session = normalize_model(model);
+    let mut best: Option<WindowReading> = None;
+    for row in rows {
+        let Some(table) = row.as_table() else {
+            continue;
+        };
+        let row_model = table
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        if normalize_model(row_model) != session {
+            continue;
+        }
+        let row_name = table
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        let skip = |reason: &str| {
+            eprintln!(
+                "context-window: routing row '{row_model}' (name '{row_name}') skipped: {reason}"
+            );
+        };
+        let Some(context) = table.get("context").and_then(toml::Value::as_integer) else {
+            continue;
+        };
+        if context <= 0 {
+            skip("context is not a positive integer");
+            continue;
+        }
+        let measured_at = match table.get("context_measured_at") {
+            None => continue,
+            Some(toml::Value::String(s)) => {
+                match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(date) => date.to_string(),
+                    Err(_) => {
+                        skip("context_measured_at is not YYYY-MM-DD");
+                        continue;
+                    }
+                }
+            }
+            Some(toml::Value::Datetime(dt)) => match dt.date {
+                Some(date) => format!("{:04}-{:02}-{:02}", date.year, date.month, date.day),
+                None => {
+                    skip("context_measured_at carries a time but no date");
+                    continue;
+                }
+            },
+            Some(_) => {
+                skip("context_measured_at is not a date");
+                continue;
+            }
+        };
+        let evidence = table
+            .get("context_source")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string);
+        let replace = match &best {
+            None => true,
+            Some(current) => (context as u64) < current.tokens,
+        };
+        if replace {
+            best = Some(WindowReading {
+                tokens: context as u64,
+                measured_at: Some(measured_at),
+                evidence,
+            });
+        }
+    }
+    best.unwrap_or(WindowReading {
+        tokens: window_for_model(model),
+        measured_at: None,
+        evidence: None,
+    })
+}
+
+fn default_reading(model: &str) -> WindowReading {
+    WindowReading {
+        tokens: window_for_model(model),
+        measured_at: None,
+        evidence: None,
+    }
+}
+
+/// A config file that exists but does not parse names itself on stderr once;
+/// plain absence of `routing.models` is the normal unmeasured case and stays
+/// quiet.
+fn warn_unparsable_config(cwd: &Path) {
+    for path in crate::agents_config::config_candidates(cwd) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if content.parse::<toml::Table>().is_err() {
+                eprintln!(
+                    "context-window: config {} does not parse as TOML; its routing.models rows are ignored",
+                    path.display()
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// [`window_from_rows`] over the real config: the first candidate config's
+/// `routing.models` rows, first-hit-wins exactly like every other Rust reader.
+pub fn window_reading(model: &str, cwd: &Path) -> WindowReading {
+    match crate::agents_config::config_lookup(cwd, &["routing", "models"]) {
+        Some(toml::Value::Array(rows)) => window_from_rows(model, &rows),
+        Some(_) => {
+            eprintln!(
+                "context-window: routing.models is not a list of rows; using the id-based default"
+            );
+            default_reading(model)
+        }
+        None => {
+            warn_unparsable_config(cwd);
+            default_reading(model)
+        }
+    }
+}
+
 pub fn effective_window_for_model(
     model: &str,
     session_id: &str,
@@ -559,5 +704,78 @@ mod tests {
             super::verify_compaction_receipt(&receipt, "thread-a"),
             Err(ContextWindowError::Invalid(_))
         ));
+    }
+
+    fn rows_from(toml_text: &str) -> Vec<toml::Value> {
+        toml::from_str::<toml::Value>(toml_text)
+            .unwrap()
+            .get("rows")
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn ac1_hp_a_dated_row_supplies_the_window_with_provenance() {
+        let rows = rows_from(
+            "[[rows]]\nmodel = \"glm-5.3-flash\"\ncontext = 1310720\ncontext_measured_at = \"2026-09-17\"\ncontext_source = \"vendor doc\"\n",
+        );
+        let reading = super::window_from_rows("glm-5.3-flash", &rows);
+        assert_eq!(reading.tokens, 1_310_720);
+        assert_eq!(reading.measured_at.as_deref(), Some("2026-09-17"));
+        assert_eq!(reading.evidence.as_deref(), Some("vendor doc"));
+    }
+
+    #[test]
+    fn ac1_hp_a_bare_toml_date_row_matches_too() {
+        let rows = rows_from(
+            "[[rows]]\nmodel = \"claude-opus-5\"\ncontext = 500000\ncontext_measured_at = 2026-09-01\n",
+        );
+        let reading = super::window_from_rows("claude-opus-5", &rows);
+        assert_eq!(reading.tokens, 500_000);
+        assert_eq!(reading.measured_at.as_deref(), Some("2026-09-01"));
+    }
+
+    #[test]
+    fn ac2_hp_no_matching_row_falls_back_to_the_ladder_default() {
+        let reading = super::window_from_rows("claude-haiku-4-5", &[]);
+        assert_eq!(reading.tokens, super::DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(reading.measured_at, None);
+        assert_eq!(reading.evidence, None);
+    }
+
+    #[test]
+    fn ac3_edge_an_undated_or_unparseable_date_is_ignored() {
+        let undated = rows_from("[[rows]]\nmodel = \"glm-5.3-flash\"\ncontext = 1310720\n");
+        let reading = super::window_from_rows("glm-5.3-flash", &undated);
+        assert_eq!(reading.tokens, 1_000_000);
+        assert_eq!(reading.measured_at, None);
+
+        let bad = rows_from(
+            "[[rows]]\nmodel = \"glm-5.3-flash\"\ncontext = 1310720\ncontext_measured_at = \"17-09-2026\"\n",
+        );
+        let reading = super::window_from_rows("glm-5.3-flash", &bad);
+        assert_eq!(reading.tokens, 1_000_000);
+        assert_eq!(reading.measured_at, None);
+    }
+
+    #[test]
+    fn ac5_edge_of_two_dated_rows_the_smaller_window_wins() {
+        let rows = rows_from(
+            "[[rows]]\nmodel = \"glm-5.3-flash\"\ncontext = 2000000\ncontext_measured_at = \"2026-09-01\"\n\n[[rows]]\nmodel = \"glm-5.3-flash\"\ncontext = 1310720\ncontext_measured_at = \"2026-09-17\"\ncontext_source = \"observed\"\n",
+        );
+        let reading = super::window_from_rows("glm-5.3-flash", &rows);
+        assert_eq!(reading.tokens, 1_310_720);
+        assert_eq!(reading.measured_at.as_deref(), Some("2026-09-17"));
+        assert_eq!(reading.evidence.as_deref(), Some("observed"));
+    }
+
+    #[test]
+    fn ac6_edge_a_row_model_with_a_bracket_suffix_matches_the_bare_id() {
+        let rows = rows_from(
+            "[[rows]]\nmodel = \"glm-5.3-flash[1m]\"\ncontext = 1310720\ncontext_measured_at = \"2026-09-17\"\n",
+        );
+        let reading = super::window_from_rows("glm-5.3-flash", &rows);
+        assert_eq!(reading.tokens, 1_310_720);
     }
 }
