@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The generated state-dir stub (STATE_DIR etc.), so the fallback-writer log
+# path never hardcodes $HOME/.fno. REPO_ROOT is preset from this file's own
+# location so the stub's git rev-parse subshell never runs on the hot path.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# shellcheck source=scripts/lib/paths.sh
+source "$REPO_ROOT/scripts/lib/paths.sh"
+
 if [[ $# -eq 0 ]]; then
     echo "cargo-rustc-wrapper: missing rustc command" >&2
     exit 2
@@ -127,7 +134,7 @@ name_fallback_writer() {
         return 0
     fi
     {
-        local log="$HOME/.fno/logs/cargo-fallback-writers.log"
+        local log="$STATE_DIR/logs/cargo-fallback-writers.log"
         mkdir -p "$(dirname "$log")"
         local cargo_argv parent_pid parent_argv
         cargo_argv="$(ps -o command= -p "$PPID" 2>/dev/null || true)"
