@@ -64,21 +64,126 @@ By production owner, not file prefix:
 
 ## Ledger
 
-Marks: R retain (contract + caught bug), F fix assertion, C consolidate (keeper named), D delete (proof named). One row per declaration; parameterized rows marked individually when they differ.
+Marks: R retain (contract + caught bug), F fix assertion, C consolidate (keeper named), D delete (proof named). One row per declaration; a class row carries the evidence line for its uniform-R members, and every F, C or D has its own row. Read pass completed on every declaration, including parameter tables.
 
 ### Lane 1: root routing
 
 | Test | Mark | Evidence |
 |---|---|---|
-| `test_claims_root_routing.py` (3) | R | Parity guard: Python `claims_root_for` and Rust `claims_root_for` must agree on prefix routing while both legs write the same lockfiles. Fails on a one-sided prefix change. |
+| `test_claims_root_routing.py` (3) | R | Parity guard: the Python prefix list and the Rust hand copy must stay equal while both legs write the same lockfiles; a one-sided prefix change routes the same key to two roots. |
+| `claims_root.rs::tests` (4) | R | The Rust side of the same routing: colon-and-known-prefix partition, empty-env-is-unset, cwd-free resolution for global keys, and the resume-attach fallback matching Python's answer. |
+
+### Lane 2: lock core and store
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claims_core.py::TestAcquire` (16) | R | Acquire matrix: validation bounds, TTL/pid-unavailable schema v2, stale reclaim, the corroborated hybrid arm and its ambient-pid flip side (codex P1: a suspended session keeps its slot). |
+| `test_claims_core.py::TestPidProvenanceStamping` (12) | R | Every writer earns its provenance stamp against the harness it stores; shared-host (codex app-server) never earns session-prover, refresh never re-poisons (the permanent-lease bug). |
+| `test_claims_core.py::TestRelease` (7) | R | Release semantics incl. strict-holder mismatch and the under-mutex strict compare (the resurrection race). |
+| `test_claims_core.py::TestRefresh` (9) | R | TTL extension, contention bound, x-b445 verdict-gated renewal (expired-live extends, stale refuses byte-identical). |
+| `test_claims_core.py::TestStatus` (10) | R | Status states plus basis (offhost vs pid-reuse), x-74aa rootless node-key routing, unknown-not-free for unrouted keys. |
+| `test_claims_core.py::TestList` (4) | R | Prefix filter, stale-excluded default with the dead-pid fixture discipline (the latent late-suite flake note). |
+| `test_claims_core.py::TestForceRelease` (7) | R | Administrative override always succeeds, takes the recovery mutex, proceeds on timeout. |
+| `test_claims_core.py::TestSessionIdStamping` (5) + `TestSessionWitnessVerdicts` (6) | R | x-a613: session id rides the record; the native witness heals a live session's verdict (x-0c29) and bounds unknown; re-anchor moves a dead pid to the registry row pid. |
+| `test_claims_io.py` (35) | R | Absent-not-null serialization discipline per field (expires_at, machine_id, session_id), corrupted/missing/newer-schema refusals, O_EXCL create races (two threads, one winner), archive naming, root resolution, x-f22f state-root denial with the repo breadcrumb and its clear/keep rules. |
+| `claims.rs::tests` (70 of 71; one D below) | R | Renewal family (fixed deadline, re-anchor, acquired_at hold, v2 refusal, span-growth P1, verdict-gated refusals), encode-key vectors, validation bounds, YAML parity, session witness family, liveness matrix with basis per cause, sweep buckets, pid exclusivity, zombie/reaped holders, machine-id stability, recovery-mutex wait/steal/grace, event-wire beside corpse locks, concurrent stealers, 8-thread acquire race. |
+| `claim_store.rs::tests` (3) | R | Store import/export/release-stopped round trips over real lockfiles. |
+| `claim_queue.rs::tests` (11) | R | Queue ordering property, corpse reaping, recycled-pid condemnation, foreign-machine skip, ticket monotonicity, hole non-reuse, bash-era phantom stamps, lane depth. |
+
+Deletions in this lane:
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `claims.rs::classify_is_the_state_view_of_classify_with_basis` (1) | D | Production `classify` is the one-line delegate `classify_with_basis(...).0`; the test restates that delegation over six fixtures and can only fail if someone edits the delegation line. No contract lost: `classify_basis_names_each_cause` and `liveness_matches_python_classify_including_hybrid_arm` exercise the real classifier. |
+
+### Lane 3: verbs
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claims_cli.py` (72 of 79; marks below) | R | Exit-code contract per verb (1 held, 2 validation, 3 missing, 4 strict mismatch), contention-exhaustion not a traceback, the reconcile mutex, no-op release receipt honesty, do-row stamp/rollback windows (open row on kill, closed row protected, same-session rollback spared), roster crosscheck receipts (positive markers, degraded vs unconsulted, JSON parseability), global-root node-key resolution, import-stub capture regression. |
+| `claim_verbs.rs::tests` (20) | R | Sweep payload shape/filter/corruption exclusion, handover witness subject switch (never answers from the minter; thread-worker by-name/alias join), primed batch wire (one interpreter, every subject, failed batch never hangs), served-liveness tier, handover/gate payload session splits with control twins. |
+
+Deletions and consolidations in this lane:
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claims_cli.py::test_help_lists_all_verbs` | D | Restates the declared CLI surface (junk pattern: capability test restating flags). Each verb is exercised by its own behavioral tests, which fail if the verb disappears. |
+| `test_claims_cli.py::test_ttl_parser_seconds_no_unit/seconds/minutes/hours/empty/invalid` (6) | C | Six standalone cases over one pure function become one table-driven case; the conversion values are pinned per row. Keeper: the single parametrized `test_ttl_parser_table` this campaign writes in place. The CLI boundary stays covered by `test_acquire_invalid_ttl_format` and `test_acquire_with_ttl`. |
+
+### Lane 4: reap and release
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claim_reap.py` (81 of 85; one D below) | R | The native verdict door (dead/off-host/TTL-suspect/live), the x-cd1e expiry-travels arm with its boundary twins, the load-bearing kill-without-release reap, both-roots sweep and dedup, off-host and suspect keeps, failure-reported-not-raised, dry-run/journal contracts, the abandonment probe (unknown keeps; roster joins with the P1 row-absent guard; transcript fallback), shared-pid exclusivity (the 7-claim immortality specimen), mux-pane absence parsing, the x-9c91 walked-dir fix, and the two skipped known-defect mirrors kept as the defect's record. |
+| `test_claim_closure_release.py` (22) | R | x-94f8: closure releases the claim and clears the mirror on done/supersede only, configured-graph-scoped, broken store never fails the mutation; x-a114 terminal-node settlement (a live holder on a closed node survives; a dead one settles); default-sweep mirror clear with explicit-root and dry-run negatives. |
+| `test_claim_force_release.py` (4) | R | x-cff2: force release names the path it read and the other root's stray file; byte-identity of the untouched file. |
+| `test_claim_rebind.py` (16) | R | Full compare_and_rebind matrix: rebound/idempotent/refused states, mutex wait-not-refuse, handover security gate (a live published holder cannot be taken; spawn-handover can), metadata provenance rules. |
+| `reclaim.rs::tests` (14) | R | Leak predicates per lane, apply receipts with byte counts, codex quarantine keep-rules (unreadable marker, converge lock, rollback failure, live symlink, near-miss names, foreign marketplace), daemon path excludes cwd roots. |
+| `claims_release_stopped.rs::tests` (4) | R | Stopped-session release matrix: own handover released, live-pid kept with named reading, other-session and other-worker handovers untouched, zero-scan receipts. |
+| `claims_long_holds.rs::tests` (7) | R | Row shape/threshold/order, witness healing with pid-disagreement naming, probe rendering arms, off-host never probes a foreign pid, verb CLI contract. |
+
+Deletion in this lane:
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claim_reap.py::TestClassifyForSweepMatchesIsProvablyDead` (4) | D | Compares two test-local wrappers (`is_provably_dead`, `classify_for_sweep`) that call the identical Rust door; the equality is a self-comparison. The real verdicts and buckets those wrappers return are asserted independently by `TestIsProvablyDead` and `TestExpiredTTLIsHostIndependent`. |
+
+### Lane 5: lanes and mutex
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_lane_slots.py` (18) | R | Cap primitive: acquisition, cap refusal, sequential degradation, slot ownership on re-dispatch (no cap inflation), metadata authority, TTL coercion, CLI flow. |
+| `test_mutex_steal.py` (20) | R | Steal predicate boundaries on a frozen clock (`<=` held), corpse theft, dangling symlinks (lstat), owner-token swap detection, restore grace window (x-474a), the cross-language threshold parity test (wire protocol), recovery-mutex corpses, and the poll-not-spin contract. |
+| `test_claims_concurrency.py` (7) | R | Multi-process O_EXCL races (2 and 5 racers, one winner per trial), stale-recovery race, worktree-to-space root resolution with a real git worktree, holder-flip seam. |
+
+### Lane 6: identity and opt-out
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claims_session_pid.py` (11) | R | The Python shim contract: one exec per from_pid, cached, both halves from one read, five degrade modes, type-checked halves, the measured codex deny list. The Rust ancestor-walk semantics are pinned by spawn_context's own tests (named in the file docstring). |
+| `claims_identity_tests.rs` (10) | R | Harness/session tag serialization (absent-not-null), identity resolution precedence, x-0992 disagreement refusals, child-stamp scrubbing. |
+
+### Lane 7: verdict, roster, silence, client
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claim_status_worked.py` (8) | R | Stop-stamp vs fresh-tail liveness, live-worker join with degraded-coverage hedges, registry-only probe attribution, closed-phase filter. |
+| `test_claims_status_roster.py` (12 of 13; one D below) | R | The refused ratio arm's regression fixture (64 of 129), unresolved-row fail-closed, x-dead transcript dating arms, dead-pid falsifier, x-c08a closed-session receipt, stale-keeper fallback, x-3575 ordering. |
+| `test_claims_silence.py` (9) | R | x-1182 silence classifier over injected rows: positive scanned marker at zero, unreadable vs silent buckets, codex-transcript resolution. |
+| `test_claim_verdict.py` (5 of 6; one D in lane 3) | R | Missing-binary refusal with remedy, one-batch native subprocess, verdict-delegation fail-closed on door omission (acquire refuses; status never reports free). |
+| `test_claims_client.py` (2) | R | The Python-to-Rust flag wire: exact argv the native door receives. |
+| `claims_gate_tests.rs` (15) | R | The short-lived holder arm: gate keys read the pid at any age, holder-process leases at expiry, spawning-session witness never heals a dead gate, refused-probe suspect, off-host clock path, provenance stamping. |
+
+Deletion in this lane:
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claims_status_roster.py::test_roster_reader_module_is_authority` | D | Identity check that the module re-imports roster.py's symbols; every verdict test already drives `read_roster` through the CLI, so a shadowed copy is exercised wherever it lives. Preserves a refactoring style, not behavior. |
+
+Deletion in this lane:
+
+| Test | Mark | Evidence |
+|---|---|---|
+| `test_claim_verdict.py::test_claim_clock_lives_with_claim_types` | D | Asserts `now_ms()` is non-decreasing: a tautology of any clock, no contract. The clock is exercised by every other test in the suite. |
 
 ### Lane 8: cross-implementation
 
 | Test | Mark | Evidence |
 |---|---|---|
-| `test_claims_cross_impl.py` (18) | R (all) | Both legs write the same lockfile format; each case drives one leg and asserts on the other's read. This is the only proof the two implementations interoperate. Retired only when one leg dies. |
+| `test_claims_cross_impl.py` (18) | R (all) | Both legs write the same lockfiles; each case drives one leg and asserts on the other's read (status field parity both directions, cross release, stale reclaim + archive + audit events, hybrid-arm parity, byte-identical filename encoding, Python-vs-Rust race one winner per round, recovery-mutex wait/steal interop both directions, expires_at absence discipline, corrupted-file parity). This is the only proof the two implementations interoperate; retired only when one leg dies. |
 
-(Lanes 2 to 7: filled during the read-only pass below.)
+### Retention bar
+
+No D or C row above deletes a contract's only proof: each names a stronger keeper that already existed, or a contract that never existed (the four identity/tautology rows). The two skipped known-defect mirrors in test_claim_reap.py stay R: they are the defect's written record and flip on when the mirror release lands.
+
+## Layer plan
+
+One contract, one primary owner, already true lane by lane; the campaign found no redundant layer, only wrapper restatements and same-file duplicates. Cutover is therefore exactly the ledger's F/C/D rows, applied file by file:
+
+1. D rows: delete the four declaration groups and the Rust delegation test.
+2. C rows: collapse the six `_parse_ttl` cases into one parametrized table test; delete the three test_claim_ttl.py rows whose keepers live in test_claims_core.py (`test_AC3_HP_refresh_extends_expires_at`, `test_AC3_FR_refresh_pid_liveness_returns_none`, `test_AC3_ERR_refresh_wrong_holder_raises`).
+3. F row: `test_AC2_FR_release_emits_duration` gains the assertion it never had (capture the emitted event, require `duration_held_ms` present and non-negative).
+4. No production seam is unlocked: no deleted test owned a test-only export, and `cli/src/fno/claims` takes no edits.
 
 ## Preservation
 
