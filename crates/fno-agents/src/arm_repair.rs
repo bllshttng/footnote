@@ -55,7 +55,12 @@ fn entry(
             Some(OPERATOR),
         ),
         "timeout" => (
-            "the arm's run hit its time limit",
+            "the arm's run hit its time limit; the step named in the detail is where the clock stopped, not a measured cause",
+            Some(WATCH_STATUS),
+            Some(OPERATOR),
+        ),
+        "budget_spent" => (
+            "the pass ran out of its slice before it covered every unit it enumerated; the detail names how many of N it reached",
             Some(WATCH_STATUS),
             Some(OPERATOR),
         ),
@@ -334,6 +339,8 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
             "select_unmeasured".to_string(),
             Some(select_unmeasured_repair(&detail)),
         )
+    } else if skip == "budget_spent" {
+        ("budget_spent".to_string(), None)
     } else if skip == "timeout" {
         ("timeout".to_string(), None)
     } else if detail.contains("not a git repository") {
@@ -1017,6 +1024,44 @@ mod tests {
         annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
         assert_eq!(rows[0].cause.as_deref(), Some("timeout"));
         assert!(rows[0].line.contains("repair: fno do pr watch status"));
+    }
+
+    // AC2: a budget_spent row names the shortfall; a timeout row stops
+    // blaming the step the clock happened to land in.
+    #[test]
+    fn budget_spent_row_names_the_count_and_timeout_names_the_clock() {
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.failing = true;
+        kw.skip_reason = Some("budget_spent".into());
+        kw.detail = Some(
+            "crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns".into(),
+        );
+        let mut rows = vec![kw];
+        annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
+        assert_eq!(rows[0].cause.as_deref(), Some("budget_spent"));
+        assert!(rows[0].line.contains("repair: fno do pr watch status"));
+        assert!(
+            rows[0]
+                .line
+                .contains("ran out of its slice before it covered every unit it enumerated"),
+            "line: {}",
+            rows[0].line
+        );
+
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.failing = true;
+        kw.skip_reason = Some("timeout".into());
+        kw.detail = Some("phase slice 45s spent at king_wake:mail".into());
+        let mut rows = vec![kw];
+        annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
+        assert_eq!(rows[0].cause.as_deref(), Some("timeout"));
+        assert!(
+            rows[0]
+                .line
+                .contains("the step named in the detail is where the clock stopped"),
+            "line: {}",
+            rows[0].line
+        );
     }
 
     #[test]

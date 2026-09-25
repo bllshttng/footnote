@@ -7,6 +7,8 @@ is named, never answered.
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -45,6 +47,47 @@ def test_ensure_codex_daemon_failure_and_timeout_name_the_command() -> None:
 
     with pytest.raises(DispatchAskError, match="timed out"):
         codex_pane.ensure_codex_daemon(hanging)
+
+
+def test_ensure_codex_daemon_does_not_wait_for_a_daemon_child_with_open_pipes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A detached daemon child may inherit the startup command's output fds."""
+    from fno.agents.dispatch import DispatchAskError
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    child_pid_file = tmp_path / "child.pid"
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/bin/sh\n"
+        "(sleep 3) &\n"
+        "printf '%s\\n' \"$!\" > \"$CODEX_CHILD_PID_FILE\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    codex.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "CODEX_CHILD_PID_FILE": str(child_pid_file),
+    }
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_START_TIMEOUT_S", 1.0)
+
+    failure = None
+    try:
+        codex_pane.ensure_codex_daemon(subprocess.run, env=env)
+    except DispatchAskError as exc:
+        failure = str(exc)
+    finally:
+        if child_pid_file.exists():
+            try:
+                os.kill(int(child_pid_file.read_text(encoding="utf-8")), signal.SIGTERM)
+            except (ProcessLookupError, ValueError):
+                pass
+
+    assert failure is None, failure
 
 
 def test_codex_shell_env_args_renders_one_self_leaf() -> None:
