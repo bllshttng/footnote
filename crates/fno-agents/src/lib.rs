@@ -183,6 +183,7 @@ pub mod interrupt_classify;
 pub mod json_output;
 pub(crate) mod keeper_revival;
 pub mod kill_criteria;
+pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_escalation;
