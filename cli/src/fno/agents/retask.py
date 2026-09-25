@@ -280,6 +280,7 @@ def run_retask(
             command_template = dispatch_command(target.harness)
         else:
             command_template = normalize_command(f"/{target.verb} {{id}}", target.harness)
+        from fno import paths
         from fno.rust_binary import verb_call
 
         return verb_call(
@@ -291,9 +292,13 @@ def run_retask(
                 "target": asdict(target),
                 "target_command": command_template.format(id=node),
                 "mux": mux,
+                "graph": str(paths.graph_json()),
+                **({"registry": str(registry_path)} if registry_path else {}),
             },
+            # Above the old poll's near-17-minute worst case, so a slow
+            # succession is never clipped into a receipt that lies.
             RetaskTransportError,
-            timeout=300,
+            timeout=1200,
         )
     except RetaskTransportError as exc:
         receipt = _refused(str(exc))

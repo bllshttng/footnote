@@ -88,19 +88,22 @@ pub fn run_payload() -> i32 {
         Some(command) if !command.is_empty() => command.to_string(),
         _ => return fail("payload needs target_command".to_string()),
     };
+    // An absent or unusable mux ref is NOT a door refusal: detect names the
+    // row defect (worker_has_no_mux_ref) byte for byte, so the door passes
+    // the emptiness through and lets the transaction refuse by word.
     let mux_ref = match payload.get("mux") {
         None | Some(Value::Null) => None,
         Some(value) => {
             let session = value.get("session").and_then(Value::as_str).unwrap_or("");
             let pane_id = value.get("pane_id").and_then(Value::as_u64).unwrap_or(0);
-            if session.is_empty() || pane_id == 0 {
-                return fail("payload mux needs a session and a nonzero pane_id".to_string());
-            }
-            Some((session.to_string(), pane_id))
+            (!session.is_empty() && pane_id != 0).then(|| (session.to_string(), pane_id))
         }
     };
 
-    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+    let registry_path = match payload.get("registry").and_then(Value::as_str) {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => crate::paths::AgentsHome::from_env().registry_json(),
+    };
     let rows = match crate::client_verbs::load_registry_entries(&registry_path) {
         Ok(rows) => rows,
         Err(message) => return fail(format!("registry read failed: {message}")),
@@ -114,14 +117,18 @@ pub fn run_payload() -> i32 {
         Err(error) => return fail(format!("registry row {worker:?} does not decode: {error}")),
     };
     let row = retask_row_from_entry(&entry);
+    // A thread row without the opened viewport is a producer bug: the Python
+    // front always opens one before building the payload.
+    if row.substrate.as_deref() == Some("thread") && mux_ref.is_none() {
+        return fail("payload needs the opened thread viewport in mux".to_string());
+    }
+    let graph_path = match payload.get("graph").and_then(Value::as_str) {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        // Same fallback as every other client-side read.
+        _ => crate::graph_get::default_graph_path(),
+    };
 
-    let mut seams = LiveSeams::live(
-        row.clone(),
-        mux_ref,
-        node,
-        registry_path,
-        crate::graph_get::default_graph_path(),
-    );
+    let mut seams = LiveSeams::live(row.clone(), mux_ref, node, registry_path, graph_path);
     let live_mode = live_permission_mode(&entry);
     let node = seams.node.clone();
     let receipt = match execute_retask(
@@ -722,8 +729,11 @@ pub(crate) fn live_permission_mode(entry: &RegistryEntry) -> Option<String> {
     let start = size.saturating_sub(TRANSCRIPT_TAIL_BYTES);
     use std::io::Seek;
     handle.seek(std::io::SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    handle.read_to_string(&mut tail).ok()?;
+    let mut raw_tail = Vec::new();
+    handle.read_to_end(&mut raw_tail).ok()?;
+    // A seek landing mid-codepoint or a torn append must not blind the mode
+    // read: the Python seam decoded lossy and so does this one.
+    let mut tail = String::from_utf8_lossy(&raw_tail).to_string();
     if !tail.is_empty() && !tail.ends_with('\n') {
         // A concurrently appended torn record does not decide; complete
         // records do.

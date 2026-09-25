@@ -33,6 +33,11 @@
 //! only producer is the Python front door, the action is unadvertised, and a
 //! hand-written payload with a wrong tier would switch the pane to that tier.
 //!
+//! Two optional keys carry store paths the Python front resolved through the
+//! config layer: `"graph"` (graph.json, honoring `config.paths.graph_json`)
+//! and `"registry"` (registry.json, honoring run_retask's registry_path).
+//! Absent keys fall back to the ambient resolution.
+//!
 //! Exit codes: 0 with the receipt as one stdout JSON line for both
 //! `retasked` and `refused`; 2 for a usage or payload error (stderr names the
 //! problem). The receipt keys and refusal words are byte-for-byte the ones
