@@ -73,6 +73,13 @@ git log ${BASE:+$BASE..}HEAD --pretty=format:"- %s%n%b" | head -50
 TITLE="[type]: [description based on commits]"
 printf '%s\n' "$TITLE" > .fno/pr-title.txt
 
+TEST_DELTA=$(cargo run --quiet \
+  --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents -- \
+  test-delta --base "$BASE") || {
+  echo "test delta unavailable for base $BASE" >&2
+  exit 1
+}
+
 BODY="$(cat <<'EOF'
 ## Summary
 
@@ -95,6 +102,10 @@ EOF
 # expansion). The closure trailer and the reviewed-at line are appended later,
 # at the create step, since they matter only for a real PR.
 printf '%s\n' "$BODY" > .fno/pr-body.md
+{
+  printf '\n## Test delta\n\n'
+  printf '%s\n' "$TEST_DELTA"
+} >> .fno/pr-body.md
 ```
 
 `.fno/pr-title.txt` and `.fno/pr-body.md` are the draft of record. Every later step reuses them.

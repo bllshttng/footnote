@@ -262,7 +262,11 @@ See [wave-patterns.md](wave-patterns.md) for the decision tree on sequential vs 
 
 ### 3. Spawn Task Executors
 
-Use Task tool to spawn fresh executors for each task. Before dispatch, resolve
+Use Task tool to spawn fresh executors for each task. The executor loads
+`fno:test-audit` in authoring mode beside `fno:tdd`; every new or changed test's
+four gate answers must appear in the task result. Prefer extending the owning
+test or a table-driven case, and require a named reason before adding a test
+file. Before dispatch, resolve
 the per-task executor with the three-tier chain (task → plan → surface
 inference → `do`):
 
