@@ -76,6 +76,7 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "stale":
             return "released stale lockfile" if release_claim(key, status.get("holder") or "", root=root) else "lockfile changed"
         if state == "corrupted":
+            typer.echo(f"warning: lockfile {key} is corrupted; graph claim cleared but lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to repair.", err=True)
             return "lockfile left (corrupted)"
 
         # live or suspect: only release when it is ours; a suspect claim (TTL-unexpired, dead pid) is still owned.
@@ -83,6 +84,7 @@ def _release_node_lockfile(node_id: str) -> str:
         if holder == _invoking_claim_holder():
             return "released own lockfile" if release_claim(key, holder, root=root) else "lockfile changed"
 
+        typer.echo(f"warning: lockfile {key} held by LIVE holder {holder!r}; lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to override.", err=True)
         return "lockfile left (live foreign holder)"
     except Exception as exc:
         return f"lockfile untouched ({exc})"
@@ -95,20 +97,10 @@ def _wedge_refusal(verb: str, node_id: str, open_do: int) -> None:
 
 
 def _settle_status_after_release(node_id: str) -> None:
-    """The retired claim mirror stamped a released node back to its queue
-    state; the port keeps the transition a write. The commit pipeline
-    re-derives the final word (the ladder's ready/idea), so the mutator
-    only has to move the stuck row."""
+    from fno.graph.statuses import settle_released_node
     from fno.graph.store import commit_rows_via_store
 
-    def mutator(entries):
-        for entry in entries:
-            if entry.get("id") == node_id and entry.get("status") == "in_progress":
-                entry["status"] = "ready"
-                break
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), settle_released_node(node_id))
 
 
 def _unclaim_node(task_id: str) -> None:
@@ -214,8 +206,12 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     for r in open_rows:
         reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
 
-    _release_node_lockfile(node_id)
-    _settle_status_after_release(node_id)
+    note = _release_node_lockfile(node_id)
+    if note.startswith("lockfile"):
+        typer.echo(f"requeue: {node_id} claim was not released ({note}); the node stays claimed.", err=True)
+        raise typer.Exit(code=3)
+    if note.startswith(("released", "no lockfile")):
+        _settle_status_after_release(node_id)
 
     after = _read_node(node_id, _graph_path())
     status_after = (after or {}).get("persisted_status")

@@ -547,6 +547,7 @@ def cmd_session_close(
     from fno.claims.self_identity import resolve_self_identity
     from fno.graph.fuzzy import resolve_node
     from fno.graph.api import wire_rows
+    from fno.graph.statuses import settle_released_node
     from fno.graph.store import append_session_record, commit_rows_via_store
 
     summary = summary.strip()
@@ -663,18 +664,7 @@ def cmd_session_close(
         else:
             receipt["claim_released"] = False
     if receipt.get("claim_released"):
-        # The retired claim mirror stamped a released node back to its queue
-        # state; the port keeps the transition a write. The commit pipeline
-        # re-derives the final word (done, in_review, deferred, the ladder's
-        # ready/idea), so the mutator only has to move the stuck row.
-        def _settle_ready(entries):
-            for entry in entries:
-                if entry.get("id") == node_id and entry.get("status") == "in_progress":
-                    entry["status"] = "ready"
-                    break
-            return entries
-
-        commit_rows_via_store(_graph_path(), _settle_ready)
+        commit_rows_via_store(_graph_path(), settle_released_node(node_id))
     if json_out:
         typer.echo(json.dumps(receipt))
     else:
