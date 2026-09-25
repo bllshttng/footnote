@@ -295,7 +295,18 @@ def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
 
 def test_rust_stress_cleans_both_packages_before_building() -> None:
     workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
-    steps = workflow["jobs"]["stress"]["steps"]
+    stress_job = workflow["jobs"]["stress"]
+    steps = stress_job["steps"]
+    stress_env_step = next(
+        (
+            step
+            for step in steps
+            if step.get("name") == "Stress the process-backed e2e binaries"
+        ),
+        None,
+    )
+    assert stress_env_step is not None
+    assert stress_env_step["env"]["STRESS_SKIP_SLOW"] == "1"
     run = "\n".join(step.get("run", "") for step in steps)
     lines = _command_lines(run)
     stress = lines.index("bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?")
@@ -305,3 +316,15 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
         )
         assert clean < stress, f"stress can execute a stale cached {package} harness"
+
+    cli_workflow = yaml.safe_load(_WORKFLOW.read_text())
+    smoke_env_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["smoke-rest"]["steps"]
+            if step.get("name", "").startswith("Smoke shard: everything except pytest")
+        ),
+        None,
+    )
+    assert smoke_env_step is not None
+    assert smoke_env_step["env"]["STRESS_SKIP_SLOW"] == "1"
