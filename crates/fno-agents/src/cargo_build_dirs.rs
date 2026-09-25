@@ -68,6 +68,19 @@ pub fn fno_build_base(root: &Path) -> PathBuf {
     state.join("cargo-build")
 }
 
+/// The CARGO_BUILD_BUILD_DIR value: `<fno base>/{workspace-path-hash}`.
+pub fn build_dir_env_value(root: &Path) -> String {
+    format!("{}/{{workspace-path-hash}}", fno_build_base(root).display())
+}
+
+/// Set CARGO_BUILD_BUILD_DIR when the process has none. A preset wins.
+/// Env mutation: call only while the process is single-threaded.
+pub fn fill_build_dir_env(root: &Path) {
+    if std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none() {
+        std::env::set_var("CARGO_BUILD_BUILD_DIR", build_dir_env_value(root));
+    }
+}
+
 fn expand_home(path: &Path) -> PathBuf {
     if let Ok(rest) = path.strip_prefix("~") {
         if let Some(home) = home() {
@@ -2726,5 +2739,44 @@ mod tests {
             "no row line names a source dir named target: {:?}",
             rep.lines
         );
+    }
+
+    /// The one value resolver behind the keeper, daemon, stop hook and
+    /// install exports: an unset env resolves to `<fno base>/{workspace-path-hash}`,
+    /// and a session preset survives untouched.
+    #[test]
+    fn fill_build_dir_env_sets_unset_and_honors_preset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("CARGO_BUILD_BUILD_DIR");
+        let root = temp_root("fill-env");
+
+        std::env::remove_var("CARGO_BUILD_BUILD_DIR");
+        std::env::set_var("FNO_CARGO_TARGETS_BASE", root.join("cbd-base"));
+        let expected = format!(
+            "{}/{{workspace-path-hash}}",
+            root.join("cbd-base").display()
+        );
+        fill_build_dir_env(&root);
+        assert_eq!(
+            std::env::var_os("CARGO_BUILD_BUILD_DIR").as_deref(),
+            Some(std::ffi::OsStr::new(&expected)),
+            "unset env resolves from the fno base"
+        );
+        assert_eq!(build_dir_env_value(&root), expected);
+
+        std::env::set_var("CARGO_BUILD_BUILD_DIR", "/tmp/session-own-base/hash");
+        fill_build_dir_env(&root);
+        assert_eq!(
+            std::env::var_os("CARGO_BUILD_BUILD_DIR").as_deref(),
+            Some(std::ffi::OsStr::new("/tmp/session-own-base/hash")),
+            "a preset wins"
+        );
+
+        std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+        match saved {
+            Some(v) => std::env::set_var("CARGO_BUILD_BUILD_DIR", v),
+            None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }

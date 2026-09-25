@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The generated state-dir stub (STATE_DIR etc.), so the fallback-writer log
+# path never hardcodes $HOME/.fno. REPO_ROOT is preset from this file's own
+# location so the stub's git rev-parse subshell never runs on the hot path.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# shellcheck source=scripts/lib/paths.sh
+source "$REPO_ROOT/scripts/lib/paths.sh"
+
 if [[ $# -eq 0 ]]; then
     echo "cargo-rustc-wrapper: missing rustc command" >&2
     exit 2
@@ -101,6 +108,48 @@ case " $* " in
         ;;
 esac
 
+# An env-less cargo build lands in the fallback base ~/.cargo/build (the
+# tracked .cargo/config.toml's build-dir template). The wrapper is the one
+# door every such compile passes, so it names the offender: once per cargo,
+# one tab-separated line in ~/.fno/logs/cargo-fallback-writers.log naming
+# the cargo pid and argv, the parent pid and argv, the cwd and the manifest
+# dir. The compiler always runs.
+name_fallback_writer() {
+    if [[ -n "${CARGO_BUILD_BUILD_DIR:-}" || -n "${CI:-}" ]]; then
+        return 0
+    fi
+    # Same once-per-cargo shape as the unadmitted marker above: fresh under
+    # 60 minutes, so a marker from an earlier cargo with this pid goes stale.
+    # The noclobber create is the once-per-cargo gate: cargo runs rustc calls
+    # in parallel, so the exists-then-create test alone would let two of them
+    # both log.
+    local marker="${TMPDIR:-/tmp}/fno-build-fallback.$PPID"
+    if [[ -e "$marker" ]]; then
+        if [[ -n "$(find "$marker" -mmin -60 2>/dev/null)" ]]; then
+            return 0
+        fi
+        rm -f "$marker" 2>/dev/null || true
+    fi
+    if ! ( set -o noclobber; : >"$marker" ) 2>/dev/null; then
+        return 0
+    fi
+    {
+        local log="$STATE_DIR/logs/cargo-fallback-writers.log"
+        mkdir -p "$(dirname "$log")"
+        local cargo_argv parent_pid parent_argv
+        cargo_argv="$(ps -o command= -p "$PPID" 2>/dev/null || true)"
+        parent_pid="$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')"
+        parent_argv="$(ps -o command= -p "${parent_pid:-0}" 2>/dev/null || true)"
+        printf '%s\tcargo_pid=%s\tcargo=%s\tparent=%s %s\tcwd=%s\tmanifest_dir=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PPID" "$cargo_argv" \
+            "${parent_pid:-0}" "$parent_argv" "$PWD" "${CARGO_MANIFEST_DIR:-}" >>"$log"
+        if [[ "$(wc -l <"$log")" -gt 1000 ]]; then
+            tail -n 500 "$log" >"$log.tmp" && mv "$log.tmp" "$log"
+        fi
+    } 2>/dev/null || true
+    echo "cargo-rustc-wrapper: CARGO_BUILD_BUILD_DIR is unset, so this build lands in the fallback base ~/.cargo/build; logged to ~/.fno/logs/cargo-fallback-writers.log. Run: fno config plugin install" >&2
+}
+
 case " $* " in
     *" -vV "* | *" --print"*) ;;
     *)
@@ -110,6 +159,7 @@ case " $* " in
         # cargo is already admitted; a probe that asked again waited on it
         # for 1h49m on 2026-09-23.
         [[ -n "${CARGO_CFG_TARGET_ARCH:-}" ]] || admit build
+        name_fallback_writer
         ;;
 esac
 
