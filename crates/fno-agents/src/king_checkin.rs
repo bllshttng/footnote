@@ -4125,6 +4125,62 @@ mod tests {
     }
 
     #[test]
+    fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "answered",
+                json!({"rows": [
+                    {"node": "x-1", "question_id": "q-1", "answer": "keep the lane",
+                     "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                ]}),
+            ),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "quiet_workers",
+                json!({"quiet": 1, "read": 1, "rows": [
+                    {"worker": "t-x-1-glm", "node": "x-1",
+                     "line": "RESULT: BLOCKED need a ruling"},
+                ]}),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "answered: 1 user decision(s) in scope"),
+            "lines: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("x-1 (q-1): keep the lane")));
+        assert!(lines.iter().any(|l| l == "quiet: 1 worker(s) in scope"));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("t-x-1-glm (x-1): RESULT: BLOCKED need a ruling")));
+        // A failed read keeps its line and says so; it never blanks.
+        set_reading(
+            &mut readings,
+            Reading::failed("quiet_workers", "peek exited 13".into()),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "READER FAILED quiet_workers: peek exited 13"),
+            "lines: {lines:?}"
+        );
+    }
+
+    #[test]
     fn held_rows_render_the_decide_verb_and_none_when_clear() {
         let mut readings = sample_readings(
             json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
