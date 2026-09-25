@@ -209,6 +209,10 @@ pub struct GcSummary {
     /// One entry per kept open-PR row (Locked Decision 7): the nudge
     /// ladder's input. A projection the `kept_total` does not count.
     pub open_pr_rows: Vec<OpenPrRow>,
+    /// One entry per dead-worker row the sweep kept on an in_progress
+    /// node (law d-71d03643): the nudge ladder's Resume rung is the
+    /// owner. A projection the `kept_total` does not count.
+    pub dead_work_rows: Vec<OpenPrRow>,
     /// The dead-crown sweep's report when it ran beside this pass; `None`
     /// when it did not run. The daemon arm reports crowns through its detail
     /// line, the manual verb fills this field.
@@ -226,7 +230,9 @@ pub struct OpenPrRow {
     pub session_id: String,
     pub harness: String,
     pub node: String,
-    pub pr: u64,
+    /// The PR the session drives, `None` for a dead-worker row (no PR
+    /// exists yet - the node itself is the open work).
+    pub pr: Option<u64>,
     pub cwd: String,
     /// Transcript-quiet seconds when the age seam answered.
     pub transcript_age_s: Option<i64>,
@@ -1986,15 +1992,23 @@ pub(crate) fn run_with_release(
         // and each falls through to the grace gate in gc_decide.
         // EVERY claude row carries its terminal state, not only
         // Open-work rows - recency and lineage must be able to yield to it.
-        let roster_state = if e.harness_name() == "claude" {
+        // The ROW itself (with its pid) stays in scope beside the state:
+        // liveness reads the process, and a stale pre-death row whose state
+        // never went terminal must not pass for a live one.
+        let (roster_row, roster_carries, roster_known_clean) = if e.harness_name() == "claude" {
             let mut memo = agents_memo.borrow_mut();
             let snapshot = memo.get_or_insert_with(&agents_read);
-            crate::daemon::claude_row_id(e)
-                .and_then(|rid| snapshot.find(&rid).cloned())
-                .and_then(|row| row.state)
+            let carries = snapshot.carries_pids();
+            let known_clean = match snapshot {
+                ClaudeAgentsSnapshot::Known { warnings, .. } => warnings.is_empty(),
+                ClaudeAgentsSnapshot::Unknown { .. } => false,
+            };
+            let row = crate::daemon::claude_row_id(e).and_then(|rid| snapshot.find(&rid).cloned());
+            (row, carries, known_clean)
         } else {
-            None
+            (None, false, false)
         };
+        let roster_state = roster_row.as_ref().and_then(|row| row.state.clone());
         // The terminal read is stop-aware: a `stopped` state is terminal only
         // when fno never stopped the row (no stop record). `done` and `failed`
         // stay terminal either way - they say the harness finished the work,
@@ -2069,6 +2083,18 @@ pub(crate) fn run_with_release(
         // change 8: the existence-specific probe on the row's own
         // pid. One kill(2) per row, no subprocess; only ESRCH counts.
         let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
+        // change 9: a stale pre-death roster row on a claude row. The
+        // snapshot must answer Known with no warnings (a partial list
+        // proves nothing about absence), the row must be found, its
+        // process must be gone, and its state must be neither `done` nor
+        // `stopped` - those two take today's terminal paths whatever the
+        // pid says. Only `working`, `idle`, `blocked`, `failed` or no
+        // state qualify; non-claude rows never do.
+        let process_gone = roster_known_clean
+            && roster_row
+                .as_ref()
+                .is_some_and(|r| !r.has_live_process(roster_carries))
+            && !matches!(roster_state.as_deref(), Some("done") | Some("stopped"));
         // the remaining two lifts. A release for a
         // transcript-unresolved hold reads the missing age as quiet for this
         // row only (grace_gate's release_quiet arm). A stop-family release
@@ -2118,6 +2144,7 @@ pub(crate) fn run_with_release(
             superseded_by_live_peer,
             node_merged,
             pid_gone,
+            process_gone,
             release_quiet: release_quiet_row,
             open_pr,
             peer_drives_pr,
@@ -2190,6 +2217,44 @@ pub(crate) fn run_with_release(
                         .unwrap_or("sessions")
                         .to_string();
                     summary.kept_open_work.push((id, node, status, reader))
+                }
+                Some(KeepReason::DeadOpenWork { node }) => {
+                    // Law d-71d03643: the dead worker stays held and the
+                    // tick detail keeps counting it, under the node its
+                    // provenance resolved. The nudge ladder's Resume rung
+                    // is the owner; the row carries no PR yet, so its
+                    // ladder row reads pr: null, live: false.
+                    let reader = verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                        .to_string();
+                    summary.kept_open_work.push((
+                        id.clone(),
+                        node.clone(),
+                        "in_progress".into(),
+                        reader,
+                    ));
+                    summary.holds.push(Hold {
+                        id: id.clone(),
+                        reason: KeepReason::DeadOpenWork { node: node.clone() }.as_str(),
+                        detail: format!("{node} in_progress, process gone"),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    summary.dead_work_rows.push(OpenPrRow {
+                        id,
+                        session_id: e.harness_session_id.clone().unwrap_or_default(),
+                        harness: e.harness_name().to_string(),
+                        node,
+                        pr: None,
+                        cwd: e.cwd.clone(),
+                        transcript_age_s: hold_age_s,
+                        live: false,
+                        busy: false,
+                    });
                 }
                 Some(KeepReason::OpenWorkStale { node, status }) => {
                     let reader = verdict
@@ -2265,9 +2330,11 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::OpenPr { node, pr }) => {
                     let sid_full = e.harness_session_id.clone().unwrap_or_default();
                     let live = if e.harness_name() == "claude" {
-                        // A roster row exists with a non-terminal state.
-                        matches!(roster_state.as_deref(), Some(s)
-                            if !crate::claude_roster::is_terminal_roster_state(s))
+                        // Liveness is the process: a non-terminal state with
+                        // no pid behind it is a stale pre-death row.
+                        roster_row
+                            .as_ref()
+                            .is_some_and(|r| r.has_live_process(roster_carries))
                     } else {
                         !pid_gone && !matches!(e.status, crate::AgentStatus::Exited)
                     };
@@ -2291,7 +2358,7 @@ pub(crate) fn run_with_release(
                         session_id: sid_full,
                         harness: e.harness_name().to_string(),
                         node,
-                        pr,
+                        pr: Some(pr),
                         cwd: e.cwd.clone(),
                         transcript_age_s: hold_age_s,
                         live,

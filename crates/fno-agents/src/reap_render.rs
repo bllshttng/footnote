@@ -249,6 +249,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "hold_escalate_after_s": summary.hold_escalate_after_s,
                 "release_refused": summary.release_refused,
                 "open_pr_rows": summary.open_pr_rows,
+                "dead_work_rows": summary.dead_work_rows,
                 "open_pr_nudge": nudge_json,
                 "crowns": summary.crowns,
                 "schema_skew": match summary.schema_skew {

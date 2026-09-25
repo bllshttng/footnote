@@ -297,7 +297,7 @@ pub fn apply(
         if let Err(e) = crate::fleet_task::close(
             &crate::provider_cap::questions_path(home),
             "pr-nudge",
-            &format!("PR #{} on {}", row.pr, row.node),
+            &task_key(row),
             &row.cwd,
             "activity",
             "pr-nudge",
@@ -334,7 +334,7 @@ pub fn apply(
             }
         }
         NudgeAction::Escalate => {
-            let key = format!("PR #{} on {}", row.pr, row.node);
+            let key = task_key(row);
             let marker = format!("pr-nudge: {key}");
             let text = escalation_text(&marker, &row.session_id, state.undelivered);
             if let Err(e) = crate::fleet_task::file_once(
@@ -362,15 +362,22 @@ pub fn apply(
         }
         NudgeAction::Mail | NudgeAction::Resume => {
             // Mail and resume are only reachable past `due`, which is where
-            // the one status read happened.
-            let status = status.expect("mail and resume rungs imply a due row");
-            if !actionable_nudge_status(&status) {
-                if &state != state_param {
-                    save_state(home, &row.session_id, &state);
+            // the one status read happened - for a PR row. A dead-worker
+            // row carries no PR, so there is no status to read and no
+            // actionable gate: the node's open work is the whole message.
+            let text = match row.pr {
+                Some(_) => {
+                    let status = status.expect("mail and resume rungs imply a due row");
+                    if !actionable_nudge_status(&status) {
+                        if &state != state_param {
+                            save_state(home, &row.session_id, &state);
+                        }
+                        return;
+                    }
+                    nudge_text(row, &status)
                 }
-                return;
-            }
-            let text = nudge_text(row, &status);
+                None => dead_work_text(row),
+            };
             let mut resume_argv = vec![
                 "fno".to_string(),
                 "agents".to_string(),
@@ -504,6 +511,26 @@ fn stderr_reason(stderr: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The fleet-task key for this row: PR rows key on the PR; a dead-worker
+/// row carries no PR, so the key names the node and its open work.
+fn task_key(row: &OpenPrRow) -> String {
+    match row.pr {
+        Some(pr) => format!("PR #{pr} on {}", row.node),
+        None => format!("dead worker on {}", row.node),
+    }
+}
+
+/// The nudge body for a dead-worker row (pr: None): the node's open work
+/// IS the message. No PR, no status read, no verdict to relay.
+fn dead_work_text(row: &OpenPrRow) -> String {
+    format!(
+        "{NUDGE_SENDER_LINE} continue: node {node} is in_progress and its session died \
+         with uncommitted work in {cwd}. Commit what is there and drive the node to a PR.",
+        node = row.node,
+        cwd = row.cwd,
+    )
+}
+
 /// The operator-ask text. Nudges that never landed are named as such, so
 /// "3 nudges drew no activity" cannot stand in for nudges the session never
 /// saw.
@@ -525,12 +552,15 @@ fn escalation_text(marker: &str, sid: &str, undelivered: u32) -> String {
 /// keeps the last non-empty stdout line that parses as a JSON object and
 /// reports the exit code only when no line parses.
 fn read_status(row: &OpenPrRow, runner: Runner) -> Result<Value, i32> {
+    // The caller gates on `row.pr.is_some()` (decide_with_read); this
+    // function is never reached for a dead-worker row.
+    let pr = row.pr.expect("read_status is only reached for a pr row");
     let argv = vec![
         "fno".to_string(),
         "do".to_string(),
         "pr".to_string(),
         "status".to_string(),
-        row.pr.to_string(),
+        pr.to_string(),
     ];
     let (code, stdout, _) = runner(&argv, &row.cwd);
     // Reverse scan: the payload is the last JSON object line on stdout.
@@ -585,7 +615,8 @@ fn actionable_nudge_status(status: &Result<Value, i32>) -> bool {
 /// failing checks so the session starts the fix round without a round
 /// trip.
 fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
-    let pr = row.pr;
+    // Same gate as read_status: this renders a PR row's body only.
+    let pr = row.pr.expect("nudge_text is only reached for a pr row");
     let node = &row.node;
     let body = match status {
         Err(code) => format!(
@@ -854,8 +885,9 @@ fn decide_with_read(
     let mut status = None;
     // ponytail: one status read per due row per retire pass (300 s), and an
     // escalated row is due every pass. Read escalated rows once per grace if the
-    // gh budget runs hot.
-    if due(&input) {
+    // gh budget runs hot. A dead-worker row carries no PR: no read, no red
+    // head - the node's open work is the whole reason for the nudge.
+    if due(&input) && row.pr.is_some() {
         let s = read_status(row, runner);
         input.red_head = s.as_ref().ok().and_then(settled_red_head);
         status = Some(s);
@@ -900,11 +932,19 @@ mod tests {
             session_id: "11111111-2222-3333-4444-555555555555".into(),
             harness: "claude".into(),
             node: "x-node".into(),
-            pr: 1943,
+            pr: Some(1943),
             cwd: "/tmp/wt".into(),
             transcript_age_s: Some(1000),
             live,
             busy: false,
+        }
+    }
+
+    fn dead_row() -> OpenPrRow {
+        OpenPrRow {
+            pr: None,
+            live: false,
+            ..row(false)
         }
     }
 
@@ -1040,6 +1080,77 @@ mod tests {
         assert!(resume[5].starts_with("Automatic retry from the fno daemon pr-nudge arm"));
         assert!(!resume[5].contains("<fno_mail"));
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-resume"));
+    }
+
+    #[test]
+    fn dead_worker_row_gets_one_resume_and_never_reads_pr_status() {
+        // AC3-HP: a pr: None row due for a nudge runs exactly one
+        // `fno agents resume <sid> --message continue: node ...` and
+        // never runs `fno do pr status`. The event carries pr: null.
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            calls.push(argv.to_vec());
+            (0, String::new(), String::new())
+        };
+        let r = dead_row();
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dead"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert_eq!(calls.len(), 1, "one resume, no status read: {calls:?}");
+        assert_eq!(calls[0][1], "agents");
+        assert_eq!(calls[0][2], "resume");
+        assert_eq!(calls[0][3], r.session_id);
+        assert_eq!(calls[0][4], "--message");
+        let text = &calls[0][5];
+        assert!(text.contains("node x-node is in_progress"));
+        assert!(text.contains("uncommitted work in /tmp/wt"));
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.attempts, 1);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["pr"], serde_json::json!(null));
+        assert_eq!(ev["data"]["action"], serde_json::json!("resume"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn dead_worker_row_escalates_on_the_node_marker() {
+        // AC3-ERR: 3 undelivered resumes later, one operator question
+        // files under `pr-nudge: dead worker on <node>`, pr: null.
+        let r = dead_row();
+        let spent = LadderState {
+            attempts: MAX_ATTEMPTS,
+            ..Default::default()
+        };
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) || argv.contains(&"resume".to_string()) {
+                panic!("a spent dead-worker row reads nothing and resumes nothing");
+            }
+            (0, String::new(), String::new())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dead-esc"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
+        let ev = last_event(&home, "pr_nudge_escalated");
+        assert_eq!(ev["data"]["pr"], serde_json::json!(null));
+        assert_eq!(ev["data"]["node"], serde_json::json!("x-node"));
+        let store = crate::provider_cap::questions_path(&home);
+        let filed = std::fs::read_to_string(&store).unwrap();
+        assert!(
+            filed.contains("pr-nudge: dead worker on x-node"),
+            "the escalation marker must name the node: {filed}"
+        );
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 
     #[test]
@@ -1784,7 +1895,7 @@ mod tests {
         crate::fleet_task::file_once(
             &store,
             "pr-nudge",
-            &format!("PR #{} on {}", r.pr, r.node),
+            &task_key(&r),
             &r.cwd,
             "text",
             Some("run"),
