@@ -1931,7 +1931,10 @@ mod tests {
     }
 
     /// AC5-EDGE: a tick with zero holds writes NO `retire_holds`
-    /// row, even when the pass kept a row under a hold-free bucket.
+    /// row, even when the pass kept a row under a hold-free bucket. The
+    /// fixture is an origin-unrecorded row (the NotSpawn keep is the one
+    /// hold-free keep); a terminal ADOPTED row now takes the adopted-retire
+    /// carve-out and lands in a hold-carrying bucket instead.
     #[test]
     fn a_tick_with_zero_holds_writes_no_retire_holds_event() {
         let _env = crate::claims::test_env_lock()
@@ -1941,14 +1944,14 @@ mod tests {
         let registry = serde_json::json!({
             "schema_version": 10,
             "agents": [{
-                "name": "target-x-1-adopted",
+                "name": "target-x-1-foreign",
                 "cwd": dir.display().to_string(),
                 "status": "exited",
                 "created_at": "2026-09-06T00:00:00Z",
                 "harness": "claude",
-                "harness_session_id": "sess-adopted",
+                "harness_session_id": "sess-foreign",
                 "short_id": "abc123",
-                "origin": "adopted",
+                "origin": null,
             }],
         });
         std::fs::create_dir_all(home.root()).unwrap();

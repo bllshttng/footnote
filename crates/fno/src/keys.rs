@@ -1503,7 +1503,7 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         // The hard-coded, non-rebindable chords: the global sideline chord
         // (a multi-byte CSI the scanner's ChordEsc branch dispatches, not
-        // chord()) and the prefix-free arrow ladder. The guard test
+        // chord()) and the prefix-gated arrow ladder. The guard test
         // (`every_hardcoded_chord_scans_to_a_listed_event`) fails when a
         // scanner chord has no row here, so this table cannot lag the
         // dispatch path.
@@ -1513,17 +1513,17 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             KeySection::GlobalNoPrefix,
         ),
         (
-            "arrows".into(),
+            format!("{p} arrows"),
             "focus the pane in that direction".into(),
             KeySection::GlobalNoPrefix,
         ),
         (
-            "Ctrl+arrows".into(),
+            format!("{p} Ctrl+arrows"),
             "resize the pane".into(),
             KeySection::GlobalNoPrefix,
         ),
         (
-            "Shift+arrows".into(),
+            format!("{p} Shift+arrows"),
             "move the pane".into(),
             KeySection::GlobalNoPrefix,
         ),
@@ -1701,11 +1701,12 @@ fn esc_chord(seq: &[u8]) -> EscScan {
 }
 
 /// The chords the scanner dispatches OUTSIDE the rebindable keymap, as
-/// (display, event) pairs: the global sideline chord and the prefix-free
-/// arrow ladder. One source for the which-key modal's "global (no prefix)"
-/// rows and for the guard test that fails when [`esc_chord`] completes a
-/// chord this list (and so the key table) never names - the exact gap that
-/// hid Ctrl+Opt+Left from every help surface.
+/// (display, event) pairs: the global sideline chord (truly prefix-free) and
+/// the PREFIX-GATED arrow ladder (`prefix` + arrows focuses, `prefix` +
+/// Ctrl+arrows resizes, `prefix` + Shift+arrows moves). One source for the
+/// which-key modal's "global (no prefix)" rows and for the guard test that
+/// fails when a hard-coded chord this list never names completes - the exact
+/// gap that hid Ctrl+Opt+Left from every help surface.
 pub fn hardcoded_chords() -> Vec<(&'static str, Event)> {
     use Command as C;
     use Event::*;
@@ -2522,12 +2523,15 @@ mod tests {
             (b'C', Dir::Right),
             (b'D', Dir::Left),
         ];
+        // The ladder rungs are PREFIX-GATED (the global chord is the only
+        // prefix-free one), so every ladder sequence carries the default
+        // prefix byte the Scanner::default binds.
         let mut sequences: Vec<(Vec<u8>, &str)> = vec![(b"\x1b[1;7D".to_vec(), "Ctrl+Opt+Left")];
         for (final_byte, _dir) in dir_seq {
             let f = final_byte as char;
-            sequences.push((format!("\x1b[{f}").into_bytes(), "arrows"));
-            sequences.push((format!("\x1b[1;5{f}").into_bytes(), "Ctrl+arrows"));
-            sequences.push((format!("\x1b[1;2{f}").into_bytes(), "Shift+arrows"));
+            sequences.push((format!("\x02\x1b[{f}").into_bytes(), "arrows"));
+            sequences.push((format!("\x02\x1b[1;5{f}").into_bytes(), "Ctrl+arrows"));
+            sequences.push((format!("\x02\x1b[1;2{f}").into_bytes(), "Shift+arrows"));
         }
         assert_eq!(
             listed.len(),
@@ -2544,12 +2548,19 @@ mod tests {
             );
         }
         // And the modal's rows name the section: the global chord and the
-        // three ladder rungs are documented, non-empty.
+        // three ladder rungs are documented, non-empty, the ladder rows
+        // displaying the live prefix.
         let rows = meta_rows();
-        for display in ["Ctrl+Opt+Left", "arrows", "Ctrl+arrows", "Shift+arrows"] {
+        let p = key_disp(prefix());
+        for display in [
+            "Ctrl+Opt+Left".to_string(),
+            format!("{p} arrows"),
+            format!("{p} Ctrl+arrows"),
+            format!("{p} Shift+arrows"),
+        ] {
             assert!(
                 rows.iter()
-                    .any(|(d, _, s)| d == display && *s == KeySection::GlobalNoPrefix),
+                    .any(|(d, _, s)| *d == display && *s == KeySection::GlobalNoPrefix),
                 "the key table never lists {display}"
             );
         }

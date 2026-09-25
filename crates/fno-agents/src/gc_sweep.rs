@@ -1697,6 +1697,40 @@ pub(crate) fn run_with_release(
     let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
         std::cell::RefCell::new(None);
 
+    // The adopted-retire carve-out, resolved once per row and shared by the
+    // staging filter (pass 1) and the origin pre-gate (pass 2): an adopted
+    // row whose registry status reads terminal and that no known roster
+    // snapshot lists live takes the normal pipeline - the open-PR hold and
+    // the grace window judge it - instead of keeping as a phantom forever.
+    // A roster-listed session keeps: the listing is the live fact and the
+    // registry status the stale one. A non-claude row answers None (no
+    // roster instrument governs it), which does not block the carve-out.
+    let adopted_finished = |e: &state::RegistryEntry| -> bool {
+        if e.origin.as_deref() != Some("adopted") {
+            return false;
+        }
+        if !matches!(
+            e.status,
+            crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
+        ) {
+            return false;
+        }
+        if e.harness_name() != "claude" {
+            return true;
+        }
+        let mut memo = agents_memo.borrow_mut();
+        let snapshot = memo.get_or_insert_with(|| agents_read());
+        match crate::daemon::claude_row_id(e) {
+            Some(rid) => match snapshot {
+                crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. } => {
+                    !rows.iter().any(|r| r.short_id == rid)
+                }
+                crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => true,
+            },
+            None => true,
+        }
+    };
+
     // Pass 1 (change 3): prove provenance and transcript age ONCE per
     // spawn row, so the supersession map and the row pass read the same
     // verdict instead of answering the reverse join twice. Entries the
@@ -1706,9 +1740,10 @@ pub(crate) fn run_with_release(
     // every candidate through one single-flighted read, keyed by row handle.
     // A row the seam does not answer reads None, and None is never quiet.
     // A non-spawn row is staged too so a proven corpse can fall through to
-    // the normal pipeline: spawned rows always, plus the two corpse legs'
+    // the normal pipeline: spawned rows always, plus the corpse legs'
     // populations (a row whose pid answers, and claude rows whose quiet
-    // fact the pass-2 origin gate reads). The roster snapshot itself stays
+    // fact the pass-2 origin gate reads), plus the adopted-retire
+    // carve-out's population. The roster snapshot itself stays
     // lazy - the subprocess read fires in pass 2, quiet rows only.
     let age_entries: Vec<&state::RegistryEntry> = registry
         .entries
@@ -1718,7 +1753,8 @@ pub(crate) fn run_with_release(
                 && graph.is_some()
                 && (e.origin.as_deref() == Some("spawn")
                     || e.pid.is_some_and(crate::daemon::pid_is_gone)
-                    || e.harness_name() == "claude")
+                    || e.harness_name() == "claude"
+                    || adopted_finished(e))
         })
         .collect();
     let ages = age_many(&age_entries);
@@ -1826,21 +1862,12 @@ pub(crate) fn run_with_release(
         // past the grace, so the subprocess read never fires for a row that
         // could not pass a later gate anyway.
         let is_spawn = e.origin.as_deref() == Some("spawn");
-        // The adopted-retire carve-out mirrors gc_decide's origin gate: an
-        // adopted row whose registry status reads terminal flows into the
-        // normal pipeline (which judges the open-PR hold and the grace
-        // window) instead of keeping here as a phantom forever.
-        let adopted_finished = e.origin.as_deref() == Some("adopted")
-            && matches!(
-                e.status,
-                crate::AgentStatus::Exited | crate::AgentStatus::PermanentDead
-            );
         // Only a row the corpse probe actually PASSED carries origin_corpse
         // into the policy: the GcRow field must never lean on "reached here
-        // as a non-spawn", or the adopted carve-out below would read as a
-        // corpse and skip the very gate that judges it.
+        // as a non-spawn", or the adopted carve-out would read as a corpse
+        // and skip the very gate that judges it.
         let mut corpse = false;
-        if !is_spawn && !adopted_finished {
+        if !is_spawn && !adopted_finished(e) {
             let quiet = matches!(staged_row, Some((_, Some(a))) if *a > grace_secs);
             if !origin_corpse(e, quiet, &agents_memo, agents_read) {
                 summary
