@@ -710,7 +710,7 @@ def _render_markdown(report: dict) -> str:
         for row in report.get("decisions", []):
             lines.append(
                 f"- `{row.get('decision_id', '')}` **{row.get('lifecycle', '')}** "
-                f"({row.get('lane', '')}, {row.get('ts', '')}): {row.get('decision', '')}"
+                f"({row.get('lane', '')}, {row.get('ts', '')}, {row.get('scope') or 'project:fno'}): {row.get('decision', '')}"
             )
     return "\n".join(lines).rstrip() + "\n"
 
