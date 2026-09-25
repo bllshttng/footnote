@@ -92,6 +92,9 @@
 #      because a worker pinned to another account exports that variable and
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
+#      slot_cutover.rs compares `accounts.records[].config_dir` to the exact
+#      `~/.claude` config value to distinguish shared-slot records from
+#      per-config-dir accounts. It constructs and reads no path from the value.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
 #      binding.py is the shared effective-account read those callers now go
 #      through, and test_account_binding.py is its test: it builds a canonical
@@ -246,6 +249,7 @@ cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
 crates/fno-agents/src/claude_vault.rs
+crates/fno-agents/src/slot_cutover.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py

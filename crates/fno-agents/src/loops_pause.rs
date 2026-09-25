@@ -813,6 +813,9 @@ fn markdown_doc(launchd: &Option<crate::tick_ledger::LaunchdFold>) -> String {
             receipt_event(spec.arm),
             reader,
             match spec.arm_key {
+                Some("slot_cutover.enabled") => {
+                    "If the row reads `unarmed`, add `[slot_cutover] enabled = true` to the daemon's `config.toml`".to_string()
+                }
                 Some(k) => format!("If the row reads `unarmed`, arm it with `fno config set {k} true`"),
                 None => "If the row reads red, its `cause=` suffix names the next read".to_string(),
             }
@@ -828,6 +831,15 @@ fn markdown_doc(launchd: &Option<crate::tick_ledger::LaunchdFold>) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_slot_cutover_guide_does_not_use_the_curated_config_setter() {
+        let markdown = markdown_doc(&None);
+        assert!(
+            markdown.contains("add `[slot_cutover] enabled = true` to the daemon's `config.toml`")
+        );
+        assert!(!markdown.contains("fno config set slot_cutover.enabled true"));
+    }
 
     #[test]
     fn the_launchd_parse_folds_labels_and_the_dead_list() {

@@ -202,6 +202,6 @@ Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md), [t
 
 Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md), [attention](docs/architecture/attention-items.md)
 
-Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [slot cutover](docs/architecture/managed-claude-slot-cutover.md), [cross-model review](docs/architecture/cross-model-review.md)
 
 Platform & ops: [processes](docs/architecture/background-processes.md), [fleet-FAQ](docs/fleet-faq.md), [reaping-FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path-config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md), [vocabulary](docs/architecture/vocabulary-user-and-operator.md), [graph](docs/graph-search.md)

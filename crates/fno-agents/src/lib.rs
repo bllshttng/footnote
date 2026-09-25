@@ -317,6 +317,7 @@ pub mod session_cost;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
