@@ -743,7 +743,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
         # rollback must not touch. Say which outcome happened rather than let
         # silence read as "the open row was removed".
         typer.echo(
-            f"claim release: no open do row to roll back for {node_id} "
+            f"claim release: no open execute row to roll back for {node_id} "
             f"(none was opened, or the row is already closed).",
             err=True,
         )

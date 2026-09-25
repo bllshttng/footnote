@@ -243,7 +243,7 @@ def test_roster_all_four_phases_with_honest_windows_summing(graph):
     graph([_node("x-aaaa", sessions=[
         _row("think", started_at="2026-08-07T00:00:00Z", ended_at="2026-08-07T01:00:00Z"),
         _row("blueprint", started_at="2026-08-07T01:30:00Z", ended_at="2026-08-07T02:00:00Z"),
-        _row("do", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
+        _row("execute", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
         _row("ship", started_at="2026-08-07T05:30:00Z", ended_at="2026-08-07T06:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
@@ -257,7 +257,7 @@ def test_roster_do_only_honest_window_marks_three_not_recorded(graph):
     """One honest do window: four phases render 'not recorded', the total names
     '1 of 4' rather than summing silently over the gaps."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
+        _row("execute", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert out.count("not recorded") == 4
@@ -269,7 +269,7 @@ def test_roster_end_only_row_renders_no_duration(graph):
     """A row with an end but no start renders 'end only', never '0m', and
     contributes no window to the total."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", ended_at="2026-08-07T05:00:00Z"),
+        _row("execute", ended_at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "end only" in out
@@ -281,7 +281,7 @@ def test_roster_in_progress_row_renders_no_duration(graph):
     """A row with a start but no end (work in flight) renders 'in progress',
     never a duration - an open row is not a closed window."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", started_at="2026-08-07T02:30:00Z"),
+        _row("execute", started_at="2026-08-07T02:30:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "in progress" in out
@@ -294,7 +294,7 @@ def test_roster_legacy_rows_are_not_summed_as_durations(graph):
     their span is the whole session - so they render 'end only' and are never
     summed or shown as a duration. The reader still surfaces their start in JSON."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", claimed_at="2026-08-07T00:00:00Z", at="2026-08-07T05:00:00Z"),
+        _row("execute", claimed_at="2026-08-07T00:00:00Z", at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "end only" in out
@@ -303,7 +303,7 @@ def test_roster_legacy_rows_are_not_summed_as_durations(graph):
     payload = json.loads(
         runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout
     )
-    do = next(p for p in payload["lifecycle"]["phases"] if p["phase"] == "do")
+    do = next(p for p in payload["lifecycle"]["phases"] if p["phase"] == "execute")
     assert do["start"] == "2026-08-07T00:00:00Z"  # claimed_at read as the start
     assert do["duration_seconds"] is None
 
@@ -311,13 +311,13 @@ def test_roster_legacy_rows_are_not_summed_as_durations(graph):
 def test_roster_json_absent_values_are_null_not_zero(graph):
     """-J emits the same fields with absent values as null, never 0."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", ended_at="2026-08-07T05:00:00Z"),  # end only -> null duration
+        _row("execute", ended_at="2026-08-07T05:00:00Z"),  # end only -> null duration
     ])])
     payload = json.loads(
         runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout
     )
     lc = payload["lifecycle"]
-    do = next(p for p in lc["phases"] if p["phase"] == "do")
+    do = next(p for p in lc["phases"] if p["phase"] == "execute")
     assert do["start"] is None
     assert do["duration_seconds"] is None
     assert lc["phases_recorded"] == 0

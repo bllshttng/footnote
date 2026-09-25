@@ -456,7 +456,7 @@ mod tests {
         json!({
             "id": id,
             "status": "in_progress",
-            "sessions": [{"phase": "do", "session_id": session_id}],
+            "sessions": [{"phase": "execute", "session_id": session_id}],
         })
     }
 
@@ -470,13 +470,13 @@ mod tests {
                 "id": "x-aaaa",
                 "status": "in_progress",
                 "pr_number": 2187,
-                "sessions": [{"phase": "do", "session_id": sid}],
+                "sessions": [{"phase": "execute", "session_id": sid}],
             }),
             json!({
                 "id": "x-bbbb",
                 "status": "in_progress",
                 "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}],
-                "sessions": [{"phase": "do", "session_id": "fbf271b1-new"}],
+                "sessions": [{"phase": "execute", "session_id": "fbf271b1-new"}],
             }),
         ];
         let holder_of = holder_of_staged(HashMap::from([(
@@ -498,7 +498,7 @@ mod tests {
             "id": "x-aaaa",
             "status": "in_progress",
             "pr_number": 2187,
-            "sessions": [{"phase": "do", "session_id": sid}],
+            "sessions": [{"phase": "execute", "session_id": sid}],
         })];
         let holder_of = holder_of_staged(HashMap::from([(
             "node:x-aaaa",
@@ -664,7 +664,7 @@ mod tests {
             "id": id,
             "status": "in_progress",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "codex",
                 "session_id": session_id,
                 "started_at": "2026-09-22T10:00:00Z"
@@ -688,7 +688,7 @@ mod tests {
                     "ended_at": "2026-09-21T22:31:41Z"
                 },
                 {
-                    "phase": "do",
+                    "phase": "execute",
                     "harness": "codex",
                     "session_id": "uuid-resuming",
                     "started_at": "2026-09-22T10:00:00Z"

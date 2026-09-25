@@ -485,7 +485,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id="session-open",
             merge_grant={"approved": "yes", "source": "config",
@@ -497,7 +497,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id="session-open",
             merge_grant={"approved": True, "source": "config",
@@ -510,7 +510,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         started_at="2026-08-20T00:00:00Z",
@@ -524,7 +524,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         merge_grant={"approved": False, "source": "none",
@@ -543,12 +543,12 @@ def test_ac1_hp_one_row_per_session_and_phase_whatever_the_harness_spelling(tmp_
     path = _make_graph(tmp_path, [entry])
 
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="claude",
+        path, entry["id"], phase="execute", harness="claude",
         session_id="legacy-1", started_at="2026-09-04T10:00:00Z",
     )
     assert (found, added) == (True, True)
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="unknown",
+        path, entry["id"], phase="execute", harness="unknown",
         session_id="legacy-1", ended_at="2026-09-04T11:00:00Z",
     )
     assert (found, added) == (True, False)
@@ -569,12 +569,12 @@ def test_ac1_err_wrong_shape_harness_is_refused_and_writes_nothing(tmp_path):
         ValueError, match=r"is a codex id; refusing harness claude"
     ):
         append_session_record(
-            path, entry["id"], phase="do", harness="claude", session_id=codex_id,
+            path, entry["id"], phase="execute", harness="claude", session_id=codex_id,
         )
     assert read_graph_strict(path)[0]["sessions"] == []
 
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="codex", session_id=codex_id,
+        path, entry["id"], phase="execute", harness="codex", session_id=codex_id,
     )
     assert (found, added) == (True, True)
 
@@ -600,7 +600,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         started_at="2026-08-20T00:00:00Z",
@@ -612,7 +612,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         ended_at="2026-08-20T00:01:00Z",
@@ -631,7 +631,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id=session_id,
             started_at="2026-08-20T00:00:00Z",
@@ -640,7 +640,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-one",
         ended_at="2026-08-20T00:01:00Z",
@@ -650,7 +650,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-two",
         ended_at="2026-08-20T00:02:00Z",
@@ -666,7 +666,7 @@ def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id=session_id,
             started_at="2026-08-20T00:00:00Z",
@@ -679,7 +679,7 @@ def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
     result = reap_open_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="dead-session",
     )
@@ -710,7 +710,7 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="closed-session",
         started_at="2026-08-20T00:00:00Z",
@@ -724,7 +724,7 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     result = reap_open_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="closed-session",
     )

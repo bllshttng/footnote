@@ -1996,7 +1996,7 @@ mod tests {
                  "dispatch_verb": "do",
                  "source": "idea", "source_kind": "operator_request",
                  "supersession": {"successor": "ab-two", "reason": "merged"},
-                 "sessions": [{"phase": "do", "harness": "claude",
+                 "sessions": [{"phase": "execute", "harness": "claude",
                                "session_id": "s-1"}],
                  "blocked_by": ["ab-two"]},
                 {"id": "ab-two", "slug": "two", "title": "Two", "type": "bug",

@@ -223,8 +223,8 @@ fn node_lists_children_blockers_and_live_sessions() {
         json!({"id": "x-blk", "status": "ready", "priority": "p2"}),
     ];
     rows[0]["sessions"] = json!([
-        {"phase": "do", "session_id": "s-live"},
-        {"phase": "do", "session_id": "s-dead"},
+        {"phase": "execute", "session_id": "s-live"},
+        {"phase": "execute", "session_id": "s-dead"},
         {"phase": "plan"}
     ]);
     rows[3]["blocked_by"] = json!(["x-top"]);

@@ -510,7 +510,7 @@ mod tests {
         let entries = vec![json!({"id": "x-1", "sessions": [
             {"phase": "blueprint", "harness": "claude", "session_id": "s", "ended_at": "2026-09-01T02:00:00Z"},
             {"phase": "think", "harness": "claude", "session_id": "s"},
-            {"phase": "do", "harness": "claude", "session_id": "s", "started_at": "2026-09-01T03:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s", "started_at": "2026-09-01T03:00:00Z"},
             {"phase": "review", "harness": "claude", "session_id": "gone"}
         ]})];
         let events = vec![
@@ -519,7 +519,7 @@ mod tests {
             ev("2026-09-01T00:50:00Z", None),
             ev("2026-09-01T01:00:00Z", Some("blueprint")),
             ev("2026-09-01T01:30:00Z", None),
-            ev("2026-09-01T03:00:00Z", Some("do")),
+            ev("2026-09-01T03:00:00Z", Some("execute")),
             ev("2026-09-01T05:00:00Z", None),
         ];
         let (fills, counts) = plan(&entries, &mut |_, sid| {
@@ -549,9 +549,9 @@ mod tests {
             ]
         );
         assert_eq!(counts["review"]["no_transcript"], 1);
-        assert_eq!(counts["do"]["end_missing"], 1);
+        assert_eq!(counts["execute"]["end_missing"], 1);
         assert_eq!(
-            counts["do"].get("end_filled"),
+            counts["execute"].get("end_filled"),
             None,
             "an open do row is never ended here"
         );

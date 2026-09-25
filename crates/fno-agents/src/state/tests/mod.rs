@@ -182,7 +182,7 @@ fn pending_session_row_roundtrips_and_absent_key_stays_absent() {
     // intact, and a row without one never grows the key (X3 passthrough).
     let mut e = sample_entry("parked");
     e.pending_session_row = Some(serde_json::json!({
-        "phase": "do",
+        "phase": "execute",
         "merge_grant": {
             "approved": true,
             "source": "config",
@@ -193,7 +193,7 @@ fn pending_session_row_roundtrips_and_absent_key_stays_absent() {
     let json = serde_json::to_string(&e).unwrap();
     let back: RegistryEntry = serde_json::from_str(&json).unwrap();
     let parked = back.pending_session_row.as_ref().unwrap();
-    assert_eq!(parked["phase"], "do");
+    assert_eq!(parked["phase"], "execute");
     assert_eq!(parked["merge_grant"]["approved"], true);
 
     // A row with no parked payload serializes no key at all, not a null.

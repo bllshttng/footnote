@@ -559,7 +559,7 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     )
     assert stamped.exit_code == 0, stamped.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
     # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
@@ -602,7 +602,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
     assert "handover from" in out.output
 
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1, rows
     assert do[0]["started_at"]
     assert not do[0].get("ended_at")
@@ -663,7 +663,7 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     )
     assert acq.exit_code == 0, acq.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
     # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
@@ -703,7 +703,7 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
     )
     assert rel.exit_code == 0, rel.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1  # one row, not two - release closed the acquire row
     assert do[0]["started_at"] and do[0]["ended_at"]
     assert do[0]["started_at"] <= do[0]["ended_at"]
@@ -732,7 +732,7 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
 def _do_rows(graph_path):
     return [
         x for x in read_graph_strict(graph_path)[0].get("sessions", [])
-        if x.get("phase") == "do"
+        if x.get("phase") == "execute"
     ]
 
 
@@ -818,7 +818,7 @@ def test_rollback_do_spares_an_earlier_open_row_from_the_same_session(
     rows = _do_rows(g)
     assert len(rows) == 1
     assert rows[0]["started_at"] == first_started
-    assert "no open do row to roll back" in rel.output
+    assert "no open execute row to roll back" in rel.output
 
 
 def test_stamp_do_and_rollback_do_are_mutually_exclusive(tmp_path, monkeypatch):

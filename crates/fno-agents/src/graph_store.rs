@@ -3176,7 +3176,7 @@ mod tests {
         let entries = vec![
             json!({
                 "id": "N1", "status": "done",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
             json!({
                 "id": "N2", "status": "done",
@@ -3205,7 +3205,7 @@ mod tests {
         let entries = vec![
             json!({
                 "id": "N2", "status": "done",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
             json!({
                 "id": "N3", "status": "in_review",
@@ -3224,7 +3224,7 @@ mod tests {
         assert_eq!(work_state(&index, "unknown-id"), WorkState::NoProvenance);
         let opencode = vec![json!({
             "id": "N4", "status": "done",
-            "sessions": [{"session_id": "ses_CaseKept", "phase": "do", "harness": "opencode"}],
+            "sessions": [{"session_id": "ses_CaseKept", "phase": "execute", "harness": "opencode"}],
         })];
         let index = work_index(&opencode);
         assert_eq!(
@@ -3248,7 +3248,7 @@ mod tests {
             }),
             json!({
                 "id": "N2", "status": "in_progress",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
         ];
         let work = work_index(&entries);
@@ -3404,7 +3404,7 @@ mod tests {
         let fresh = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-fresh",
                 "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
@@ -3415,7 +3415,7 @@ mod tests {
         let old = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-old",
                 "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
@@ -3426,7 +3426,7 @@ mod tests {
         let bad = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-bad",
                 "started_at": "not-a-date",
@@ -3440,7 +3440,7 @@ mod tests {
         // An 11-day-old open do row carries the diagnostic and the node is
         // STILL in_progress: age records uncertainty, it never clears an owner.
         let old_row = json!({
-            "phase": "do",
+            "phase": "execute",
             "harness": "claude",
             "session_id": "s-old",
             "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
@@ -3460,7 +3460,7 @@ mod tests {
         // Positive control: a 17-minute row gets NO marker and no status
         // change - youth is not strandedness.
         let fresh_row = json!({
-            "phase": "do",
+            "phase": "execute",
             "harness": "claude",
             "session_id": "s-fresh",
             "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
@@ -3494,7 +3494,7 @@ mod tests {
             "id": "n-bad",
             "status": "in_progress",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-bad",
                 "started_at": "not-a-date",
