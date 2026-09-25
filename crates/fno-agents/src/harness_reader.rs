@@ -26,6 +26,7 @@ use std::time::Duration;
 
 const AUTHORITY_TIMEOUT_S: u64 = 15;
 const INSTRUMENT_TIMEOUT_S: u64 = 30;
+#[expect(unused)]
 const PROBE_TIMEOUT_S: u64 = 5;
 const LIVE_SPAWN_TIMEOUT_S: u64 = 75;
 /// The env pins a live journey strips from every child it spawns, beside the
@@ -120,7 +121,8 @@ pub struct MeasurementRecord {
     pub requested_model: String,
 }
 
-fn run_command_bounded(cmd: &mut Command, secs: u64) -> (Option<i32>, String) {
+fn run_command_bounded(cmd: Command, secs: u64) -> (Option<i32>, String) {
+    let program = cmd.get_program().to_string_lossy().to_string();
     match output_with_timeout_result(cmd, secs) {
         Ok(out) => {
             let code = out.status.code();
@@ -128,10 +130,7 @@ fn run_command_bounded(cmd: &mut Command, secs: u64) -> (Option<i32>, String) {
             text.push_str(&String::from_utf8_lossy(&out.stderr));
             (code, text)
         }
-        Err(e) => (
-            None,
-            format!("could not run {}: {e}", cmd.get_program().to_string_lossy()),
-        ),
+        Err(e) => (None, format!("could not run {program}: {e}")),
     }
 }
 
@@ -140,7 +139,7 @@ fn run_command_bounded(cmd: &mut Command, secs: u64) -> (Option<i32>, String) {
 fn run_authority(argv: &[String]) -> (i32, String) {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    match output_with_timeout_result(&mut cmd, AUTHORITY_TIMEOUT_S) {
+    match output_with_timeout_result(cmd, AUTHORITY_TIMEOUT_S) {
         Ok(out) => {
             let code = out.status.code().unwrap_or(-1);
             let mut text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -163,7 +162,7 @@ fn authority_argv(decl: &ProbeDecl, harness: &str) -> Vec<String> {
 fn harness_version(harness: &str) -> Result<String, String> {
     let mut cmd = Command::new(harness);
     cmd.arg("--version");
-    let (code, output) = run_command_bounded(&mut cmd, AUTHORITY_TIMEOUT_S);
+    let (code, output) = run_command_bounded(cmd, AUTHORITY_TIMEOUT_S);
     let first = output.lines().next().unwrap_or("").trim().to_string();
     if code == Some(0) && !first.is_empty() {
         Ok(first)
@@ -575,7 +574,18 @@ impl IsolatedRoot {
         cmd.args(argv);
         cmd.env("READINESS_SMOKE", "1");
         self.child_env(&mut cmd);
-        run_command_bounded(&mut cmd, INSTRUMENT_TIMEOUT_S)
+        run_command_bounded(cmd, INSTRUMENT_TIMEOUT_S)
+    }
+
+    /// The same subprocess under a custom bound: the spawn waits up to
+    /// `LIVE_SPAWN_TIMEOUT_S`, the short polls up to `PROBE_TIMEOUT_S`.
+    fn fno_bounded(&self, argv: &[&str], secs: u64) -> (Option<i32>, String) {
+        let fno_bin = std::env::var("FNO_PROBE_FNO").unwrap_or_else(|_| "fno".to_string());
+        let mut cmd = Command::new(fno_bin);
+        cmd.args(argv);
+        cmd.env("READINESS_SMOKE", "1");
+        self.child_env(&mut cmd);
+        run_command_bounded(cmd, secs)
     }
 }
 
@@ -624,39 +634,6 @@ fn probe_seed(nonce: &str, name: &str, claim_key: &str) -> String {
          When you receive PROBE_SURVIVE_REQUEST={nonce}, and only after seeing \
          PROBE_SEED={nonce}, print PROBE_SURVIVE={nonce}. Remain idle."
     )
-}
-
-fn missing_marker_lines(name: &str, fail_detail: String) -> Vec<LineVerdict> {
-    let mut lines = vec![LineVerdict::new(
-        "SPAWN",
-        "fail",
-        "harness binary",
-        1,
-        fail_detail,
-    )];
-    for (line, marker) in [
-        ("ISOLATION", "run nonce inside the isolated root"),
-        (
-            "IDENTITY",
-            "local store artifact or cross-process recall nonce",
-        ),
-        ("CLAIM", "live claim holder"),
-        ("MAIL BOTH WAYS", "worker response to sent message"),
-        ("VIEW", "harness-owned screen"),
-        ("SURVIVE", "prior turn after process stop"),
-        ("ROW MATCHES", "honesty sweep and canonical-copy freshness"),
-        ("MANIFEST PINNED", "live readiness-grid capture"),
-        ("CLEANUP", "row removed after the run"),
-    ] {
-        lines.push(LineVerdict::new(
-            line,
-            "skip",
-            marker,
-            1,
-            format!("blocked by {name} binary"),
-        ));
-    }
-    lines
 }
 
 fn dry_run_lines(harness: &str) -> Vec<LineVerdict> {
@@ -746,19 +723,22 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
     let seed = probe_seed(&nonce, &name, &claim_key);
     let mut lines: Vec<LineVerdict> = Vec::new();
 
-    let (spawn_code, spawn_output) = root.fno(&[
-        "agents",
-        "spawn",
-        &seed,
-        "--name",
-        &name,
-        "--harness",
-        harness,
-        "--cwd",
-        &std::env::temp_dir().to_string_lossy(),
-        "--timeout",
-        "60",
-    ]);
+    let (spawn_code, spawn_output) = root.fno_bounded(
+        &[
+            "agents",
+            "spawn",
+            &seed,
+            "--name",
+            &name,
+            "--harness",
+            harness,
+            "--cwd",
+            &std::env::temp_dir().to_string_lossy(),
+            "--timeout",
+            "60",
+        ],
+        LIVE_SPAWN_TIMEOUT_S,
+    );
 
     // ISOLATION first: the nonce must read back from inside the root, and its
     // absence from the real root is reported only beside that positive read.
@@ -820,7 +800,7 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         lines.push(manifest_pinned_line(
             harness,
             root,
-            Some((spawn_code, spawn_output)),
+            (spawn_code, spawn_output),
             None,
         ));
         lines.push(cleanup_line(root, &name));
@@ -871,7 +851,7 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         lines.push(LineVerdict::new(
             "IDENTITY",
             "pass",
-            identity.marker(),
+            &identity.marker(),
             identity.attempts,
             session_id.clone(),
         ));
@@ -902,7 +882,7 @@ fn run_live_rubric(harness: &str, root: &IsolatedRoot) -> (Vec<LineVerdict>, Iso
         "{:032x}",
         Utc::now().timestamp_nanos_opt().unwrap_or(0) as u128
     );
-    let (mail_code, _) = root.fno(&[
+    let (_mail_code, _) = root.fno(&[
         "agents",
         "mail",
         "send",
@@ -1053,7 +1033,7 @@ fn row_matches_line(harness: &str) -> LineVerdict {
         "--json",
     ]);
     sweep.current_dir(&root);
-    let sweep_result = output_with_timeout_result(&mut sweep, INSTRUMENT_TIMEOUT_S);
+    let sweep_result = output_with_timeout_result(sweep, INSTRUMENT_TIMEOUT_S);
     let mut fresh = Command::new("git");
     fresh.args([
         "diff",
@@ -1063,7 +1043,7 @@ fn row_matches_line(harness: &str) -> LineVerdict {
         "crates/fno/src/harness_capabilities.toml",
     ]);
     fresh.current_dir(&root);
-    let fresh_result = output_with_timeout_result(&mut fresh, INSTRUMENT_TIMEOUT_S);
+    let fresh_result = output_with_timeout_result(fresh, INSTRUMENT_TIMEOUT_S);
     let (sweep_clean, sweep_detail) = match sweep_result {
         Ok(out) if out.status.success() => (
             sweep_has_no_finding(&out.stdout, harness),
@@ -1262,7 +1242,7 @@ fn rubric_report(harness: &str, live: bool) -> serde_json::Value {
         }
         return report;
     }
-    let mut root = match IsolatedRoot::establish(harness) {
+    let root = match IsolatedRoot::establish(harness) {
         Ok(root) => root,
         Err(detail) => {
             // No isolated root, no run: the refusal is the answer, and no
@@ -1355,7 +1335,7 @@ pub fn run_client(args: &[String]) -> i32 {
         .collect();
     let live = args.iter().any(|a| a == "--live");
     let write = args.iter().any(|a| a == "--write");
-    let Some(harness) = rest.first().map(String::as_str) else {
+    let Some(harness) = rest.first().map(|s| s.as_str()) else {
         eprintln!("harness-probe {mode}: exactly one harness argument is required");
         return 2;
     };

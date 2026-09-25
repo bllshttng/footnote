@@ -131,7 +131,7 @@ fn journeys_section(contract: &HarnessContract, roster: &[String]) -> String {
     }
     out.push('\n');
     for key in JOURNEY_KEYS {
-        let decl = contract.journeys.get(*key);
+        let decl = contract.journeys.get(key);
         let instrument = match decl {
             Some(decl) if decl.kind == "unprobeable" => decl.reason.clone(),
             Some(decl) if !decl.marker.is_empty() => {
@@ -153,7 +153,7 @@ fn journeys_section(contract: &HarnessContract, roster: &[String]) -> String {
         };
         out.push_str(&format!("| {key} | {instrument} |"));
         for harness in roster {
-            let cell = if *key == "wait-for-ci" {
+            let cell = if key == "wait-for-ci" {
                 let (state, refusal) = wait_for_ci_cell(harness);
                 if refusal.is_empty() {
                     format!("`{state}`")
@@ -290,9 +290,10 @@ fn skill_needs(
     skills_dir: &Path,
     vocabulary: &[String],
 ) -> Result<Vec<(String, Vec<String>)>, String> {
-    let mut entries = std::fs::read_dir(skills_dir)
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(skills_dir)
         .map_err(|e| format!("cannot read the skills directory: {e}"))?
-        .collect::<Vec<_>>();
+        .filter_map(|entry| entry.ok())
+        .collect();
     entries.sort_by_key(|e| e.file_name());
     let mut needs = Vec::new();
     for entry in entries {
@@ -420,8 +421,9 @@ fn render_verb_matrix(
             .probe
             .keys()
             .filter(|f| f.starts_with("features."))
-            .map(|f| f["features.".len()..].to_string()),
-        roster.clone(),
+            .map(|f| f["features.".len()..].to_string())
+            .collect::<Vec<String>>(),
+        roster.to_vec(),
     ]
     .concat();
     let needs = skill_needs(skills_dir, &vocabulary)?;
@@ -478,9 +480,9 @@ fn render_verb_matrix(
                         state
                     } else if roster.contains(need) {
                         if need == harness {
-                            "native"
+                            "native".to_string()
                         } else {
-                            "absent"
+                            "absent".to_string()
                         }
                     } else {
                         let decl = contract.probe.get(&format!("features.{need}"));
@@ -525,7 +527,7 @@ pub fn run_client(args: &[String]) -> i32 {
     let write = args.iter().any(|a| a == "--write");
     let table = flag_value(args, "--table");
     let root_flag = flag_value(args, "--root");
-    let root = match resolve_root(root_flag.as_deref()) {
+    let root = match resolve_root(root_flag.as_deref().map(Path::new)) {
         Ok(root) => root,
         Err(e) => {
             eprintln!("fno doctor harness-matrix: {e}");
