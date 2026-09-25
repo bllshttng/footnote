@@ -268,6 +268,28 @@ fn mint_id() -> String {
     format!("q-{hex}")
 }
 
+/// True when the question carries retract intent and names one of `ids`.
+/// The id citation is what keeps the exemption narrow - "revoke the
+/// credentials" alone never qualifies - and mirrors the nearby tier's own
+/// remedy ("name every id above and ask again").
+fn cites_retraction(question: &str, ids: &[String]) -> bool {
+    let lower = question.to_lowercase();
+    let intent = ["retract", "repeal", "rescind", "revoke", "overturn"]
+        .iter()
+        .any(|w| lower.contains(w));
+    intent && ids.iter().any(|id| lower.contains(&id.to_lowercase()))
+}
+
+/// True when the question's closing action is the retraction of a live law
+/// whose retraction only the operator may record. The lane verdict is the
+/// retract gate's own rule (`_decision_lane`), consumed as data.
+fn targets_operator_retraction(question: &str, laws: &[crate::law_match::LawRow]) -> bool {
+    laws.iter().any(|l| {
+        l.retraction_needs_operator()
+            && cites_retraction(question, std::slice::from_ref(&l.decision_id))
+    })
+}
+
 pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     // The user's name for the refusal line, and the render cap for the
     // receipt; both absent read as the plain shapes.
@@ -285,14 +307,24 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     }
 
     // The law refusal first: a live law on this subject means the question
-    // is never recorded (fail-closed, d-0fa92eb9).
+    // is never recorded (fail-closed, d-0fa92eb9) - unless the question's
+    // closing action is the retraction of that law. A law-lane row refuses
+    // every non-operator retraction (`retract_decision`), so "act on the
+    // law; do not ask" has no agent-side remedy there and the user is the
+    // only door. The closing action may ride the pin line (`--ask`), so it
+    // scans with the question, not after it.
+    let closing_text = match req.ask.as_deref() {
+        Some(ask) if !ask.trim().is_empty() => format!("{}\n{}", req.question, ask),
+        _ => req.question.clone(),
+    };
+    let retraction_ask = targets_operator_retraction(&closing_text, &req.laws);
     let law_verdict = crate::law_match::ask_answer(&crate::law_match::AskRequest {
         question: req.question.clone(),
         subject: req.subject.clone(),
         node: req.node.clone(),
         laws: req.laws.clone(),
     });
-    if !law_verdict.exact.is_empty() || law_verdict.nearby_refusal.is_some() {
+    if (!law_verdict.exact.is_empty() && !retraction_ask) || law_verdict.nearby_refusal.is_some() {
         for hit in &law_verdict.exact {
             let mut line = format!(
                 "outstanding: refused: live law already rules on '{}' ({}). Read it: \
@@ -304,6 +336,8 @@ fno inbox decisions {} --lane law --state live. Act on the law; do not ask {who}
             if req.subject.is_none() {
                 line += " If the question is about another subject, name it with --subject.";
             }
+            line += " If the question asks to retract this law, name its id in the \
+question and ask again: only the user may record that retraction.";
             answer.lines.push(line);
         }
         if let Some(refusal) = law_verdict.nearby_refusal {
@@ -370,7 +404,9 @@ One line plus a node pointer (law d-59af3235)."
         // The asker-must-decide refusal (user ruling 2026-09-22): a
         // reversible question with a recommendation is one the asker or its
         // king settles itself; it reaches the user only with a user-only
-        // reason in why_user.
+        // reason in why_user. A question whose closing action is an
+        // operator-only retraction is not the asker's to settle, whatever
+        // the file says: the same authority rule decides here.
         if parsed.reversible.trim().eq_ignore_ascii_case("yes") {
             let why = parsed.why_user.to_ascii_lowercase();
             let user_only = [
@@ -383,7 +419,7 @@ One line plus a node pointer (law d-59af3235)."
             ]
             .iter()
             .any(|k| why.contains(k));
-            if !user_only {
+            if !user_only && !retraction_ask {
                 let decide = match node {
                     Some(n) => format!("fno backlog decide {n} \"<ruling>\""),
                     None => "fno backlog decide <node> \"<ruling>\"".to_string(),
@@ -874,6 +910,124 @@ stops
         assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
     }
 
+    fn junk_law() -> crate::law_match::LawRow {
+        crate::law_match::LawRow {
+            decision_id: "d-junk0001".to_string(),
+            subject: Some("junk-law".to_string()),
+            decision: Some("a placeholder ruling".to_string()),
+            ts: Some("2026-08-29T19:20:10Z".to_string()),
+            lane: Some("law".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_question_to_retract_a_law_is_accepted() {
+        // The closing action is a retraction, and the retract gate refuses
+        // every non-operator authority on a law-lane row: the ask is the
+        // only door, so neither the law refusal nor decide_yourself fires.
+        let home = tmp_home("retract-accept");
+        let root = tmp_root("retract-accept");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "Is a net-zero Python repair legal with no grant?",
+                "Retract d-junk0001: the junk law ruling on junk-law?",
+            );
+        let mut r = req(&question, &root);
+        r.subject = Some("junk-law".to_string());
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        assert!(journal_text(&root).lines().count() == 1);
+    }
+
+    #[test]
+    fn the_retraction_exemption_needs_the_id_not_the_intent_alone() {
+        let home = tmp_home("retract-no-id");
+        let root = tmp_root("retract-no-id");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "Is a net-zero Python repair legal with no grant?",
+                "Retract the junk law ruling on junk-law?",
+            );
+        let mut r = req(&question, &root);
+        r.subject = Some("junk-law".to_string());
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn citing_the_law_id_without_retract_intent_still_refuses() {
+        let home = tmp_home("cite-no-retract");
+        let root = tmp_root("cite-no-retract");
+        let mut r = req(
+            "d-junk0001 rules on junk-law; how do we comply with it?",
+            &root,
+        );
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("note the reading".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn a_reversible_agent_decidable_question_is_still_refused() {
+        // Live laws in the payload do not widen the exemption: without the
+        // id citation and intent, rule 10 holds. No law matches this
+        // question, so the decide_yourself gate is what refuses it.
+        let home = tmp_home("retract-still-refused");
+        let root = tmp_root("retract-still-refused");
+        let question = QUESTION_FILE.replace("## Reversible\ncostly", "## Reversible\nyes");
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+    }
+
+    #[test]
+    fn a_row_without_a_lane_verdict_keeps_the_old_refusal() {
+        // Older callers send no lane; the exemption never arms, which keeps
+        // the captured goldens and every pre-lane caller on the old door.
+        let home = tmp_home("retract-no-lane");
+        let root = tmp_root("retract-no-lane");
+        let mut law = junk_law();
+        law.lane = None;
+        let mut r = req(
+            "Retract d-junk0001: the junk law ruling on junk-law?",
+            &root,
+        );
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("retract the junk law".to_string());
+        r.laws = vec![law];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn a_pin_whose_ask_line_carries_the_retraction_is_accepted() {
+        // The closing action is the --ask line: a pin whose question names
+        // the law only by subject still passes when the action names the id.
+        let home = tmp_home("retract-pin-ask");
+        let root = tmp_root("retract-pin-ask");
+        let mut r = req("the junk law on junk-law blocks this node.", &root);
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("retract d-junk0001".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        assert!(journal_text(&root).lines().count() == 1);
+    }
+
     #[test]
     fn ac9_edge_second_ask_on_same_subject_and_node_names_the_open_id() {
         let home = tmp_home("dedup");
@@ -909,6 +1063,7 @@ stops
             subject: Some("test-subject".to_string()),
             decision: Some("stay strict".to_string()),
             ts: Some("2026-09-01T00:00:00Z".to_string()),
+            lane: Some("law".to_string()),
         }];
         let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 2);

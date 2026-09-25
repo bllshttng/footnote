@@ -1824,16 +1824,8 @@ where
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live && !short_id.is_empty() {
-        // Deliberately silent on mechanism: the caller (`run_resume`) decides
-        // AFTER this returns whether the row gets --print-command'd, the
-        // Python headless wake-and-verify delegation, or (a mux pane row
-        // never reaches this arm, so that leaves) nothing else -- an
-        // "attaching" claim printed here was true when this arm always led
-        // to a bare `claude attach` exec, and stayed on the screen after the
-        // delegation replaced that exec with a wake that never attaches at
-        // all. The caller's own downstream output (the printed command, or
-        // fno-py's before -> after line) is what actually describes what
-        // happened.
+        // The caller decides whether to print the command, deliver through
+        // control.sock, or use a mux pane; downstream output names the action.
         eprintln!("fno agents resume: {name} is live");
         let argv = crate::harness_capabilities::render_session_argv_with_ids(
             "claude",
@@ -2459,28 +2451,20 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // Live claude row (short_id, no mux ref): delegate to the Python wake
-    // (resume_cli.py `_resume_claude_wake`) rather than re-deriving its
-    // pty/bracketed-paste/retry recipe natively - ONE implementation; the
-    // full rationale lives on `claude_supervisor::guard_birth`, which this
-    // arm also calls before the exec (the wake's `claude attach` can birth
-    // the supervisor; the delegation keeps its anti-recursion pin, which the
-    // guard never touches).
-    if matches!(&route, ResumeRoute::ClientResume) {
-        if let Some(code) = crate::resume_wake::claude_live_route(
-            harness,
-            &claim_uuid,
-            &mux_session,
+    // Live claude rows are read from the account's roster and resumed over
+    // control.sock; the Python wake and its supervisor-birth leg are retired.
+    if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
+        return crate::resume_wake::claude_live_route(
             entry,
             &name,
+            &row_name,
             cwd,
-            &message,
+            message.as_deref(),
             message_already_queued,
             reentry_plan.as_ref(),
             cross_project,
-        ) {
-            return code;
-        }
+            home,
+        );
     }
 
     // A codex thread wakes over the daemon before the terminal exec path.
@@ -4552,14 +4536,9 @@ mod tests {
 
     #[test]
     fn acquire_named_session_claim_guards_resume_attach_keys() {
-        // The live-attach delegation itself acquires no claim (Python's
-        // `_resume_claude_wake` does, gated on skip-eligibility, once exec'd)
-        // -- but the attach key this exercises is still the shared
-        // contract: Python's own claim builds the identical key so the two
-        // runtimes contend for the same lock on the same row whichever one
-        // ends up acquiring it. Verify that key independently
-        // refuses a second concurrent writer, the same contract
-        // acquire_resume_session_claim already has for its own key.
+        // The live-attach route acquires this key before injecting. Verify the
+        // shared lock contract independently: it refuses a second concurrent
+        // writer on the same row, as the session-claim path does for its key.
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
         let short_id = "deadbeef";
         let root = cv_tmpdir();
