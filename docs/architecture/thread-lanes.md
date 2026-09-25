@@ -29,7 +29,7 @@ The `attach` lane has two destinations. The lane alone cannot pick between them.
 | codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
 | claude | no `pre_exec`, `claude attach {short_id}` | the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host` |
 
-A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing, and the spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
+A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing. The spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
 
 That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
 
@@ -41,7 +41,7 @@ A `keeper` harness with no built lane still gets an honest refusal naming what i
 
 ## What a thread survives
 
-Measured 2026-09-21, on the question of who owns a claude thread: the owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host`. The fno daemon hosts none. The spawning `fno agents spawn` client parents nothing and exits once the session is backgrounded.
+Measured 2026-09-21, on the question of who owns a claude thread. The owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`). It hosts each session in its own `bg-pty-host`. The fno daemon hosts none. The spawning `fno agents spawn` client parents nothing and exits once the session is backgrounded.
 
 | Event | The thread | Evidence |
 |---|---|---|

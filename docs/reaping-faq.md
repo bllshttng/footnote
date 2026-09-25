@@ -90,7 +90,7 @@ These five move or remove state around sessions. None stops or removes a session
 5. open do row on an all-done session: `kept {id} (open do row on done node: {node})`. The settle pass and a `--release` ruling work through this gate
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
-8. policy `gc_decide`, open node: planning lane, then open-PR keep `kept {id} (open pr: {node} {detail})`, then the dead-worker keep `kept {id} (dead open work: {node})`, then the four releases, then the open-work window
+8. policy `gc_decide`, open node: planning lane, then open-PR keep `kept {id} (open pr: {node} {detail})`, then the dead-worker keep, then the four releases, then the open-work window
 9. the grace gate: an unresolved transcript keeps, a fresh transcript keeps unless terminal or the pid is gone
 10. live descendant: `kept {id} (live descendant: {child})`, skipped for a terminal row
 11. apply freshness re-check: `kept {id} (active: ...)` or `kept {id} (probe unread: ...)`
