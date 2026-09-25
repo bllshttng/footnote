@@ -1,9 +1,11 @@
 //! Recorded-response tests for the tracker seam (mounted by `mod.rs`).
 
 use super::github::GitHubTracker;
+use super::linear::LinearTracker;
 use super::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A hermetic env for tests that touch HOME-derived paths: FNO_CONFIG names an
 /// empty file, so no real config resolves; HOME lands in the temp dir. Hold
@@ -132,6 +134,9 @@ fn cand(id: &str, title: &str, blocked_by: &[&str]) -> Candidate {
 #[test]
 fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
     let dir = tempfile::tempdir().unwrap();
+    // hermetic_env mutates process-global env; hold the crate's env lock so
+    // parallel env-holding tests (ac2, a_scope_switch) cannot interleave.
+    let _lock = crate::claims::test_env_lock();
     let _env = hermetic_env(dir.path());
     // Sidecar file for o/r#1 with plan_path, cwd and two sessions.
     let sidecar_dir = dir.path().join(".fno/sidecar");
@@ -387,7 +392,7 @@ fn door_ops_answer_refusals_in_the_payload() {
     assert_eq!(
         doc.get("error"),
         Some(&json!(
-            "unknown tracker backend: jira. Available: graph, github"
+            "unknown tracker backend: jira. Available: graph, github, linear"
         ))
     );
     // Unknown op.
@@ -411,4 +416,184 @@ fn door_ops_answer_refusals_in_the_payload() {
         .and_then(Value::as_str)
         .unwrap_or("")
         .contains("partition"));
+}
+
+/// A recorded Linear API: each POST is answered by the marker its query
+/// document names. Pages pop in order, so a paginated list walks them.
+struct FakeLinear {
+    issue: (i32, String, String),
+    open_pages: Mutex<Vec<String>>,
+    states: (i32, String, String),
+    mutation: (i32, String, String),
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl linear::LinearHttp for FakeLinear {
+    fn post(&self, body: &str) -> Result<(i32, String, String), String> {
+        self.sent.lock().unwrap().push(body.to_string());
+        if body.contains("issueUpdate") {
+            return Ok(self.mutation.clone());
+        }
+        if body.contains("workflowStates") {
+            return Ok(self.states.clone());
+        }
+        if body.contains("TeamOpenIssues") {
+            let mut pages = self.open_pages.lock().unwrap();
+            return match pages.is_empty() {
+                true => Ok((0, String::new(), "no pages recorded".into())),
+                false => Ok((0, pages.remove(0), String::new())),
+            };
+        }
+        Ok(self.issue.clone())
+    }
+}
+
+#[test]
+fn a_linear_read_maps_the_node_spec_fields() {
+    let issue = r#"{"data": {"issues": {"nodes": [{
+        "identifier": "ENG-7", "title": "Ship it", "priority": 1,
+        "createdAt": "2026-09-01T00:00:00Z",
+        "description": "the issue body",
+        "url": "https://linear.app/example/issue/ENG-7",
+        "state": {"type": "started"},
+        "parent": {"identifier": "ENG-1"},
+        "estimate": {"value": 5.0},
+        "blockedBy": {"nodes": [
+            {"issue": {"identifier": "ENG-7"}, "relatedIssue": {"identifier": "ENG-2"}},
+            {"issue": {"identifier": "ENG-3"}, "relatedIssue": {"identifier": "ENG-7"}}]}}]}}}"#;
+    let t = LinearTracker::new(
+        Some("key".into()),
+        Some("ENG".into()),
+        Box::new(FakeLinear {
+            issue: (0, issue.into(), String::new()),
+            open_pages: Mutex::new(vec![]),
+            states: (0, "{}".into(), String::new()),
+            mutation: (0, "{}".into(), String::new()),
+            sent: Arc::new(Mutex::new(vec![])),
+        }),
+    );
+    let node = t.read("ENG-7").unwrap();
+    assert_eq!(node.id, "ENG-7");
+    assert_eq!(node.title.as_deref(), Some("Ship it"));
+    assert_eq!(node.state, State::Open);
+    assert_eq!(node.parent.as_deref(), Some("ENG-1"));
+    assert_eq!(node.blocked_by, ["ENG-2", "ENG-3"]);
+    assert_eq!(node.details.as_deref(), Some("the issue body"));
+    assert_eq!(
+        node.url.as_deref(),
+        Some("https://linear.app/example/issue/ENG-7")
+    );
+    assert_eq!(node.size.as_deref(), Some("M"));
+}
+
+#[test]
+fn a_linear_read_maps_not_found() {
+    let t = LinearTracker::new(
+        Some("key".into()),
+        Some("ENG".into()),
+        Box::new(FakeLinear {
+            issue: (
+                0,
+                r#"{"data": {"issues": {"nodes": []}}}"#.into(),
+                String::new(),
+            ),
+            open_pages: Mutex::new(vec![]),
+            states: (0, "{}".into(), String::new()),
+            mutation: (0, "{}".into(), String::new()),
+            sent: Arc::new(Mutex::new(vec![])),
+        }),
+    );
+    match t.read("ENG-9") {
+        Err(TrackerError::NotFound(id)) => assert_eq!(id, "ENG-9"),
+        other => panic!("expected NotFound, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_linear_list_open_maps_priority_size_and_paginates() {
+    let page1 = r#"{"data": {"team": {"issues": {
+        "nodes": [
+            {"identifier": "ENG-1", "title": "One", "priority": 2,
+             "state": {"type": "started"}, "createdAt": "2026-09-01T00:00:00Z",
+             "estimate": {"value": 5.0}, "blockedBy": {"nodes": [
+                {"issue": {"identifier": "ENG-1"}, "relatedIssue": {"identifier": "ENG-2"}}]}},
+            {"identifier": "ENG-2", "title": "Two", "priority": 0,
+             "state": {"type": "backlog"}, "createdAt": "2026-09-02T00:00:00Z",
+             "estimate": {"value": 12.0}, "blockedBy": {"nodes": []}}],
+        "pageInfo": {"hasNextPage": true, "endCursor": "c1"}}}}}"#;
+    let page2 = r#"{"data": {"team": {"issues": {
+        "nodes": [
+            {"identifier": "ENG-3", "title": "Three", "priority": 4,
+             "state": {"type": "completed"}, "createdAt": "2026-09-03T00:00:00Z",
+             "estimate": null, "blockedBy": {"nodes": []}}],
+        "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}"#;
+    let t = LinearTracker::new(
+        Some("key".into()),
+        Some("ENG".into()),
+        Box::new(FakeLinear {
+            issue: (0, "{}".into(), String::new()),
+            open_pages: Mutex::new(vec![page1.into(), page2.into()]),
+            states: (0, "{}".into(), String::new()),
+            mutation: (0, "{}".into(), String::new()),
+            sent: Arc::new(Mutex::new(vec![])),
+        }),
+    );
+    let cands = t.list_open().unwrap();
+    assert_eq!(cands.len(), 3);
+    assert_eq!(cands[0].priority, "p1");
+    assert_eq!(cands[0].node.size.as_deref(), Some("M"));
+    assert_eq!(cands[0].node.blocked_by, ["ENG-2"]);
+    assert_eq!(cands[1].priority, "p2");
+    assert_eq!(cands[1].node.size.as_deref(), Some("L"));
+    assert_eq!(cands[2].priority, "p3");
+    assert_eq!(cands[2].node.size, None);
+}
+
+#[test]
+fn a_linear_close_picks_the_completed_state() {
+    let states = r#"{"data": {"issues": {"nodes": [{
+        "id": "uuid-7",
+        "team": {"workflowStates": {"nodes": [
+            {"id": "s-todo", "type": "backlog"},
+            {"id": "s-done", "type": "completed"}]}}}]}}}"#;
+    let sent_log = Arc::new(Mutex::new(Vec::new()));
+    let t = LinearTracker::new(
+        Some("key".into()),
+        Some("ENG".into()),
+        Box::new(FakeLinear {
+            issue: (0, "{}".into(), String::new()),
+            open_pages: Mutex::new(vec![]),
+            states: (0, states.into(), String::new()),
+            mutation: (
+                0,
+                r#"{"data": {"issueUpdate": {"success": true}}}"#.into(),
+                String::new(),
+            ),
+            sent: sent_log.clone(),
+        }),
+    );
+    t.close("ENG-7").unwrap();
+    let sent = sent_log.lock().unwrap();
+    assert!(sent.iter().any(|b| b.contains("s-done")));
+}
+
+#[test]
+fn a_linear_tracker_without_the_api_key_refuses_naming_the_env_var() {
+    let t = LinearTracker::new(
+        None,
+        Some("ENG".into()),
+        Box::new(FakeLinear {
+            issue: (0, "{}".into(), String::new()),
+            open_pages: Mutex::new(vec![]),
+            states: (0, "{}".into(), String::new()),
+            mutation: (0, "{}".into(), String::new()),
+            sent: Arc::new(Mutex::new(vec![])),
+        }),
+    );
+    match t.read("ENG-7") {
+        Err(TrackerError::Refused(msg)) => {
+            assert!(msg.contains("FNO_TRACKER_LINEAR_API_KEY"), "{msg}")
+        }
+        other => panic!("expected Refused, got {:?}", other),
+    }
 }
