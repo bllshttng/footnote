@@ -1364,7 +1364,7 @@ def list_decisions(
     if limit and limit > 0:
         out = out[:limit]
     label = subject or "(all)"
-    if scope != "all":
+    if scope.casefold() != "all":
         try:
             from fno.rust_binary import verb_call
             answer = verb_call("law-match", {"mode": "scope-split", "rows": out})

@@ -587,7 +587,7 @@ def backlog_decisions(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
-    scope: str = typer.Option("current", "--scope", help="'all' shows every project's laws."),
+    scope: str = typer.Option("current", "--scope", metavar="current|all", help="'all' shows every project's laws."),
     subject_legacy: Optional[str] = typer.Option(
         None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
     ),
