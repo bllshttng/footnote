@@ -101,9 +101,12 @@ fn store_exec_lane(args: &[String]) -> Result<(), String> {
     fno_agents::store_exec::run_exec(cfg)
 }
 
-/// `--keeper` / `--pane` entrypoint: parse, then run the keeper to completion.
+/// `--keeper` / `--pane` entrypoint: parse, fill the build-dir env (before any
+/// thread starts, so the env write is sound), then run the keeper; every hosted
+/// harness child inherits it.
 fn pane_keeper_lane(args: &[String]) -> Result<(), String> {
     let cfg = fno_agents::pane_keeper::parse_pane_args(args)?;
+    fno_agents::cargo_build_dirs::fill_build_dir_env(&cfg.cwd);
     fno_agents::pane_keeper::run(cfg)
 }
 
