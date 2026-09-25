@@ -37,7 +37,7 @@ The agent chip folds harness, model and effort into one value chip. With a model
 
 - One launch request id equals one spawn attempt, enforced twice. The composer disables the button while an attempt it armed is in flight. The server's launch desk replays the in-flight or finished attempt for a duplicate submission instead of spawning again.
 - The client remembers the attempt across close/reopen. A reopened composer cannot silently spawn a replacement. It shows the pending or resolved attempt.
-- An `Unknown` outcome leaves birth unresolved. The `cancel` chip (Enter on it returns to editing with the draft intact) resolves it; retry arms a fresh request id. The draft survives throughout.
+- An `Unknown` outcome leaves birth unresolved. The `cancel` chip (Enter on it returns to editing with the draft intact) resolves it. Retry arms a fresh request id. The draft survives throughout.
 - An empty message is an intentionally seedless launch. The spawn door decides whether the harness/substrate combination accepts one, and its refusal is the visible explanation. No fabricated seed.
 
 ## Boundaries not crossed
