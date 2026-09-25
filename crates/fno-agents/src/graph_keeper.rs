@@ -1286,7 +1286,7 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     reply
 }
 
-fn is_write_method(method: &str) -> bool {
+pub(crate) fn is_write_method(method: &str) -> bool {
     matches!(method, "commit" | "commit_rows" | "op" | "api")
 }
 

@@ -1378,8 +1378,14 @@ pub fn delete_session(base_url: &str, token: &str, session_id: &str) -> Result<(
 /// listing. Below this version the field is UNVERIFIED, not known-absent, so a
 /// caller skips instead of guessing: an older serve that ignored the field
 /// would turn a retirement that works today into one that holds its row
-/// forever.
+/// forever. Above [`OPENCODE_V2_FLOOR`] the argument binds upward: the 2.x
+/// HTTP API is a different contract, and an unverified version is skipped,
+/// not guessed at.
 pub const ARCHIVE_MIN_VERSION: (u32, u32, u32) = (1, 14, 50);
+
+/// First opencode 2.x release. The archive op was measured against the 1.x
+/// HTTP API only, so a serve at or above this version is skipped and told why.
+pub const OPENCODE_V2_FLOOR: (u32, u32, u32) = (2, 0, 0);
 
 /// What one archive attempt measured. `Survived` is an outcome, not an error:
 /// the write was accepted and the stored record still carries no
@@ -1457,7 +1463,14 @@ pub fn archive_capable_serve(home: &AgentsHome) -> Option<ServeHandle> {
     if health.get("healthy") != Some(&serde_json::Value::Bool(true)) {
         return None;
     }
-    if !version_at_least(health.get("version")?.as_str()?, ARCHIVE_MIN_VERSION) {
+    let version = health.get("version")?.as_str()?.to_string();
+    if !version_at_least(&version, ARCHIVE_MIN_VERSION) {
+        return None;
+    }
+    if version_at_least(&version, OPENCODE_V2_FLOOR) {
+        eprintln!(
+            "opencode serve reports {version}; the archive op is measured on 1.14.50 up to but not including 2.0.0, so it is skipped"
+        );
         return None;
     }
     Some(ServeHandle {
