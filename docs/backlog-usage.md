@@ -91,6 +91,8 @@ When a PR opens outside the Footnote PR path, repair its node with `fno backlog 
 
 Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno king escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
 
+A repeat `fno backlog note` on a node with no encounter from the same session ends its receipt with the encounter command. A note is prose nothing ranks. An encounter is the row `fno backlog demand` reads.
+
 ```bash
 fno backlog encounter <id> --evidence "cost two wrong diagnoses before I found the real seam."
 fno backlog encounter <id> --operator --evidence "the operator hit the same seam."
