@@ -175,6 +175,8 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
+            "--attention-api" => args.attention_api = true,
+            "--attention-port" => args.attention_port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
         }
     }
