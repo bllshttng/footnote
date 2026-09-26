@@ -197,6 +197,7 @@ pub mod kill_criteria;
 pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
+pub mod king_checkin_blueprint;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
