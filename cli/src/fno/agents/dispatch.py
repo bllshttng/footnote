@@ -6706,7 +6706,7 @@ def wake_and_deliver(
             return False, f"spawn-exit-{exc.code}"
 
     try:
-        if entry is not None and getattr(entry, "status", None) == "exited":
+        if entry is not None and entry.status == "exited" and fork_lineage.respawn_ok(entry):
             short = (
                 getattr(entry, "short_id", None)
                 or getattr(entry, "name", "")

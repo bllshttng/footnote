@@ -1031,6 +1031,10 @@ def _hermetic_resume_pin(monkeypatch):
     real = fork_lineage.spawn_axes_call
 
     def _answer(payload):
+        if payload.get("reentry_mechanism") is not None:
+            # The rung-2 respawn gate asks the Rust reentry resolver; the
+            # hermetic default keeps today's respawn-in-place behavior.
+            return {"mechanism": "respawn"}
         pin = payload.get("resume_pin")
         if pin is None:
             return real(payload)
