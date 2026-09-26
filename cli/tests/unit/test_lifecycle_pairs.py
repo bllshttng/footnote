@@ -85,9 +85,16 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- self-inverse: the same verb reverses itself --
     Pair("backlog", "rank", "rank"),
     Pair("backlog", "update", "update"),
-    # requeue releases a dead worker's wedge (open do row + claim); target init
-    # acquires the next holder's lockfile.
-    Pair("backlog", "requeue", "update"),
+    # requeue releases a dead worker's wedge (open do row + claim). Its old
+    # re-lock correction (update --locked-by) retired with the graph mirror:
+    # the next holder takes a claim store lock instead (fno agents claim
+    # acquire node:<node>), an operation outside this app.
+    Pair(
+        "backlog",
+        "requeue",
+        None,
+        "the re-lock door retired with the graph claim mirror; re-acquisition is a claim store acquire, not a backlog verb",
+    ),
     # contain stamps contained_in + parent; its correction is update's
     # --parent null flag, which the contain epilog names verbatim.
     Pair("backlog", "contain", "update"),
@@ -219,8 +226,9 @@ def test_the_help_check_can_fail():
 def test_a_transition_with_no_inverse_states_why_in_its_own_help():
     """`inverse=None` is allowed, silence is not.
 
-    No row currently takes this branch, so the positive control below is what
-    keeps the test from being a green light that never ran.
+    The requeue row takes this branch (its re-lock door retired with the
+    graph claim mirror), so the positive control below keeps the test from
+    being a green light that never ran.
     """
     unexplained: list[str] = []
     for pair in LIFECYCLE_PAIRS:

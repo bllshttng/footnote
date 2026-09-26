@@ -3864,7 +3864,10 @@ def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Return a node wedged in_progress by a dead worker to the queue."""
+    """Return a node wedged in_progress by a dead worker to the queue.
+
+    The re-lock door retired with the graph claim mirror; re-acquisition is a claim store acquire, not a backlog verb.
+    """
     from fno.backlog.requeue import cmd_requeue as _impl
 
     _impl(node, json_out=json_out)

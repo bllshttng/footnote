@@ -805,6 +805,9 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
     """A merged-PR close stamps a never-shipped plan shipped->done using the
     evidencing PR url, rather than calling graduate (a no-op) on its own
     (ab-bd9f476c)."""
+    import os
+    import time
+
     from fno.graph._reconcile import PrMergeState
 
     plan = tmp_path / "p.md"
@@ -825,6 +828,18 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
             }
         ],
     )
+    # The store projects the claim store over every read, so the stamp's
+    # session id is the live claim holder, not the graph row's retired
+    # mirror field: seed the holder the stamp should carry.
+    now_ms = int(time.time() * 1000)
+    claims_dir = tmp_path / ".fno" / "claims"
+    claims_dir.mkdir(parents=True)
+    (claims_dir / "node%3Aab-done0001.lock").write_text(
+        f'schema_version: 1\nkey: "node:ab-done0001"\nholder: "sess-9"\n'
+        f"acquired_at: {now_ms}\npid: {os.getpid()}\nhost: test-host\n"
+        f'expires_at: {now_ms + 900_000}\nreason: "done stamp fixture"\n'
+    )
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
 
     def merged_query(pr_number, **kwargs):
         return PrMergeState(
