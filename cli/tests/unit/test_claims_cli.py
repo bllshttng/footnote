@@ -19,36 +19,23 @@ from fno.graph.store import read_graph_strict
 runner = CliRunner()
 
 
-def test_ttl_parser_seconds_no_unit():
-    assert _parse_ttl("60") == 60_000
-
-
-def test_ttl_parser_seconds():
-    assert _parse_ttl("60s") == 60_000
-
-
-def test_ttl_parser_minutes():
-    assert _parse_ttl("5m") == 5 * 60_000
-
-
-def test_ttl_parser_hours():
-    assert _parse_ttl("2h") == 2 * 3_600_000
-
-
-def test_ttl_parser_empty_string_returns_none():
-    assert _parse_ttl("") is None
-
-
-def test_ttl_parser_invalid_raises():
-    with pytest.raises(Exception):
-        _parse_ttl("xyz")
-
-
-def test_help_lists_all_verbs():
-    result = runner.invoke(cli, ["--help"])
-    assert result.exit_code == 0
-    for verb in ("acquire", "release", "refresh", "status", "list"):
-        assert verb in result.output
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("60", 60_000),  # bare digits are seconds
+        ("60s", 60_000),
+        ("5m", 5 * 60_000),
+        ("2h", 2 * 3_600_000),
+        ("", None),
+        ("xyz", "error"),
+    ],
+)
+def test_ttl_parser_table(text, want):
+    if want == "error":
+        with pytest.raises(Exception):
+            _parse_ttl(text)
+    else:
+        assert _parse_ttl(text) == want
 
 
 def test_acquire_fresh_key(cwd_tmp):

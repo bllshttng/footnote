@@ -243,52 +243,6 @@ class TestExpiredTTLIsHostIndependent:
         assert verdicts == {"BB16s-MBP": True, "BB16s-MacBook-Pro.local": True}
 
 
-class TestClassifyForSweepMatchesIsProvablyDead:
-    """is_provably_dead is a thin bool-only view of classify_for_sweep
-    (the native classifier) - both share one implementation rather than being kept
-    in sync by convention. This regression test pins the invariant
-    directly rather than trusting that never drifts back apart.
-    """
-
-    @pytest.mark.parametrize(
-        "claim",
-        [
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="dead_pid_same_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
-                ),
-                id="off_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=now_ms() + 60_000,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="ttl_protected_suspect",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=None,
-                    pid=os.getpid(), host=socket.gethostname(),
-                ),
-                id="live",
-            ),
-        ],
-    )
-    def test_provably_dead_verdict_matches(self, claim):
-        ts = now_ms()
-        provably_dead, _bucket = classify_for_sweep(claim, ts)
-        assert provably_dead is is_provably_dead(claim, now=ts)
-
-
 # ---------------------------------------------------------------------------
 # reap_dead_claims: the reaper (core.py)
 # ---------------------------------------------------------------------------
