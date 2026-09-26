@@ -23,6 +23,19 @@ if TYPE_CHECKING:
 _UNKNOWN_WARN_CAP = 3
 
 
+def _json_surface() -> bool:
+    """The invocation asks for machine-readable output. Two spellings: the
+    root ``--json/-J`` flag (read off the live click context) and any verb's
+    own ``--json/-J`` token, read off raw argv. A reader may capture stderr
+    together with stdout, so diagnostics stay off a parse; the unknown-key
+    findings remain on ``fno config doctor``."""
+    ctx = click.get_current_context(silent=True)
+    root = ctx.find_root() if ctx is not None else None
+    if root is not None and isinstance(root.obj, dict) and root.obj.get("json"):
+        return True
+    return "--json" in sys.argv or "-J" in sys.argv
+
+
 class SettingsRefused(click.ClickException, ValueError):
     """A settings file carries a value the schema refuses; the message names
     the file, the key, the value and the legal set.
@@ -180,15 +193,16 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     # with this.
     import importlib
 
-    problems = importlib.import_module("fno.config_readback").unknown_key_problems(layers)
-    for line in problems[:_UNKNOWN_WARN_CAP]:
-        print(f"fno config: {line}", file=sys.stderr)
-    if len(problems) > _UNKNOWN_WARN_CAP:
-        print(
-            f"fno config: ... and {len(problems) - _UNKNOWN_WARN_CAP} more unknown "
-            "config key(s); `fno config doctor` names them all",
-            file=sys.stderr,
-        )
+    if not _json_surface():
+        problems = importlib.import_module("fno.config_readback").unknown_key_problems(layers)
+        for line in problems[:_UNKNOWN_WARN_CAP]:
+            print(f"fno config: {line}", file=sys.stderr)
+        if len(problems) > _UNKNOWN_WARN_CAP:
+            print(
+                f"fno config: ... and {len(problems) - _UNKNOWN_WARN_CAP} more unknown "
+                "config key(s); `fno config doctor` names them all",
+                file=sys.stderr,
+            )
 
     raw = _revoke_unbacked_optouts(raw)
     try:

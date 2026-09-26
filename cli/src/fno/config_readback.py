@@ -29,6 +29,10 @@ _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
 #: key the loader would lift must not report as unknown: warning on a working
 #: key is cried wolf.
 _HONORED_LEGACY_KEYS = frozenset({"recovery.retire_grace_s"})
+#: Top-level blocks retired with the md attention arm (attention-items.md
+#: "Config keys"): a leftover row is dead config, and "unknown; ignored"
+#: reads as if it once worked by modeling. Named as retired instead.
+_RETIRED_BLOCKS = frozenset({"attention", "reach_me"})
 
 _Model = Optional[type[BaseModel]]
 
@@ -165,6 +169,13 @@ def unknown_key_problems(
         except Exception:  # noqa: BLE001
             continue
         for key in unknown:
+            block = key.split(".", 1)[0]
+            if block in _RETIRED_BLOCKS:
+                problems.append(
+                    f"[[{block}]] rows are retired (set in {path}): question "
+                    "pages need no setup. Delete the row."
+                )
+                continue
             hints = _near_miss_keys(key)
             tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
             problems.append(f"{key} (set in {path}) is not a modeled config key; {tail}")
