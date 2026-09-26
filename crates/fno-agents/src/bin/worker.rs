@@ -101,7 +101,9 @@ fn main() {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
              (claude stream-json adoption), --store-keeper (graph store), \
-             --store-exec (one store request), or --law-exec (one law request)"
+             --store-exec (one store request), --law-exec (one law request on \
+             stdin), or --law-exec-arg <request> (one law request by argv, \
+             stdin inherited)"
         );
         std::process::exit(2);
     }
