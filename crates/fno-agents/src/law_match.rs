@@ -852,7 +852,15 @@ fn edit_answer(
     index_path: Option<&std::path::Path>,
     state_root: Option<&std::path::Path>,
 ) -> Value {
-    let targets = normalize_paths(&req.paths);
+    // The hook sends one target per array element already; comma-splitting
+    // here would corrupt a legal path that contains a comma. The record door
+    // owns the comma-joined flag form and normalizes at its own edge.
+    let targets: Vec<String> = req
+        .paths
+        .iter()
+        .map(String::as_str)
+        .map(str::to_owned)
+        .collect();
     let hook_event = req
         .hook
         .get("hook_event_name")
