@@ -74,6 +74,7 @@ pub mod blueprint_judge;
 mod boot_revival;
 mod bounded_cmd;
 mod bounded_spawn;
+pub mod burn_watch;
 mod cancel_sentinel;
 pub mod canonical_check;
 pub mod capability_leaves;
