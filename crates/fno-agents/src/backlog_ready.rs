@@ -554,9 +554,10 @@ pub fn is_blueprint_doc(entry: &Value) -> bool {
 /// from the node's details at init). Difficulty picks the VERB; the separate
 /// ruling on which model runs a /blueprint only applies once blueprint IS the
 /// verb, so a node routed straight to target owes no blueprint lane. The
-/// `config.dispatch.blueprint_floor` knob carries "high" (this default) or
-/// "medium" (blueprint for medium and up, the pre-lean table); anything else
-/// degrades to the default on both the Python and the Rust side.
+/// `config.dispatch.blueprint_floor` knob carries "high" (this default),
+/// "medium" (blueprint for medium and up, the pre-lean table), "low"
+/// (blueprint every plan-less node), or "never" (target everything); anything
+/// else degrades to the default on both the Python and the Rust side.
 pub const DEFAULT_BLUEPRINT_FLOOR: &str = "high";
 
 /// The node tag that marks an open premise question blocking dispatch - the
@@ -587,16 +588,18 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
 }
 
 /// [`effective_verb`] with the operator's blueprint floor. `floor` reads
-/// "high" (lean default) or "medium" (pre-lean: blueprint for medium and up);
+/// "high" (lean default), "medium" (pre-lean: blueprint for medium and up),
+/// "low" (blueprint every plan-less node), or "never" (target everything);
 /// any other value degrades to the default.
 pub fn effective_verb_with_floor(
     entry: &Value,
     floor: &str,
 ) -> Result<(Option<String>, String), String> {
-    let floor = if floor.trim().eq_ignore_ascii_case("medium") {
-        "medium"
-    } else {
-        DEFAULT_BLUEPRINT_FLOOR
+    let floor = match floor.trim().to_ascii_lowercase().as_str() {
+        "medium" => "medium",
+        "low" => "low",
+        "never" => "never",
+        _ => DEFAULT_BLUEPRINT_FLOOR,
     };
     let node_id = get_str(entry, "id").unwrap_or("unknown");
     let raw = get_str(entry, "dispatch_verb")
@@ -637,10 +640,11 @@ pub fn effective_verb_with_floor(
                 .map(|s| s.trim().to_ascii_uppercase())
                 .unwrap_or_default();
             let premise = has_premise_question(entry);
-            let wants_blueprint = if floor == "medium" {
-                matches!(difficulty.as_str(), "medium" | "high")
-            } else {
-                difficulty == "high" || size == "L" || premise
+            let wants_blueprint = match floor {
+                "never" => false,
+                "low" => true,
+                "medium" => matches!(difficulty.as_str(), "medium" | "high"),
+                _ => difficulty == "high" || size == "L" || premise,
             };
             if wants_blueprint {
                 ("/blueprint", format!("intake difficulty={difficulty}"))
@@ -2288,6 +2292,24 @@ mod tests {
         assert_eq!(verb.as_deref(), Some("/blueprint"));
         let (verb, _) = effective_verb_with_floor(&row, "spicy").unwrap();
         assert_eq!(verb.as_deref(), Some("/target"));
+    }
+
+    #[test]
+    fn low_floor_blueprints_every_planless_node_and_never_targets_everything() {
+        let low = json!({"id": "x-low", "difficulty": "low"});
+        let high = json!({"id": "x-high", "difficulty": "high"});
+        for row in [&low, &high] {
+            let (verb, _) = effective_verb_with_floor(row, "low").unwrap();
+            assert_eq!(verb.as_deref(), Some("/blueprint"), "{}", row["id"]);
+        }
+        // "never" overrides every blueprint clause, size L and the
+        // premise-question tag included.
+        let size_l = json!({"id": "x-big", "difficulty": "low", "size": "L"});
+        let premise = json!({"id": "x-q", "difficulty": "low", "tags": ["premise-question"]});
+        for row in [&low, &high, &size_l, &premise] {
+            let (verb, _) = effective_verb_with_floor(row, "never").unwrap();
+            assert_eq!(verb.as_deref(), Some("/target"), "{}", row["id"]);
+        }
     }
 
     #[test]

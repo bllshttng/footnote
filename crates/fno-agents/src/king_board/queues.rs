@@ -737,6 +737,13 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 "id": node.get("id"),
                 "priority": node.get("priority"),
                 "title": node.get("title"),
+                // The verb table reads these four; a slim row would refuse
+                // every candidate as undecidable, and a dropped declared
+                // verb would lose its precedence over the derived answer.
+                "difficulty": node.get("difficulty"),
+                "size": node.get("size"),
+                "tags": node.get("tags"),
+                "dispatch_verb": node.get("dispatch_verb"),
             })
         })
         .collect();
