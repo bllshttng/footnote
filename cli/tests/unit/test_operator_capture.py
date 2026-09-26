@@ -30,7 +30,28 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native read-backs resolve the store through FNO_CONFIG's state_dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
+
+
+def _native_backlog(*args: str) -> tuple[int, str, str]:
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 @pytest.fixture
@@ -140,9 +161,9 @@ def test_idea_operator_request_reads_back(tmp_graph, operator_turn):
     assert node["request_origin"] == "operator_request"
     nid = node["id"]
 
-    read = runner.invoke(app, ["backlog", "get", nid, "--field", "source_kind"])
-    assert read.exit_code == 0, read.output
-    assert "operator_request" in read.stdout
+    read_code, read_out, read_err = _native_backlog("get", nid, "--field", "source_kind")
+    assert read_code == 0, read_err
+    assert "operator_request" in read_out
 
 
 def test_idea_rejects_unknown_source_kind(tmp_graph):
@@ -258,12 +279,11 @@ def test_find_filters_by_source_kind(tmp_graph):
 
     gs.commit_rows_via_store(tmp_graph, seed)
 
-    result = runner.invoke(
-        app,
-        ["backlog", "find", "ask", "--source-kind", "operator_request", "--json"],
+    find_code, find_out, find_err = _native_backlog(
+        "find", "ask", "--source-kind", "operator_request", "--json",
     )
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
+    assert find_code == 0, find_err
+    rows = json.loads(find_out)
     assert [r["id"] for r in rows] == ["ab-opr000001"]
 
 

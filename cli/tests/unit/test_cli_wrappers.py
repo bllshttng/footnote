@@ -57,11 +57,11 @@ def test_top_level_help_lists_new_subapps():
         assert result.output, f"`fno {noun} --help` produced empty output"
 
 
-# ── fno backlog get, several ids: forwards to `fno-agents graph-get` (x-997a) ──
+# ── fno backlog get: the native exec shim ──
 #
-# One id keeps the all-Python path (untouched, exercised elsewhere by this
-# command's other tests). Several ids is a NEW shape whose whole job is the
-# argv it hands the binary, so that argv is what these pin.
+# The graph-mode read ladder is the native binary's; the Python surface execs
+# it. Several ids is the batch shape whose whole job is the argv it hands the
+# binary, so that argv is what these pin.
 
 _FAKE_GET_BIN = "/fake/bin/fno-agents"
 
@@ -94,23 +94,26 @@ def test_get_two_ids_forwards_graph_get_argv(monkeypatch):
 
     result = runner.invoke(app, ["backlog", "get", "x-997a", "x-374b"], env=_ENV)
     assert result.exit_code == 0
-    assert captured["cmd"] == [_FAKE_GET_BIN, "graph-get", "x-997a", "x-374b", "--json"]
+    assert captured["cmd"] == [_FAKE_GET_BIN, "backlog", "get", "x-997a", "x-374b", "--json"]
 
 
-def test_get_one_id_never_invokes_the_binary(monkeypatch):
-    """A single id is the existing all-Python path; the binary must not even
-    be resolved, let alone invoked."""
-    import fno.rust_binary
+def test_get_one_id_execs_the_binary_without_the_batch_flag(monkeypatch):
+    """A single graph-mode id is the native binary's read now; it execs
+    without the batch --json flag the multi-id dispatch appends."""
+    import subprocess
 
-    def _fail_resolve():
-        raise AssertionError("resolve_binary() called for a single-id get")
+    captured = {}
 
-    monkeypatch.setattr(fno.rust_binary, "resolve_binary", _fail_resolve)
+    def _stub_run(cmd, check=False, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _StubGetResult(returncode=1)
+
+    _patch_get_binary(monkeypatch)
+    monkeypatch.setattr(subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["backlog", "get", "x-nonexistent-abc"], env=_ENV)
-    # Reads through to the normal "no node matching" miss, not the batch path.
+    assert captured["cmd"] == [_FAKE_GET_BIN, "backlog", "get", "x-nonexistent-abc"]
     assert result.exit_code == 1
-    assert "No node matching" in result.output
 
 
 def test_get_propagates_the_binary_exit_code(monkeypatch):

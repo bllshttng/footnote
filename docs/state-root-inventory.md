@@ -20,6 +20,7 @@ One file per install. These belong at the root.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
+| `graph.json` | `fno doctor graph export --now`, the only writer: an on-demand JSON snapshot of the graph.db store; read the store with `fno backlog get`, `fno backlog find`, or the tracker snapshot door (`fno-agents backlog get` stdin door) | written only when exported |
 | `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate); reached from the `paths.graph_json()` anchor via its `.db` sibling | durable row store; WAL sidecars are SQLite-managed |
 | `graph.json.lock` | `crates/fno-agents/src/graph_store.rs::BoundedLock` | the publish cycle's bounded lock beside the store; the keeper holds it for the duration of one mutation |
 | `graph.md` | `graph/_constants.py` | regenerated per write |

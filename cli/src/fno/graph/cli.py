@@ -3200,6 +3200,7 @@ def cmd_update(
         normalize_tag,
     )
     from fno.graph.store import commit_rows_via_store
+    from fno.graph._contain import release_contained
     from fno.graph._intake import (
         _parse_blocker_list, _validate_blocker_ids, _find_node,
         _would_create_cycle, _would_exceed_epic_depth,
@@ -3750,8 +3751,7 @@ def cmd_update(
                 # an `== _owner` test contradicted it - re-parenting onto a
                 # descendant of the unit silently un-contained the node, making
                 # it independently dispatchable and costed again and dropping it
-                # from the owner's merge cascade. Walk up from the new parent;
-                # depth-capped and cycle-safe like the other ancestor walks.
+                # from the owner's merge cascade.
                 _cur = (_find_node(entries, _new_parent) or {}).get("id") if _new_parent else None
                 _seen: set = set()
                 _still_contained = False
@@ -3762,7 +3762,7 @@ def cmd_update(
                     _seen.add(_cur)
                     _cur = (_find_node(entries, _cur) or {}).get("parent")
                 if not _still_contained:
-                    node.pop("contained_in", None)
+                    release_contained(entries, node)
             if parent.lower() == "null":
                 node["parent"] = None
             else:
@@ -4958,10 +4958,6 @@ def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
             typer.echo(json.dumps(value))
         else:
             typer.echo(value)
-    elif grouped:
-        from fno.graph.grouped import render_grouped
-
-        typer.echo(render_grouped(e))
     else:
         typer.echo(json.dumps(e, indent=2))
 
@@ -4981,7 +4977,6 @@ def cmd_get(
         help="Exact-only resolution (id/slug/bare-hex); never fuzzy. The stable surface the /think router seeds a design from - a miss exits 1 so a typo'd token can never silently seed.",
     ),
 ) -> None:
-    from fno.graph.fuzzy import resolve_node
     from fno.tracker import active_backend_name
 
     from fno.graph.get_batch import resolve_or_dispatch
@@ -4998,37 +4993,6 @@ def cmd_get(
     if active_backend_name() != "graph":
         _render_external_get(id, field)
         return
-
-    # Strict read: exit 1 stays "read cleanly, node absent"; an unreadable graph
-    # gets GRAPH_UNREADABLE_EXIT so a caller cannot mistake it for an absent node.
-    entries = _resolve_entries_or_exit(id)
-    # Deterministic resolution tiers 1-3 (): exact ab-id, exact slug,
-    # bare-8-hex re-prefix. A slug/bare-hex argument resolves to the same node
-    # an ab-id would, so the spawn VALIDATE step (`fno backlog get "$node"`)
-    # accepts every exact entry form. `resolve_node` is already exact-only, so
-    # --strict pins that contract for the router (): should `get` ever gain
-    # a describe-it fuzzy default, --strict stays the exact-only seed path.
-    match = resolve_node(id, entries)
-    if match.kind == "exact":
-        e = match.candidates[0]
-        from fno.graph._intake import project_root_from_settings
-
-        root = project_root_from_settings(e["project"]) if e.get("project") else None
-        e["_resolved_cwd"] = root or e.get("cwd")
-        _echo_node_entry(e, field, grouped)
-        return
-
-    # Read-through fallback: a node the sweep archived still resolves here
-    # (read-only). Mutating verbs stay working-graph-only and error instead.
-    from fno.graph.store import read_archive_entries, resolve_node_with_archive, served_store_path
-
-    matched_entry = resolve_node_with_archive(id, read_archive_entries())
-    if matched_entry is not None:
-        _echo_node_entry(matched_entry, field, grouped)
-        return
-
-    typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {served_store_path(_graph_path())}", err=True)
-    raise typer.Exit(code=1)
 
 
 # -- project-root (work-map resolution; null-for-unmapped) --
@@ -10999,168 +10963,6 @@ def _do_intake_multi(
     )
     if tallies["intaked"] + tallies["claimed"] + tallies["already"] == 0:
         raise typer.Exit(code=4)
-
-
-# -- find --
-
-
-@cli.command("find")
-def cmd_find(
-    query: str = typer.Argument(
-        ..., help="ab-id / id-prefix / slug / bare-hex / free-text description"
-    ),
-    domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
-    status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
-    source_kind: Optional[str] = typer.Option(
-        None,
-        "--source-kind",
-        help=(
-            "Filter by origin: organic|from_inbox|from_observation|from_supervisor|"
-            "operator_request. operator_request lists the operator's own asks."
-        ),
-    ),
-    use_fts: bool = typer.Option(
-        False,
-        "--fts",
-        help=(
-            "Full-text search (BM25-ranked whole-word matching) over title+slug+details "
-            "via a hash-validated cache beside graph.json. Exact id/slug lookups are "
-            "unchanged. Falls back to substring search where FTS5 is unavailable."
-        ),
-    ),
-    limit: int = typer.Option(
-        20, "--limit", "-L", min=1, help="Max results for the --fts lane (BM25 rank order)."
-    ),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON array"),
-) -> None:
-    """Search graph entries: exact id/slug/bare-hex, else high-recall over title+slug+details.
-
-    The describe-it candidate generator (): a free-text query matches
-    across title, slug, AND details so the model has the recall it needs to rank
-    a fuzzy description. An ``ab-`` query keeps the existing id/prefix resolution
-    (resolve_id) byte-for-byte so `done`/intake callers are unaffected.
-    """
-    from fno.graph.fuzzy import resolve_id, resolve_node, search_entries
-    from fno.graph.slug import format_handle
-
-    entries = _display_entries("find")
-    q = (query or "").strip()
-
-    def _resolve_against(pool: list[dict]) -> list[dict]:
-        # Exact resolution first (id / slug / bare-hex). Trying resolve_node
-        # BEFORE the ab- prefix branch is deliberate: a title can slugify to an
-        # `ab-`-led slug (e.g. "AB test cleanup" -> `ab-test-cleanup`), which
-        # resolve_id would reject as a malformed id; the exact-slug tier catches
-        # it so `find` and `get` resolve the same slug (codex P2).
-        node = resolve_node(query, pool)
-        if node.kind == "exact":
-            return list(node.candidates)
-        if q.startswith("ab-"):
-            # Canonical id / id-prefix path - unchanged (resolve_id owns it).
-            match = resolve_id(query, pool)
-            if match.kind == "ambiguous":
-                return list(match.candidates)
-            if match.kind in {"exact", "fuzzy", "branch_derived"}:
-                return [e for e in pool if e.get("id") == match.id]
-            return []
-        # --fts: BM25-ranked full-text over the hash-validated cache. Ranked
-        # ids -> pool entries in rank order; nodes dropped by --domain/
-        # --project/--status simply shrink the output. Any FTS5 absence or
-        # cache failure degrades to the substring lane (a stranger on an odd
-        # Python must not lose search).
-        if use_fts and pool is entries:
-            # The cache indexes the LOCAL graph file; under an external
-            # tracker the entries are not those bytes, so the fts lane must
-            # not answer (same backend gate as the archive read-through).
-            from fno.tracker import active_backend_name
-
-            if active_backend_name() == "graph":
-                try:
-                    from fno.graph import fts as graph_fts
-
-                    # Full ranked set, THEN filters, THEN truncate: slicing
-                    # first could evict every in-filter match in favor of
-                    # better-ranked out-of-filter ones.
-                    ranked = graph_fts.search(q, _graph_path(), limit=None)
-                    by_id = {
-                        e.get("id"): e for e in pool if isinstance(e.get("id"), str)
-                    }
-                    kept = [
-                        by_id[i]
-                        for i in ranked
-                        if i in by_id and _passes_filters(by_id[i])
-                    ]
-                    return kept[:limit]
-                except Exception as exc:  # noqa: BLE001 - degrade, never fail
-                    typer.echo(f"warning: fts unavailable ({exc}); using substring search", err=True)
-        # High-recall describe-it search over title+slug+details.
-        return search_entries(query, pool, fields=("title", "slug", "details"))
-
-    def _passes_filters(e: dict) -> bool:
-        if domain is not None and e.get("domain") != domain:
-            return False
-        if project is not None and e.get("project") != project:
-            return False
-        if status is not None and e.get("status") != status:
-            return False
-        # A node written before this field existed carries the organic default,
-        # so the filter reads the resolved value, never a missing key.
-        if source_kind is not None and (e.get("source_kind") or SOURCE_KIND_DEFAULT) != source_kind:
-            return False
-        return True
-
-    matched = [e for e in _resolve_against(entries) if _passes_filters(e)]
-
-    # Read-through fallback to the archive: a node the sweep drained out of the
-    # working graph must still surface here, or archiving done nodes silently
-    # destroys the dedup recall `/think` + `/blueprint` depend on. Mirrors
-    # `backlog get`'s fallback: working graph first, archive read lazily only on
-    # a miss, results stamped `_archived`. A corrupt/absent archive is a miss,
-    # never a crash (design "Errors").
-    if not matched:
-        from fno.graph.store import read_archive_entries
-        from fno.tracker import active_backend_name
-
-        # The archive is default-backend storage; no read-through behind an
-        # external selection (stale local rows are the leak the seam closes).
-        if active_backend_name() == "graph":
-            # Guard the whole read + resolve + filter: a corrupt archive OR a
-            # malformed archived entry must degrade to a miss, never propagate a
-            # crash to the caller (design "Errors").
-            try:
-                archived = read_archive_entries(path=_graph_path())
-                hits = [
-                    {**e, "_archived": True}
-                    for e in _resolve_against(archived)
-                    if _passes_filters(e)
-                ]
-            except Exception:
-                hits = []
-            matched.extend(hits)
-
-    if not matched:
-        typer.echo(f"fno backlog find: no matches for {query!r}", err=True)
-        raise typer.Exit(code=1)
-
-    if json_output:
-        typer.echo(json.dumps(matched, indent=2))
-        return
-
-    for e in matched:
-        # Lead with the slug-forward handle (`slug (ab-id)`, or `(ab-id)` when
-        # unslugged); the canonical hex stays present and copyable ().
-        typer.echo(
-            "\t".join(
-                [
-                    format_handle(e),
-                    e.get("status", "?"),
-                    e.get("domain", "?"),
-                    e.get("project", "-") or "-",
-                    e.get("title", ""),
-                ]
-            )
-        )
 
 
 @cli.command("discover", hidden=True)

@@ -237,7 +237,7 @@ class VerbUnavailable(RuntimeError):
 
 
 def verb_call(
-    verb: str,
+    verb: "str | list[str]",
     payload: dict,
     unavailable: type = VerbUnavailable,
     *,
@@ -269,9 +269,10 @@ def verb_call(
             "the fno-agents binary was not found; reinstall fno,"
             " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
         )
+    verb_display = verb if isinstance(verb, str) else " ".join(verb)
     try:
         proc = subprocess.run(
-            [str(binary), verb],
+            [str(binary), *(verb if isinstance(verb, list) else [verb])],
             input=json.dumps(payload),
             stdout=subprocess.PIPE,
             stderr=None if passthrough_stderr else subprocess.PIPE,
@@ -279,11 +280,11 @@ def verb_call(
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise unavailable(f"fno-agents {verb} failed: {exc}") from exc
+        raise unavailable(f"fno-agents {verb_display} failed: {exc}") from exc
     if proc.returncode != 0:
         # With passthrough_stderr the child owns the real stderr (None here),
         # so name where it went instead of crashing on strip().
-        detail = f"fno-agents {verb} exited {proc.returncode}"
+        detail = f"fno-agents {verb_display} exited {proc.returncode}"
         if passthrough_stderr:
             detail += " (its stderr went to your terminal)"
         else:
@@ -294,7 +295,7 @@ def verb_call(
     try:
         return json.loads(proc.stdout)
     except ValueError as exc:
-        raise unavailable(f"fno-agents {verb} bad output: {exc}") from exc
+        raise unavailable(f"fno-agents {verb_display} bad output: {exc}") from exc
     finally:
         if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
             print(json.dumps({"payload": payload}), flush=True)

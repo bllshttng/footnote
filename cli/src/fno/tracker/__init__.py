@@ -9,7 +9,7 @@ must work offline.
 Backend selection is env-driven so it works with no config-schema machinery:
 ``FNO_TRACKER_BACKEND=github`` opts into GitHub Issues, and
 ``FNO_TRACKER_GITHUB_REPO=owner/repo`` scopes its ``list_open``. Default is
-``graph``. Every backend answers in Rust through ``fno-agents graph-get``'s stdin door.
+``graph``. Every backend answers in Rust through ``fno-agents backlog get``'s stdin door.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class _RustTracker:
         self.name = name
 
     def _call(self, op: str, id: str | None = None) -> dict:
-        out = rust_binary.verb_call("graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
+        out = rust_binary.verb_call(["backlog", "get"], {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
         if out.get("not_found"):
             raise NodeNotFound(id)
         if out.get("error"):

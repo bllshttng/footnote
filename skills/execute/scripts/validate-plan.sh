@@ -20,7 +20,7 @@ _decision_read() {
         _DECISION_VERDICT="${cached#*$'\t'}"
         return 0
     fi
-    if out=$(fno backlog decisions "$id" --scope all 2>"$TMPDIR_BASE_VAL/decisions.err"); then
+    if out=$(fno backlog decisions "$id" 2>"$TMPDIR_BASE_VAL/decisions.err"); then
         rc=0
     else
         rc=$?

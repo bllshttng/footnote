@@ -127,7 +127,31 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
     # Route paths.graph_archive_json (used by cmd_get read-through) to the temp.
     import fno.paths as p
     monkeypatch.setattr(p, "graph_json", lambda: g)
+    # The native binary (which the get/find read-backs exec) resolves the
+    # store through FNO_CONFIG's state_dir; point it at this same tmp dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g, tmp_path / "graph-archive.json"
+
+
+def _native_backlog(*args) -> tuple[int, str, str]:
+    """Run the native binary's backlog verb against the routed store.
+    Returns (code, stdout, stderr)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
@@ -141,9 +165,9 @@ def test_get_read_through_resolves_archived_node(tmp_path, monkeypatch):
         {"id": "ab-arch0001", "slug": "archived-node", "title": "Old", "completed_at": "2026-01-01T00:00:00Z"}
     ]}) + "\n")
 
-    r = runner.invoke(app, ["backlog", "get", "ab-arch0001"])
-    assert r.exit_code == 0, r.output
-    out = json.loads(r.output)
+    code, stdout, stderr = _native_backlog("get", "ab-arch0001")
+    assert code == 0, stderr
+    out = json.loads(stdout)
     assert out["id"] == "ab-arch0001"
     assert out["_archived"] is True
 
@@ -151,8 +175,8 @@ def test_get_read_through_resolves_archived_node(tmp_path, monkeypatch):
 def test_get_missing_everywhere_exits_1(tmp_path, monkeypatch):
     g, _archive = _route(tmp_path, monkeypatch)
     _seed(g, [])
-    r = runner.invoke(app, ["backlog", "get", "ab-nope0001"])
-    assert r.exit_code == 1
+    code, _, _ = _native_backlog("get", "ab-nope0001")
+    assert code == 1
 
 
 def test_find_read_through_resolves_archived_node(tmp_path, monkeypatch):
@@ -167,9 +191,9 @@ def test_find_read_through_resolves_archived_node(tmp_path, monkeypatch):
          "completed_at": "2026-01-01T00:00:00Z"}
     ]}) + "\n")
 
-    r = runner.invoke(app, ["backlog", "find", "Archived Feature", "--json"])
-    assert r.exit_code == 0, r.output
-    hits = json.loads(r.output)
+    code, stdout, stderr = _native_backlog("find", "Archived Feature", "--json")
+    assert code == 0, stderr
+    hits = json.loads(stdout)
     assert [h["id"] for h in hits] == ["ab-arch0001"]
     assert hits[0]["_archived"] is True
 
@@ -181,9 +205,8 @@ def test_find_corrupt_archive_is_miss_not_crash(tmp_path, monkeypatch):
     _seed(g, [])  # working graph empty
     archive.write_text("{not json at all")
 
-    r = runner.invoke(app, ["backlog", "find", "anything", "--json"])
-    assert r.exit_code == 1
-    assert r.exception is None or isinstance(r.exception, SystemExit)
+    code, _, _ = _native_backlog("find", "anything", "--json")
+    assert code == 1
 
 
 def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
@@ -557,8 +580,8 @@ def test_apply_leaves_no_open_reference_to_an_archived_id(tmp_path, monkeypatch)
     assert evs[0]["data"]["moved"] == 1
     assert evs[0]["data"]["soft_edges_stripped"] == 2
     # Read-through still resolves the archived node by id.
-    r_get = runner.invoke(app, ["backlog", "get", "x-softrel"])
-    assert r_get.exit_code == 0, r_get.output
+    r_code, _, r_err = _native_backlog("get", "x-softrel")
+    assert r_code == 0, r_err
 
 
 # -- fno backlog album (x-a023 browse surface) -------------------------------
