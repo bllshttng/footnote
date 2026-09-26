@@ -10,11 +10,11 @@ import typer
 def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict: bool) -> str:
     if len(ids) > 1:
         _dispatch(ids, field=field, grouped=grouped, strict=strict)
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() == "graph":
+        _exec(["backlog", "get", ids[0]])
     return ids[0]
-
-
-def exec_graph(ids: List[str]) -> None:
-    _exec(["backlog", "get", *ids])
 
 
 def _dispatch(ids: List[str], *, field: object, grouped: bool, strict: bool) -> None:

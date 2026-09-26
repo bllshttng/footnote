@@ -235,10 +235,9 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
-        # bash-census and session-start bytes: both dispatch directly in
-        # client.rs before build_request, never `fno agents`. The batch graph
-        # read and the backlog note actions folded into the grouped
-        # `fno-agents backlog` dispatcher and left this set.
+        # bash-census and session-start bytes dispatch directly in
+        # client.rs before build_request, never `fno agents`; the batch
+        # graph read and the note actions folded into `fno-agents backlog`.
         "bash-census",
         "session-start-bytes",
         "judge",

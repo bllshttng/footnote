@@ -4943,14 +4943,13 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
     joined["_resolved_cwd"] = sc.cwd
 
     if field:
-        _echo_node_entry(joined, field)
+        _echo_node_entry(joined, field, False)
         return
     typer.echo(json.dumps(joined, indent=2))
 
 
-def _echo_node_entry(e: dict, field: Optional[str]) -> None:
-    """Render one resolved node under an external backend: the field arm or
-    the pretty JSON default (the grouped ladder is the native binary's)."""
+def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
+    """Render one resolved node: the field / grouped / JSON output ladder."""
     if field:
         value = e.get(field)
         if value is None:
@@ -4980,7 +4979,7 @@ def cmd_get(
 ) -> None:
     from fno.tracker import active_backend_name
 
-    from fno.graph.get_batch import exec_graph, resolve_or_dispatch
+    from fno.graph.get_batch import resolve_or_dispatch
     id = resolve_or_dispatch(ids, field=field, grouped=grouped, strict=strict)
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
@@ -4994,8 +4993,6 @@ def cmd_get(
     if active_backend_name() != "graph":
         _render_external_get(id, field)
         return
-
-    exec_graph([id])
 
 
 # -- project-root (work-map resolution; null-for-unmapped) --
