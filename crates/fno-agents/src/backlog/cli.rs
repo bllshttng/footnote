@@ -73,10 +73,16 @@ fn resolve_head(args: &[String]) -> Result<Resolved<'_>, String> {
             legacy: commands::resolve(group, action).expect("catalog round-trip"),
             tail: &args[1..],
         }),
-        None => Err(format!(
-            "fno-agents backlog: unknown command {first}. {}",
-            help_text()
-        )),
+        // Unknown and retired names ride the compat forward VERBATIM: the
+        // Python surface owns the retirement tombstones (annotate's note
+        // --blocking guidance) and its own unknown-command error, so the
+        // refusal text stays the one main has always answered with. The
+        // runtime name leaks into the 'static slot - at most once per
+        // process, and the exec replaces the process before it matters.
+        None => Ok(Resolved {
+            legacy: Box::leak(first.to_string().into_boxed_str()),
+            tail: &args[1..],
+        }),
     }
 }
 
@@ -97,7 +103,8 @@ fn help_text() -> String {
     }
     out.push_str(
         "\nActions not yet native forward to the Python surface until their port \
-         lands; retired names refuse by name.\n",
+         lands; retired and unknown names ride the same forward, where the \
+         retirement tombstones live.\n",
     );
     out
 }
@@ -113,6 +120,13 @@ pub fn run(args: &[String]) -> i32 {
     if head.is_none() || head == Some("-h") || head == Some("--help") {
         println!("{}", help_text());
         return 0;
+    }
+    // A leading option is the backlog app's own flag (`fno backlog --json
+    // decompose ...`): the catalog resolves commands, never app flags, so
+    // the whole argv rides the compat forward verbatim, exactly the shape
+    // the Python app has always parsed.
+    if head.is_some_and(|h| h.starts_with('-')) {
+        return forward_verbatim(args);
     }
     let resolved = match resolve_head(args) {
         Ok(r) => r,
@@ -139,23 +153,30 @@ pub fn run(args: &[String]) -> i32 {
         // The folded batch read: the engine contract is a leading or
         // trailing `--graph`, several ids without the single-id render
         // flags, or the stdin tracker door (zero positionals: the engine's
-        // own stdin arm decides). The single-id render ladder (field /
-        // grouped / tiers / archive walk) is native.
-        "get"
-            if leads_with_engine_door(resolved.tail)
-                || carries(resolved.tail, &["--graph"])
-                || positional_count(resolved.tail) == 0
-                || (positional_count(resolved.tail) > 1
-                    && !carries(resolved.tail, &["--field", "--grouped", "--strict"])) =>
-        {
-            crate::graph_get::run_graph_get(resolved.tail)
-        }
+        // own stdin arm decides). A --help tail is the single-id command's
+        // help, which the Python surface still renders. The single-id
+        // render ladder (field / grouped / tiers / archive walk) is native.
+        "get" if is_engine_get(resolved.tail) => crate::graph_get::run_graph_get(resolved.tail),
         "get" => super::get_cli::run(resolved.tail),
         // The search ladder is native; the FTS cache and the external
         // backend reads forward from inside.
         "find" => super::find_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
+}
+
+/// The engine door's get contract, help excluded: a leading or trailing
+/// `--graph`, zero positionals (the stdin tracker door), or the batch shape
+/// (several ids, no render flags). `--help`/`-h` anywhere in the tail keeps
+/// the single-id path, whose parse-fail forward reaches the Python command's
+/// real argument help.
+fn is_engine_get(tail: &[String]) -> bool {
+    !carries(tail, &["--help", "-h"])
+        && (leads_with_engine_door(tail)
+            || carries(tail, &["--graph"])
+            || positional_count(tail) == 0
+            || (positional_count(tail) > 1
+                && !carries(tail, &["--field", "--grouped", "--strict"])))
 }
 
 /// Whether the tail opens with the engine door's `--graph` token.
@@ -175,8 +196,25 @@ fn positional_count(tail: &[String]) -> usize {
 /// `scrape::fno_py`. Branch handlers (the native get and find forward their
 /// external-backend and FTS branches through this same door).
 pub fn forward_to_python(legacy: &str, tail: &[String]) -> i32 {
+    let argv: Vec<String> = std::iter::once("backlog".to_string())
+        .chain(std::iter::once(legacy.to_string()))
+        .chain(tail.iter().cloned())
+        .collect();
+    exec_python(argv)
+}
+
+/// The unparsed forward: `fno-py backlog <args...>` with every token intact,
+/// for app-level options and the unknown/retired names Python owns.
+fn forward_verbatim(args: &[String]) -> i32 {
+    let argv: Vec<String> = std::iter::once("backlog".to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    exec_python(argv)
+}
+
+fn exec_python(argv: Vec<String>) -> i32 {
     let mut cmd = std::process::Command::new(crate::scrape::fno_py());
-    cmd.arg("backlog").arg(legacy).args(tail);
+    cmd.args(argv);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -236,9 +274,44 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_command_refuses_with_the_catalog() {
-        let err = routed(&["frobnicate"]).unwrap_err();
-        assert!(err.contains("unknown command frobnicate"), "{err}");
+    fn an_unknown_command_rides_the_forward_verbatim() {
+        // The Python surface owns the retirement tombstones (annotate's
+        // note --blocking guidance) and the unknown-command error, so the
+        // unknown name forwards as itself, tail intact.
+        let owned: Vec<String> = ["frobnicate", "x-abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let r = resolve_head(&owned).unwrap();
+        assert_eq!(r.legacy, "frobnicate");
+        assert_eq!(r.tail, &["x-abc".to_string()]);
+    }
+
+    #[test]
+    fn a_help_tail_keeps_get_off_the_engine_door() {
+        // `fno backlog get --help` is the single-id command's help: zero
+        // positionals must not read as the stdin tracker door here.
+        let help: Vec<String> = ["--help"].iter().map(|s| s.to_string()).collect();
+        assert!(!is_engine_get(&help));
+        let short: Vec<String> = vec!["x-abc".to_string(), "-h".to_string()];
+        assert!(!is_engine_get(&short));
+        // The real engine shapes stay on the engine door.
+        let stdin_door: Vec<String> = vec!["--graph".to_string(), "/tmp/g".to_string()];
+        assert!(is_engine_get(&stdin_door));
+        let batch: Vec<String> = vec!["x-aaaa".to_string(), "x-bbbb".to_string()];
+        assert!(is_engine_get(&batch));
+    }
+
+    #[test]
+    fn a_leading_app_option_is_not_a_command() {
+        // `fno backlog --json decompose x` is the Python app's group-option
+        // form; the catalog owns commands only, so an option-led argv never
+        // resolves to a legacy command here (run() forwards it verbatim).
+        let owned: Vec<String> = ["--json", "decompose", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(owned.first().is_some_and(|a| a.starts_with('-')));
     }
 
     #[test]
