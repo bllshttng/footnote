@@ -186,18 +186,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
-    // `harness-probe`: the capability reader's two leaves (fields + rubric),
-    // transport-only (no client action - shrink law). Callers: the Python
-    // leaves `fno agents harness probe` and `fno doctor harness`, which keep
-    // their spellings and route here.
-    if args.first().map(String::as_str) == Some("harness-probe") {
-        std::process::exit(fno_agents::harness_reader::run_client(&args[1..]));
-    }
-    // `harness-matrix`: the two matrix renderers, transport-only like
-    // `harness-probe`. Caller: the `fno doctor harness-matrix --write` leaf
-    // and the guards freshness step.
-    if args.first().map(String::as_str) == Some("harness-matrix") {
-        std::process::exit(fno_agents::harness_matrix::run_client(&args[1..]));
+    // `harness-probe` / `harness-matrix`: the capability reader and the
+    // matrix renderers, transport-only (no client action - shrink law).
+    if matches!(
+        args.first().map(String::as_str),
+        Some("harness-probe" | "harness-matrix")
+    ) {
+        std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));

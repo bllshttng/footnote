@@ -4907,9 +4907,8 @@ def harness_probe(
     ),
     as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
 ) -> None:
-    """Measure the capability table against the live harness. The reader
-    lives in the fno-agents binary (harness_reader.rs); this leaf keeps the
-    spelling and routes to it."""
+    """Measure the capability table against the live harness; the reader
+    lives in the fno-agents binary and this leaf keeps the spelling."""
     from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
     from fno.rust_binary import resolve_installed_binary
 

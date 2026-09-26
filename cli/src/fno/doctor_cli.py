@@ -93,54 +93,46 @@ def intel_command() -> None:
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
 # convention; `fno help doctor --all`.
 doctor_app.command("lanes", hidden=True)(lanes_command)
+
+
+def _route_harness(verb: str, argv: list[str]) -> None:
+    """Exec the fno-agents door: the Rust runtime is the only implementation."""
+    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
+    from fno.rust_binary import resolve_installed_binary
+
+    binary = resolve_installed_binary()
+    if binary is None:
+        refuse_without_binary(verb)
+    route_to_rust(argv, binary=binary)
+
+
 @doctor_app.command("harness", hidden=True)
 def harness_command(
     harness: str = typer.Argument(..., help="Harness name to probe."),
     live: bool = typer.Option(False, "--live", help="Run real pane and state probes."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit machine-readable JSON."),
 ) -> None:
-    """The executable support rubric for one harness. The rubric lives in the
-    fno-agents binary (harness_reader.rs) and runs inside an isolated state
-    root; this leaf keeps the spelling and routes to it."""
-    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
-    from fno.rust_binary import resolve_installed_binary
-
-    binary = resolve_installed_binary()
-    if binary is None:
-        refuse_without_binary("harness")
+    """The executable support rubric for one harness, served by the crate."""
     argv = ["harness-probe", "rubric", harness]
     if live:
         argv.append("--live")
     if json_out:
         argv.append("--json")
-    route_to_rust(argv, binary=binary)
+    _route_harness("harness", argv)
 
 
-# `doctor harness-matrix` renders the two matrix docs from the table: the
-# features matrix and the verb x harness projection. Hidden per the
-# new-verb convention; the freshness gates are the tripwire, this verb is
-# the regenerator. The renderer lives in the fno-agents binary
-# (harness_matrix.rs); the leaf refuses without the binary, the same shape
-# `fno doctor scratch` has.
+# `doctor harness-matrix` regenerates both matrix docs from the table. The
+# renderer lives in the fno-agents binary; the leaf refuses without it,
+# the same shape `fno doctor scratch` has.
 @doctor_app.command("harness-matrix", hidden=True)
 def harness_matrix_command(
-    write: bool = typer.Option(
-        False,
-        "--write",
-        help="Write docs/harnesses/capability-matrix.md and verb-matrix.md from the table.",
-    ),
+    write: bool = typer.Option(False, "--write"),
 ) -> None:
     """Render the features and verb matrices from the capability table."""
-    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
-    from fno.rust_binary import resolve_installed_binary
-
-    binary = resolve_installed_binary()
-    if binary is None:
-        refuse_without_binary("harness-matrix")
     argv = ["harness-matrix"]
     if write:
         argv.append("--write")
-    route_to_rust(argv, binary=binary)
+    _route_harness("harness-matrix", argv)
 doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared
 # routing inventory can actually reach (absorbs the old "no surface answers

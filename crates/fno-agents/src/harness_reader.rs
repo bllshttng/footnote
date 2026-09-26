@@ -1423,6 +1423,17 @@ pub fn run_client(args: &[String]) -> i32 {
     }
 }
 
+/// The binary's two harness doors as one arm: `harness-probe` (the
+/// capability reader) and `harness-matrix` (the two renderers), both
+/// transport-only. client.rs keeps a single arm for the pair.
+pub fn transport_doors(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("harness-probe") => run_client(&args[1..]),
+        Some("harness-matrix") => crate::harness_matrix::run_client(&args[1..]),
+        _ => 2,
+    }
+}
+
 fn print_human(harness: &str, mode: &str, report: &serde_json::Value) {
     if mode == "fields" {
         if let Some(error) = report.get("error").and_then(|e| e.as_str()) {
