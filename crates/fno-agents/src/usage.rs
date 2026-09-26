@@ -30,7 +30,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "rename <name> --name <new-label>   -- renames the registry LABEL. The old label keeps resolving as an alias and the harness session is untouched",
-    "stop <name> [--force]",
+    "stop <name> [--force] [--cross-project]   --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
     "rm <name> [--force] [--cross-project]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it; --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",

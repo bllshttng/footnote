@@ -4609,24 +4609,35 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
+    // stop shares rm's cross-project grant: its store heal resolves through
+    // the same confinement refusal that names --cross-project.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json(), false)
-            .await
-        {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     if entry.status == AgentStatus::Exited {
         // An exited agent needs no stop work. (Pre-G4 this also force-cleared a
