@@ -538,11 +538,15 @@ pub fn project(
     _now: u64,
 ) -> Vec<AttentionItem> {
     let mut items: Vec<AttentionItem> = Vec::new();
-    // Latest ask of a qid wins; a close row drops the item.
+    // Latest ask of a qid wins; a close row drops the item; an unsuperseded
+    // `attention_answer` row flips the state to `answered` (first answer wins).
     let mut asked: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut answered_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in journals_raw.lines() {
-        if line.trim().is_empty() || !line.contains("operator_question") {
+        if line.trim().is_empty()
+            || !(line.contains("operator_question") || line.contains("attention_answer"))
+        {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -560,6 +564,18 @@ pub fn project(
                     closed.insert(qid.to_string());
                 }
             }
+            "attention_answer" => {
+                let superseded = v
+                    .get("data")
+                    .and_then(|d| d.get("superseded"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if !superseded {
+                    if let Some(qid) = str_field(&v, "item_id") {
+                        answered_ids.insert(qid.to_string());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -568,12 +584,18 @@ pub fn project(
             continue;
         }
         let ts = row.get("ts").and_then(Value::as_str).unwrap_or("");
-        if let Some(item) = item_from_question_row(row, ts) {
+        if let Some(mut item) = item_from_question_row(row, ts) {
+            if answered_ids.contains(qid) {
+                item.state = "answered".to_string();
+            }
             items.push(item);
         }
     }
     for (slug, text) in notes {
-        if let Some(item) = item_from_note(slug, text) {
+        if let Some(mut item) = item_from_note(slug, text) {
+            if answered_ids.contains(&format!("note-{slug}")) {
+                item.state = "answered".to_string();
+            }
             items.push(item);
         }
     }
@@ -607,6 +629,154 @@ pub fn attach_reach(items: &mut [AttentionItem], registry: &crate::state::Regist
         }
     }
 }
+
+/// One recently-answered item, as the panel shows it: an answer or delivery
+/// row under [`ANSWERED_TTL_S`] old. `rung`/`outcome` stay empty until the
+/// arm's first delivery row lands.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Answered {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asker: Option<String>,
+    pub answer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rung: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    pub at: String,
+}
+
+/// The answered fold: closed or answered items whose answer or delivery row
+/// is under [`ANSWERED_TTL_S`] old, newest first. Reads the same raw journal
+/// text `project` reads, so tests need no disk.
+pub fn answered(journals_raw: &str, now: u64) -> Vec<Answered> {
+    let ttl = ANSWERED_TTL_S;
+    // Last ask per id (title/asker/options), first unsuperseded answer per
+    // id, last delivery per id.
+    let mut asks: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut answers: std::collections::HashMap<String, (String, Value)> =
+        std::collections::HashMap::new();
+    let mut deliveries: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for line in journals_raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !(line.contains("operator_question")
+            || line.contains("attention_answer")
+            || line.contains("attention_delivery"))
+        {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str).unwrap_or("") {
+            "operator_question" => {
+                if let Some(qid) = str_field(&v, "question_id") {
+                    asks.insert(qid.to_string(), v.clone());
+                }
+            }
+            "attention_answer" => {
+                let superseded = v
+                    .get("data")
+                    .and_then(|d| d.get("superseded"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                let Some(id) = str_field(&v, "item_id") else {
+                    continue;
+                };
+                if !superseded && !answers.contains_key(id) {
+                    let at = v
+                        .get("ts")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    answers.insert(id.to_string(), (at, v.clone()));
+                }
+            }
+            "attention_delivery" => {
+                if let Some(id) = str_field(&v, "item_id") {
+                    deliveries.insert(id.to_string(), v.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let parse = |ts: &str| -> Option<u64> {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()
+            .map(|t| t.timestamp().max(0) as u64)
+    };
+    let mut out: Vec<Answered> = Vec::new();
+    for (id, (at, row)) in answers {
+        let answer_at = parse(&at);
+        let delivery = deliveries.get(&id);
+        let delivery_at = delivery
+            .and_then(|d| d.get("ts"))
+            .and_then(Value::as_str)
+            .and_then(parse);
+        let fresh = answer_at.is_some_and(|t| now.saturating_sub(t) < ttl)
+            || delivery_at.is_some_and(|t| now.saturating_sub(t) < ttl);
+        if !fresh {
+            continue;
+        }
+        // The ask row supplies title, asker and the option texts the answer
+        // maps onto; a store-only answer (no ask row) still shows its words.
+        let (title, asker, answer_text) = match asks.get(&id) {
+            Some(ask) => {
+                let item = item_from_question_row(ask, "");
+                let text = match (
+                    row.get("data").and_then(|d| d.get("option")),
+                    row.get("data").and_then(|d| d.get("words")),
+                    row.get("data").and_then(|d| d.get("done")),
+                ) {
+                    (Some(Value::Number(n)), _, _) => {
+                        let n = n.as_u64().unwrap_or(0) as usize;
+                        item.as_ref()
+                            .and_then(|i| i.options.get(n.saturating_sub(1)))
+                            .map(|o| o.text.clone())
+                            .unwrap_or_else(|| format!("option {n}"))
+                    }
+                    (_, Some(Value::String(w)), _) if !w.is_empty() => w.clone(),
+                    (_, _, Some(Value::Bool(true))) => "done".to_string(),
+                    _ => String::new(),
+                };
+                (
+                    item.as_ref().map(|i| i.title.clone()).unwrap_or_default(),
+                    item.as_ref()
+                        .and_then(|i| i.asker.as_ref())
+                        .map(|a| a.handle.clone()),
+                    text,
+                )
+            }
+            None => (String::new(), None, String::new()),
+        };
+        out.push(Answered {
+            id,
+            title,
+            asker,
+            answer: answer_text,
+            rung: delivery
+                .and_then(|d| d.get("data"))
+                .and_then(|d| d.get("rung"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            outcome: delivery
+                .and_then(|d| d.get("data"))
+                .and_then(|d| d.get("outcome"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            at: at.clone(),
+        });
+    }
+    out.sort_by(|a, b| b.at.cmp(&a.at));
+    out
+}
+
+/// How long a closed or answered item stays on the panel's answered rows
+/// after its answer (or its delivery row) landed.
+pub const ANSWERED_TTL_S: u64 = 15 * 60;
 
 #[cfg(test)]
 mod tests {
@@ -785,5 +955,62 @@ mod tests {
         let mut items2 = project(&journals, &[], "", 0);
         crate::attention::attach_reach(&mut items2, &registry);
         assert!(items2[0].asker.as_ref().unwrap().reach.is_none());
+    }
+
+    #[test]
+    fn an_answer_row_flips_the_item_state_to_answered() {
+        let journals = format!(
+            "{}\n{}\n",
+            row(
+                "q-ans",
+                "Which lane?",
+                json!({"ask": "pick one", "options": ["a", "b"]})
+            ),
+            r#"{"ts":"2026-09-26T05:00:00Z","type":"attention_answer","source":"daemon","data":{"item_id":"q-ans","sink":"mux","option":2,"answered_at":"2026-09-26T05:00:00Z","authority":"sink","attested_by":"mux","superseded":false}}"#
+        );
+        let items = project(&journals, &[], "", 0);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, "answered");
+        // A superseded row changes nothing.
+        let journals2 = format!(
+            "{}\n{}\n",
+            row(
+                "q-ans2",
+                "Which lane?",
+                json!({"ask": "pick one", "options": ["a", "b"]})
+            ),
+            r#"{"ts":"2026-09-26T05:00:00Z","type":"attention_answer","source":"daemon","data":{"item_id":"q-ans2","sink":"mux","option":1,"superseded":true}}"#
+        );
+        let items2 = project(&journals2, &[], "", 0);
+        assert_eq!(items2[0].state, "open", "a superseded row never answers");
+    }
+
+    #[test]
+    fn answered_folds_fresh_answers_with_their_delivery() {
+        let raw = concat!(
+            r#"{"ts":"2026-09-26T05:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-a","question":"Which?","session_id":"s1","asker":"w1","cwd":"/repo/fno"}}"#,
+            "\n",
+            r#"{"ts":"2026-09-26T05:01:00Z","type":"attention_answer","source":"daemon","data":{"item_id":"q-a","sink":"mux","option":1,"answered_at":"2026-09-26T05:01:00Z","superseded":false}}"#,
+            "\n",
+            r#"{"ts":"2026-09-26T05:02:00Z","type":"attention_delivery","source":"daemon","data":{"item_id":"q-a","rung":"mail","outcome":"landed","evidence":"outstanding: q-a answered; mail to w1: delivered (hosted)"}}"#,
+            "\n",
+        );
+        // now = 05:10:00Z: the answer is 9 minutes old, inside the TTL.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-26T05:10:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        let rows = answered(&raw, now);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.id, "q-a");
+        assert_eq!(r.title, "Which?");
+        assert_eq!(r.asker.as_deref(), Some("w1"));
+        // Option 1 maps onto the ask row's first option text.
+        assert_eq!(r.answer, "option 1", "a bare options array has no texts");
+        assert_eq!(r.rung.as_deref(), Some("mail"));
+        assert_eq!(r.outcome.as_deref(), Some("landed"));
+        // Past the TTL: gone from the panel's answered rows.
+        let late = now + crate::attention::ANSWERED_TTL_S + 10;
+        assert!(answered(&raw, late).is_empty());
     }
 }

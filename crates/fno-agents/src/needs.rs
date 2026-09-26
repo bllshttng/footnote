@@ -526,6 +526,11 @@ struct NeedsArgs {
     fires_floor: u64,
     json: bool,
     items: bool,
+    answer: Option<String>,
+    option: Option<u32>,
+    words: Option<String>,
+    done: bool,
+    sink: Option<String>,
     events_override: Vec<PathBuf>,
     ledger_override: Option<PathBuf>,
 }
@@ -535,6 +540,11 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
     let mut fires_floor = DEFAULT_FIRES_FLOOR;
     let mut json = false;
     let mut items = false;
+    let mut answer: Option<String> = None;
+    let mut option: Option<u32> = None;
+    let mut words: Option<String> = None;
+    let mut done = false;
+    let mut sink: Option<String> = None;
     let mut events_override: Vec<PathBuf> = Vec::new();
     let mut ledger_override: Option<PathBuf> = None;
 
@@ -556,6 +566,18 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
             }
             "--json" | "-J" => json = true,
             "--items" => items = true,
+            "--answer" => answer = Some(it.next().ok_or("--answer needs an item id")?),
+            "--option" => {
+                option = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .filter(|n| *n > 0)
+                        .ok_or("--option needs a positive option number")?,
+                )
+            }
+            "--words" => words = Some(it.next().ok_or("--words needs the answer text")?),
+            "--done" => done = true,
+            "--sink" => sink = Some(it.next().ok_or("--sink needs a sink name")?),
             "--events" => {
                 events_override.push(PathBuf::from(it.next().ok_or("--events needs a path")?))
             }
@@ -570,6 +592,11 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
         fires_floor,
         json,
         items,
+        answer,
+        option,
+        words,
+        done,
+        sink,
         events_override,
         ledger_override,
     })
@@ -782,8 +809,81 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
     0
 }
 
+/// The `--answer` door: record one durable `attention_answer` row for an open
+/// item, first answer wins, and print a one-line JSON receipt. The mux is the
+/// caller this exists for, but any process gets the same receipt. The arm owns
+/// delivery (the clear, the resume, the crown escalation) on its next beat;
+/// the door never delivers.
+fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) -> i32 {
+    let picks = [args.option.is_some(), args.words.is_some(), args.done];
+    if picks.iter().filter(|p| **p).count() != 1 {
+        eprintln!(
+            "fno-agents: needs --answer needs exactly one of --option <n>, --words <text>, --done"
+        );
+        return 2;
+    }
+    match args.sink.as_deref() {
+        Some("mux") => {}
+        other => {
+            eprintln!(
+                "fno-agents: needs --answer accepts only --sink mux (got {})",
+                other.unwrap_or("none")
+            );
+            return 2;
+        }
+    }
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    // The same projection `run_items` folds, so a closed or already-answered
+    // item refuses for the reason the panel will show.
+    let (items, _, _) = crate::attention_arm::read_items_at(&fno_dir, cwd);
+    let Some(item) = items.iter().find(|i| i.id == item_id) else {
+        eprintln!("fno-agents: not found: {item_id}");
+        return 2;
+    };
+    if item.state != "open" {
+        eprintln!("fno-agents: not open: {item_id} (state {})", item.state);
+        return 2;
+    }
+    let answer = if let Some(n) = args.option {
+        if n as usize > item.options.len() {
+            eprintln!(
+                "fno-agents: option {n} is outside 1..={} for {item_id}",
+                item.options.len()
+            );
+            return 2;
+        }
+        crate::attention_file::FileAnswer::Option(n)
+    } else if args.done {
+        if item.kind != "pin" {
+            eprintln!("fno-agents: only a pin takes --done: {item_id} is a question");
+            return 2;
+        }
+        crate::attention_file::FileAnswer::Done
+    } else {
+        crate::attention_file::FileAnswer::Words(args.words.clone().unwrap_or_default())
+    };
+    match crate::attention_arm::append_answer_row(item_id, "mux", &answer, "sink", "mux") {
+        Ok((_, superseded)) => {
+            println!(
+                "{}",
+                json!({"recorded": true, "item_id": item_id, "superseded": superseded})
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents: needs: {e}");
+            1
+        }
+    }
+}
+
 /// One held node: the node an open question blocks, that question, and when
 /// it was asked.
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HeldRow {
     pub(crate) node: String,
@@ -1344,6 +1444,9 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // The --items leg reads the attention projection; everything else is the
     // session-needs fold (never touches the ledger).
+    if let Some(id) = args.answer.clone() {
+        return run_answer(home, &cwd, &args, &id);
+    }
     if args.items {
         return run_items(home, &cwd);
     }
@@ -2473,5 +2576,120 @@ mod tests {
         );
         let empty = tempfile::tempdir().unwrap();
         assert!(held_map(empty.path(), Path::new(".")).is_empty());
+    }
+
+    /// An open question row in the space journal, and the args for a mux
+    /// option answer against it. The [`DeclaredRoot`] guard rides the return
+    /// so the fixture outlives setup: dropping it restores the env and
+    /// deletes the root.
+    fn door_setup(tag: &str) -> (tempfile::TempDir, crate::paths::DeclaredRoot, NeedsArgs) {
+        let root = crate::paths::DeclaredRoot::declare(tag);
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        let space = crate::paths::space_dir(&cwd).join("events.jsonl");
+        std::fs::create_dir_all(crate::paths::space_dir(&cwd)).unwrap();
+        let ask = serde_json::json!({
+            "ts": "2026-09-26T05:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {
+                "question_id": "q-door", "question": "pick one", "ask": "pick one",
+                "session_id": "s1", "cwd": "/repo/fno", "asker": "w1", "node": "x-1",
+                "options": ["a", "b"]
+            }
+        });
+        crate::event_store::append_envelope(&space, &ask.to_string(), None).unwrap();
+        let args = NeedsArgs {
+            since_epoch: None,
+            fires_floor: 0,
+            json: false,
+            items: false,
+            answer: Some("q-door".to_string()),
+            option: Some(2),
+            words: None,
+            done: false,
+            sink: Some("mux".to_string()),
+            events_override: vec![],
+            ledger_override: None,
+        };
+        (dir, root, args)
+    }
+
+    #[test]
+    fn ac1_hp_the_mux_door_records_a_durable_answer_row() {
+        let (dir, _root, args) = door_setup("needs_door_hp_open_");
+        let cwd = dir.path().join("repo");
+        let home = crate::paths::AgentsHome::from_env();
+        let code = run_answer(&home, &cwd, &args, "q-door");
+        assert_eq!(code, 0);
+        let home2 = crate::paths::AgentsHome::from_env();
+        let raw =
+            crate::event_store::journal_text(&crate::provider_cap::questions_path(&home2), &[]);
+        assert!(
+            raw.contains("attention_answer") && raw.contains("\"sink\":\"mux\""),
+            "the mux row landed: {raw}"
+        );
+        // The projection shows it answered.
+        let fno_dir = home2.root().parent().map(Path::to_path_buf).unwrap();
+        let (items, _, _) = crate::attention_arm::read_items_at(&fno_dir, &cwd);
+        let item = items.iter().find(|i| i.id == "q-door").unwrap();
+        assert_eq!(item.state, "answered");
+    }
+
+    #[test]
+    fn ac1_err_the_door_refuses_and_names_the_reason() {
+        let (dir, _root, mut args) = door_setup("needs_door_err_refus");
+        let cwd = dir.path().join("repo");
+        let home = crate::paths::AgentsHome::from_env();
+        // Absent id.
+        assert_eq!(run_answer(&home, &cwd, &args, "q-none"), 2);
+        // Sink other than mux (and a missing sink).
+        args.sink = Some("file".to_string());
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        args.sink = None;
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        args.sink = Some("mux".to_string());
+        // Two picks at once.
+        args.words = Some("nope".to_string());
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        args.words = None;
+        // Option out of range.
+        args.option = Some(3);
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        args.option = None;
+        // --done on a question.
+        args.done = true;
+        assert_eq!(run_answer(&home, &cwd, &args, "q-door"), 2);
+        // Nothing landed: the door writes nothing on a refusal.
+        let home2 = crate::paths::AgentsHome::from_env();
+        let raw =
+            crate::event_store::journal_text(&crate::provider_cap::questions_path(&home2), &[]);
+        assert!(
+            !raw.contains("attention_answer"),
+            "refusals write nothing: {raw}"
+        );
+    }
+
+    #[test]
+    fn ac1_edge_append_marks_a_second_row_superseded() {
+        // First answer wins across writers: the second row records
+        // superseded and changes nothing.
+        let _root = crate::paths::DeclaredRoot::declare("needs_door_edge_sup");
+        let first = crate::attention_arm::append_answer_row(
+            "q-sup",
+            "questions",
+            &crate::attention_file::FileAnswer::Words("narrow".to_string()),
+            "file_edit",
+            "file:q-sup",
+        )
+        .unwrap();
+        assert_eq!(first.1, false, "the first row wins");
+        let second = crate::attention_arm::append_answer_row(
+            "q-sup",
+            "mux",
+            &crate::attention_file::FileAnswer::Words("wide".to_string()),
+            "sink",
+            "mux",
+        )
+        .unwrap();
+        assert_eq!(second.1, true, "the second row records superseded");
     }
 }
