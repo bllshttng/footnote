@@ -369,9 +369,9 @@ mod tests {
     fn phase_end_fills_every_open_ship_row_once() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            json!({"entries": [{
+            &[json!({
                 "id": "x-s", "slug": "s", "type": "feature", "title": "s",
                 "status": "idea", "priority": "p2",
                 "sessions": [
@@ -379,8 +379,7 @@ mod tests {
                     {"phase": "ship", "harness": "codex", "session_id": "b", "started_at": "2026-09-01T01:00:00Z"},
                     {"phase": "do", "harness": "claude", "session_id": "a", "started_at": "2026-09-01T00:00:00Z"}
                 ]
-            }]})
-            .to_string(),
+            })],
         )
         .unwrap();
         let store = Store::new(&graph);
@@ -424,17 +423,16 @@ mod tests {
     fn a_retired_session_leaves_its_think_and_review_rows_with_both_stamps() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            json!({"entries": [{
+            &[json!({
                 "id": "x-t", "title": "t", "status": "idea", "priority": "p2",
                 "sessions": [
                     {"phase": "think", "harness": "claude", "session_id": "gone-1", "started_at": "2026-09-01T00:00:00Z"},
                     {"phase": "review", "harness": "claude", "session_id": "gone-1", "started_at": "2026-09-01T02:00:00Z"},
                     {"phase": "think", "harness": "claude", "session_id": "alive-2", "started_at": "2026-09-01T03:00:00Z"}
                 ]
-            }]})
-            .to_string(),
+            })],
         )
         .unwrap();
         let store = Store::new(&graph);

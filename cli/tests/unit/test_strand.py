@@ -7,6 +7,7 @@ terminal-parent stranding on every `next`, and (3) reconcile heals what
 predates the guard and reports the count.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone
@@ -213,7 +214,6 @@ def test_receipt_leaves_contained_and_in_review_classifications_alone():
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh empty graph.json routed to tmp_path."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -326,7 +326,7 @@ def stranded_board(tmp_path, monkeypatch):
         _node("x-donep", completed_at=DONE, status="done"),
         _node("x-kid", parent="x-donep"),
     ]
-    graph_path.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(graph_path, json.dumps({"entries": entries}) + "\n")
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
@@ -404,7 +404,7 @@ def test_next_winner_stdout_stays_clean_stderr_names_the_stranded(
         _node("x-donep", completed_at=DONE, status="done"),
         _node("x-kid", parent="x-donep", status="idea"),
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     r = runner.invoke(app, ["backlog", "next", "--all"], catch_exceptions=False)
     assert r.exit_code == 0, r.output

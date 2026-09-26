@@ -8,6 +8,7 @@ needs the compiled runtime and skips whole where the smoke harness deleted
 the worker binary (the parity-test convention).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import pytest
 
@@ -27,6 +28,7 @@ from pathlib import Path  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
 from fno.cli import app  # noqa: E402
+from fno.graph.store import read_graph_strict  # noqa: E402
 from fno.graph.archive import (  # noqa: E402
     _archive_bucket_counts,
     _last_sweep_line,
@@ -108,7 +110,7 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     # _constants serves these names through module __getattr__, so they are
     # NOT real attributes. monkeypatch.setattr would save the resolved value
     # and its undo would setattr it back, BAKING a frozen path into the module
@@ -129,7 +131,7 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}) + "\n")
 
 
 def test_get_read_through_resolves_archived_node(tmp_path, monkeypatch):
@@ -196,7 +198,7 @@ def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
         app, ["backlog", "archive", "--apply", "--older-than-days", "0", "--roadmap-id", "rm-A"]
     )
     assert r.exit_code == 0, r.output
-    live = {e["id"] for e in json.loads(g.read_text())["entries"]}
+    live = {e["id"] for e in read_graph_strict(g)}
     assert "ab-dep00001" in live  # held: an open node in rm-B still blocks on it
     assert not archive.exists() or "ab-dep00001" not in {
         e["id"] for e in json.loads(archive.read_text())["entries"]
@@ -341,7 +343,7 @@ def test_dry_run_receipt_carries_last_sweep_marker(tmp_path, monkeypatch):
 
 
 def _pm_receipt(node_id: str, days_old: int, **extra) -> dict:
-    from datetime import datetime as dt, timedelta, timezone as tz
+    from datetime import timedelta, timezone as tz
 
     created = (datetime.now(tz.utc) - timedelta(days=days_old)).isoformat()
     return {
@@ -416,7 +418,7 @@ def test_dry_run_reports_would_retire_count(tmp_path, monkeypatch):
     r = runner.invoke(app, ["backlog", "archive"])
     assert r.exit_code == 0, r.output
     assert "would retire 1 stale postmortem receipt(s)" in r.output
-    live = {e["id"]: e for e in json.loads(g.read_text())["entries"]}
+    live = {e["id"]: e for e in read_graph_strict(g)}
     assert live["ab-old00001"]["status"] == "idea"  # dry-run never mutates
 
 

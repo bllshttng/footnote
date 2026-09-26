@@ -6,6 +6,8 @@ mapped to the design's Failure Modes + Acceptance Criteria.
 """
 from __future__ import annotations
 
+from tests.fixtures.graph_seed import seed_graph
+
 from fno.graph.slug import (
     assign_unique_slug,
     derive_base_slug,
@@ -161,14 +163,10 @@ def test_format_handle_falls_back_to_hex_when_unslugged():
 def test_locked_mutate_assigns_slugs_to_all_nodes(tmp_path):
     """Every persisted mutation slugs both legacy and freshly-appended nodes,
     and a re-mutation does not rewrite the already-assigned handles."""
-    import json
-
     from fno.graph.store import commit_rows_via_store
 
     p = tmp_path / "graph.json"
-    p.write_text(
-        json.dumps({"entries": [{"id": "ab-aaaaaaaa", "title": "Hello World"}]}) + "\n"
-    )
+    seed_graph(p, [{"id": "ab-aaaaaaaa", "title": "Hello World"}])
 
     def add_one(entries):
         entries.append({"id": "ab-bbbbbbbb", "title": "Second Node"})

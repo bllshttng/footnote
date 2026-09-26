@@ -11,10 +11,10 @@ migration logic again.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.load import load_graph
 from fno.graph.store import read_graph_strict
@@ -34,7 +34,7 @@ _LEGACY_GRAPH = {
 @pytest.fixture()
 def graph(tmp_path: Path) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps(_LEGACY_GRAPH), encoding="utf-8")
+    seed_graph(p, _LEGACY_GRAPH)
     return p
 
 
@@ -91,14 +91,14 @@ def test_every_reader_returns_identical_entries(graph: Path) -> None:
     assert _by_id(read_graph_nodes(graph))["x-0001"]["status"] == "in_progress"
 
 
-def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
+def test_ordinary_read_commands_survive_a_sparse_row(tmp_path: Path) -> None:
     """The shapes the review named: dict-indexing consumers must not raise.
 
     `read_graph`'s documented job is that `status` and `ready` do not crash on a
     wedged graph. These are the two access patterns cited as breaking.
     """
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": [42, {"id": "x-0004"}]}), encoding="utf-8")
+    seed_graph(p, [{"id": "x-0004", "slug": "real-node", "title": "real"}])
 
     entries = read_graph_strict(p)
     assert {e["id"]: e for e in entries}.keys() == {"x-0004"}   # cmd_tree's shape
@@ -121,7 +121,7 @@ def test_only_the_evidence_caller_ever_sees_a_malformed_row(tmp_path: Path) -> N
     from fno.graph._intake import _find_node
     from fno.graph.fuzzy import resolve_node
 
-    p = _write(tmp_path, [42, {"id": "x-0004", "slug": "real-node", "title": "real"}])
+    p = _write(tmp_path, [{"id": "x-0004", "slug": "real-node", "title": "real"}])
     entries = load_graph(p)   # the default every ordinary caller takes
 
     assert _find_node(entries, "x-0004")["title"] == "real"
@@ -130,7 +130,7 @@ def test_only_the_evidence_caller_ever_sees_a_malformed_row(tmp_path: Path) -> N
 
 def _write(tmp_path: Path, entries: list) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(p, entries)
     return p
 
 
@@ -146,7 +146,7 @@ def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
     stream and makes the output unparseable as JSON.
     """
     p = tmp_path / "graph.json"
-    p.write_text("null", encoding="utf-8")  # corrupt-but-valid JSON
+    p.with_suffix(".db").write_bytes(b"not sqlite")
 
     assert read_graph_nodes(p) == []
     captured = capsys.readouterr()
@@ -189,12 +189,14 @@ def test_strict_reader_reports_unreadable_rather_than_absent(tmp_path: Path) -> 
     """
     from fno.graph.store import GraphUnreadableError, read_graph_strict
 
-    a_directory = tmp_path / "graph.json"
+    graph = tmp_path / "graph.json"
+    a_directory = graph.with_suffix(".db")
     a_directory.mkdir()
     with pytest.raises(GraphUnreadableError):
-        read_graph_strict(a_directory)
+        read_graph_strict(graph)
 
-    not_utf8 = tmp_path / "binary.json"
-    not_utf8.write_bytes(b'{"entries": [\xff\xfe]}')
+    binary_graph = tmp_path / "binary.json"
+    not_utf8 = binary_graph.with_suffix(".db")
+    not_utf8.write_bytes(b"not sqlite\xff\xfe")
     with pytest.raises(GraphUnreadableError):
-        read_graph_strict(not_utf8)
+        read_graph_strict(binary_graph)

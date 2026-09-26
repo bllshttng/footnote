@@ -12,6 +12,7 @@ is the pair that closes that gap for the silent-on-zero case.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import time
@@ -1329,9 +1330,7 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     findable by subject through the graph projection, not merely greppable
     in the journal."""
     graph = root / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [{"id": "x-7d94", "title": "t", "status": "ready"}]}) + "\n"
-    )
+    seed_graph(graph, json.dumps({"entries": [{"id": "x-7d94", "title": "t", "status": "ready"}]}) + "\n")
 
     qid = runner.invoke(
         outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94", "--ask", "finish the lane"]
@@ -1624,17 +1623,14 @@ def test_capture_project_roots_reads_graph_without_importing_tracker(
     this.mkdir()
     sibling.mkdir()
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {"id": "x-this", "cwd": str(this)},
                     {"id": "x-sibling", "source_cwd": str(sibling)},
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     real_import = builtins.__import__
@@ -1660,13 +1656,10 @@ def test_capture_project_roots_does_not_resolve_every_graph_entry(
     this.mkdir()
     sibling.mkdir()
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
             {"id": "ab-this0001", "cwd": str(this)},
             {"id": "ab-sibl0001", "cwd": str(sibling)},
-        ]}),
-        encoding="utf-8",
-    )
+        ]}))
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     real_resolve = Path.resolve
@@ -1826,8 +1819,7 @@ def capture_roots(
     monkeypatch.setenv("FNO_REPO_ROOT", str(this))
     (this / ".fno").mkdir(exist_ok=True)
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {"id": "x-0001", "title": "a", "cwd": str(this)},
@@ -1835,8 +1827,7 @@ def capture_roots(
                 ]
             }
         )
-        + "\n"
-    )
+        + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -1932,12 +1923,11 @@ def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
     _write_inbox(this, ["- [ ] fu-aaaaaa - alpha"])
     # other/ has no inbox at all; also plant a graph cwd that does not exist.
     import fno.graph._constants as gc
-    import json as _json
 
-    graph = gc.GRAPH_JSON
-    data = _json.loads(graph.read_text())
-    data["entries"].append({"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"})
-    graph.write_text(_json.dumps(data))
+    seed_graph(
+        gc.GRAPH_JSON,
+        [{"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"}],
+    )
 
     res = runner.invoke(outstanding_app, [])
     assert res.exit_code == 0, res.output

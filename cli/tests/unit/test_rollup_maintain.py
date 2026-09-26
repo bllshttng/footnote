@@ -1,5 +1,6 @@
 """The maintain rollup leg: propose-only backfill for standing orphans (US5)."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.maintain import ROLLUP_PROPOSAL_CAP, detect_rollup_candidates
 
@@ -103,6 +104,7 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
     import fno.graph._constants as gc
     import fno.graph.store as gs
     from fno.cli import app
+    from fno.graph.store import read_graph_strict
 
     entries = [
         {**epic("x-mux0001", "mux pane layout polish"), "project": "fno",
@@ -113,7 +115,7 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
          "created_at": "2026-01-01T00:00:00+00:00"},
     ]
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(g, json.dumps({"entries": entries}))
     for mod, attr, val in (
         (gc, "GRAPH_JSON", g), (gc, "GRAPH_MD", tmp_path / "g.md"),
         (gc, "GRAPH_HTML", tmp_path / "g.html"),
@@ -128,4 +130,4 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
     assert "rollup candidate x-orph0001 -> x-mux0001" in res.stdout
     assert "--parent x-mux0001" in res.stdout
     # Propose-only: the graph is untouched.
-    assert json.loads(g.read_text())["entries"][1].get("parent") is None
+    assert read_graph_strict(g)[1].get("parent") is None

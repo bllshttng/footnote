@@ -2,7 +2,7 @@
 # test-autocorrect-pack-blocked.sh
 #
 # autocorrect-pack.sh emits a BLOCKED-state section read through the store
-# api. It once read `.nodes` out of graph.json while the entry list lived
+# api. It once read `.nodes` out of a JSON export while the entry list lived
 # under `.entries`, so the selector ran against an empty list on every
 # invocation and the packet shipped an empty section for its whole life.
 # jq's stderr was discarded too, so a read that never matched anything was
@@ -80,10 +80,10 @@ printf '%s | S1 | test | test.md | fixture event\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMP/fno/corrections.log"
 
 # Two blocked nodes, one via `status` and one via blocked_count, plus a node
-# that must NOT appear.
-cat > "$TMP/graph.json" <<'JSON'
+# that must NOT appear. Seed the store through its stable path anchor.
+cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$TMP/graph.json"
 {"entries":[
-  {"id":"tst-block01","title":"blocked by status","status":"blocked","blocked_count":0,
+  {"id":"tst-block01","title":"blocked by status","status":"blocked","blocked_by":["tst-upstream"],"blocked_count":0,
    "last_blocked_reason":"waiting on upstream"},
   {"id":"tst-block02","title":"blocked by count","status":"ready","blocked_count":3,
    "last_blocked_reason":null},
@@ -114,7 +114,7 @@ grep -q 'waiting on upstream' "$OUT" \
 pass "last_blocked_reason survives into the packet"
 
 # A store that cannot be read must say NOT READ (failed), never [].
-printf '{broken' > "$TMP/unreadable.json"
+printf '{broken' > "$TMP/unreadable.db"
 CLAUDE_DIR_OVERRIDE="$TMP/claude" FNO_HOME="$TMP/fno" FNO_GRAPH_PATH="$TMP/unreadable.json" \
   bash "$PACK" --dry-run > "$TMP/bad-packet.yaml" 2>"$TMP/bad-err.log" \
   || fail "unreadable-store run exited non-zero (stderr: $(cat "$TMP/bad-err.log"))"

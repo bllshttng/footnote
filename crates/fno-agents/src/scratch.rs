@@ -122,9 +122,9 @@ const RULES: &[Rule] = &[
     rule!("pr_state", [
         "gh pr (view|list|merge|create|ready|diff)|fno do pr (info|merge|create|rebase)|pulls/\\d+|mergeable|gh pr status|--body-file",
     ]),
-    // 13. Graph read: subtree walk or batch status.
+    // 13. Graph read: subtree walk or batch status, Python or Rust store seam.
     rule!("graph", [
-        "graph\\.json|fno backlog (get|find|ready|next|board|rank|contain|maintain|groom|reconcile|decisions|demand)|fno inbox board|_kanban_column",
+        "graph\\.json|graph_store|graph_json|read_graph_strict|fno\\.graph\\.store|fno backlog (get|find|ready|next|board|rank|contain|maintain|groom|reconcile|decisions|demand)|fno inbox board|_kanban_column",
     ]),
     // 14. Import fno internals to probe one function.
     rule!("fno_internal", [
@@ -1424,7 +1424,9 @@ mod tests {
     }
 
     fn seed_graph(path: &Path, nodes: &[serde_json::Value]) {
-        std::fs::write(path, json!({ "entries": nodes }).to_string()).unwrap();
+        // SQLite is the only store: the keyed-node reader answers from the
+        // store reader, so the fixture seeds the store, never a json mirror.
+        crate::graph_store::seed_rows(path, nodes).unwrap();
     }
 
     /// Three jobs, one copy of `content` each.
@@ -2031,17 +2033,13 @@ mod tests {
     }
 
     #[test]
-    fn keyed_nodes_follow_the_backend_switch() {
+    fn node_statuses_follow_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        // A row the import can represent: from_json requires slug, type and
-        // priority, and a row it refuses is skipped, so the flip drops it.
-        std::fs::write(
-            &graph,
-            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2","origin_evidence":"scratch-shape:ci_probe"}]}"#,
-        )
-        .unwrap();
-        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        let rows = vec![
+            serde_json::json!({"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2","origin_evidence":"scratch-shape:ci_probe"}),
+        ];
+        crate::graph_store::seed_rows(&graph, &rows).unwrap();
         let store = crate::backlog::api::Store::new(&graph);
         crate::backlog::api::node_create(
             &store,

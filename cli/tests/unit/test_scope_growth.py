@@ -7,6 +7,7 @@ process. So coverage travels with the number and the number is withheld below a
 floor.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -187,7 +188,7 @@ def graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
 
     def seed(entries: list[dict]) -> Path:
-        g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+        seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
         return g
 
     import fno.graph._constants as gc

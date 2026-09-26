@@ -2934,14 +2934,9 @@ mod tests {
         // Hermetic graph fixture: the epic read must never lean on the
         // machine's live graph.json.
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            serde_json::json!({
-                "entries": [
-                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
-                ]
-            })
-            .to_string(),
+            &[serde_json::json!({"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"})],
         )
         .expect("writes");
         let answer = stage_answer_with(
@@ -3029,14 +3024,9 @@ mod tests {
     fn node_subject_idents_resolves_parent_and_project() {
         let dir = tempfile::tempdir().expect("tempdir");
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            serde_json::json!({
-                "entries": [
-                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
-                ]
-            })
-            .to_string(),
+            &[serde_json::json!({"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"})],
         )
         .expect("writes");
         let (idents, project, unread) = node_subject_idents("x-aaaa", Some(&graph));
@@ -3062,12 +3052,9 @@ mod tests {
             )],
         );
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            serde_json::json!({
-                "entries": [{"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}]
-            })
-            .to_string(),
+            &[serde_json::json!({"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"})],
         )
         .expect("writes");
         let hook = serde_json::json!({

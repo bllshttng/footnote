@@ -837,6 +837,12 @@ pub fn run_court_fold(args: &[String]) -> i32 {
 mod tests {
     use super::*;
 
+    fn seed_graph(graph: &std::path::Path, body: &str) {
+        let document: Value = serde_json::from_str(body).unwrap();
+        let rows = document["entries"].as_array().unwrap();
+        crate::graph_store::seed_rows(graph, rows).unwrap();
+    }
+
     fn entries() -> Vec<Value> {
         serde_json::from_str(
             r#"[
@@ -1315,17 +1321,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        seed_graph(
             &graph,
-            serde_json::to_string(&json!({"entries": [
+            &serde_json::to_string(&json!({"entries": [
                 {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
                  "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
                 {"id": "x-1", "parent": "e-1", "status": "in_progress", "title": "Child",
                  "slug": "x-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
             ]}))
             .unwrap(),
-        )
-        .unwrap();
+        );
         let cwd = dir.path().to_path_buf();
         let crowns = vec![json!({"scope": "e-1", "level": 2})];
         let fold = court_fold(
@@ -1354,9 +1359,9 @@ mod tests {
         )
         .unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        seed_graph(
             &graph,
-            serde_json::to_string(&json!({"entries": [
+            &serde_json::to_string(&json!({"entries": [
                 {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
                  "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
                 {"id": "x-1", "parent": "e-1", "status": "in_progress", "title": "Child",
@@ -1378,8 +1383,7 @@ mod tests {
                  "slug": "k-2", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
             ]}))
             .unwrap(),
-        )
-        .unwrap();
+        );
         let cwd = dir.path().to_path_buf();
         let crowns = vec![json!({"scope": "e-1", "level": 2})];
         let fold = court_fold(
@@ -1484,11 +1488,10 @@ mod tests {
             "[[work.workspaces.main.projects]]\nname = \"p\"\npath = \"/repo/p\"\n",
         )
         .unwrap();
-        std::fs::write(
-            dir.path().join("graph.json"),
-            serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-        )
-        .unwrap();
+        seed_graph(
+            &dir.path().join("graph.json"),
+            &serde_json::to_string(&json!({ "entries": entries })).unwrap(),
+        );
         let registry = dir.path().join("registry.json");
         let mut v = json!({ "agents": registry_rows });
         v["schema_version"] = json!(crate::state::REGISTRY_SCHEMA_VERSION);
@@ -1600,16 +1603,15 @@ mod tests {
             "[[work.workspaces.main.projects]]\nname = \"p\"\npath = \"/repo/p\"\n",
         )
         .unwrap();
-        std::fs::write(
-            dir.path().join("graph.json"),
-            serde_json::to_string(&json!({"entries": [
+        seed_graph(
+            &dir.path().join("graph.json"),
+            &serde_json::to_string(&json!({"entries": [
                 {"id": "e-1", "type": "epic", "project": "p", "status": "in_progress"},
                 {"id": "a", "parent": "e-1", "project": "p", "status": "in_progress"},
                 {"id": "b", "project": "p", "status": "in_progress"}
             ]}))
             .unwrap(),
-        )
-        .unwrap();
+        );
         let cwd = dir.path().to_path_buf();
         let crowns = vec![
             json!({"scope": "p", "level": 1}),
@@ -1684,15 +1686,14 @@ mod tests {
         std::env::set_var(crate::paths::HOME_ENV, dir.path());
         crate::paths::pin_test_claims_root(dir.path());
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        seed_graph(
             &graph,
-            serde_json::to_string(&json!({"entries": [
+            &serde_json::to_string(&json!({"entries": [
                 {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
                  "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
             ]}))
             .unwrap(),
-        )
-        .unwrap();
+        );
         let args = vec![
             "--graph".to_string(),
             graph.display().to_string(),

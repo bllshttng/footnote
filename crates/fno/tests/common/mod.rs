@@ -91,6 +91,9 @@ impl Scratch {
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
         cmd.envs(test_owner::self_owner_env());
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
+        }
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -122,6 +125,9 @@ impl Scratch {
         // CommandBuilder has no batch envs(); apply the pair one call each.
         for (k, v) in test_owner::self_owner_env() {
             cmd.env(k, v);
+        }
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
         }
     }
 
@@ -219,6 +225,55 @@ impl Drop for Scratch {
         }
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Replace the fixture graph through the mux crate's store client.
+pub fn seed_graph(graph: &Path, rows: &[serde_json::Value]) -> Result<(), String> {
+    if let Some(worker) = store_worker() {
+        std::env::set_var("FNO_AGENTS_WORKER", worker);
+    }
+    let snapshot = fno::store_client::call(graph, "begin", serde_json::json!({}))?;
+    let version = snapshot
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "the store returned no snapshot version".to_string())?;
+    fno::store_client::call(
+        graph,
+        "commit",
+        serde_json::json!({"version": version, "entries": rows}),
+    )?;
+    Ok(())
+}
+
+fn store_worker() -> Option<PathBuf> {
+    let worker = std::env::var_os("FNO_AGENTS_WORKER")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            std::env::var_os("FNO_AGENTS_FRONT").and_then(|front| {
+                let path = PathBuf::from(front).parent()?.join("fno-agents-worker");
+                path.is_file().then_some(path)
+            })
+        })
+        // Test executables live under target/debug/deps; the worker is their
+        // sibling, or under the separately rooted fno-agents crate target.
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent()?
+                        .parent()
+                        .map(|dir| dir.join("fno-agents-worker"))
+                })
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(|root| root.join("fno-agents/target/debug/fno-agents-worker"))
+                .filter(|path| path.is_file())
+        });
+    worker
 }
 
 /// The `fno` client running on a real PTY, plus a human-eye view of it.

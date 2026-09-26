@@ -6,6 +6,7 @@ and returns the row to the working population; the round-trip with `archive`
 proves neither verb can drop a node from both populations.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -54,7 +55,7 @@ def _node(nid: str, **over) -> dict:
 
 
 def _seed(graph: Path, entries: list[dict]) -> None:
-    graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(graph, json.dumps({"entries": entries}) + "\n")
 
 
 def _rows(graph: Path) -> list[dict]:

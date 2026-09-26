@@ -4,6 +4,7 @@ The album is a read verb over the file the sweep already maintains. Cards are
 done nodes sorted newest-first; a card with no gift says so rather than hiding.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -38,7 +39,7 @@ def _seed_archive(graph: Path, entries: list[dict]) -> None:
         if row["status"] == "done" and not row.get("completed_at"):
             row["completed_at"] = "2026-09-01T00:00:00Z"
         complete.append(row)
-    graph.write_text(json.dumps({"entries": complete}) + "\n")
+    seed_graph(graph, json.dumps({"entries": complete}) + "\n")
 
 
 def test_json_sorted_desc_gift_only_when_present(tmp_path, monkeypatch):

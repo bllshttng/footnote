@@ -1,5 +1,6 @@
 """Unit tests for the deterministic relatedness map (node x-c2e9)."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone
@@ -10,7 +11,9 @@ from fno.graph import relatedness as R
 
 
 def _node(nid, title="", domain=None, details="", slug="", **extra):
-    e = {"id": nid, "title": title, "slug": slug, "details": details}
+    e = {"id": nid, "title": title, "slug": slug}
+    if details:
+        e["details"] = details
     if domain is not None:
         e["domain"] = domain
     e.update(extra)
@@ -204,7 +207,7 @@ def _wire_paths(tmp_path, monkeypatch, entries):
     from fno.graph import cli as _cli
 
     graph = tmp_path / "graph.json"
-    graph.write_text(_json.dumps({"entries": entries}))
+    seed_graph(graph, _json.dumps({"entries": entries}))
     sidecar = tmp_path / "relatedness.json"
     monkeypatch.setattr(_cli, "_graph_path", lambda: graph)
     # relatedness build reads through the guarded display seam, which
@@ -219,14 +222,14 @@ def test_cli_build_then_get(tmp_path, monkeypatch):
     from fno.graph.cli import _relatedness_cli
 
     _wire_paths(tmp_path, monkeypatch, [
-        _node("a", title="nightly groomer relatedness", domain="code"),
-        _node("b", title="nightly groomer rank", domain="code"),
+        _node("aa-0001", title="nightly groomer relatedness", domain="code"),
+        _node("aa-0002", title="nightly groomer rank", domain="code"),
     ])
     runner = CliRunner()
     assert runner.invoke(_relatedness_cli, ["build"]).exit_code == 0
-    res = runner.invoke(_relatedness_cli, ["get", "a", "-J"])
+    res = runner.invoke(_relatedness_cli, ["get", "aa-0001", "-J"])
     assert res.exit_code == 0
-    assert '"id": "b"' in res.stdout
+    assert '"id": "aa-0002"' in res.stdout
 
 
 def test_cli_get_no_map_exits_nonzero_empty(tmp_path, monkeypatch):

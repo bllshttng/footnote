@@ -5,6 +5,7 @@ The resolver's projects_root is injected via monkeypatch so no real
 ~/.claude is touched.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json; monkeypatches fno.graph constants to use it."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -44,9 +45,15 @@ def _invoke(*args, input=None):
 
 
 def _write_node(g: Path, node: dict) -> None:
-    data = json.loads(g.read_text())
-    data["entries"].append(node)
-    g.write_text(json.dumps(data, indent=2) + "\n")
+    from fno.graph.store import read_graph_strict
+
+    seed_graph(g, [*read_graph_strict(g), node])
+
+
+def _store_state(g: Path):
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    return read_graph_strict(g), store_export_status(g)
 
 
 def _base_node(node_id: str, **overrides) -> dict:
@@ -243,20 +250,20 @@ def test_ac_edge_foreign_harness_spawn(tmp_graph, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Read-only: no mutation to graph.json
+# Read-only: no mutation to the graph store
 # ---------------------------------------------------------------------------
 
 def test_ac_verify_read_only(tmp_graph, tmp_path, monkeypatch):
-    """AC-VERIFY: provenance command never mutates graph.json."""
+    """AC-VERIFY: provenance command never mutates the graph store."""
     import fno.provenance.resolver as resolver_mod
     monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
 
     node = _base_node("ab-prov0006", source_session_id="sid-xyz", source_harness="claude")
     _write_node(tmp_graph, node)
 
-    before = tmp_graph.read_text()
+    before = _store_state(tmp_graph)
     _invoke("backlog", "provenance", "ab-prov0006")
-    after = tmp_graph.read_text()
+    after = _store_state(tmp_graph)
 
     assert before == after
 

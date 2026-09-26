@@ -12,6 +12,7 @@ only way to get it wrong is to name the wrong territory - which is checkable, an
 checked here.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -34,8 +35,7 @@ def territory(tmp_path, monkeypatch):
 
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps(
+    seed_graph(graph_path, json.dumps(
             {
                 "entries": [
                     {"id": "e-1", "type": "epic", "project": "alpha"},
@@ -43,9 +43,7 @@ def territory(tmp_path, monkeypatch):
                     {"id": "n-1", "type": "feature", "project": "alpha"},
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
 
     cfg = tmp_path / "config.toml"
     cfg.write_text(
@@ -246,8 +244,7 @@ def test_an_epic_set_falls_under_the_crown_holding_every_member(territory) -> No
     names and always fell through, so no king could grant two epics at once."""
     from fno import paths
 
-    paths.graph_json().write_text(
-        json.dumps(
+    seed_graph(paths.graph_json(), json.dumps(
             {
                 "entries": [
                     {"id": "e-1", "type": "epic", "project": "alpha"},
@@ -255,9 +252,7 @@ def test_an_epic_set_falls_under_the_crown_holding_every_member(territory) -> No
                     {"id": "e-3", "type": "epic", "project": "beta"},
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     from fno.agents.crown import scope_contains
 
     assert scope_contains("alpha", "e-1,e-2") is True     # both members of alpha

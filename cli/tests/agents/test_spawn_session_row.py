@@ -17,6 +17,7 @@ session and do not create review-worker rows. Coverage:
     call (the daemon observer's spelling).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -81,13 +82,10 @@ def _seed_graph() -> None:
 
     g = paths.graph_json()
     g.parent.mkdir(parents=True, exist_ok=True)
-    g.write_text(
-        json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
             "id": NODE, "title": "scratch provenance target",
             "type": "feature", "project": "fno", "status": "ready",
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
 
 
 def _node_rows() -> list[dict]:

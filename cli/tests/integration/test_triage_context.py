@@ -12,6 +12,7 @@ decouples ``_candidate_record`` from ``cmd_context`` can't silently drop
 fields the LLM reasoning prompt depends on.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -219,7 +220,7 @@ def test_deep_mode_still_includes_plan_excerpt(tmp_path):
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Empty graph routed to tmp_path via monkeypatch (matches sibling tests)."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -235,7 +236,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def _seed_entries(graph_path: Path, entries: list[dict]) -> None:
     """Write a hand-crafted graph.json so we can exercise legacy/edge fields."""
-    graph_path.write_text(json.dumps({"entries": entries}))
+    seed_graph(graph_path, json.dumps({"entries": entries}))
 
 
 def _invoke(*args):
@@ -252,7 +253,7 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
         tmp_graph,
         [
             {
-                "id": "ab-CLI",
+                "id": "ab-c11a0001",
                 "title": "CLI test",
                 "priority": "p1",
                 "plan_path": str(plan),
@@ -274,7 +275,7 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
     assert ctx["candidates"], "expected one candidate from seeded graph"
     c = ctx["candidates"][0]
 
-    assert c["id"] == "ab-CLI"
+    assert c["id"] == "ab-c11a0001"
     assert c["size"] == "M"
     assert c["domain"] == "code"
     assert c["details"] == "user-supplied implementation guidance"
@@ -296,7 +297,7 @@ def test_cli_context_idea_branch_also_enriched(tmp_graph):
         tmp_graph,
         [
             {
-                "id": "ab-IDEA",
+                "id": "ab-1dea0001",
                 "title": "An idea",
                 "priority": "p2",
                 "plan_path": None,
@@ -313,7 +314,7 @@ def test_cli_context_idea_branch_also_enriched(tmp_graph):
     assert ctx["ideas"], "expected one idea from seeded graph"
     i = ctx["ideas"][0]
 
-    assert i["id"] == "ab-IDEA"
+    assert i["id"] == "ab-1dea0001"
     assert i["size"] == "S"
     assert i["details"] == "thought captured at intake time"
     assert "claim_history" in i

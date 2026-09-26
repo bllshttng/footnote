@@ -7,9 +7,9 @@ targets) is paired with the same mutation writing graph.json, proving the
 mutator ran and chose to skip.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
-import json
 import os
 from pathlib import Path
 from typing import Generator
@@ -31,7 +31,7 @@ pytestmark = requires_rust
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(path, entries)
 
 
 def _read_graph(path: Path) -> list[dict]:
@@ -84,7 +84,6 @@ def _isolate(
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path / "repo"))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
 
-    from fno import config as config_mod
 
     import fno.graph._constants as gc
     for attr in ("GRAPH_JSON", "GRAPH_MD", "GRAPH_HTML", "GRAPH_ARCHIVE_JSON"):
@@ -314,7 +313,6 @@ def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, cap
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
-    from fno import config as config_mod
 
     from fno.graph.roadmap_public import render_configured_targets
 
@@ -670,7 +668,7 @@ def test_the_canonical_board_is_current_when_the_view_pass_returns(tmp_path, mon
     )
 
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
+    seed_graph(graph, '{"entries": []}')
     monkeypatch.setattr(gc, "GRAPH_JSON", graph)
 
     def _add(entries):

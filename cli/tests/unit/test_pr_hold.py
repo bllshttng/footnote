@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -61,7 +62,7 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
-    graph.write_text(json.dumps({"entries": complete}))
+    seed_graph(graph, json.dumps({"entries": complete}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     # x-a93a: hold_for_pr scopes its "anything to check" gate by matching an
     # entry's own `cwd` against this repo's canonical root
@@ -99,11 +100,13 @@ def test_hold_for_pr_returns_attributable_plan_hold(tmp_path, monkeypatch):
 
 def test_hold_for_pr_fails_closed_when_bound_plan_is_unreadable(tmp_path, monkeypatch):
     graph = _graph(tmp_path, monkeypatch, plan_body="---\nstatus: ready\n---\n")
-    data = json.loads(graph.read_text())
+    from fno.graph.store import read_graph_strict
+
+    data = read_graph_strict(graph)
     malformed = tmp_path / "malformed.md"
     malformed.write_text("---\nstatus: ready\ndispatch_hold: [\n")
-    data["entries"][0]["plan_path"] = str(malformed)
-    graph.write_text(json.dumps(data))
+    data[0]["plan_path"] = str(malformed)
+    seed_graph(graph, data)
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold-invalid:x-5a5c" in reason
 
@@ -173,7 +176,7 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     plan = tmp_path / "unused.md"
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {"id": "x-1111", "slug": "x-1111", "title": "x-1111",  "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
@@ -207,7 +210,7 @@ def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nod
     plan = other_root / "other-project.md"
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {"id": "x-2222",
             "slug": "x-2222", "title": "x-2222", 
             "type": "feature",
@@ -236,7 +239,7 @@ def test_hold_for_pr_still_checks_when_this_repos_project_has_a_ref_less_node(
     plan = tmp_path / "unheld.md"
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {"id": "x-3333",
             "slug": "x-3333", "title": "x-3333", 
             "type": "feature",
@@ -271,7 +274,7 @@ def test_hold_for_pr_still_checks_when_the_matching_node_has_a_null_project(
     plan = tmp_path / "unclaimed.md"
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {"id": "x-4444",
             "slug": "x-4444", "title": "x-4444", 
             "type": "feature",
@@ -319,7 +322,7 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
         "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {
             "id": "x-5555",
             "slug": "x-5555", "title": "x-5555", 
@@ -369,7 +372,7 @@ def test_hold_for_pr_falls_back_to_show_toplevel_when_canonical_worktree_is_none
         "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {
             "id": "x-7777",
             "slug": "x-7777", "title": "x-7777", 
@@ -412,7 +415,7 @@ def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
         "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {
             "id": "x-6666",
             "slug": "x-6666", "title": "x-6666", 

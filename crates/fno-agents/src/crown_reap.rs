@@ -947,14 +947,17 @@ mod tests {
     fn the_inheritor_names_the_presiding_l1_or_operator() {
         let dir = tmp("inheritor");
         // One epic list mapping to one project, so the presiding level-1
-        // crown resolves through the graph path the config override pins.
-        let graph_fixture = dir.join("graph-fixture.json");
-        let graph = serde_json::json!({"entries": [
-            {"id": "x-epic1", "project": "fno"},
-            {"id": "x-epic2", "project": "fno"},
-        ]});
-        fs::write(&graph_fixture, graph.to_string()).unwrap();
-        pin_window(&dir, Some(&graph_fixture));
+        // crown resolves through the seeded FNO_HOME store. set_var is
+        // process-global; restore it before returning.
+        let old_home = std::env::var("FNO_HOME").ok();
+        let seeded = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_HOME", seeded.path());
+        let graph = vec![
+            serde_json::json!({"id": "x-epic1", "project": "fno"}),
+            serde_json::json!({"id": "x-epic2", "project": "fno"}),
+        ];
+        crate::graph_store::seed_rows(&seeded.path().join("graph.json"), &graph).unwrap();
+        pin_window(&dir, None);
         // Live level-1 crown over fno: a busy row holding scope fno at rung 1.
         let l1 = reg_row("crown-l1", "busy", Some("fno"), Some(1));
         let session = "aaaa1111-0000-4000-8000-000000000001";
@@ -989,6 +992,10 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(out.vacated[0].inheritor, "operator");
+        match old_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
         fs::remove_dir_all(&dir).ok();
     }
 

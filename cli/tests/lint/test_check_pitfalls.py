@@ -11,6 +11,7 @@ graph fails loud, and an absent graph is the legitimate skip. Fixture runs pin
 `FNO_GRAPH_JSON` to an absent path so the operator's live graph never decides
 a test.
 """
+from tests.fixtures.graph_seed import seed_graph
 import os
 import shutil
 import subprocess
@@ -29,9 +30,15 @@ def _run(
     target: Path, *, lint: Path = LINT, env_extra: dict | None = None
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
-    # operator's live graph: the default env pins an absent graph, which is
-    # the gate's legitimate skip.
-    env = {**os.environ, "FNO_GRAPH_JSON": str(target.parent / "absent-graph.json")}
+    # operator's live graph: pin an empty state root with an absent store.
+    state = target.parent / "state"
+    config = target.parent / "config.toml"
+    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
+    env = {
+        **os.environ,
+        "FNO_CONFIG": str(config),
+        "FNO_GRAPH_JSON": str(state / "graph.json"),
+    }
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -329,11 +336,8 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
 
 def _seeded_graph(tmp_path: Path) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        '{"entries": [{"id": "x-1234", "title": "A real guard", "slug": "x-1234",'
-        ' "type": "feature", "priority": "p2", "status": "idea"}]}',
-        encoding="utf-8",
-    )
+    seed_graph(graph, '{"entries": [{"id": "x-1234", "title": "A real guard", "slug": "x-1234",'
+        ' "type": "feature", "priority": "p2", "status": "idea"}]}')
     return graph
 
 
@@ -378,10 +382,11 @@ def test_graduates_to_resolves_by_title_after_normalization(tmp_path: Path) -> N
 
 
 def test_an_unreadable_graph_fails_loud(tmp_path: Path) -> None:
-    graph = tmp_path / "graph.json"
-    graph.write_text("{not json", encoding="utf-8")
+    graph_db = tmp_path / "state" / "graph.db"
+    graph_db.parent.mkdir(parents=True)
+    graph_db.write_bytes(b"not sqlite")
     path = _fixture(tmp_path, [GOOD])
-    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    r = _run(path)
     assert r.returncode == 1
     assert "cannot be read" in r.stderr
 

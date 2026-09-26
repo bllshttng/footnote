@@ -1380,10 +1380,6 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",
-    "graph_export_failed",
-    // One 5-minute parity sample: relational export vs authoritative JSON
-    // while JSON is still the backend (the 7-day soak clock's input).
-    "graph_parity_sample",
     // Choke-point removal accounting: ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every
