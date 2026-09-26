@@ -49,11 +49,15 @@ pub(crate) fn r_blueprint(
     let mut target_ready: Vec<String> = Vec::new();
     let mut skips: Vec<Value> = Vec::new();
     for row in &rows {
-        let id = row
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        // A row with no string id answers no verb: skip it, never dispatch
+        // an "unknown" node the way a silent default would invite.
+        let id = match row.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => {
+                skips.push(json!({"id": null, "reason": "row carries no id"}));
+                continue;
+            }
+        };
         match crate::backlog_ready::effective_verb_with_floor(row, floor) {
             Ok((verb, _)) if verb.as_deref() == Some("/blueprint") => candidates.push(id),
             Ok((verb, _)) if verb.as_deref() == Some("/target") => target_ready.push(id),
@@ -408,7 +412,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-bp-med-{}", std::process::id()));
         let reading = blueprint_reading(
             &dir,
-            "[dispatch]\nblueprint_floor = \"medium\"\n",
+            "",
             unplanned_board(&[("x-med", "medium"), ("x-low", "low")], Some(0)),
             Some("sess-1"),
             vec![],
@@ -448,6 +452,25 @@ mod tests {
             "error": "graph unreadable", "rows": []}]});
         let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4), "high");
         assert!(reading.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row with no string id skips with a reason; it never surfaces as an
+    /// "unknown" candidate a king would try to dispatch.
+    #[test]
+    fn r_blueprint_skips_a_row_without_a_string_id() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-noid-{}", std::process::id()));
+        let board = json!({"queues": [{"name": "unplanned", "status": "ok", "count": 1,
+            "rows": [{"id": null, "difficulty": "high"}]}]});
+        let reading =
+            blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4), "high").unwrap();
+        assert_eq!(reading["starts"], json!([]), "{reading}");
+        assert_eq!(reading["target_ready"], json!([]), "{reading}");
+        assert_eq!(
+            reading["skips"],
+            json!([{"id": null, "reason": "row carries no id"}]),
+            "{reading}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

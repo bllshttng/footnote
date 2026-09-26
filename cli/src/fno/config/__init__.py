@@ -2129,9 +2129,13 @@ class DispatchBlock(BaseModel):
     @classmethod
     def _coerce_blueprint_floor(cls, v: object) -> object:
         """Only the four literals are honored; anything else degrades to "high",
-        the lean default. Same stance as the validators above: a typo can never
-        widen blueprint ceremony past the lean-dispatch ruling."""
-        return v if v in ("high", "medium", "low", "never") else "high"
+        the lean default. Case and surrounding space are normalized like the
+        Rust reader lowercases them, so both surfaces answer one value. Same
+        stance as the validators above: a typo can never widen blueprint
+        ceremony past the lean-dispatch ruling."""
+        if isinstance(v, str) and v.strip().lower() in ("high", "medium", "low", "never"):
+            return v.strip().lower()
+        return "high"
 
 
 def _positive_int(v: object) -> bool:

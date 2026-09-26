@@ -68,6 +68,8 @@ def test_blueprint_floor_validator_degrades_a_typo_to_the_lean_default():
 def test_blueprint_floor_validator_accepts_the_widened_ladder():
     assert DispatchBlock(blueprint_floor="low").blueprint_floor == "low"
     assert DispatchBlock(blueprint_floor="never").blueprint_floor == "never"
+    assert DispatchBlock(blueprint_floor=" Low ").blueprint_floor == "low"
+    assert DispatchBlock(blueprint_floor="NEVER").blueprint_floor == "never"
 
 
 def test_floor_low_and_never_ride_with_the_row(monkeypatch):
