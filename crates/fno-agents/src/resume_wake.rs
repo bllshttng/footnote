@@ -1954,7 +1954,6 @@ mod tests {
             // The stale fno view: never live, never terminal.
             |_| Some("unreachable".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
@@ -2029,7 +2028,6 @@ mod tests {
             // The stale fno view: never live, never terminal.
             |_| Some("unreachable".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
