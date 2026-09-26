@@ -405,11 +405,14 @@ mod tests {
             uuid,
             &[format!(r#"{{"type":"summary","summary":"{long}"}}"#)],
         );
-        let named = synthesized_entry_name(uuid, "x-e4b0", "a1b2c3d4");
+        let named = synthesized_entry_name(uuid, "linked-task", "a1b2c3d4");
         assert_eq!(named.chars().count(), 48, "the title is capped");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
-        // No title: the linked node id names the row.
-        assert_eq!(synthesized_entry_name(uuid, "x-e4b0", "a1b2c3d4"), "x-e4b0");
+        // No title: the linked task id names the row.
+        assert_eq!(
+            synthesized_entry_name(uuid, "linked-task", "a1b2c3d4"),
+            "linked-task"
+        );
         // Neither: the derivable t- form (the bridge's manual form).
         assert_eq!(synthesized_entry_name(uuid, "", "a1b2c3d4"), "t-a1b2c3d4");
     }

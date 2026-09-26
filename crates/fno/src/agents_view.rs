@@ -2678,9 +2678,9 @@ mod tests {
     mod lineage_kind_tests;
     mod liveness_rule_tests;
     mod parked_child_tests;
+    mod roster_join_tests;
     mod spawned_by_name_tests;
     mod thread_row_status_tests;
-    mod roster_join_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
     }

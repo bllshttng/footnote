@@ -4119,10 +4119,9 @@ fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
     // key would produce (Locked 3 parity, at the modal boundary).
     let m = build_keys_modal();
     let (ri, _) = m.popup.selected().expect("a selectable row");
-    let (ri, ev) = m.row_events[ri..]
+    let ev = m.row_events[ri..]
         .iter()
-        .enumerate()
-        .find_map(|(i, e)| e.clone().map(|e| (ri + i, e)))
+        .find_map(|e| e.clone())
         .expect("a first executable row");
     // That first executable row is Global's `w` -> OpenSelector.
     assert_eq!(ev, crate::keys::resolve_chord(b'w'));
