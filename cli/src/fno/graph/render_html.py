@@ -111,36 +111,23 @@ def leak_offender_lines(offenders: list[tuple[str, str, tuple[str, ...]]]) -> li
     ]
 
 
-def alert_render_refused(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
-    """Best-effort OS alert when a public render refuses. A refusal's stderr
-    dies with the calling process under launchd, so the live page can sit
-    stale with no reader - the outage behind the write-time gate. Fire the
-    same `fno inbox notify` lane the push script uses, so every refused
-    render is audible, never silent."""
-    try:
-        from fno.notify._impl import send_notification
-
-        detail = "; ".join(
-            f"{node_id} {'+'.join(classes)}" for node_id, _, classes in offenders[:3]
-        )
-        send_notification(
-            "roadmap render refused",
-            f"{subject}: leak gate refused ({detail})",
-            "fno backlog roadmap",
-        )
-    except Exception:  # noqa: BLE001 - an alert must never mask the refusal
-        pass
-
-
 def leak_refusal_report(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
     """The audible refusal, shared by the manual roadmap verb and the
     auto-render so the two leak-gate reports cannot drift apart: one stderr
-    line per offender, then the alert (a bare exit under launchd is
-    invisible)."""
+    line per offender, then a best-effort OS alert. A bare exit under
+    launchd is invisible and the live page can sit stale with no reader, so
+    the alert rides the same `fno inbox notify` lane the push script fires.
+    An alert failure never masks the refusal."""
     print(f"Error: public title leak gate refused {subject}:", file=sys.stderr)
     for line in leak_offender_lines(offenders):
         print(line, file=sys.stderr)
-    alert_render_refused(subject, offenders)
+    try:
+        from fno.notify._impl import send_notification
+
+        detail = "; ".join(f"{i} {'+'.join(c)}" for i, _, c in offenders[:3])
+        send_notification("roadmap render refused", f"{subject}: leak gate refused ({detail})")
+    except Exception:  # noqa: BLE001 - an alert must never mask the refusal
+        pass
 
 
 def atomic_write_documents(documents: dict[Path, str]) -> None:
