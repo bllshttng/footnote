@@ -20,6 +20,10 @@ The mux subprocess is faked; the real socket path is the agent_edge e2e.
 from __future__ import annotations
 
 import subprocess
+
+# The real run, bound before any test patches subprocess.run: the fake's
+# foreign-call passthrough must not resolve the patch and recurse.
+_REAL_RUN = subprocess.run
 from pathlib import Path
 
 import pytest
@@ -90,10 +94,12 @@ class FakeMux:
         # caller appeared (the crown read resolves the registry through the
         # config layer, which runs `git rev-parse`) and broke both.
         #
-        # A foreign call is answered as success and NOT recorded, so `calls`
-        # keeps meaning what its readers think it means.
+        # A foreign call is NOT recorded, so `calls` keeps meaning what its
+        # readers think it means. It runs for real: the envelope render
+        # (`fno-agents mail-envelope`) is a foreign call whose stdout IS the
+        # payload, so a synthetic empty success silently sent empty panes.
         if argv[1:3] != ["mux", "pane"] or len(argv) < 4:
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            return _REAL_RUN(argv, input=input, capture_output=True, text=True, timeout=30)
         verb = argv[3]
         self.calls.append((list(argv), input))
         times = self.fail_times.get(verb)
