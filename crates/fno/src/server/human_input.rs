@@ -40,19 +40,19 @@ fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> 
     }
 }
 
-/// The attended hold window: a keystroke past this since the pane's last
-/// arm re-arms the hold. One arm per 5-minute window; the idle clock the
-/// arm writes lifts the hold and delivers the digest about five minutes
-/// after the operator goes quiet. Same value as mail_hold::DEFAULT_MINUTES.
-const ATTENDED_HOLD_WINDOW: Duration = Duration::from_secs(300);
+/// The attended hold refresh throttle: an arm older than this re-arms on
+/// the next keystroke, so a burst that outlasts the five-minute clock gets
+/// its deadline moved before the release timer can lift the hold under a
+/// still-typing operator. One spawn a minute under continuous typing; a
+/// sub-minute burst stays one spawn.
+const ATTENDED_HOLD_REFRESH: Duration = Duration::from_secs(60);
 
 /// Arm now? Pure so tests drive the burst arithmetic: the first keystroke
-/// ever, or one past the window since the last arm. A keystroke inside the
-/// window coalesces into the burst the arm already covers.
+/// ever, or one past the refresh throttle since the last arm.
 fn hold_arm_due(last: Option<Instant>, now: Instant) -> bool {
     match last {
         None => true,
-        Some(t) => now.saturating_duration_since(t) >= ATTENDED_HOLD_WINDOW,
+        Some(t) => now.saturating_duration_since(t) >= ATTENDED_HOLD_REFRESH,
     }
 }
 
@@ -294,23 +294,33 @@ impl Core {
     /// Arm (or, on a submit, re-arm) the pane session's mail hold.
     /// The one arm source that sees the keystrokes: a session the registry
     /// carries holds delivery while its operator types and drains as one
-    /// digest at the idle clock. One spawn per window (`hold_arm_due`);
-    /// a pane with no session mapping does nothing. The spawn runs
-    /// off-loop and never blocks the keystroke.
+    /// digest at the idle clock. The arm re-arms past the refresh throttle
+    /// (`hold_arm_due`), so a long burst keeps its clock ahead of the
+    /// release timer; a pane with no session mapping does nothing. The
+    /// spawn runs off-loop and never blocks the keystroke.
     pub(super) fn arm_attended_hold(&mut self, pane: u64, force: bool) {
         let now = Instant::now();
         if !force && !hold_arm_due(self.hold_arm_last.get(&pane).copied(), now) {
             return;
         }
-        let session = super::agent_rows_join::bind_agent_to_pane(
+        let bound = super::agent_rows_join::bind_agent_to_pane(
             &self.agents,
             &self.session_name,
             pane,
             &self.attached,
             &|a| self.worker_pane_for_agent(a),
         )
-        .and_then(|i| self.agents[i].harness_session_id.clone());
-        let Some(session) = session else {
+        .map(|i| &self.agents[i]);
+        // A portal-hosted thread has no mux/attach mapping; the same
+        // fallback the submit witness uses resolves it.
+        let portal_bound = bound
+            .is_none()
+            .then(|| crate::thread_viewer::row_for_pane(&self.portals, pane, &self.agents))
+            .flatten();
+        let Some(session) = bound
+            .or(portal_bound)
+            .and_then(|a| a.harness_session_id.clone())
+        else {
             return;
         };
         self.hold_arm_last.insert(pane, now);
@@ -341,11 +351,11 @@ mod tests {
         assert!(hold_arm_due(None, t0), "the first keystroke ever arms");
         assert!(
             !hold_arm_due(Some(t0), t0 + Duration::from_secs(30)),
-            "a keystroke inside the window coalesces into the burst the arm covers"
+            "a keystroke inside the throttle coalesces into the burst the arm covers"
         );
         assert!(
-            hold_arm_due(Some(t0), t0 + ATTENDED_HOLD_WINDOW),
-            "one past the window a new burst re-arms"
+            hold_arm_due(Some(t0), t0 + ATTENDED_HOLD_REFRESH),
+            "one past the refresh throttle a new burst re-arms"
         );
     }
 
@@ -707,6 +717,50 @@ mod tests {
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_portal_bound_pane_arms_through_the_portal_fallback() {
+        use crate::server::CoreMsg;
+        use crate::thread_viewer::Portal;
+        let mut core = witness_test_core(7);
+        core.agents = vec![crate::agents_view::RegistryAgent {
+            name: "thread".into(),
+            cwd: "/fixture".into(),
+            mux: None,
+            harness: Some("codex".into()),
+            session_id: Some("thread-id".into()),
+            harness_session_id: Some("dddddddd-1111-2222-3333-444455556666".into()),
+            ..Default::default()
+        }];
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "thread".into(),
+                seat: 7,
+                tab: 5,
+            },
+        );
+        core.clients.push(crate::server::Client {
+            id: 1,
+            reliable_tx: tokio::sync::mpsc::channel(1).0,
+            dirty: Default::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            synced_modes: Default::default(),
+            view: (1, 1),
+            visible: Default::default(),
+            dims: (24, 80),
+            passive: false,
+            last_press: None,
+        });
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"x".to_vec(),
+        });
+        assert!(
+            core.hold_arm_last.contains_key(&7),
+            "a portal-seated pane arms its row's hold through the same fallback the witness uses"
+        );
     }
 
     #[test]

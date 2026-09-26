@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::paths::AgentsHome;
-use crate::state::update_registry;
+use crate::state::{load_registry, update_registry};
 
 /// The idle window the server arm runs, in minutes: hold.py's own
 /// `DEFAULT_MINUTES`, so a hold the server armed reads exactly like one the
@@ -41,15 +41,43 @@ fn canonical_handle(session_id: &str) -> String {
 }
 
 /// The state root the Python `hold_dir()` resolves to: `$FNO_HOME`, else
-/// `$HOME/.fno`. Config-file `state_dir` overrides are not read here, the
+/// `paths.state_dir` from the global config's `[paths]` table (`~` expands),
+/// else `$HOME/.fno`. The project-local config override is unread here, the
 /// same bound every other Rust writer in the fleet runs under.
 fn state_root() -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_HOME") {
         return PathBuf::from(home);
     }
-    std::env::var_os("HOME")
+    let ambient = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".fno"))
-        .unwrap_or_else(|| PathBuf::from(".fno"))
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    let global = ambient.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&global) else {
+        return ambient;
+    };
+    let Ok(doc) = text.parse::<toml::Table>() else {
+        return ambient;
+    };
+    let Some(configured) = doc
+        .get("paths")
+        .and_then(|p| p.get("state_dir"))
+        .and_then(|v| v.as_str())
+    else {
+        return ambient;
+    };
+    let expanded = configured
+        .strip_prefix("~/")
+        .map(|rest| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(rest))
+                .unwrap_or_else(|| PathBuf::from(rest))
+        })
+        .unwrap_or_else(|| PathBuf::from(configured));
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        ambient
+    }
 }
 
 fn hold_sidecar_path(handle: &str) -> PathBuf {
@@ -82,6 +110,14 @@ fn set_policy(session_id: &str, policy: Option<&str>) -> Option<String> {
     })
     .ok()?;
     matched
+}
+
+/// The matched row's session id, read-only (the clock-before-stamp order
+/// needs the handle before anything is stamped).
+fn lookup_session(session_id: &str) -> Option<String> {
+    let registry = load_registry(&AgentsHome::shared_registry_json()).ok()?;
+    row_for_session(&registry, session_id)
+        .and_then(|i| registry.entries[i].harness_session_id.clone())
 }
 
 /// Write the sidecar clock in hold.py `_write`'s exact shape: one JSON
@@ -178,7 +214,10 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             }
         }
     } else {
-        let Some(matched) = set_policy(session_id, Some("bus-only")) else {
+        // Clock BEFORE stamp: an absent clock on a stamped row is the
+        // never-lapses state, so a failed clock write must leave the row
+        // unstamped (mail keeps its default delivery, the arm just failed).
+        let Some(matched) = lookup_session(session_id) else {
             eprintln!("mail-hold: no registry row carries session {session_id}");
             return 3;
         };
@@ -186,6 +225,13 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         if let Err(exc) = write_idle_clock(&handle, minutes * 60) {
             eprintln!("mail-hold: could not write the clock for {handle}: {exc}");
             return 1;
+        }
+        if set_policy(session_id, Some("bus-only")).is_none() {
+            // The row raced out between the read and the stamp. The clock
+            // on disk is inert without the flag, so this is exit 3, not a
+            // rollback.
+            eprintln!("mail-hold: no registry row carries session {session_id}");
+            return 3;
         }
         spawn_release_timer(&handle);
         println!("mail-hold: bus-only armed for {handle} ({minutes}m idle)");
