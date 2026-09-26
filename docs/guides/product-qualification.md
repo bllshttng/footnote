@@ -54,7 +54,7 @@ Any superiority or adoption claim requires actual imported observations with too
 
 ## Bounded live-trial protocol
 
-Live trials are an authorized, budgeted activity. This page describes the protocol; it performs no trial.
+Live trials are an authorized, budgeted activity. This page describes the protocol. It performs no trial.
 
 1. The operator grants the trial: scope, budget in dollars, and the exact scenarios allowed to run with a paid worker lane.
 2. Run the live-trial cohorts only: `fno doctor evals run --task product-delivery-journey --cohort operator-effort-per-outcome --repeat 2 --provider <provider> --lane <resolved lane>`
