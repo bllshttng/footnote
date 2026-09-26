@@ -338,6 +338,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::review_summary::run_review_summary(&args[1..]);
     }
 
+    // PR creation reads this branch-vs-base test inventory for its body; it
+    // stays binary-direct because it only folds a local diff and needs no daemon.
+    if matches!(verb, "test-delta") {
+        return fno_agents::test_delta::run_test_delta(&args[1..]);
+    }
+
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct
@@ -4444,6 +4450,7 @@ fn format_success(
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
                     result.get("codex_loaded"),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             } else {
                 Some(render_list_table(
@@ -4451,6 +4458,7 @@ fn format_success(
                     &discovered,
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             }
         }
@@ -4522,6 +4530,7 @@ fn render_list_json(
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
     codex_loaded: Option<&Value>,
+    retired: &Value,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     // `codex_loaded` is additive and present only when the caller probed the
@@ -4540,6 +4549,7 @@ fn render_list_json(
     if let Some(block) = codex_loaded {
         payload["codex_loaded"] = block.clone();
     }
+    fno_agents::reap_render::attach_retired(&mut payload, retired);
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
@@ -4702,24 +4712,21 @@ fn truncate_cell(s: &str, width: usize) -> String {
     }
 }
 
-/// Render agents list as a human-readable table (Task 3.1; CHECKED/PID added by
-/// plan, Architecture C).
+/// Render agents list as a human-readable table (Task 3.1).
 ///
-/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD. CHECKED
-/// is the relative age since the last reconcile probe (`never` when unprobed);
-/// it replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid
-/// for a PTY agent (`-` for a one-shot ask, which has no managed process).
-/// EVENT AGE is the relative age of the transcript's newest activity and LAST
-/// MESSAGE the flattened last-turn text - beside the state column on
-/// purpose, so a row claiming to be busy while its transcript is hours old
-/// shows the disagreement instead of hiding it. This is a functional table;
-/// byte-exact match with Python is not required (Python's table is
-/// time-dependent via relative timestamps).
+/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD.
+/// CHECKED is the relative age since the last reconcile probe (`never` when
+/// unprobed); it replaced the always-`-` LIVE column (AC5-UI). PID is the
+/// worker pid for a PTY agent (`-` for a one-shot ask). EVENT AGE and LAST
+/// MESSAGE sit beside the state column on purpose: a row claiming busy while
+/// its transcript is hours old shows the disagreement. Byte-exact match with
+/// Python is not required (its table is time-dependent).
 fn render_list_table(
     agents: &Value,
     discovered: &[Value],
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
+    retired: &Value,
 ) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
@@ -4835,20 +4842,16 @@ fn render_list_table(
     if !discovered.is_empty() {
         out.push_str(&render_discovered_section(discovered));
     }
+    out.push_str(&fno_agents::reap_render::retired_section(retired));
     out
 }
 
 /// Render the host-local discovered-live-sessions lane below the registry
-/// table (AC1-UI). A blank line + banner make it visually
-/// distinct. Columns: ADDRESS (the mailbox) LABEL (friendly alias) STATUS
-/// PROJECT CWD.
-///
-/// ADDRESS leads and the alias is demoted to LABEL, matching the Python
-/// renderer. The alias led this table for its whole life, which made it the
-/// leftmost thing a reader copied, and `<project>-<short8>` is not an address.
-/// The value is read off the row rather than derived here: `to_row` resolves it
-/// from the session's own harness, so this renderer and the Python one cannot
-/// answer differently about the same session.
+/// table (AC1-UI). Columns: ADDRESS (the mailbox) LABEL (friendly alias)
+/// STATUS PROJECT CWD. ADDRESS leads, matching the Python renderer:
+/// `<project>-<short8>` is not an address. The value is read off the row
+/// (`to_row` resolves it from the session's own harness), so this renderer
+/// and the Python one cannot answer differently about the same session.
 fn render_discovered_section(discovered: &[Value]) -> String {
     let headers = ["ADDRESS", "LABEL", "STATUS", "PROJECT", "CWD"];
     let display: Vec<[String; 5]> = discovered

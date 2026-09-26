@@ -2238,6 +2238,16 @@ def register_existing_session(
             # caller's transport key (the 8-hex jobId `claude attach` wants) must
             # win over the full UUID that setattr just wrote there.
             fresh.short_id = short_id
+        elif harness == "claude":
+            # No caller transport key: derive the 8-hex jobId the harness's own
+            # attach form addresses, as a restamp and a branch row do. Writing
+            # the full UUID here left a registered row unattachable. A derived
+            # key that collides with an existing address is skipped, not
+            # raised: the session-start hook fails open, and the full UUID
+            # still resolves the row by session id.
+            derived = claude_transport_short_id(session_id)
+            if _DERIVED_SHORT_RE.match(derived) and not _address_is_taken(derived):
+                fresh.short_id = derived
         entries.append(fresh)
         return entries
 
