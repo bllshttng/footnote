@@ -1308,13 +1308,6 @@ fn derived_short_id(session_id: &str) -> String {
     crate::identity::canonical_handle(session_id.trim())
 }
 
-/// Derivable, stable row name for a synthesized entry so re-adopting upserts one
-/// row (the upsert keys on `harness_session_id`; the name is for display + name
-/// addressing). `t-` is the bridge's manual form: no provenance.
-fn synthesized_name(short: &str) -> String {
-    format!("t-{short}")
-}
-
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
 /// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
 /// the harness-appropriate session id comes from the manifest, claude
@@ -1348,7 +1341,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // Synthesized from an identity that arrived without a row; the lane
         // it ran on is unobserved, so the substrate stays unknown.
         substrate: None,
-        name: synthesized_name(&short),
+        name: crate::claude_adopt::synthesized_entry_name(&session, &id.fno_id, &short),
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
@@ -4715,7 +4708,9 @@ mod tests {
         assert_eq!(e.claude_session_uuid, None);
         assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
         assert!(!e.short_id.is_empty());
-        assert_eq!(e.name, format!("t-{}", e.short_id));
+        // The name prefers the linked node id over the bare t- form (a
+        // transcript title would outrank both; this test env has none).
+        assert_eq!(e.name, "20260804T202518Z-cl99002-4e0236");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }
