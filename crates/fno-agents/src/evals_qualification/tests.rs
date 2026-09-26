@@ -214,3 +214,51 @@ fn unrunnable_history_answers_all_missing_not_an_error() {
     assert_eq!(totals["expected"], json!(6));
     assert_eq!(totals["missing"], json!(6));
 }
+
+#[test]
+fn vacuous_manifest_never_reads_as_a_pass() {
+    // No scenarios, no version pin, or no bank-rev pin is never conformance
+    // complete: nothing declared can never read as qualified.
+    for mut bad in [json!({}), base_manifest()] {
+        bad.as_object_mut().unwrap().remove("scenarios");
+        let p = projection(&[], &bad);
+        assert!(p.pointer("/qualification/manifest_error").is_some());
+        assert!(!p
+            .pointer("/qualification/conformance_complete")
+            .unwrap()
+            .as_bool()
+            .unwrap());
+        assert_eq!(exit_code(&p), 4);
+    }
+    let mut no_rev = base_manifest();
+    no_rev["release"]["bank_rev"] = json!("");
+    let p = projection(&[], &no_rev);
+    assert_eq!(exit_code(&p), 4);
+    let mut wrong_version = base_manifest();
+    wrong_version["manifest_version"] = json!(99);
+    let p = projection(&[], &wrong_version);
+    assert_eq!(exit_code(&p), 4);
+}
+
+#[test]
+fn valid_manifest_with_full_conformance_still_passes_after_the_guard() {
+    let rows = vec![
+        qrow("install-first-use", 0, Some(true), REV),
+        qrow("install-first-use", 1, Some(true), REV),
+        qrow("delivery-evidence-failure", 0, Some(true), REV),
+        qrow("manifest 1 guard", 1, Some(true), REV), // wrong cohort, ignored
+    ];
+    // Rebuild the same full set minus the rogue row, then assert exit 0.
+    let rows = vec![
+        qrow("install-first-use", 0, Some(true), REV),
+        qrow("install-first-use", 1, Some(true), REV),
+        qrow("delivery-evidence-failure", 0, Some(true), REV),
+        qrow("delivery-evidence-failure", 1, Some(true), REV),
+    ];
+    let p = projection(&rows, &base_manifest());
+    assert!(p
+        .pointer("/qualification/manifest_error")
+        .unwrap()
+        .is_null());
+    assert_eq!(exit_code(&p), 0);
+}

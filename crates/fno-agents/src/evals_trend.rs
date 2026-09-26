@@ -759,6 +759,11 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     }
     let now = now.unwrap_or_else(Utc::now);
 
+    if qualification.is_some() && mode != "report" {
+        eprintln!("evals-trend: --qualification requires --mode report (got '{mode}')");
+        return EXIT_USAGE;
+    }
+
     if mode == "summary" {
         return print_summary(&history, stale_days, now);
     }

@@ -81,11 +81,32 @@ pub fn projection(rows: &[Value], manifest: &Value) -> Value {
     let mut declared: Vec<(String, String)> = Vec::new(); // (cohort, scenario id)
     let mut rev_mismatch_rows = 0u64;
 
-    let scenarios = manifest
+    // A malformed manifest can never read as a passing qualification: no
+    // declared version, no pinned bank revision, or no scenario at all makes
+    // the projection answer "nothing declared", and "nothing declared" is
+    // never conformance-complete.
+    let version = manifest.get("manifest_version").and_then(Value::as_u64);
+    let scenarios_list = manifest
         .get("scenarios")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let manifest_error = if version != Some(1) {
+        Some(format!(
+            "unsupported manifest_version {version:?}; expected 1"
+        ))
+    } else if bank_rev.is_empty() {
+        Some("release.bank_rev pin is missing or empty".to_string())
+    } else if scenarios_list.is_empty() {
+        Some("no scenarios declared".to_string())
+    } else {
+        None
+    };
+    if manifest_error.is_some() {
+        conformance_complete = false;
+    }
+
+    let scenarios = scenarios_list;
     for s in &scenarios {
         let id = s.get("id").and_then(Value::as_str).unwrap_or_default();
         let cohort = s.get("cohort").and_then(Value::as_str).unwrap_or(id);
@@ -259,6 +280,7 @@ pub fn projection(rows: &[Value], manifest: &Value) -> Value {
     json!({
         "qualification": {
             "manifest_version": manifest.get("manifest_version").cloned().unwrap_or(json!(null)),
+            "manifest_error": manifest_error,
             "release": release,
             "revision_mismatch_rows": rev_mismatch_rows,
             "units": units,
@@ -284,6 +306,7 @@ pub fn exit_code(projection: &Value) -> i32 {
         .get("conformance_complete")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let manifest_error = q.get("manifest_error").is_some_and(|e| !e.is_null());
     let false_success = q
         .get("false_success")
         .and_then(Value::as_array)
@@ -294,7 +317,7 @@ pub fn exit_code(projection: &Value) -> i32 {
         .and_then(Value::as_object)
         .map(|m| !m.is_empty())
         .unwrap_or(false);
-    if complete && !false_success && !undeclared {
+    if complete && !manifest_error && !false_success && !undeclared {
         0
     } else {
         4
@@ -305,6 +328,12 @@ pub fn exit_code(projection: &Value) -> i32 {
 pub fn render_text(projection: &Value) -> String {
     let q = projection.get("qualification").unwrap_or(projection);
     let mut out = String::from("Qualification projection:\n");
+    if let Some(err) = q.get("manifest_error").filter(|e| !e.is_null()) {
+        out.push_str(&format!(
+            "  MANIFEST ERROR: {}\n",
+            err.as_str().unwrap_or("malformed manifest")
+        ));
+    }
     if let Some(scenarios) = q.get("scenarios").and_then(Value::as_object) {
         for (id, s) in scenarios {
             out.push_str(&format!(
