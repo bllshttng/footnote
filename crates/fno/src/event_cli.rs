@@ -90,6 +90,8 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
                 "seq": r.seq,
                 "retention_class": r.retention_class,
                 "inserted": r.inserted,
+                "suppressed": r.suppressed,
+                "pending_occurrences": r.pending_occurrences,
             });
             println!("{receipt}");
             0
@@ -210,6 +212,7 @@ fn run_import(args: &[OsString]) -> i32 {
                 "store": receipt.store.display().to_string(),
                 "ingested": receipt.ingested,
                 "corrupt": receipt.corrupt,
+                "coalesced": receipt.coalesced,
             });
             println!("{payload}");
             0
