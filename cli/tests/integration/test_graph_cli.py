@@ -1618,7 +1618,7 @@ def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
     node_id = "ab-offered1"
     plan = tmp_graph.parent / "ready.md"
     plan.write_text("---\nstatus: ready\n---\n\n# Ready\n")
-    tmp_graph.write_text(json.dumps({"entries": [{
+    _seed_graph_text(tmp_graph, json.dumps({"entries": [{
         "id": node_id, "title": "Still offered", "status": "ready",
         "project": "p", "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-09-01T00:00:00Z",
@@ -2876,7 +2876,7 @@ def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkey
     recent = _recent_iso(1)
     plan = _write_plan(tmp_graph.parent, "claimed-next.md", "Claimed next")
     node_id = "ab-next0001"
-    tmp_graph.write_text(json.dumps({"entries": [{
+    _seed_graph_text(tmp_graph, json.dumps({"entries": [{
         "id": node_id, "title": "Claimed next", "project": "fno",
         "plan_path": str(plan), "created_at": recent, "priority": "p2",
     }]}) + "\n")
@@ -2888,10 +2888,11 @@ def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkey
     assert result.exit_code == 0, result.output
     assert f'"id": "{node_id}"' in result.output
     assert claim_status(f"node:{node_id}")["state"] == "live"
-    assert read_graph(tmp_graph)[0]["locked_by"] == "next-session"
-    raw = json.loads(tmp_graph.read_text())["entries"][0]
-    assert "locked_by" not in raw
-    assert "locked_at" not in raw
+    # No graph owner is written: the claim lockfile is the holder of record,
+    # and the read serves the stored word (the lock fields are the retired
+    # mirror), so the served row carries no owner at all.
+    served = read_graph(tmp_graph)[0]
+    assert served["locked_by"] is None
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):
