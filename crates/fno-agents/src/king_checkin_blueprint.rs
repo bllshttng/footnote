@@ -473,4 +473,35 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A declared verb outranks the derived answer: an out-of-family
+    /// declaration abstains into a skip, a declared /target wins over the
+    /// derived /blueprint, and a declared /blueprint stays a candidate.
+    #[test]
+    fn r_blueprint_honors_a_declared_verb_over_the_derived_answer() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-decl-{}", std::process::id()));
+        let board = json!({"queues": [
+            {"name": "unplanned", "status": "ok", "count": 3,
+             "rows": [
+                {"id": "x-think", "difficulty": "high", "dispatch_verb": "/fno:think"},
+                {"id": "x-tgt", "difficulty": "low", "dispatch_verb": "/target"},
+                {"id": "x-bp", "difficulty": "low", "dispatch_verb": "/fno:blueprint"}
+            ]},
+            {"name": "undispatched", "status": "ok", "count": 0, "rows": []}
+        ]});
+        let reading =
+            blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4), "high").unwrap();
+        assert_eq!(reading["starts"], json!(["x-bp"]), "{reading}");
+        assert_eq!(reading["target_ready"], json!(["x-tgt"]), "{reading}");
+        assert_eq!(reading["skips"].as_array().unwrap().len(), 1, "{reading}");
+        assert_eq!(reading["skips"][0]["id"], json!("x-think"), "{reading}");
+        assert!(
+            reading["skips"][0]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("out-of-family"),
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
