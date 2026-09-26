@@ -135,14 +135,26 @@ fn repo_root() -> Option<PathBuf> {
 /// Write `bytes` to `path` only when they differ from what is already there.
 ///
 /// An unconditional write restamps the mtime on every build, which makes cargo
-/// re-run downstream work forever. Write-on-difference converges.
+/// re-run downstream work forever. Write-on-difference converges. The write
+/// lands in a sibling temp file and renames, so a concurrent reader (a
+/// parallel `cargo build --workspace` compiling the copy) never sees a torn
+/// file.
 fn write_if_different(path: &Path, bytes: &[u8]) {
     if let Ok(existing) = std::fs::read(path) {
         if existing == bytes {
             return;
         }
     }
-    if let Err(err) = std::fs::write(path, bytes) {
+    let temp = path.with_extension(format!(
+        "{}.tmp{}",
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    let written = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path));
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&temp);
         println!(
             "cargo:warning=fno-agents build: could not write {}: {err}",
             path.display()
