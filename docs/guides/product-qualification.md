@@ -2,7 +2,7 @@
 
 How a maintainer proves what the release actually does: one declared expected set, deterministic conformance, and a projection that never reports unrun work as a pass.
 
-The release qualification matrix is declared once in `evals/fixtures/product-delivery/qualification.json`. It pins the release revision and bank revision, five scenario families, two repeats each, the declared units, and the measurement slots. Grade-only conformance and paid live trials are distinct cohort classes, and foreign products have no supported runner here: observations about them arrive only as imports with provenance.
+The release qualification matrix is declared once in `evals/fixtures/product-delivery/qualification.json`. It pins the release revision and bank revision, five scenario families, two repeats each, the declared units, and the measurement slots. Grade-only conformance and paid live trials are distinct cohort classes. Foreign products have no supported runner here. Observations about them arrive only as imports with provenance.
 
 ## Run the conformance scenarios
 
