@@ -133,8 +133,10 @@ def test_spawn_resume_exits_non_zero_when_the_fork_never_comes_up(
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
     _seed_row("rev-agent", "deadbeef", SOURCE_UUID)
     # Re-arm the real gate the conftest auto-neuter stood down; the binary's
-    # poll is faked to the refused verdict.
-    monkeypatch.setattr(reg, "revive_proof_or_refuse", REAL_GATE)
+    # poll is faked to the refused verdict. The re-arm must land on the call
+    # site's binding: harnesses/claude.py imports the name directly, so the
+    # registry module's own attribute is not what the spawn path calls.
+    monkeypatch.setattr(claude_mod, "revive_proof_or_refuse", REAL_GATE)
     monkeypatch.setattr(reg, "_revive_proof_verdict", lambda _sid: REFUSED)
 
     result = CliRunner().invoke(

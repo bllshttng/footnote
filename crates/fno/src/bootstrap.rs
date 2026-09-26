@@ -116,6 +116,37 @@ pub fn forward(args: &[OsString]) -> ! {
     }
 }
 
+/// Forward the `fno backlog ...` argv to the sibling Rust binary's grouped
+/// dispatcher. One exec, stdio inherited, signals and exit codes pass
+/// through unchanged. A missing or non-executable sibling refuses with the
+/// install remedy and NEVER provisions the Python wheel: the backlog
+/// namespace has no Python fallback on this side of the door.
+pub fn forward_backlog(args: &[OsString]) -> ! {
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = bootstrap_command(&bin);
+    command.args(args);
+    #[cfg(unix)]
+    {
+        let err = crate::process_admission::bootstrap_exec(&mut command);
+        eprintln!(
+            "fno backlog: the sibling Rust binary could not be exec'd: {err}\n       \
+             reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+        );
+        std::process::exit(2);
+    }
+    #[cfg(not(unix))]
+    match command.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!(
+                "fno backlog: the sibling Rust binary could not be run: {err}\n       \
+                 reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run(args: &[OsString]) -> BootResult<()> {
     // Fast path: a recorded sentinel from a prior successful provision. No uv
     // call, no network - the common case after first run (AC4-HP). The sentinel

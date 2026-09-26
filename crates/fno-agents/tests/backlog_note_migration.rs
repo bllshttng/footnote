@@ -31,12 +31,16 @@ fn run_notes(args: &[&str]) -> (i32, String) {
 
 fn run_notes_full(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
-        .args(std::iter::once("backlog-notes").chain(args.iter().copied()))
+        .args(
+            std::iter::once("backlog")
+                .chain(std::iter::once("notes"))
+                .chain(args.iter().copied()),
+        )
         // The client lazy-starts a daemon that inherits this env, so the
         // daemon dies with this test run instead of idling an hour (x-5533).
         .envs(fno_agents::test_run::self_owner_env())
         .output()
-        .expect("spawn fno-agents backlog-notes");
+        .expect("spawn fno-agents backlog notes");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),

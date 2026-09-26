@@ -102,6 +102,10 @@ pub struct SyncReceipt {
     pub store: PathBuf,
     pub ingested: u64,
     pub corrupt: u64,
+    /// Lines the observation gate counted as pending instead of storing:
+    /// declared poll types whose identical occurrence was already
+    /// represented.
+    pub coalesced: u64,
     pub read_bytes: u64,
 }
 
@@ -109,6 +113,7 @@ pub struct SyncReceipt {
 struct FileTally {
     ingested: u64,
     corrupt: u64,
+    coalesced: u64,
     read_bytes: u64,
 }
 
@@ -221,8 +226,10 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
         let tally = import_file(&tx, source, now_ms)?;
         total.ingested += tally.ingested;
         total.corrupt += tally.corrupt;
+        total.coalesced += tally.coalesced;
         total.read_bytes += tally.read_bytes;
     }
+    observation::sweep_expired_windows(&tx, now_ms)?;
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     prune(&mut conn, now_ms)?;
@@ -230,6 +237,7 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
         store,
         ingested: total.ingested,
         corrupt: total.corrupt,
+        coalesced: total.coalesced,
         read_bytes: total.read_bytes,
     })
 }
@@ -245,6 +253,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
         .map_err(|e| e.to_string())?;
     configure_store_connection(&conn, store)?;
     ensure_schema(&mut conn, store)?;
+    observation::ensure_observation_tables(&conn)?;
     Ok(conn)
 }
 
@@ -604,6 +613,36 @@ fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
         if reject.as_deref() == Some("corrupt json") {
             tally.corrupt += 1;
         }
+        // A declared poll observation consults the gate before inserting:
+        // an identical healthy poll inside its window is counted pending and
+        // no row is written. Rejected lines never coalesce; they stay
+        // verbatim.
+        if reject.is_none()
+            && observation::OBSERVATION_HEARTBEATS
+                .iter()
+                .any(|(t, _)| *t == ty.as_str())
+        {
+            let data = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|v| v.get("data").cloned())
+                .unwrap_or(serde_json::Value::Null);
+            match observation::observation_gate(
+                &tx,
+                &ty,
+                scope.as_deref(),
+                &data,
+                &line,
+                &row_hash,
+                ts_ms,
+            ) {
+                Ok(observation::ObservationGate::Suppressed { .. }) => {
+                    tally.coalesced += 1;
+                    continue;
+                }
+                Ok(observation::ObservationGate::Insert) => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
         let inserted = insert_v2_row(
             tx,
             "events",
@@ -794,6 +833,11 @@ pub struct AppendReceipt {
     /// False when the id (or byte-identical line) was already stored: the
     /// retry is an idempotent hit, never a second row.
     pub inserted: bool,
+    /// True when the observation gate represented this poll inside its
+    /// subject's window instead of storing a row: nothing was inserted, and
+    /// `pending_occurrences` names the window's pending count.
+    pub suppressed: bool,
+    pub pending_occurrences: i64,
 }
 
 /// Commit one canonical envelope as the acknowledgement boundary: a single
@@ -875,6 +919,71 @@ pub fn append_envelope(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let id = extract_identity(line);
+    // Idempotent hit first: a byte-identical retry reads back the stored row
+    // and never consults the observation gate (one logical write, not a new
+    // occurrence).
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM events WHERE event_id = ?1 AND line = ?2",
+            params![event_id, line],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(seq) = existing {
+        tx.commit()
+            .map_err(|e| format!("{}: {e}", store.display()))?;
+        return Ok(AppendReceipt {
+            store,
+            event_id: event_id.clone(),
+            seq,
+            retention_class: class.to_string(),
+            inserted: false,
+            suppressed: false,
+            pending_occurrences: 0,
+        });
+    }
+    let collided: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM events WHERE event_id = ?1",
+            params![event_id],
+            |r| r.get(0),
+        )
+        .ok();
+    if collided.is_some() {
+        return Err(format!(
+            "{}: identity collision on event_id {event_id}: stored envelope differs",
+            store.display()
+        ));
+    }
+    // A declared poll observation consults the gate before inserting: an
+    // identical healthy poll inside its window is counted pending and no
+    // row is written.
+    match observation::observation_gate(
+        &tx,
+        &ty,
+        obj.get("data")
+            .and_then(|d| d.get("scope"))
+            .and_then(|s| s.as_str()),
+        obj.get("data").expect("data object checked above"),
+        line,
+        &row_hash,
+        ts_ms,
+    )? {
+        observation::ObservationGate::Suppressed { pending } => {
+            tx.commit()
+                .map_err(|e| format!("{}: {e}", store.display()))?;
+            return Ok(AppendReceipt {
+                store,
+                event_id,
+                seq: 0,
+                retention_class: class.to_string(),
+                inserted: false,
+                suppressed: true,
+                pending_occurrences: pending,
+            });
+        }
+        observation::ObservationGate::Insert => {}
+    }
     let inserted = tx
         .execute(
             "INSERT OR IGNORE INTO events
@@ -922,6 +1031,8 @@ pub fn append_envelope(
         seq,
         retention_class: class.to_string(),
         inserted: inserted > 0,
+        suppressed: false,
+        pending_occurrences: 0,
     })
 }
 
@@ -1119,7 +1230,14 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut held = conn
-        .prepare("SELECT 1 FROM events WHERE row_hash = ?1")
+        .prepare(
+            // A line the store holds either as an event or as a pending
+            // observation is committed knowledge; only the latter exists for a
+            // suppressed poll, and treating it as an uncommitted tail would
+            // double-represent it in every journal-text read.
+            "SELECT EXISTS(SELECT 1 FROM events WHERE row_hash = ?1)
+         OR EXISTS(SELECT 1 FROM event_observation_pending WHERE row_hash = ?1)",
+        )
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut text = String::new();
     for line in rows {
@@ -1132,10 +1250,16 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
             continue;
         }
         let hash = Sha256::digest(raw.as_bytes()).to_vec();
-        if held
+        let not_held: bool = held
             .query_row(params![hash], |r| r.get::<_, i64>(0))
-            .is_err()
-        {
+            .map(|found| found == 0)
+            .unwrap_or(false);
+        if not_held && observation::tail_line_flushed(&conn, raw) {
+            // The line is represented by a flushed observation window; a
+            // second copy in the tail would double-represent it.
+            continue;
+        }
+        if not_held {
             text.push_str(raw);
             text.push('\n');
         }
@@ -1191,6 +1315,8 @@ pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
         .map_err(|e| e.to_string())?;
     Ok(n as u64)
 }
+
+mod observation;
 
 #[cfg(test)]
 mod tests;
