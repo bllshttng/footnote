@@ -1678,37 +1678,24 @@ pub(crate) struct Core {
     /// glance, and one operator wanting two at once is the case to hear about
     /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
-    /// The open PORTALS: the panes dedicated to
-    /// thread-substrate rows, keyed by the operator-facing index. A portal is
-    /// the thing you go through to reach a live harness thread, so several
-    /// threads can each hold one and the existing Join actions tile them side
-    /// by side.
+    /// The open PORTALS under the TV model: index -> entry (channel,
+    /// screen pane, tab). A portal is never a pane and never a tab: it is
+    /// the index plus the placement (which tab, which leaf) plus the
+    /// channel it is tuned to. The screen pane is what the portal plays
+    /// now: a live viewer, a parked screen, or (after an operator close)
+    /// nothing, and the entry always names the live screen.
     ///
-    /// This is deliberately NOT the singleton contract `diff_pane` above
-    /// keeps. A diff is a glance and one at a time is its design; a portal is
-    /// a window onto a running thread and the cap of one was the defect
-    /// (lifted it). Substrate semantics are untouched either way: a
-    /// thread still hosts no pane until one is created.
+    /// Reaching the SAME channel is a focus; reaching a different one
+    /// swaps the screen in place (spawn-first, `tree::replace_leaf`,
+    /// reap-last). Only an explicit gesture creates or closes: an
+    /// operator's sideline +, the composer, an explicit `--portal`, or an
+    /// operator close. Side-effect doors (a bare spawn, retask's plain
+    /// reach, the owned command view) never add to this map; a machine
+    /// view that must exist is a transient pane with no entry, never
+    /// restored.
     ///
-    /// Per index, the mechanics are exactly the old single slot's. Re-reaching
-    /// the SAME row is a no-op focus ("show me"), never a close - closing is
-    /// the ordinary close-pane gesture. A repoint to a different row reuses
-    /// the open-here mechanic (spawn-first, `tree::replace_leaf`, reap-last)
-    /// so the geometry never moves, and it touches only its own index. NEVER
-    /// persisted and NEVER rebuilt by restore: a pane binds a session to
-    /// geometry, a thread binds a session to a row, and persisting a portal
-    /// would re-bind a thread to a rectangle across a restart. `BTreeMap`
-    /// rather than `HashMap` so iteration is index-ordered and the sideline's
-    /// portal column cannot reshuffle between frames.
-    ///
-    /// After a viewer's child dies, the seat keeps the tab alive as
-    /// an idle-shell stand-in and the entry names the STAND-IN, so the next
-    /// reach repoints the seat in the same tab instead of minting a second
-    /// portal tab. That swap now fires only for the LAST open portal: it
-    /// exists so a dying viewer never deletes the only window onto the fleet,
-    /// and with another portal open that premise is false. The seat pane is a
-    /// live viewer iff `panes[seat].cmd` is `Some` (shells carry no argv
-    /// provenance); the same-row focus arm requires it.
+    /// `BTreeMap` rather than `HashMap` so iteration is index-ordered and
+    /// the sideline's portal column cannot reshuffle between frames.
     portals: BTreeMap<u8, Portal>,
     /// One-shot latch for the discoverability notice: the first
     /// thread row to appear with no portal open tells the operator the reach

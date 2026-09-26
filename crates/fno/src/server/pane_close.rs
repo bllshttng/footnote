@@ -1,36 +1,37 @@
-//! What happens when one pane closes : the close cascade, the
-//! portal stand-in swap, and the loss notice a vanishing portal owes the
-//! operator who was reading it.
+//! What happens when one pane closes: the close cascade, the parked
+//! screen a dead viewer's portal keeps showing, and the loss notice a
+//! vanishing portal owes the operator who was reading it.
 
 use super::*;
 
-/// Why a pane is closing. The split: a portal is just another
-/// viewport, so a seat whose VIEWER died keeps its place, while an operator
-/// close closes the pane like any pane's. The close path is told apart by
-/// cause, never by the free-text reason string.
+/// Why a pane is closing. The split: a portal outlives its viewer, so a
+/// seat whose VIEWER died keeps its place and parks on the no-signal
+/// screen, while an operator close closes the pane like any pane's. The
+/// close path is told apart by cause, never by the free-text reason
+/// string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseCause {
     /// The pane's child exited on its own: the PTY exit arm, the reap
     /// backstop, or a session retire. A live viewer seat always gets the
-    /// stand-in swap.
+    /// parked screen.
     ViewerDied,
     /// An operator gesture: prefix+x, `fno mux pane kill`, the row menu's
-    /// Close portal. Never mints a stand-in, so N deliberate closes can
+    /// Close portal. Never mints a screen, so N deliberate closes can
     /// never leave N shells holding N tabs open.
     Operator,
 }
 
 impl Core {
     /// Close one pane whose child exited on its own: the death path. A live
-    /// viewer seat always runs the stand-in swap (a portal is a viewport:
-    /// the seat outlives the viewer and the row it showed), and a spawn
+    /// viewer seat always swaps to the parked screen (the portal outlives
+    /// its viewer: the window stays, the channel goes quiet), and a spawn
     /// failure falls through to the plain close with its loss notice.
     pub(super) fn close_viewer_died(&mut self, pid: u64, reason: &str) -> Flow {
         self.close_pane_for(pid, reason, CloseCause::ViewerDied)
     }
 
     /// Close one pane by operator gesture: the pane goes away like any
-    /// pane's, no stand-in is minted, and a vanishing portal's loss notice
+    /// pane's, no screen is minted, and a vanishing portal's loss notice
     /// still names what the operator was reading.
     pub(super) fn close_pane_reasoned(&mut self, pid: u64, reason: &str) -> Flow {
         self.close_pane_for(pid, reason, CloseCause::Operator)
@@ -80,31 +81,35 @@ impl Core {
                 .squad(sid)
                 .map(|s| s.canonical_cwd().to_string())
                 .unwrap_or_default();
-            if let Ok(shell_pid) = self.spawn_pane(rows, cols, &cwd) {
+            // The channel stays parked: the portal keeps its index and
+            // leaf and shows the no-signal screen. No interactive shell is
+            // minted, so a dead viewer can never multiply tabs.
+            let channel = self
+                .portals
+                .get(&seat_portal.expect("seat implies a portal"))
+                .map(|portal| portal.row_key.clone())
+                .unwrap_or_default();
+            if let Ok(screen_pid) = self.spawn_parked_screen(&channel, rows, cols, &cwd) {
                 let tab = &mut self.session.squad_mut(sid).expect("live squad").tabs[ti];
-                if tree::replace_leaf(tab, pid, shell_pid) {
-                    // Spawn-first paid off: swap the seat to the stand-in and
-                    // reap the dead viewer last, the repoint arm's ordering.
+                if tree::replace_leaf(tab, pid, screen_pid) {
+                    // Spawn-first paid off: swap the seat to the parked
+                    // screen and reap the dead viewer last, the repoint
+                    // arm's ordering.
                     if let Some(portal) = seat_portal.and_then(|idx| self.portals.get_mut(&idx)) {
-                        portal.seat = shell_pid;
+                        portal.seat = screen_pid;
                     }
                     self.reap_pane(pid);
                     self.push_layout(true);
-                    // The view was kept, but the pane the operator was
-                    // reading changed identity: say so, naming the row.
                     if let Some(idx) = seat_portal {
-                        if let Some(portal) = self.portals.get(&idx) {
-                            self.notice_all(format!(
-                                "portal {idx} ({}): viewer exited, seat kept",
-                                portal.row_key
-                            ));
-                        }
+                        let line = format!("portal {idx}: no signal - {channel} ended");
+                        self.write_restore_message(screen_pid, &line);
+                        self.notice_all(line);
                     }
                     return Flow::Continue;
                 }
-                // The tab closed under the swap: undo the shell and fall
+                // The tab closed under the swap: undo the screen and fall
                 // through to the plain close below.
-                self.reap_pane(shell_pid);
+                self.reap_pane(screen_pid);
             }
         }
         // No stand-in took the seat. The entry is deliberately LEFT

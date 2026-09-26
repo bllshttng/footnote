@@ -319,17 +319,19 @@ fn one_row_never_holds_two_portals() {
         "the attach mapping still names the one live viewer"
     );
 
-    // A row shown only through a STAND-IN is not being viewed, so its
-    // portal stays repointable and never blocks a reach elsewhere.
+    // A row shown only through a PARKED screen is not being viewed, so
+    // its portal stays repointable and never blocks a reach elsewhere.
     core.close_viewer_died(seat, "viewer exited");
     let stand_in = core
         .portals
         .get(&0)
-        .expect("portal 0 holds a stand-in")
+        .expect("portal 0 holds a parked screen")
         .seat;
     assert!(
-        core.panes.get(&stand_in).is_some_and(|e| e.cmd.is_none()),
-        "fixture: the seat now holds an idle shell, not a viewer"
+        core.panes
+            .get(&stand_in)
+            .is_some_and(|e| e.portal_hold.is_some()),
+        "fixture: the seat now holds a parked screen, not a viewer"
     );
     core.command(client_id, portal_reach_cmd("deadbee1", 1));
     assert!(
@@ -443,14 +445,12 @@ fn stored_tab_trees_captures_every_portal_seat_tiled_in_one_tab() {
 }
 
 #[test]
-fn every_viewer_death_keeps_its_seat_as_an_idle_shell() {
-    // AC1-HP (x-3349). A portal is just another viewport: removing a row
-    // is not removing a pane. Whichever portal's viewer dies, its seat
-    // stays an idle shell at the same leaf in the same tab, the sibling
-    // portal is untouched, and the notice names the kept seat. This
-    // inverts the x-8f9d last-portal-only rule: the one-window premise
-    // was never true of a fleet with several portals, and the deliberate
-    // close path is where "no shell left behind" lives now.
+fn every_viewer_death_parks_its_portal_on_no_signal() {
+    // AC1-HP (x-3349, re-ruled as the TV model). A portal outlives its
+    // viewer: whichever portal's viewer dies, its seat stays at the same
+    // leaf in the same tab and parks on the no-signal screen, the sibling
+    // portal is untouched, and the notice says what ended. No interactive
+    // shell is minted, so a death can never multiply tabs.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, mut rx) = thread_core();
     core.agents = vec![
@@ -474,8 +474,21 @@ fn every_viewer_death_keeps_its_seat_as_an_idle_shell() {
     let seat = core.portals.get(&1).expect("portal 1 keeps its seat").seat;
     assert_ne!(seat, b_seat, "the dead viewer was reaped");
     assert!(
-        core.panes.get(&seat).is_some_and(|e| e.cmd.is_none()),
-        "portal 1's seat holds an idle shell, not a viewer"
+        core.panes
+            .get(&seat)
+            .is_some_and(|e| e.portal_hold.as_deref() == Some("deadbee2")),
+        "portal 1's seat holds the parked screen for its channel"
+    );
+    assert!(
+        core.panes
+            .get(&seat)
+            .is_some_and(|e| e.cmd.as_deref() == Some("sh")),
+        "the screen runs no shell prompt: a no-input tail process"
+    );
+    assert_eq!(
+        core.panes.get(&seat).and_then(|e| e.name.as_deref()),
+        Some("deadbee2"),
+        "a parked screen's pane name is its channel"
     );
     let (sid, ti) = core.session.find_pane(seat).expect("kept seat in tree");
     let tab = &core.session.squad(sid).unwrap().tabs[ti];
@@ -483,7 +496,7 @@ fn every_viewer_death_keeps_its_seat_as_an_idle_shell() {
     assert_eq!(
         tree::leaves(&tab.root).len(),
         b_leaf_count,
-        "the shell replaced the viewer at the same leaf"
+        "the screen replaced the viewer at the same leaf"
     );
     assert_eq!(
         core.portals.get(&0).map(|e| e.seat),
@@ -493,14 +506,14 @@ fn every_viewer_death_keeps_its_seat_as_an_idle_shell() {
     assert_eq!(
         core.panes.len(),
         panes_before,
-        "the shell replaced the viewer one for one"
+        "the screen replaced the viewer one for one"
     );
     let notices = drain_notices(&mut rx);
     assert!(
         notices
             .iter()
-            .any(|t| t.contains("portal 1") && t.contains("deadbee2") && t.contains("seat kept")),
-        "the notice names the kept seat and the row: {notices:?}"
+            .any(|t| t.contains("portal 1") && t.contains("no signal") && t.contains("deadbee2")),
+        "the notice names the portal and the channel that ended: {notices:?}"
     );
 }
 
@@ -1136,15 +1149,17 @@ fn portal_landed_check_does_not_count_a_stand_in_seat() {
     let stand_in = core
         .portals
         .get(&0)
-        .expect("portal 0 holds a stand-in")
+        .expect("portal 0 holds a parked screen")
         .seat;
     assert!(
-        core.panes.get(&stand_in).is_some_and(|e| e.cmd.is_none()),
-        "fixture: the seat now holds an idle shell, not a viewer"
+        core.panes
+            .get(&stand_in)
+            .is_some_and(|e| e.portal_hold.is_some()),
+        "fixture: the seat now holds a parked screen, not a viewer"
     );
     assert!(
         !core.portal_landed("target-a", 1),
-        "a stand-in seat is not a landing"
+        "a parked screen is not a landing"
     );
     core.reap_pane(stand_in);
 }
@@ -1821,16 +1836,17 @@ fn portal_fresh_open_refuses_a_missing_tab_before_any_pane() {
 // ---- (x-d545) the remembered tab outlives its viewer ----
 
 #[test]
-fn close_pane_viewer_seat_lone_leaf_keeps_tab_with_idle_shell() {
+fn close_pane_viewer_seat_lone_leaf_keeps_tab_with_a_parked_screen() {
     // AC1-HP + AC3-HP: the viewport tab is the only tab of its squad; the
     // recorded viewer's child exits; the tab survives with the SAME id
-    // and one idle shell, the squad and the session survive, and the
+    // and one parked screen, the squad and the session survive, and the
     // close is Flow::Continue - never the SessionEmpty shutdown the old
     // path took.
     set_attach_program(&["/bin/cat"]);
     let (mut core, _client_id, _p1, _rx) = thread_core();
-    // A viewer carries argv provenance (the tier argv), a bare shell
-    // none - the arm's seat check keys on exactly that difference.
+    // A viewer carries argv provenance (the tier argv), a parked screen
+    // the FNO_PORTAL_HELD marker - the arm's seat check keys on exactly
+    // that difference.
     let lone_viewer = core
         .spawn_pane_cmd(&["/bin/cat".to_string()], 24, 40, "/tmp/seen")
         .expect("viewer pane");
@@ -1868,14 +1884,14 @@ fn close_pane_viewer_seat_lone_leaf_keeps_tab_with_idle_shell() {
     let shell = leaves[0];
     assert!(core.panes.contains_key(&shell), "the seat pane is live");
     assert!(
-        core.panes[&shell].cmd.is_none(),
-        "the seat holds an idle shell, not a viewer"
+        core.panes[&shell].portal_hold.as_deref() == Some("row-x"),
+        "the seat holds the parked screen for row-x, not a viewer"
     );
     let entry = core.portals.get(&0).expect("portal 0 still open");
     assert_eq!(
         (entry.row_key.as_str(), entry.seat, entry.tab),
         ("row-x", shell, 900),
-        "the portal names the stand-in seat"
+        "the portal names the parked seat"
     );
     assert!(
         !core.panes.contains_key(&lone_viewer),
@@ -2367,7 +2383,11 @@ fn restore_holds_a_portal_slot_idle_in_its_seat() {
         Some("deadbee1"),
         "the placeholder carries its held row in its own argv"
     );
-    assert_eq!(entry.name.as_deref(), Some("portal1"), "the seat is named");
+    assert_eq!(
+        entry.name.as_deref(),
+        Some("deadbee1"),
+        "a parked screen's pane name is its channel"
+    );
     assert!(
         entry.vt.text().contains("held across restart"),
         "the pane says what it waits for"
@@ -3004,13 +3024,13 @@ fn a_vanishing_portal_says_so_and_names_its_row() {
         "the notice names the row and the reason: {loss:?}"
     );
 
-    // A viewer DEATH keeps the seat and announces the kept shell instead:
+    // A viewer DEATH parks the portal on the no-signal screen instead:
     // evidence named, nothing lost.
     core.close_viewer_died(a_seat, "child exited");
     let kept = collect_until_portal_closed(&mut rx, "portal 0").expect("the kept notice arrived");
     assert!(
-        kept.contains("deadbee1") && kept.contains("seat kept"),
-        "the death notice reads as kept, not lost: {kept:?}"
+        kept.contains("deadbee1") && kept.contains("no signal"),
+        "the death notice reads as no signal, not lost: {kept:?}"
     );
 }
 

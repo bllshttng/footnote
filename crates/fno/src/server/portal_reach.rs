@@ -125,9 +125,10 @@ pub(super) fn rearm_held_portal_seats(
                 tab: tid,
             },
         );
-        if let Some(entry) = core.panes.get_mut(&seat) {
-            entry.name = Some(format!("portal{index}"));
-        }
+        // The seat's pane name is its channel, stamped at the mint
+        // ([`Core::spawn_parked_screen`]); rearm renames nothing. A pane
+        // named portalN is therefore never minted again - the restore
+        // prune (keeper_adopt) sweeps only the ones an older server left.
         // A live re-arm leaves no fill door armed: the seat runs the real
         // viewer, so `fill_held_portal_at`'s stand-in check already refuses.
         if core.portal_seat_is_viewer(seat) {
@@ -1409,6 +1410,34 @@ impl Core {
         self.panes
             .get(&pid)
             .is_some_and(|e| e.cmd.is_some() && e.portal_hold.is_none())
+    }
+
+    /// The parked screen a portal shows when nothing plays on it: a
+    /// keeper-hosted process that takes no input and runs no shell. The
+    /// channel rides the argv in `FNO_PORTAL_HELD=`, so a later server
+    /// re-derives the hold from the pane itself and
+    /// [`Core::portal_seat_is_viewer`] never reads the seat as live. The
+    /// one mint site for both parked kinds: a restore-held slot and the
+    /// no-signal screen a dead viewer leaves.
+    pub(crate) fn spawn_parked_screen(
+        &mut self,
+        channel: &str,
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+    ) -> Result<u64, String> {
+        let argv = vec![
+            "env".to_string(),
+            format!("FNO_PORTAL_HELD={channel}"),
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "stty -echo 2>/dev/null; exec tail -f /dev/null".to_string(),
+        ];
+        let pid = self.spawn_pane_cmd(&argv, rows, cols, cwd)?;
+        if let Some(entry) = self.panes.get_mut(&pid) {
+            entry.name = Some(channel.to_string());
+        }
+        Ok(pid)
     }
 
     /// Spawn `env <wrapper> <shell>` on the first shell candidate that
