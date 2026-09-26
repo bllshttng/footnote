@@ -92,7 +92,9 @@ def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path,
 
     proc = _sp.run(
         [str(binary), "backlog", "find", "--fts", "resume handle", "-J"],
-        capture_output=True, text=True, env=dict(_os.environ),
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     assert proc.returncode == 0, proc.stderr
     assert "warning: fts unavailable" in proc.stderr

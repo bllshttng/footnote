@@ -130,7 +130,9 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     fresh = _sp.run(
         [str(binary), "backlog", "get", "x-511a"],
-        capture_output=True, text=True, env=dict(_os.environ),
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     assert fresh.returncode == 0, fresh.stderr
     assert marker in fresh.stdout

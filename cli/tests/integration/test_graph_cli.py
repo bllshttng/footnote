@@ -74,7 +74,9 @@ def _native_get(*args) -> str:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     proc = _sp.run(
         [str(binary), "backlog", "get", *args],
-        capture_output=True, text=True, env=dict(_os.environ),
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
@@ -92,7 +94,9 @@ def _native_get_raw(*args):
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     proc = _sp.run(
         [str(binary), "backlog", "get", *args],
-        capture_output=True, text=True, env=dict(_os.environ),
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     return proc.returncode, proc.stdout, proc.stderr
 

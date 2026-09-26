@@ -147,7 +147,9 @@ def _native_backlog(*args) -> tuple[int, str, str]:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     proc = _sp.run(
         [str(binary), "backlog", *args],
-        capture_output=True, text=True, env=dict(_os.environ),
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     return proc.returncode, proc.stdout, proc.stderr
 
