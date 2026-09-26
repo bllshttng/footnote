@@ -178,7 +178,7 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
     is asserted in test_harness_loop_participation.py)."""
     import fno.agents.harness_map as harness_map
 
-    monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
+    monkeypatch.setattr(harness_map, "_loop_gate_answer", lambda h, c: {"refusal": None})
     from fno.agents.harness_map import thread_seatable
 
     assert thread_seatable("pi") is True
