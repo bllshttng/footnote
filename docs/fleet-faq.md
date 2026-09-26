@@ -453,6 +453,14 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 *Graduates to:* a list whose rows name their base, or a list that follows a stack to its root.
 
+## My command timed out. Did it fail?
+
+**Answer.** No. A timeout says your budget was too small. It does not say the work stopped. Read the state after the timeout before you report a failure.
+
+**Specimen.** `fno backlog note` exited 124 at a 40s budget and again at 60s, and the report went out as "graph writes hang while reads answer". Writes were landing the whole time. Ten measured writes that night: 34.7s, 41.4s, 44.6s, 46.7s, 51.9s, 53.2s, 66.3s, 87.6s, 102.4s, 150.9s. One write the operator interrupted at 400s had already been recorded on the node. Five reports of a hang were one slow subsystem and a short timeout.
+
+*Graduates to:* a receipt from the graph verbs naming the elapsed time, so a caller can tell a slow write from a lost one.
+
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.

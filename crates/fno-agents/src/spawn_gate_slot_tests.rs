@@ -194,6 +194,21 @@ fn succession_skips_a_full_king_share() {
 }
 
 #[test]
+fn succession_skips_a_full_king_share_on_a_multi_epic_scope() {
+    let fixture = SuccessionFixture::new(3);
+    fixture.write_entries(vec![
+        fixture.king("king-a", "session-a", "x-epic-a,x-epic-b"),
+        fixture.king("king-b", "session-b", "y-epic"),
+        fixture.worker("worker-a", "session-a"),
+    ]);
+
+    fixture
+        .spawn("successor", Some("session-a"), Some("x-epic-a,x-epic-b"))
+        .expect("a succession over a comma-joined epic set does not pay king share")
+        .release();
+}
+
+#[test]
 fn succession_refusal_reports_an_ineligible_caller() {
     let fixture = SuccessionFixture::new(2);
     fixture.write_entries(vec![
