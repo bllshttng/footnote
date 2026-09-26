@@ -10,7 +10,6 @@
 use super::{Ctx, InterruptOutcome};
 use crate::codex_thread::stop_settle_bound;
 use crate::state::RegistryEntry;
-use serde_json::json;
 
 /// Interrupt the codex thread's in-flight turn, shut the actor down, and
 /// drop it from the map. Shared by the stop verb and rm: the caller that
@@ -100,27 +99,18 @@ pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
 /// The row is gone; stamp the tombstone so the harness-store healer
 /// does not adopt the same session back under a fresh short-id name (the
 /// adopted duplicate that then blocked resume). Any harness: the store
-/// fallback adopts claude transcripts by the same door. A failed write is
-/// an event, never a refused removal - the row is already gone.
-pub(crate) fn stamp_removed_session_tombstone(ctx: &Ctx, entry: &RegistryEntry, name: &str) {
-    let Some(session_id) = entry
+/// fallback adopts claude transcripts by the same door. A failed write
+/// rides the rm receipt (`tombstone_reason`), never refuses the removal -
+/// the row is already gone. `None` when nothing was stamped (no session id)
+/// or the write landed; `Some` carries the write error.
+pub(crate) fn stamp_removed_session_tombstone(
+    home: &crate::paths::AgentsHome,
+    entry: &RegistryEntry,
+) -> Option<String> {
+    let session_id = entry
         .harness_session_id
         .as_deref()
         .map(str::trim)
-        .filter(|session_id| !session_id.is_empty())
-    else {
-        return;
-    };
-    if let Err(tombstone_error) =
-        crate::rm_tombstone::record(&ctx.home, entry.harness_name(), session_id)
-    {
-        let _ = ctx.emitter.emit(
-            "rm_tombstone_failed",
-            &json!({
-                "name": name,
-                "session_id": session_id,
-                "error": tombstone_error,
-            }),
-        );
-    }
+        .filter(|session_id| !session_id.is_empty())?;
+    crate::rm_tombstone::record(home, entry.harness_name(), session_id).err()
 }

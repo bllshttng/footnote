@@ -789,11 +789,6 @@ async fn rm_stamps_a_tombstone_for_the_removed_codex_session() {
         "01a0aba4-0934-7f10-aac3-67c76bfd244c"
     );
     assert!(tombstones[0]["removed_at"].is_u64());
-    assert!(crate::rm_tombstone::recent(
-        &home,
-        "codex",
-        "01a0aba4-0934-7f10-aac3-67c76bfd244c"
-    ));
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -828,11 +823,11 @@ async fn rm_stamps_a_tombstone_for_a_removed_claude_session() {
     .await;
 
     assert!(response.error().is_none(), "{response:?}");
-    assert!(crate::rm_tombstone::recent(
-        &home,
-        "claude",
-        "aaaa1111-1111-2222-3333-444444444444"
-    ));
+    assert_eq!(
+        response.result().unwrap()["tombstone_written"],
+        true,
+        "a clean rm stamps the tombstone"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 
