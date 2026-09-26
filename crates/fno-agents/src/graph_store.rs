@@ -158,7 +158,7 @@ const STATUS_TO_RUNG: &[(&str, &str)] = &[
 ];
 
 /// Retired plan spellings (plan._status.STATUS_ALIASES), accepted on read.
-const PLAN_STATUS_ALIASES: &[(&str, &str)] = &[
+pub(crate) const PLAN_STATUS_ALIASES: &[(&str, &str)] = &[
     ("shipped", "in_review"),
     ("archived", "superseded"),
     ("stub", "idea"),

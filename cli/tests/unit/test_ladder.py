@@ -256,8 +256,31 @@ def _fm(path) -> str:
     return m.group(1).strip().strip("'\"") if m else ""
 
 
+def _project_is_noop(tmp_path, monkeypatch, node) -> bool:
+    """Project `node` through the keeper client over a seeded temp graph.
+
+    True when the round trip left the doc's status line alone. The keeper
+    fills graph defaults (priority, tags, ...) into the bare test row, so the
+    mirror fields may legitimately change; the ladder guards only status.
+    """
+    import json as _json
+
+    import fno.graph.store as gs
+    from fno.plan._project import project_graph_nodes
+
+    g = tmp_path / "graph.json"
+    g.write_text(_json.dumps({"entries": [node]}))
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    from pathlib import Path
+
+    plan = Path(node["plan_path"])
+    before = _fm(plan)
+    project_graph_nodes([node], [node["id"]])
+    return _fm(plan) == before
+
+
 @pytest.mark.parametrize("stamped", ["design", "ready"])
-def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
+def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped, monkeypatch):
     """The doc and the graph must agree and STAY agreed.
 
     The graph derives `design` FROM the plan doc while the projection writes the
@@ -265,7 +288,6 @@ def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
     They must not: one round trip has to be a no-op.
     """
     from fno.graph.statuses import recompute_statuses
-    from fno.plan._project import project_node_to_plan
 
     plan = tmp_path / "p.md"
     plan.write_text(f"---\nstatus: {stamped}\ntitle: T\n---\n\n# T\n\nbody\n")
@@ -274,14 +296,14 @@ def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
     recompute_statuses([node])
     assert node["status"] == stamped  # graph reads the doc
 
-    assert project_node_to_plan(node, plan) is False  # doc already agrees
+    assert _project_is_noop(tmp_path, monkeypatch, node)  # doc already agrees
     assert _fm(plan) == stamped
 
     recompute_statuses([node])
     assert node["status"] == stamped  # and it stays put
 
 
-def test_claiming_a_design_node_leaves_the_doc_at_design(tmp_path):
+def test_claiming_a_design_node_leaves_the_doc_at_design(tmp_path, monkeypatch):
     """The lock lives in the graph; the doc is the planner's.
 
     Claiming never projects onto the plan status line, so a claimed node whose
@@ -289,7 +311,6 @@ def test_claiming_a_design_node_leaves_the_doc_at_design(tmp_path):
     editing its own doc while the node is locked.
     """
     from fno.graph.statuses import recompute_statuses
-    from fno.plan._project import project_node_to_plan
 
     plan = tmp_path / "p.md"
     plan.write_text("---\nstatus: design\ntitle: T\n---\n\n# T\n\nbody\n")
@@ -298,27 +319,25 @@ def test_claiming_a_design_node_leaves_the_doc_at_design(tmp_path):
     recompute_statuses([node])
     assert node["status"] == "in_progress"  # the lock is graph state
 
-    assert project_node_to_plan(node, plan) is False
+    assert _project_is_noop(tmp_path, monkeypatch, node)
     assert _fm(plan) == "design"  # the doc stands
     assert is_design_stage(node)
 
 
-def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
+def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path, monkeypatch):
     """`plan sync` must not undo a fresh `/blueprint`.
 
     `/blueprint` rewrites the doc design -> ready without touching the graph,
     and `read_graph` does not recompute, so the persisted `status` can still
     say `design` when the sweep runs. Repainting from that stale value would
     stamp `design` back onto the doc and un-blueprint it. The forward-only rule
-    in project_plan_status is what prevents it.
+    in the status projection is what prevents it.
     """
-    from fno.plan._project import project_node_to_plan
-
     plan = tmp_path / "p.md"
     plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
     stale = {"id": "x-a", "plan_path": str(plan), "status": "design"}
 
-    assert project_node_to_plan(stale, plan) is False
+    assert _project_is_noop(tmp_path, monkeypatch, stale)
     assert _fm(plan) == "ready"  # blueprint survives
 
 
@@ -341,20 +360,18 @@ def test_idea_can_skip_design_and_go_straight_to_ready(tmp_path):
     assert not is_design_stage(node)
 
 
-def test_stale_idea_graph_never_stamps_design_on_a_fresh_blueprint(tmp_path):
+def test_stale_idea_graph_never_stamps_design_on_a_fresh_blueprint(tmp_path, monkeypatch):
     """The idea -> design projection must not undo a straight-to-blueprint doc.
 
     GRAPH_TO_PLAN_STATUS maps graph `idea` -> plan `design`, and the graph can
     still read `idea` in the window before the next mutation recomputes it.
     Forward-only is what keeps that from regressing the doc.
     """
-    from fno.plan._project import project_node_to_plan
-
     plan = tmp_path / "quick.md"
     plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
     stale = {"id": "x-a", "plan_path": str(plan), "status": "idea"}
 
-    assert project_node_to_plan(stale, plan) is False
+    assert _project_is_noop(tmp_path, monkeypatch, stale)
     assert _fm(plan) == "ready"
 
 
