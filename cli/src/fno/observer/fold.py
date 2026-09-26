@@ -229,30 +229,6 @@ def score_blueprint_item(item: dict, *, plan_text: Optional[str]) -> dict[str, O
     return result
 
 
-def score_review_item(
-    *, addressed_ids: set[str], skipped_ids: set[str], all_finding_ids: set[str]
-) -> dict[str, Optional[str]]:
-    """Score one review corpus item on finding_precision (Locked Decision 9).
-
-    pass: every raised finding was either fixed or explicitly logged as
-    skipped (a documented disposition). fail: at least one finding was
-    neither addressed nor logged - declined and never contradicted. degraded:
-    a mix. No findings at all is not scorable (a review with nothing to
-    say has no precision to measure) -> None, a coverage gap.
-    """
-    if not all_finding_ids:
-        return {"finding_precision": None}
-    dispositioned = addressed_ids | skipped_ids
-    unresolved = all_finding_ids - dispositioned
-    if not unresolved:
-        verdict = "pass"
-    elif len(unresolved) < len(all_finding_ids):
-        verdict = "degraded"
-    else:
-        verdict = "fail"
-    return {"finding_precision": verdict}
-
-
 # --------------------------------------------------------------------------- #
 # target: PR-anchored corpus
 #
@@ -747,20 +723,6 @@ if __name__ == "__main__":
     item3 = {"judgeable": False, "outcome": None}
     assert score_blueprint_item(item3, plan_text=None)["shipped_outcome"] is None
     assert score_blueprint_item(item3, plan_text=None)["collision_free"] is None
-
-    # score_review_item
-    assert score_review_item(addressed_ids=set(), skipped_ids=set(), all_finding_ids=set()) == {
-        "finding_precision": None
-    }
-    assert score_review_item(
-        addressed_ids={"c1"}, skipped_ids={"c2"}, all_finding_ids={"c1", "c2"}
-    ) == {"finding_precision": "pass"}
-    assert score_review_item(
-        addressed_ids=set(), skipped_ids=set(), all_finding_ids={"c1", "c2"}
-    ) == {"finding_precision": "fail"}
-    assert score_review_item(
-        addressed_ids={"c1"}, skipped_ids=set(), all_finding_ids={"c1", "c2"}
-    ) == {"finding_precision": "degraded"}
 
     # -- target: PR-anchored corpus --------------------------------- #
     t_now = datetime(2026, 7, 18, 12, 0, 0)
