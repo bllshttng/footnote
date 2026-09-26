@@ -163,6 +163,11 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
     "GIT_COMMITTER_EMAIL",
+    # Editor selection for the board's $EDITOR description edit, with VISUAL
+    # its convention sibling. The client falls back to vi when unset, so the
+    # developer's exported editor is ambient state a test must not inherit.
+    "EDITOR",
+    "VISUAL",
 )
 
 # Read by source but NOT ambient state: the process needs these to run, and
