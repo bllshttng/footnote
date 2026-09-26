@@ -1201,3 +1201,44 @@ def _unbake_constants_facade():
     for name in _FACADE_NAMES:
         if name in vars(gc):
             delattr(gc, name)
+
+
+@pytest.fixture(autouse=True)
+def _no_status_ci_door(monkeypatch):
+    """Hermetic default for the status door transports.
+
+    `_verify._failing_required`, `_internal_gh._checks` and the merge flake
+    probe read their facts through `fno.rust_binary.verb_call` status ops.
+    In the test environment the resolver finds no dev binary or a stale
+    installed one, so an unstubbbed call is a real network read or a
+    wrong-shape answer. The default answers an empty row set for status-ci
+    (no required check failing) and the fail-open no-recovery fact for
+    status-rerun; any other op raises, like a missing binary. Tests pinning
+    real door answers re-stub `fno.rust_binary.verb_call`.
+    """
+    import fno.rust_binary as rust_binary
+
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        op = payload.get("op") if isinstance(payload, dict) else None
+        if op == "status-ci":
+            return []
+        raise (unavailable or rust_binary.VerbUnavailable)(
+            f"fno-agents {verb} {op} unavailable in tests"
+        )
+
+    monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
+
+
+@pytest.fixture(autouse=True)
+def _no_review_lane_by_default(monkeypatch):
+    """Hermetic default: no review lane is configured (a fresh install).
+
+    The coverage gate's lane probe reads the real claims store when left
+    alone, so a worker whose own branch carries live review:branch claims
+    leaks them into unit tests that never staged coverage rows. Tests
+    pinning a lane set `fno.pr._merge._review_lane_configured` themselves
+    (the merge-world stub does).
+    """
+    from fno.pr import _merge
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)

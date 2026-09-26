@@ -1,0 +1,142 @@
+{
+ "expected": {
+  "exit": 0,
+  "stderr_lines": [
+   "42 OPEN green settled mergeable NOT-ready @ b41ac4bfeedf - 1 blockers: ci_green",
+   "note: green on re-run; earlier failed attempt: ci. A passing re-run is a recovery, not proof the defect is gone."
+  ],
+  "stdout": "{\"pr\": \"42\", \"head\": \"b41ac4bfeedface0123456789abcdef012345678\", \"verdict\": \"green\", \"settled\": true, \"green\": true, \"pr_state\": \"OPEN\", \"mergeable\": \"MERGEABLE\", \"github_merge_state\": {\"state\": \"clean\", \"blockers\": [], \"missing_required_checks\": null, \"source\": \"mergeable_state clean\"}, \"checks\": {\"total\": 2, \"check_runs\": 2, \"statuses\": 0, \"fail_check_runs\": 0, \"fail_statuses\": 0, \"pass\": 2, \"fail\": 0, \"pending\": 0, \"unsettled\": 0, \"unsettled_fail\": 0}, \"rerun_recovered\": true, \"recovered_failures\": [\"ci\"], \"optional_reviews\": [], \"optional_reviews_unresolved\": 0, \"optional_reviews_resolved_unchanged\": 0, \"review_coverage\": {\"coverage\": \"not_asked\", \"reviewed_count\": null}, \"review_posture\": null, \"merge_authority\": {\"config_auto_merge_enabled\": true, \"grant\": \"dispatch\"}, \"merge_execution\": null, \"rounds_used\": null, \"max_rounds\": null, \"rounds_exhausted\": null, \"rounds_note\": \"no review_coverage row at this head; run fno-agents review-coverage\", \"review_activity\": {\"blocker\": \"\", \"detail\": \"\", \"hold\": null, \"worktree\": {\"probed\": false, \"path\": null, \"dirty\": null, \"head\": null, \"note\": \"not asked: PR is terminal\"}}, \"dispatch_hold\": null, \"merge_decision\": {\"outcome\": \"held\", \"head\": \"b41ac4bfeedface0123456789abcdef012345678\", \"blockers\": [{\"code\": \"ci_green\", \"class\": \"held\", \"detail\": \"CI is green; awaiting review coverage\"}]}, \"ready\": false, \"ready_blockers\": [\"ci_green\"]}\n"
+ },
+ "inputs": {
+  "branch_history": null,
+  "cache": {
+   "seed_rows": {
+    "Owner--Repo-42-b41ac4bfeedf": {
+     "exit": 2,
+     "output": {
+      "checks": {
+       "total": 1
+      },
+      "green": false,
+      "head": "b41ac4bfeedface0123456789abcdef012345678",
+      "mergeable": "MERGEABLE",
+      "pr": "42",
+      "pr_state": "OPEN",
+      "settled": false,
+      "verdict": "pending"
+     },
+     "ts": 1790409000
+    }
+   }
+  },
+  "coverage_row": {
+   "coverage": "not_asked",
+   "reviewed_count": null
+  },
+  "fetch_fail": false,
+  "fetch_stderr": "",
+  "github_merge_blockers": {
+   "blockers": [],
+   "missing_required_checks": null,
+   "source": "mergeable_state clean",
+   "state": "clean"
+  },
+  "hold_reason": null,
+  "merge_authority": {
+   "config_auto_merge_enabled": true,
+   "grant": "dispatch"
+  },
+  "merge_execution": null,
+  "optional_reviews": {
+   "optional_reviews": [],
+   "optional_reviews_resolved_unchanged": 0,
+   "optional_reviews_unresolved": 0
+  },
+  "rate_limit_class": "",
+  "raw": {
+   "check_runs_pages": [
+    {
+     "check_runs": [
+      {
+       "conclusion": "success",
+       "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/1001",
+       "name": "ci",
+       "started_at": "2026-09-25T00:00:00Z",
+       "status": "completed"
+      },
+      {
+       "conclusion": "success",
+       "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/1002",
+       "name": "lint",
+       "started_at": "2026-09-25T00:00:00Z",
+       "status": "completed"
+      }
+     ],
+     "total_count": 2
+    }
+   ],
+   "failed_job_logs": {},
+   "job_logs": {
+    "1001": "2026-09-25T00:00:01Z ##[group]Run smoke\n2026-09-25T00:00:02Z ##[endgroup]\n2026-09-25T00:00:03Z Current runner version: 2.311.0\n2026-09-25T00:00:04Z ##[error]Process completed with exit code 1.\n2026-09-25T00:00:05Z Cleaning up orphan processes\n",
+    "1002": "2026-09-25T00:00:01Z step one ok\n2026-09-25T00:00:02Z assert_eq failed: expected 200, got 401\n2026-09-25T00:00:03Z ##[error]Process completed with exit code 1.\n"
+   },
+   "job_steps": {},
+   "pulls": {
+    "base": {
+     "ref": "main"
+    },
+    "head": {
+     "ref": "feature/x-8ab0",
+     "sha": "b41ac4bfeedface0123456789abcdef012345678"
+    },
+    "merge_state_status": "clean",
+    "mergeable": true,
+    "merged": false,
+    "state": "open"
+   },
+   "runs_listing": {
+    "total_count": 0,
+    "workflow_runs": []
+   },
+   "statuses": {
+    "state": "success",
+    "statuses": []
+   },
+   "zero_rows": []
+  },
+  "receipt": {
+   "blockers": [
+    {
+     "class": "held",
+     "code": "ci_green",
+     "detail": "CI is green; awaiting review coverage"
+    }
+   ],
+   "head": "b41ac4bfeedface0123456789abcdef012345678",
+   "outcome": "held"
+  },
+  "rerun_recovery": {
+   "failed": [
+    "ci"
+   ],
+   "recovered": true
+  },
+  "review_activity": {
+   "blocker": "",
+   "detail": "",
+   "hold": null,
+   "worktree": {
+    "dirty": null,
+    "head": null,
+    "note": "not asked: PR is terminal",
+    "path": null,
+    "probed": false
+   }
+  },
+  "review_lane": true
+ },
+ "name": "refresh_flag",
+ "now": 1790409600,
+ "refresh": true,
+ "use_cache": true
+}

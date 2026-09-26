@@ -245,6 +245,20 @@ fn production_run(argv: &[String], cwd: &str) -> (i32, String, String) {
     }
 }
 
+/// The ladder's production runner: a status argv answers in process through
+/// the status door (one owner, no CLI cold start); every other argv still
+/// spawns. Tests stage their own runner, so the seam stays theirs.
+fn ladder_run(argv: &[String], cwd: &str) -> (i32, String, String) {
+    if argv.len() > 4 && argv[2] == "pr" && argv[3] == "status" {
+        let payload = serde_json::json!({
+            "cwd": cwd,
+            "pr": argv[4].parse::<u64>().unwrap_or(0),
+        });
+        return crate::pr_status::cache::run_door("status-read", &payload);
+    }
+    production_run(argv, cwd)
+}
+
 /// The daemon arm: run the ladder over every open-PR row this sweep kept,
 /// then drop the state files of sessions that no longer carry one.
 pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow], grace_secs: i64) {
@@ -263,7 +277,7 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
             held,
             grace_secs,
             now,
-            &mut production_run,
+            &mut ladder_run,
         );
     }
     cleanup_state_files(home, rows);
@@ -919,7 +933,7 @@ pub fn plan_with(
 
 /// The dry run with the production runner.
 pub fn plan(home: &AgentsHome, rows: &[OpenPrRow], grace_secs: i64) -> Vec<(String, String)> {
-    plan_with(home, rows, grace_secs, &mut production_run)
+    plan_with(home, rows, grace_secs, &mut ladder_run)
 }
 
 #[cfg(test)]
