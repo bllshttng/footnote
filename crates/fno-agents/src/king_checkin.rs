@@ -312,18 +312,24 @@ const DEFAULT_BLUEPRINT_CEILING: usize = 1;
 
 /// The check-in's blueprint reading: this session's live blueprint
 /// subagents against the ceiling, then which unplanned nodes to start and
-/// which to skip. The claim list and the session id arrive through the seam
-/// (arguments, not ambient reads) so the unit tests need no claims directory.
-/// A failed source is this reading's error, never a zero: an unreadable claim
-/// list read as `running 0` would name starts past the ceiling. Starts also
-/// wait until plans ready fall below the king's worker slots - a blueprint
-/// nobody can build is the exact spend the wake meter exists to name.
+/// which to skip. Each unplanned row is routed through the lifecycle verb
+/// table first: a row whose verb resolves to /blueprint is a candidate, one
+/// that resolves to /target prints as target-ready (no blueprint ceiling
+/// applies), and an undecidable row skips with the refusal. `floor` is the
+/// operator's `dispatch.blueprint_floor`; the claim list and the session id
+/// arrive through the seam (arguments, not ambient reads) so the unit tests
+/// need no claims directory. A failed source is this reading's error, never
+/// a zero: an unreadable claim list read as `running 0` would name starts
+/// past the ceiling. Starts also wait until plans ready fall below the
+/// king's worker slots - a blueprint nobody can build is the exact spend the
+/// wake meter exists to name.
 fn r_blueprint(
     board: &Result<Value, String>,
     cwd: &Path,
     session_id: Option<String>,
     claims: Result<Vec<String>, String>,
     slots: Result<usize, String>,
+    floor: &str,
 ) -> Result<Value, String> {
     let session_id = session_id
         .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
@@ -336,10 +342,22 @@ fn r_blueprint(
         .and_then(|r| r.as_array())
         .cloned()
         .unwrap_or_default();
-    let candidates: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string))
-        .collect();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut target_ready: Vec<String> = Vec::new();
+    let mut skips: Vec<Value> = Vec::new();
+    for row in &rows {
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        match crate::backlog_ready::effective_verb_with_floor(row, floor) {
+            Ok((verb, _)) if verb.as_deref() == Some("/blueprint") => candidates.push(id),
+            Ok((verb, _)) if verb.as_deref() == Some("/target") => target_ready.push(id),
+            Ok((_, note)) => skips.push(json!({"id": id, "reason": note})),
+            Err(refusal) => skips.push(json!({"id": id, "reason": refusal})),
+        }
+    }
     let provider = std::env::var("FNO_ROUTE_PROVIDER").unwrap_or_default();
     let provider_cap = crate::spawn_gate_lanes::provider_subagents_cap(cwd, &provider);
     // A provider budget can only lower the one-per-king ceiling, never raise it.
@@ -383,18 +401,15 @@ fn r_blueprint(
         ceiling.saturating_sub(running)
     };
     let starts: Vec<String> = candidates.iter().take(open).cloned().collect();
-    let mut skips: Vec<Value> = match &gate_reason {
+    match &gate_reason {
         Some(reason) => candidates
             .iter()
-            .map(|id| json!({"id": id, "reason": reason}))
-            .collect(),
-        None => candidates
-            .iter()
-            .skip(open)
-            .map(|id| json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
-            .collect(),
+            .for_each(|id| skips.push(json!({"id": id, "reason": reason}))),
+        None => candidates.iter().skip(open).for_each(|id| {
+            skips.push(json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
+        }),
     };
-    if candidates.is_empty() && running == 0 {
+    if rows.is_empty() && running == 0 {
         skips.push(json!({"id": null, "reason": "no unplanned node in scope"}));
     }
     Ok(json!({
@@ -404,6 +419,7 @@ fn r_blueprint(
         "plans_ready": pr_v,
         "slots": slots_v,
         "starts": starts,
+        "target_ready": target_ready,
         "skips": skips,
     }))
 }
@@ -1212,7 +1228,10 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         )
         .share
         .ok_or_else(|| "king share unreadable".to_string());
-        r_blueprint(&beat.board, &ctx.cwd, session_id, claims, slots)
+        let floor = crate::agents_config::config_lookup(&ctx.cwd, &["dispatch", "blueprint_floor"])
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| crate::backlog_ready::DEFAULT_BLUEPRINT_FLOOR.to_string());
+        r_blueprint(&beat.board, &ctx.cwd, session_id, claims, slots, &floor)
     });
     take(
         "escalations",
@@ -1286,6 +1305,10 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         );
         data.insert("blueprint_slots".into(), bp.value["slots"].clone());
         data.insert("blueprint_starts".into(), bp.value["starts"].clone());
+        data.insert(
+            "blueprint_target_ready".into(),
+            bp.value["target_ready"].clone(),
+        );
         data.insert("blueprint_skips".into(), bp.value["skips"].clone());
     }
     if let Some(esc) = get("escalations").filter(|r| r.ok) {
@@ -1638,6 +1661,14 @@ fn render_lines(
                     "  start /fno:blueprint subagent {}",
                     dash(Some(id))
                 ));
+            }
+            for id in bp
+                .get("target_ready")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+            {
+                lines.push(format!("  target-ready: /fno:target {}", dash(Some(id))));
             }
             for skip in bp
                 .get("skips")
@@ -3307,12 +3338,13 @@ mod tests {
         readings[i] = r;
     }
 
-    /// A board payload naming one `unplanned` queue with `ids` as candidates
-    /// and, when `plans_ready` is Some, one `undispatched` queue counting it.
-    fn unplanned_board(ids: &[&str], plans_ready: Option<usize>) -> Value {
+    /// A board payload naming one `unplanned` queue whose rows carry
+    /// `(id, difficulty)` and, when `plans_ready` is Some, one `undispatched`
+    /// queue counting it.
+    fn unplanned_board(rows: &[(&str, &str)], plans_ready: Option<usize>) -> Value {
         let mut queues = vec![json!({
-            "name": "unplanned", "status": "ok", "count": ids.len(),
-            "rows": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()
+            "name": "unplanned", "status": "ok", "count": rows.len(),
+            "rows": rows.iter().map(|(id, d)| json!({"id": id, "difficulty": d})).collect::<Vec<_>>()
         })];
         if let Some(pr) = plans_ready {
             queues.push(json!({
@@ -3331,6 +3363,7 @@ mod tests {
         session_id: Option<&str>,
         holders: Vec<String>,
         slots: Result<usize, String>,
+        floor: &str,
     ) -> Result<Value, String> {
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -3347,6 +3380,7 @@ mod tests {
             session_id.map(str::to_string),
             Ok(holders),
             slots,
+            floor,
         );
         match prior_provider {
             Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
@@ -3368,10 +3402,19 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3", "x-4"], Some(0)),
+            unplanned_board(
+                &[
+                    ("x-1", "high"),
+                    ("x-2", "high"),
+                    ("x-3", "high"),
+                    ("x-4", "high"),
+                ],
+                Some(0),
+            ),
             Some("sess-1"),
             vec![],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["running"], 0);
@@ -3400,10 +3443,11 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "[agents.provider_limits.zai]\nsubagents = 3\n",
-            unplanned_board(&["x-1", "x-2"], Some(2)),
+            unplanned_board(&[("x-1", "high"), ("x-2", "high")], Some(2)),
             Some("sess-1"),
             vec![],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["ceiling"], 1);
@@ -3425,10 +3469,14 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "",
-            unplanned_board(&["x-1", "x-2", "x-3"], Some(5)),
+            unplanned_board(
+                &[("x-1", "high"), ("x-2", "high"), ("x-3", "high")],
+                Some(5),
+            ),
             Some("sess-1"),
             vec![],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["running"], 0);
@@ -3450,10 +3498,11 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "",
-            unplanned_board(&["x-1", "x-2"], None),
+            unplanned_board(&[("x-1", "high"), ("x-2", "high")], None),
             Some("sess-1"),
             std::vec![],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["starts"], json!([]), "{reading}");
@@ -3477,6 +3526,7 @@ mod tests {
             Some("sess-1"),
             vec![],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["starts"], json!([]));
@@ -3494,13 +3544,17 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3"], Some(0)),
+            unplanned_board(
+                &[("x-1", "high"), ("x-2", "high"), ("x-3", "high")],
+                Some(0),
+            ),
             Some("sess-1"),
             vec![
                 "blueprint-session:sess-1".to_string(),
                 "blueprint-session:sess-1".to_string(),
             ],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["running"], 2);
@@ -3521,14 +3575,55 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "",
-            unplanned_board(&["x-1"], Some(0)),
+            unplanned_board(&[("x-1", "high")], Some(0)),
             Some("sess-1"),
             vec!["blueprint-session:someone-else".to_string()],
             Ok(4),
+            "high",
         )
         .unwrap();
         assert_eq!(reading["running"], 0);
         assert_eq!(reading["starts"], json!(["x-1"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// VERIFY (default floor): a low-difficulty unplanned row reads
+    /// target-ready and a high one stays a blueprint candidate.
+    #[test]
+    fn r_blueprint_routes_low_to_target_ready_and_high_to_blueprint_at_the_default_floor() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-part-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "",
+            unplanned_board(&[("x-low", "low"), ("x-high", "high")], Some(0)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "high",
+        )
+        .unwrap();
+        assert_eq!(reading["starts"], json!(["x-high"]), "{reading}");
+        assert_eq!(reading["target_ready"], json!(["x-low"]), "{reading}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// VERIFY (floor medium): a medium row flips to a blueprint candidate
+    /// and a low row stays target-ready.
+    #[test]
+    fn r_blueprint_flips_a_medium_row_to_blueprint_at_the_medium_floor() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-med-{}", std::process::id()));
+        let reading = blueprint_reading(
+            &dir,
+            "[dispatch]\nblueprint_floor = \"medium\"\n",
+            unplanned_board(&[("x-med", "medium"), ("x-low", "low")], Some(0)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "medium",
+        )
+        .unwrap();
+        assert_eq!(reading["starts"], json!(["x-med"]), "{reading}");
+        assert_eq!(reading["target_ready"], json!(["x-low"]), "{reading}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3540,10 +3635,11 @@ mod tests {
         let reading = blueprint_reading(
             &dir,
             "",
-            unplanned_board(&["x-1"], Some(0)),
+            unplanned_board(&[("x-1", "high")], Some(0)),
             None,
             vec![],
             Ok(4),
+            "high",
         );
         assert!(reading.is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -3556,7 +3652,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fno-bp-badq-{}", std::process::id()));
         let board = json!({"queues": [{"name": "unplanned", "status": "error",
             "error": "graph unreadable", "rows": []}]});
-        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4));
+        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4), "high");
         assert!(reading.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
