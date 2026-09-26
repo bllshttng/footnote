@@ -104,7 +104,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `notes/` | `cli/src/fno/research/core.py` (`notes/research`) | permanent research notes |
 | `nudge-cursors/` | `cli/src/fno/agents/nudge.py` | one cursor per nudge target, overwritten |
 | `announce-cursors/` | `fno-agents announce` (`crates/fno-agents/src/announce.rs`) | one seen-id set per session; pruned to ids still on retained bus segments |
-| `law-edit-seen/` | `fno-agents law-match` edit read (`crates/fno-agents/src/law_match.rs` `edit_answer`, via the shared cursor in `announce.rs`) | one seen-id set per session; tiny, never cleaned |
+| `law-edit-seen/` | `fno inbox law` edit read (`crates/fno-agents/src/law_match.rs` `edit_answer`, via the shared cursor in `announce.rs`) | one seen-id set per session; tiny, never cleaned |
 | `observer-reports/` | the observer fold, via the `paths` accessor | one report per observation run |
 | `operator-capture/` | `cli/src/fno/inbox/operator_turns.py` writes `<session-id>.jsonl`, the ack ledger and receipt; `fno-agents compaction operator-turns` (`crates/fno-agents/src/operator_turns.rs`) writes `<session-id>.scan.json` | per session, the ack ledger is permanent. The scan cursor cache is safe to delete, the next read rescans from byte 0 |
 | `fleet/` | the transcript fold behind `fno-agents intel --fleet` (`crates/fno-agents/src/transcript_activity.rs`), `activity.json` plus its `.lock` | cursor and hour cache, safe to delete, rebuilt from the window on the next run |

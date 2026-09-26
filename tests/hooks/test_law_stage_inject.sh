@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# hooks/law-stage-inject.sh, driven end to end against a stubbed `fno-agents`.
+# hooks/law-stage-inject.sh, driven end to end against a stubbed `fno`.
 #
-# The hook's whole job is one pipe: wrap the raw hook payload as a law-match
-# stage request, run it, and print the answer's hook_output object. Its
+# The hook's whole job is one pipe: wrap the raw hook payload as a law stage
+# request, run it, and print the answer's hook_output object. Its
 # failure mode is printing SOMETHING when the answer carried no block (a
 # stray `null` or a stderr leak onto stdout would inject garbage context
 # after every Skill call), so the silent cases assert EMPTY stdout, and the
@@ -21,12 +21,12 @@ mkdir -p "$STUB"
 pass=0
 fail=0
 
-# Build a stub `fno-agents` whose body is $1, run the real hook with it on
+# Build a stub `fno` whose body is $1, run the real hook with it on
 # PATH, feeding $2 as the hook payload.
 run_with_stub() {
     local body="$1" payload="$2" out
-    { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$body"; } > "$STUB/fno-agents"
-    chmod +x "$STUB/fno-agents"
+    { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$body"; } > "$STUB/fno"
+    chmod +x "$STUB/fno"
     out="$(printf '%s' "$payload" | PATH="$STUB:$PATH" bash "$HOOK" 2>/dev/null)"
     # Command substitution strips trailing newlines on both sides of the
     # comparison, so the exactness here is on content, not the final newline.
@@ -105,14 +105,14 @@ out="$(run_with_stub 'echo "{\"ok\":true,\"stage\":null,\"hook_output\":null}"' 
     "$SKILL_PAYLOAD")"
 check "a null hook_output renders nothing" "" "$out"
 
-rm "$STUB/fno-agents"
-# With the wrapper passing stdin through, a real fno-agents elsewhere on PATH
+rm "$STUB/fno"
+# With the wrapper passing stdin through, a real fno elsewhere on PATH
 # would answer here, so the missing-binary case must confine PATH to system
 # dirs. jq is symlinked in because the hook needs it before its binary guard.
 mkdir -p "$TMP/sys"
 ln -sf "$(command -v jq)" "$TMP/sys/jq"
 out="$(printf '%s' "$SKILL_PAYLOAD" | PATH="$TMP/sys:/usr/bin:/bin" bash "$HOOK" 2>/dev/null)"
-check "a missing fno-agents renders nothing" "" "$out"
+check "a missing fno renders nothing" "" "$out"
 
 echo
 echo "Results: $pass passed, $fail failed"

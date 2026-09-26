@@ -1,6 +1,7 @@
 """The law door lives in the crate; the Python command is a shim.
 
-`fno inbox law set` forwards its arguments to `fno-agents law-match record`,
+`fno inbox law set` forwards its arguments to the native door on the `fno`
+front binary,
 which owns every gate and flag natively (--global, --paths included). The
 door's gate tests run in Rust (`crates/fno-agents/src/law_match.rs`, the
 record-door section); what stays here is the shim contract and the Python
@@ -21,13 +22,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.rust_binary import find_dev_binary
+from tests.unit._front_dev import front_dev_binary
 
 LAW_REFUSED_EXIT = 3
 
 pytestmark = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents)`",
+    front_dev_binary() is None,
+    reason="compiled fno front binary not present (build with `cargo build --manifest-path crates/fno/Cargo.toml --bin fno)`",
 )
 
 
@@ -102,7 +103,7 @@ def test_shim_forwards_argv_to_the_record_door(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The shim's whole job: every argument, flag included, rides to
-    `law-match record`, and the door's exit code is the command's."""
+    the front's law door, and the door's exit code is the command's."""
     _isolate(tmp_path, monkeypatch)
     from types import SimpleNamespace
 
@@ -110,7 +111,9 @@ def test_shim_forwards_argv_to_the_record_door(
 
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
+    monkeypatch.setattr(
+        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
+    )
     monkeypatch.setattr(
         "subprocess.run",
         lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
@@ -130,7 +133,7 @@ def test_shim_forwards_argv_to_the_record_door(
     )
 
     assert result.exit_code == 0, result.output
-    assert seen["args"][1:] == ["law-match"], seen["args"]
+    assert seen["args"][1:] == ["inbox", "law", "set"], seen["args"]
     request = json.loads(seen["input"])
     assert request["mode"] == "record"
     argv = request["argv"]
@@ -151,7 +154,9 @@ def test_shim_mirrors_the_door_exit_code(
 
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
+    monkeypatch.setattr(
+        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
+    )
     for door_exit in (1, 3, 2):
         monkeypatch.setattr(
             "subprocess.run", lambda *a, e=door_exit, **k: SimpleNamespace(returncode=e)
@@ -166,7 +171,7 @@ def test_shim_refuses_when_the_binary_is_missing(
     _isolate(tmp_path, monkeypatch)
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(fno.rust_binary, "resolve_front_binary", lambda: None)
 
     result = _run(["set", "topic", "The body"])
 
@@ -256,16 +261,16 @@ def test_an_unavailable_validator_refuses_the_recording(
 ) -> None:
     """Fail closed: a statement nobody could classify records nothing. The
     shim's exit contract mirrors the door, and the library wrapper refuses on
-    an unavailable verb."""
+    an unavailable front."""
     from fno.rust_binary import VerbUnavailable
 
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
 
     def down(*a, **k):
-        raise VerbUnavailable("the fno-agents binary was not found")
+        raise VerbUnavailable("the native fno binary was not found")
 
-    monkeypatch.setattr("fno.rust_binary.verb_call", down)
+    monkeypatch.setattr("fno.rust_binary.call_front_json", down)
     from fno.law import LawValidationError, validate_durable_law
 
     with pytest.raises(LawValidationError, match="law validation is unavailable"):

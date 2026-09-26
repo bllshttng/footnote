@@ -29,21 +29,20 @@ def validate_durable_law(
 
     A coordination note recorded as law is a lie a later reader cannot detect.
     The statement rules and the node-id subject refusal live in the
-    `law-match` crate verb (mode validate); this wrapper is the fail-closed
+    `fno inbox law match` door (mode validate); this wrapper is the fail-closed
     transport, and an unavailable validator is a refusal, never a pass.
     """
-    from fno.rust_binary import verb_call
+    from fno.rust_binary import call_front_json
 
     try:
-        answer = verb_call(
-            "law-match",
+        answer = call_front_json(
             {
                 "mode": "validate",
                 "subject": subject,
                 "decision": decision,
                 "rationale": rationale,
                 "supersedes": supersedes,
-            },
+            }
         )
     except Exception as exc:  # noqa: BLE001 - fail closed
         raise LawValidationError(f"law validation is unavailable ({exc})") from exc
@@ -71,31 +70,19 @@ def _law_callback() -> None:
 
 
 
-@law_app.command(
-    "set",
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
+@law_app.command("set", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def record_command(ctx: typer.Context) -> None:
-    """Record law in one call, from a chat or from a terminal.
+    """Record law in one call: forward argv verbatim to the native Rust door
+    (`fno inbox law set`), mirroring its exit code (0 recorded, 1
+    recorded-but-index-failed, 3 refused)."""
+    from fno.rust_binary import resolve_front_binary
 
-    The door lives in the law-match record mode (`fno-agents law-match
-    record`): this command forwards its arguments verbatim, so --global and
-    --paths are native flags of the Rust door, and mirrors its exit code
-    (0 recorded, 1 recorded-but-index-failed, 3 refused).
-    """
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
+    binary = resolve_front_binary()
     if binary is None:
-        typer.echo(
-            "fno law: refused: the law-match binary is unavailable. "
-            "Nothing was recorded.",
-            err=True,
-        )
+        typer.echo("fno law: refused: the native fno binary is unavailable.", err=True)
         raise typer.Exit(3)
-    # The verb keeps its one-JSON-request-on-stdin contract: the law-set argv
-    # rides the request, and a piped stdin rides along for --decision-file -.
+    # The argv rides the request; a piped stdin rides along for --decision-file -.
     stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
     request = json.dumps({"mode": "record", "argv": list(ctx.args), "stdin": stdin_text})
-    completed = subprocess.run([str(binary), "law-match"], input=request, text=True)
+    completed = subprocess.run([str(binary), "inbox", "law", "set"], input=request, text=True)
     raise typer.Exit(completed.returncode)

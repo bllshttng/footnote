@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Put the live laws that govern a review beside the review as it starts.
-# The matcher and the index read live in `fno-agents law-match` (mode stage).
+# The matcher and the index read live in `fno inbox law stage` (mode stage).
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
 PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
-command -v fno-agents >/dev/null 2>&1 || exit 0
+command -v fno >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/lib/with-timeout.sh
@@ -29,6 +29,6 @@ if [[ -n "$targets" ]]; then
 else
   request="$(printf '%s' "$input" | jq -c '{mode: "stage", hook: .}' 2>/dev/null || true)"
 fi
-printf '%s' "$request" | with_timeout 5 fno-agents law-match 2>/dev/null \
+printf '%s' "$request" | with_timeout 5 fno inbox law stage 2>/dev/null \
   | jq -c '.hook_output // empty' 2>/dev/null
 exit 0

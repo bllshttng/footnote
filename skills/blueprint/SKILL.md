@@ -192,7 +192,7 @@ fi
 
    Whatever the outcome, also record `decisions_acknowledged:` - one entry per row in `graph.decisions`, each carrying the `decision_id` and one line saying why that ruling does not close this work. An empty list is legal only when `graph.decisions` is itself empty; a live ruling with no matching entry is the same silence `proceed_alone_against` already refuses.
 
-   The `## Law governing blueprint` block lists the project laws for this plan. Each of those needs a `decisions_acknowledged` entry too, because validate-plan checks the same list. When no block reached this session, print it yourself: `printf '{"mode":"stage","hook":{"tool_name":"Skill","tool_input":{"skill":"fno:blueprint","args":"<node>"}}}' | fno-agents law-match | jq -r '.hook_output.hookSpecificOutput.additionalContext // "no stage law"'`.
+   The `## Law governing blueprint` block lists the project laws for this plan. Each of those needs a `decisions_acknowledged` entry too, because validate-plan checks the same list. When no block reached this session, print it yourself: `printf '{"mode":"stage","hook":{"tool_name":"Skill","tool_input":{"skill":"fno:blueprint","args":"<node>"}}}' | fno inbox law stage | jq -r '.hook_output.hookSpecificOutput.additionalContext // "no stage law"'`.
 
    Silence is not an outcome. A plan that ignores its sibling is the failure this gate exists to prevent. Do not build a second consolidator here: `fno backlog groom` already owns the daily levers-only pass and its allowlist already carries `supersede`. This gate is the pre-write half only.
 

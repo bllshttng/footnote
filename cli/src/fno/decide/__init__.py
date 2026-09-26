@@ -1366,8 +1366,9 @@ def list_decisions(
     label = subject or "(all)"
     if scope.casefold() != "all":
         try:
-            from fno.rust_binary import verb_call
-            answer = verb_call("law-match", {"mode": "scope-split", "rows": out})
+            from fno.rust_binary import call_front_json
+
+            answer = call_front_json({"mode": "scope-split", "rows": out})
             out = answer["kept"]
             label += str(answer.get("note") or "")
         except Exception:

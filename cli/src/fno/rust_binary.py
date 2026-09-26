@@ -298,3 +298,36 @@ def verb_call(
     finally:
         if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
             print(json.dumps({"payload": payload}), flush=True)
+
+def resolve_front_binary() -> Optional[Path]:
+    """The native ``fno`` front binary: $FNO_BIN, this checkout's build, ``PATH``."""
+    import shutil
+
+    raw = (os.environ.get("FNO_BIN") or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    root = Path(__file__).resolve().parents[3] / "crates" / "fno" / "target"
+    for profile in ("debug", "release"):
+        if (root / profile / "fno").exists():
+            return root / profile / "fno"
+    found = shutil.which("fno")
+    return Path(found) if found else None
+
+
+def call_front_json(payload: dict, *, timeout: float = 60) -> dict:
+    """One round-trip with the front's law door, fail-closed like verb_call."""
+    import json
+    import subprocess
+
+    binary = resolve_front_binary()
+    if binary is None:
+        raise VerbUnavailable("the native fno binary was not found")
+    done = subprocess.run(
+        [str(binary), "inbox", "law", "match"],
+        input=json.dumps(payload), capture_output=True, text=True, timeout=timeout,
+    )
+    if done.returncode != 0:
+        raise VerbUnavailable(f"fno inbox law match exited {done.returncode}: {done.stderr.strip()}")
+    return json.loads(done.stdout)

@@ -25,6 +25,7 @@ pub mod crown_names;
 pub mod digest_overlay;
 pub mod dispatch_launch;
 pub mod event_cli;
+pub mod law_cli;
 pub mod event_store;
 pub mod feed_overlay;
 #[cfg(test)]

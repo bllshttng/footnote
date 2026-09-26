@@ -1,5 +1,5 @@
-//! The question-to-law matcher: one pure function set behind a hidden
-//! JSON verb, reached as `fno-agents law-match`. The `stage` and `law` modes
+//! The question-to-law matcher: one pure function set behind the front's
+//! `fno inbox law` group. The `stage` and `law` modes
 //! read the decision index through [`crate::decision_index`]; the `ask` and
 //! `validate` modes read no file - Python keeps the decision lifecycle read
 //! (`list_decisions`) and the open-question fold (`read_open_questions`) and
@@ -1313,14 +1313,14 @@ fn scope_split_answer_in(
         // one that does not apply (d-0fa92eb9's posture). The reason rides
         // stderr, not the note, so a caller's labels stay byte-stable.
         Err(reason) => {
-            eprintln!("law-match: project unresolvable ({reason}); nothing hidden");
+            eprintln!("fno inbox law: project unresolvable ({reason}); nothing hidden");
             json!({"ok": true, "kept": req.rows, "hidden": 0, "note": ""})
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// The record door: `fno-agents law-match record <fno inbox law set argv>`
+// The record door: the `record` mode carrying the `fno inbox law set` argv
 //
 // The Python `fno inbox law set` command is a shim that forwards its argv
 // here, so these are the door's real flags: --global and --paths live on the
@@ -1348,7 +1348,7 @@ pub(crate) struct RecordDoor {
     raw_paths: Vec<String>,
 }
 
-const RECORD_USAGE: &str = "usage: fno-agents law-match record <subject> [decision] [--decision-file f|-] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--read cmd]... [--global] [--paths glob,glob]";
+const RECORD_USAGE: &str = "usage: fno inbox law set <subject> [decision] [--decision-file f|-] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--read cmd]... [--global] [--paths glob,glob]";
 
 fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
     let mut door = RecordDoor {
@@ -1726,7 +1726,7 @@ fn record_door_preflight(args: &[String], stdin_text: &str) -> Result<(RecordDoo
     let door = match parse_record_door(args) {
         Ok(d) => d,
         Err(usage) => {
-            eprintln!("fno-agents law-match: {usage}");
+            eprintln!("fno inbox law set: {usage}");
             return Err(2);
         }
     };
@@ -1997,29 +1997,37 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
     }
 }
 
-/// `fno-agents law-match`: the hidden binary-direct transport. One JSON
-/// request on stdin, one JSON answer on stdout, exit 0 whenever an answer
-/// was computed; exit 2 on malformed args or an unreadable request.
+/// The `fno inbox law match` transport: one JSON request on stdin, one JSON
+/// answer on stdout, exit 0 whenever an answer was computed; exit 2 on
+/// malformed args or an unreadable request.
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split|record; record takes argv: the fno inbox law set command line, and stdin: the text --decision-file - reads)"
+            "usage: fno inbox law match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split|record; record takes argv: the fno inbox law set command line, and stdin: the text --decision-file - reads)"
         );
         return 0;
     }
     if !args.is_empty() {
-        eprintln!("fno-agents law-match: unexpected arguments; the request rides stdin");
+        eprintln!("fno inbox law match: unexpected arguments; the request rides stdin");
         return 2;
     }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("fno-agents law-match: could not read stdin");
+        eprintln!("fno inbox law match: could not read stdin");
         return 2;
     }
-    let req: MatchRequest = match serde_json::from_str(&input) {
+    run_law_match_str(&input)
+}
+
+/// The request parser and dispatcher over an in-memory request. The `fno
+/// inbox law` verbs on the fno front call this with their own text; the
+/// record arm owns stdout (the decision id) and returns the door's exit
+/// code, every other arm prints one JSON answer and exits 0.
+pub fn run_law_match_str(input: &str) -> i32 {
+    let req: MatchRequest = match serde_json::from_str(input) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("fno-agents law-match: bad request: {e}");
+            eprintln!("fno inbox law match: bad request: {e}");
             return 2;
         }
     };

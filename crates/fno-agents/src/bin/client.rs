@@ -50,7 +50,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive-authority",
     "evals-macro",
     "evidence-gate",
-    "law-match",
     "finalize",
     "fleet-incident",
     "graph-get",
@@ -400,25 +399,18 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
-    // `law-match` is the hidden binary-direct transport for the question-to-law
-    // matcher. Same `matches!` treatment as `evidence-gate`, so no advertised
-    // fno verb is added.
-    if matches!(verb, "law-match") {
-        return fno_agents::law_match::run_law_match(&args[1..]);
-    }
-
     // `king-escalation-text` is the hidden binary-direct transport for the
     // king escalation renderer (ported out of `fno.king.escalate`): Python
     // keeps the question fold and the liveness read, this side only renders.
-    // Same `matches!` treatment as `law-match`, so no advertised fno verb is
-    // added.
+    // Same `matches!` treatment as `component-verdict`, so no advertised fno
+    // verb is added.
     if matches!(verb, "king-escalation-text") {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
     // `fleet-task` is the hidden binary-direct transport the Python reconcile
     // lanes ride through verb_call (fleet_task.rs). Same `matches!` treatment
-    // as `law-match`: no advertised fno verb.
+    // as `component-verdict`: no advertised fno verb.
     if matches!(verb, "fleet-task") {
         return fno_agents::fleet_task::run_fleet_task(&args[1..]);
     }

@@ -543,8 +543,9 @@ class TestAskReceiptNamesVisibility:
 
 
 class TestAskRefusedWhenLiveLawRules:
-    # These four route the exact tier through the real binary (`law-match`),
-    # so they need the compiled dev build, not just the patched lifecycle read.
+    # These four route the exact tier through the real binary (the law read
+    # inside question-intake), so they need the compiled dev build, not just
+    # the patched lifecycle read.
     @requires_rust
     def test_the_pr1717_question_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch

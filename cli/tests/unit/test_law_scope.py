@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.rust_binary import find_dev_binary
+from tests.unit._front_dev import front_dev_binary
 
 pytestmark = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents)`",
+    front_dev_binary() is None,
+    reason="compiled fno front binary not present (build with `cargo build --manifest-path crates/fno/Cargo.toml --bin fno)`",
 )
 
 
@@ -80,7 +80,9 @@ def test_the_shim_forwards_global_so_the_door_can_widen(
 
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
+    monkeypatch.setattr(
+        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
+    )
     monkeypatch.setattr(
         "subprocess.run",
         lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
@@ -109,7 +111,7 @@ def test_the_shim_forwards_global_so_the_door_can_widen(
 def test_scope_split_keeps_global_and_the_matching_project(tmp_path, monkeypatch):
     _work_map(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path / "proj")
-    from fno.rust_binary import verb_call
+    from fno.rust_binary import call_front_json
 
     rows = [
         {"decision_id": "d-1", "lane": "law", "scope": "global"},
@@ -118,7 +120,7 @@ def test_scope_split_keeps_global_and_the_matching_project(tmp_path, monkeypatch
         {"decision_id": "d-4", "lane": "coord"},
         {"decision_id": "d-5", "lane": "law", "scope": "project:etl"},
     ]
-    answer = verb_call("law-match", {"mode": "scope-split", "rows": rows})
+    answer = call_front_json({"mode": "scope-split", "rows": rows})
     kept = [r["decision_id"] for r in answer["kept"]]
     assert kept == ["d-1", "d-2", "d-3", "d-4"]
     assert answer["hidden"] == 1
@@ -128,13 +130,13 @@ def test_scope_split_keeps_global_and_the_matching_project(tmp_path, monkeypatch
 def test_scope_split_absent_scope_reads_project_fno(tmp_path, monkeypatch):
     _work_map(tmp_path, monkeypatch, slug="other")
     monkeypatch.chdir(tmp_path / "proj")
-    from fno.rust_binary import verb_call
+    from fno.rust_binary import call_front_json
 
     rows = [
         {"decision_id": "d-1", "lane": "law"},
         {"decision_id": "d-2", "lane": "law", "scope": "project:fno"},
     ]
-    answer = verb_call("law-match", {"mode": "scope-split", "rows": rows})
+    answer = call_front_json({"mode": "scope-split", "rows": rows})
     kept = [r["decision_id"] for r in answer["kept"]]
     assert kept == []
     assert answer["hidden"] == 2
@@ -145,10 +147,10 @@ def test_scope_split_fails_open_when_the_project_cannot_resolve(tmp_path, monkey
     nowhere = tmp_path / "nowhere"
     nowhere.mkdir()
     monkeypatch.chdir(nowhere)
-    from fno.rust_binary import verb_call
+    from fno.rust_binary import call_front_json
 
     rows = [{"decision_id": "d-1", "lane": "law", "scope": "project:demo"}]
-    answer = verb_call("law-match", {"mode": "scope-split", "rows": rows})
+    answer = call_front_json({"mode": "scope-split", "rows": rows})
     assert [r["decision_id"] for r in answer["kept"]] == ["d-1"]
     assert answer["note"] == ""
 
@@ -156,14 +158,14 @@ def test_scope_split_fails_open_when_the_project_cannot_resolve(tmp_path, monkey
 def test_list_decisions_applies_the_filter_and_the_note(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_verb(verb, params):
-        captured.update(params)
-        kept = [r for r in params["rows"] if r.get("scope") != "project:etl"]
+    def fake_front(payload):
+        captured.update(payload)
+        kept = [r for r in payload["rows"] if r.get("scope") != "project:etl"]
         return {"kept": kept, "hidden": 1, "note": " (hid 1 out-of-scope)"}
 
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb)
+    monkeypatch.setattr(fno.rust_binary, "call_front_json", fake_front)
     from fno.decide import list_decisions
 
     label, out, damaged = list_decisions(scope="current")
@@ -171,13 +173,13 @@ def test_list_decisions_applies_the_filter_and_the_note(tmp_path, monkeypatch):
     assert label.endswith("(hid 1 out-of-scope)")
 
 
-def test_list_decisions_fails_open_when_the_crate_is_unavailable(tmp_path, monkeypatch):
+def test_list_decisions_fails_open_when_the_front_is_unavailable(tmp_path, monkeypatch):
     import fno.rust_binary
 
-    def boom(verb, params):
-        raise RuntimeError("crate down")
+    def boom(payload):
+        raise RuntimeError("front down")
 
-    monkeypatch.setattr(fno.rust_binary, "verb_call", boom)
+    monkeypatch.setattr(fno.rust_binary, "call_front_json", boom)
     from fno.decide import list_decisions
 
     label, out, damaged = list_decisions(scope="current")

@@ -357,12 +357,19 @@ HEREDOC
 # that lists zero laws; the fixture must keep producing zero warnings.
 SEMLAWBIN="$TMPDIR_BASE/semlawbin"
 mkdir -p "$SEMLAWBIN"
-cat > "$SEMLAWBIN/fno-agents" <<'STUB'
+# The stage-law gate reads the native fno front (`fno inbox law stage`), the
+# surface gate reads fno-agents; the stub answers both by name.
+cat > "$SEMLAWBIN/fno" <<'STUB'
 #!/bin/bash
-if [[ "${1:-}" == "law-match" ]]; then
+if [[ "${3:-}" == "stage" ]]; then
     printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n"}}}'
     exit 0
 fi
+exit 0
+STUB
+chmod +x "$SEMLAWBIN/fno"
+cat > "$SEMLAWBIN/fno-agents" <<'STUB'
+#!/bin/bash
 if [[ "${1:-}" == "surface-check" ]]; then
     # A clean surface receipt: zero findings, nothing on stdout.
     exit 0
@@ -370,7 +377,7 @@ fi
 exit 3
 STUB
 chmod +x "$SEMLAWBIN/fno-agents"
-OUTPUT=$(FNO_AGENTS_BIN="$SEMLAWBIN/fno-agents" bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
+OUTPUT=$(FNO_BIN="$SEMLAWBIN/fno" FNO_AGENTS_BIN="$SEMLAWBIN/fno-agents" bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
 if ! grep -q "WARN:" <<< "$OUTPUT"; then
     pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
 else
@@ -1190,12 +1197,12 @@ fi
 
 # AC11j: stage-law gate - a law the blueprint-stage block lists with no
 # decisions_acknowledged entry on a post-gate plan errors naming id+subject.
-# The stub fno-agents answers law-match only; the surface gate warns NOT
+# The stub fno answers the stage gate only; the surface gate warns NOT
 # CHECKED against it, which this section does not read.
-STUB_AGENTS="$STUBBIN/fno-agents"
+STUB_AGENTS="$STUBBIN/fno"
 cat > "$STUB_AGENTS" <<'STUB'
 #!/bin/bash
-if [[ "${1:-}" == "law-match" ]]; then
+if [[ "${3:-}" == "stage" ]]; then
     printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n"}}}'
     exit 0
 fi
@@ -1218,7 +1225,7 @@ consolidation:
 |------|--------|
 | `crates/fno-agents/src/mail.rs` | Modify |
 EOF
-OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+OUTPUT=$(FNO_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if grep -q "decisions_acknowledged is missing d-a11b0002 (stub-epic-ruling)" <<< "$OUTPUT"; then
     pass "AC11j: stage-block law with no entry errors naming id and subject"
 else
@@ -1245,7 +1252,7 @@ consolidation:
 |------|--------|
 | `crates/fno-agents/src/mail.rs` | Modify |
 EOF
-OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_K" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+OUTPUT=$(FNO_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_K" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
     pass "AC11k: acknowledged stage law prints nothing"
 else
@@ -1254,10 +1261,10 @@ fi
 
 # AC11l (AC2-HP): the stage-law receipt compares acknowledged ids without
 # spawning a piped grep, including an uppercase id from the plan.
-STUB_AGENTS_HP="$STUBBIN/fno-agents-hp"
+STUB_AGENTS_HP="$STUBBIN/fno-hp"
 cat > "$STUB_AGENTS_HP" <<'STUB'
 #!/bin/bash
-if [[ "${1:-}" == "law-match" ]]; then
+if [[ "${3:-}" == "stage" ]]; then
     printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
     exit 0
 fi
@@ -1285,7 +1292,7 @@ consolidation:
 |------|--------|
 | `crates/fno-agents/src/mail.rs` | Modify |
 EOF
-OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_HP" bash "$VALIDATE" "$PLAN_NNPY_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+OUTPUT=$(FNO_BIN="$STUB_AGENTS_HP" bash "$VALIDATE" "$PLAN_NNPY_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if grep -q "stage-law check: 2 law(s) listed, 2 acknowledged" <<< "$OUTPUT" \
     && ! grep -q "stage-law.*ERROR\|decisions_acknowledged is missing d-a11b000" <<< "$OUTPUT"; then
     pass "AC11l: stage-law receipt counts uppercase acknowledgments"
@@ -1295,10 +1302,10 @@ fi
 
 # AC11m (AC2-ERR): an unread stage scope is NOT CHECKED, while a listed law
 # that is not acknowledged still fails closed.
-STUB_AGENTS_UNREAD="$STUBBIN/fno-agents-unread"
+STUB_AGENTS_UNREAD="$STUBBIN/fno-unread"
 cat > "$STUB_AGENTS_UNREAD" <<'STUB'
 #!/bin/bash
-if [[ "${1:-}" == "law-match" ]]; then
+if [[ "${3:-}" == "stage" ]]; then
     printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nUnread: the node'"'"'s epic and project (graph: invalid graph)\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
     exit 0
 fi
@@ -1307,7 +1314,7 @@ STUB
 chmod +x "$STUB_AGENTS_UNREAD"
 PLAN_NNPY_M="$TMPDIR_BASE/nnpy_m.md"
 sed 's/x-a11b003/x-a11b004/; /D-A11B0003/{N;d;}' "$PLAN_NNPY_L" > "$PLAN_NNPY_M"
-OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_UNREAD" bash "$VALIDATE" "$PLAN_NNPY_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+OUTPUT=$(FNO_BIN="$STUB_AGENTS_UNREAD" bash "$VALIDATE" "$PLAN_NNPY_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if [[ $EXIT_CODE -eq 1 ]] \
     && grep -q "stage-law check NOT CHECKED (the node's epic and project (graph: invalid graph)" <<< "$OUTPUT" \
     && grep -q "decisions_acknowledged is missing d-a11b0003" <<< "$OUTPUT"; then
