@@ -10,15 +10,36 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.plan._stamp import read_plan_file
 
 runner = CliRunner()
+
+
+def _strify(v):
+    """Scalars read back as the raw strings the line-based writer emits."""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return [_strify(i) for i in v]
+    return v
+
+
+def read_plan_file(path):
+    """PyYAML-based stand-in for the retired Python codec reader."""
+    text = Path(path).read_text(encoding="utf-8")
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    fields = yaml.safe_load(m.group(1)) if m else {}
+    fields = {k: _strify(v) for k, v in (fields or {}).items()}
+    return Path(path), fields, ""
 
 _PLAN = """\
 ---

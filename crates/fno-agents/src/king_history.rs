@@ -6,7 +6,7 @@
 //! returns, and relays here. The paths reduce to unique live journals (the
 //! `.ephemeral` siblings never carry durable rows, and a `.1` generation is
 //! the same journal its live path names); each live journal's `events.db`
-//! store is synced FIRST (`events_store::sync`, which ingests the rotated
+//! store is synced FIRST (`event_store::sync`, which ingests the rotated
 //! generation and then the live file), and the read is an indexed
 //! `(scope, type, ts_ms)` select instead of a scan of every row ever
 //! journaled. Selection is EXACT `data.scope` equality via the store's
@@ -125,7 +125,7 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
         if name.contains(crate::events::EPHEMERAL_SUFFIX) {
             continue;
         }
-        let live = crate::events_store::live_journal(path);
+        let live = crate::event_store::live_journal(path);
         if !lives.contains(&live) {
             lives.push(live);
         }

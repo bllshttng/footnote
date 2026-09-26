@@ -8,15 +8,24 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import os
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.plan._stamp import read_plan_file
 
 runner = CliRunner()
+
+
+def _fields(path: Path) -> dict:
+    """Read a doc's frontmatter with PyYAML (the writer is the Rust port)."""
+    text = Path(path).read_text(encoding="utf-8")
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    return yaml.safe_load(m.group(1)) if m else {}
 
 _PLAN = """\
 ---
@@ -35,9 +44,11 @@ def env(tmp_path, monkeypatch):
     """A temp graph.json + a plans dir; graph_json() points at the temp graph so
     the sync command and its watermark both resolve under tmp_path."""
     g = tmp_path / "graph.json"
-    seed_graph(g, '{"entries": []}\n')
+    g.write_text('{"entries": []}\n')
+    import fno.graph.store as gs
     import fno.paths as paths
     monkeypatch.setattr(paths, "graph_json", lambda: g)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
     return tmp_path, g
 
 
@@ -67,8 +78,7 @@ def test_sweep_converges_vault(env):
     assert res.exit_code == 0, res.output
     assert "3 docs repainted" in res.output
     for d in docs:
-        _, fields, _ = read_plan_file(d)
-        assert fields["priority"] == "p1"
+        assert _fields(d)["priority"] == "p1"
 
 
 def test_no_plan_path_skipped(env):
@@ -109,8 +119,7 @@ def test_watermark_short_circuits_unchanged_graph(env):
     d.write_text(_PLAN.format(node="x-0001", prio="p3"), encoding="utf-8")
     second = runner.invoke(app, ["do", "plan", "sync"])
     assert "graph unchanged" in second.output
-    _, fields, _ = read_plan_file(d)
-    assert fields["priority"] == "p3"  # untouched: gate skipped the sweep
+    assert _fields(d)["priority"] == "p3"  # untouched: gate skipped the sweep
 
 
 def test_all_bypasses_watermark(env):
@@ -126,8 +135,7 @@ def test_all_bypasses_watermark(env):
     res = runner.invoke(app, ["do", "plan", "sync", "--all"])  # graph unchanged, but --all
     assert res.exit_code == 0, res.output
     assert "1 docs repainted" in res.output
-    _, fields, _ = read_plan_file(d)
-    assert fields["priority"] == "p1"
+    assert _fields(d)["priority"] == "p1"
 
 
 def test_graph_unreadable_degrades(env, monkeypatch):
