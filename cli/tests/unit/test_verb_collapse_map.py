@@ -257,7 +257,10 @@ def test_map_covers_current_surface_once():
     # The schema-4 branch allocates `backlog session backfill`, the verb
     # that fills missing session stamps from transcripts: 610 -> 611.
     # Retiring `doctor graph backend` and `doctor graph export` frees two: 611 -> 609.
-    assert len(mapped) == 609, (
+    # `backlog find`, `backlog notes`, `agents backlog-note`,
+    # `agents backlog-notes` and `agents graph-get` no longer resolve on the
+    # live surface; their stale rows freed five: 609 -> 604.
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
