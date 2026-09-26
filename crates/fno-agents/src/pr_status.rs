@@ -518,7 +518,7 @@ pub(crate) fn unreached_job_steps(steps: &[Value]) -> Vec<String> {
         .collect()
 }
 
-fn check_name(check: &Value) -> String {
+pub(crate) fn check_name(check: &Value) -> String {
     let name = s_str(check, "name");
     if !name.is_empty() {
         return name.to_string();
@@ -532,7 +532,7 @@ fn check_name(check: &Value) -> String {
 
 /// (owner, repo, job_id) from a CheckRun's detailsUrl, else None: a
 /// StatusContext carries a targetUrl no jobs API can serve.
-fn job_ref(check: &Value) -> Option<(String, String, String)> {
+pub(crate) fn job_ref(check: &Value) -> Option<(String, String, String)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"^https?://[^/]+/([^/]+)/([^/]+)/actions/runs/\d+/job/(\d+)").unwrap()
@@ -995,9 +995,19 @@ pub(crate) fn status_payload<P: GhProbe>(
     compose::compose_payload(&inputs)
 }
 
+/// Serializes tests that point the process-global FNO_PR_STATUS_CACHE_DIR
+/// env override at their own tempdir: cargo runs tests in parallel threads.
+#[cfg(test)]
+pub(crate) fn cache_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub(crate) mod cache;
 pub(crate) mod compose;
+pub(crate) mod logs;
 pub(crate) mod reviews;
 pub(crate) mod seams;
 #[cfg(test)]
 mod tests;
+pub(crate) mod wait;

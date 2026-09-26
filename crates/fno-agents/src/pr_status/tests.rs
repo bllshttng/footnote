@@ -280,6 +280,7 @@ fn prior_row_replays_failures_by_job_id_with_no_log_reads() {
 /// override is process-global, and cargo runs tests in parallel threads.
 #[test]
 fn job_log_caches_one_attempt_and_never_a_failure() {
+    let _guard = super::cache_env_lock();
     let green = FakeGh::from_fixture("green_settled");
     let red = FakeGh::from_fixture("red_detailed_capped");
     let dir = tempfile::tempdir().unwrap();

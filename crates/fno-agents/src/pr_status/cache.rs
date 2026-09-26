@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// One status read must not become a hundred gh calls; the counting probe
 /// feeds the spend note.
 pub(crate) struct CountingProbe<P: GhProbe> {
-    inner: P,
+    pub(crate) inner: P,
     pub(crate) calls: AtomicUsize,
 }
 
@@ -188,6 +188,8 @@ pub(crate) fn live_status<P: GhProbe>(
 pub(crate) fn run_door(op: &str, payload: &Value) -> (i32, String, String) {
     match op {
         "status-read" => status_read(payload),
+        "status-wait" => super::wait::run_wait(payload),
+        "status-logs" => super::logs::run_logs_door(payload),
         _ => (2, String::new(), format!("unknown status door op {op}\n")),
     }
 }
@@ -223,7 +225,11 @@ fn status_read(payload: &Value) -> (i32, String, String) {
 /// `cached_status`: the coalescing chokepoint. Head-keyed rows, one live
 /// read per TTL under the per-key flock, a zero-network backoff pre-check,
 /// and the fail-closed stale serve when the head read itself refuses.
-fn cached_status(cwd_str: &str, pr: u64, refresh: bool) -> (i32, Value, Vec<String>, usize) {
+pub(crate) fn cached_status(
+    cwd_str: &str,
+    pr: u64,
+    refresh: bool,
+) -> (i32, Value, Vec<String>, usize) {
     let cwd = Path::new(cwd_str);
     // The slug resolves once here; the reader never runs git. No repo
     // context: serve uncached rather than key every caller onto one row.
@@ -318,7 +324,7 @@ fn fresh_probe() -> CountingProbe<crate::pr_status_facts::RealGhProbe> {
     }
 }
 
-fn git_slug(cwd: &Path) -> Option<String> {
+pub(crate) fn git_slug(cwd: &Path) -> Option<String> {
     let url = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(cwd)
