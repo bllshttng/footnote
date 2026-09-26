@@ -161,8 +161,7 @@ def init_cmd(
 
 
 def _reign_hold(argv: list[str] | None = None) -> None:
-    """Fire-and-forget the reign hold: default arms `--for <checkin_interval>`
-    on this session; the beat's `hold --off` drains it."""
+    """Fire-and-forget the reign hold (the beat's `hold --off` drains it)."""
     import re
     import shutil
     import subprocess
