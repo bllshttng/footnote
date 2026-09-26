@@ -47,19 +47,28 @@ pub(crate) enum BoardMsg {
 
 pub(crate) type BoardTx = tokio::sync::mpsc::UnboundedSender<(u64, BoardMsg)>;
 
+/// The shown node's cached markdown document read: refreshed only when
+/// the shown node, the path or the mtime changed.
+#[derive(Debug, Clone)]
+pub(crate) struct PaneDoc {
+    pub(crate) node_id: String,
+    pub(crate) path: String,
+    pub(crate) mtime: Option<std::time::SystemTime>,
+    pub(crate) lines_src: String,
+    /// Non-empty when the read failed: the pane names it.
+    pub(crate) error: String,
+}
+
 /// The board's active filters, held as route pairs so the model's own
 /// [`backlog_model::Query::from_pairs`] parses them - one parser, no second
 /// filter semantics.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct QueryState {
     pub(crate) lanes: backlog_model::LanesBy,
-    pub(crate) project: Option<String>,
-    pub(crate) epic: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) priority: Option<String>,
-    pub(crate) size: Option<String>,
-    pub(crate) king: Option<String>,
+    /// Multi-select sets by facet name; a set filters any-of.
+    pub(crate) sets: std::collections::BTreeMap<&'static str, Vec<String>>,
     pub(crate) q: Option<String>,
+    pub(crate) view: backlog_model::View,
 }
 
 impl QueryState {
@@ -71,47 +80,18 @@ impl QueryState {
             backlog_model::LanesBy::None => "none",
         };
         let mut p: Vec<(String, String)> = vec![("lanes".into(), lanes.into())];
-        for (k, v) in [
-            ("project", &self.project),
-            ("epic", &self.epic),
-            ("status", &self.status),
-            ("priority", &self.priority),
-            ("size", &self.size),
-            ("king", &self.king),
-            ("q", &self.q),
-        ] {
-            if let Some(v) = v {
+        for (k, vals) in &self.sets {
+            for v in vals {
                 p.push((k.to_string(), v.clone()));
             }
         }
-        backlog_model::Query::from_pairs(&p)
-    }
-
-    /// `priority=p1 · find: "mux"` style summary for the query line.
-    pub(crate) fn describe(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        let lanes = match self.lanes {
-            backlog_model::LanesBy::Project => "project",
-            backlog_model::LanesBy::Epic => "epic",
-            backlog_model::LanesBy::None => "none",
-        };
-        parts.push(format!("lanes: {lanes}"));
-        for (k, v) in [
-            ("project", &self.project),
-            ("epic", &self.epic),
-            ("status", &self.status),
-            ("priority", &self.priority),
-            ("size", &self.size),
-            ("king", &self.king),
-        ] {
-            if let Some(v) = v {
-                parts.push(format!("{k}={v}"));
-            }
+        if self.view == backlog_model::View::List {
+            p.push(("view".into(), "list".into()));
         }
         if let Some(q) = &self.q {
-            parts.push(format!("find: \"{q}\""));
+            p.push(("q".into(), q.clone()));
         }
-        parts.join(" · ")
+        backlog_model::Query::from_pairs(&p)
     }
 }
 
@@ -156,9 +136,12 @@ pub(crate) struct BoardView {
     pub(crate) keys_overlay: bool,
     /// Pending escape bytes in board-key mode (split-arrow safety).
     board_esc: Vec<u8>,
-    /// The drill-down overlay, when open (wave 4).
+    /// The drill-down overlay, when open (wave 4). `Some` = the detail
+    /// pane holds focus; `None` = the board pane holds it.
     pub(crate) detail: Option<node_detail::NodeDetailOverlay>,
     pub(crate) detail_esc: Vec<u8>,
+    /// The shown node's cached markdown document read.
+    pub(crate) doc: Option<PaneDoc>,
     /// The write verb queued for the run loop (one at a time).
     pub(crate) write_action: Option<WriteAction>,
 }
@@ -260,6 +243,7 @@ impl BoardView {
             board_esc: Vec::new(),
             detail: None,
             detail_esc: Vec::new(),
+            doc: None,
             write_action: None,
         }
     }
@@ -348,6 +332,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
             focus_card(b, focus.as_deref());
         }
     }
+    backlog_panes::sync_doc(b);
     if let Some(n) = notice {
         view.set_notice(n);
     }
@@ -436,7 +421,6 @@ pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usize>) {
         return (lines, None);
     };
     push_stats_line(b, &mut lines, board, w);
-    push_query_line(b, &mut lines, board, w);
     for e in &b.errors {
         lines.push(BLine::meta(format!("! {e}")));
     }
@@ -529,17 +513,76 @@ fn flow_line(flow: &Value) -> String {
     format!("{shipped} shipped this week · {cycle} · {prs} open PRs")
 }
 
-/// The query line: the active lanes/filters, the backend when it is not
-/// the graph, and every feature the backend cannot answer.
-fn push_query_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usize) {
-    let mut line = b.query.describe();
-    if board.backend != "graph" {
-        line.push_str(&format!(" · backend: {}", board.backend));
+/// The persistent filter bar's cells: Search, Status, Type, Priority,
+/// Milestone (the epic set), Labels, then Project and King when set.
+/// Cells join with ` │ ` and the caller wraps them by width. When no node
+/// carries a tag, the Labels cell says so.
+pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BLine> {
+    let _ = w;
+    let mut cells: Vec<(&str, String)> = Vec::new();
+    let q = b.query.q.as_deref().unwrap_or("any");
+    cells.push(("Search", q.to_string()));
+    let set = |name: &str| -> String {
+        let vals = b.query.sets.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+        if vals.is_empty() {
+            "any".into()
+        } else {
+            vals.join(",")
+        }
+    };
+    cells.push(("Status", set("status")));
+    cells.push(("Type", set("type")));
+    cells.push(("Priority", set("priority")));
+    cells.push(("Milestone", set("epic")));
+    let labels = set("tag");
+    if board.facets.tags.is_empty() {
+        cells.push(("Labels", "none on any node".into()));
+    } else {
+        cells.push(("Labels", labels));
     }
-    for u in &board.unavailable {
-        line.push_str(&format!(" · {}: {}", u.feature, u.reason));
+    if !set("project").is_empty() || !set("king").is_empty() {
+        cells.push(("Project", set("project")));
+        cells.push(("King", set("king")));
     }
-    lines.push(BLine::meta(elide_words(&line, w)));
+    let mut lines: Vec<BLine> = Vec::new();
+    let mut line = BLine::plain(String::new());
+    let mut used = 0usize;
+    for (label, value) in cells.iter() {
+        let cell_w = label.chars().count() + 2 + value.chars().count();
+        if used > 0 && used + 3 + cell_w > w {
+            lines.push(line.trunc(w));
+            line = BLine::plain(String::new());
+            line.push_line(BLine::of(&[
+                BSeg {
+                    text: format!("{label}: "),
+                    role: BRole::Meta,
+                },
+                BSeg {
+                    text: value.clone(),
+                    role: BRole::Body,
+                },
+            ]));
+            used = cell_w;
+            continue;
+        }
+        if used > 0 {
+            line.push_line(BLine::plain(" │ "));
+            used += 3;
+        }
+        line.push_line(BLine::of(&[
+            BSeg {
+                text: format!("{label}: "),
+                role: BRole::Meta,
+            },
+            BSeg {
+                text: value.clone(),
+                role: BRole::Body,
+            },
+        ]));
+        used += cell_w;
+    }
+    lines.push(line.trunc(w));
+    lines
 }
 
 /// Truncate one line to `w` chars (the painter wraps nothing).
@@ -869,8 +912,8 @@ impl View {
         cells: &mut [Cell],
         rows: usize,
         cols: usize,
-        overlay_origin: (usize, usize),
-        overlay_dims: (usize, usize),
+        _overlay_origin: (usize, usize),
+        _overlay_dims: (usize, usize),
     ) {
         let Some(b) = &self.backlog_board else {
             return;
@@ -880,28 +923,6 @@ impl View {
             // too, so it must paint over it, and its Esc must land here.
             let m = board_keys_popup();
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
-        } else if b.detail.is_some() {
-            let w = overlay_dims
-                .1
-                .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-            let (body, follow) = node_detail::overlay_lines(b, w);
-            let lines: Vec<chrome::BodyLine> =
-                body.iter().map(backlog_style::to_body_line).collect();
-            let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
-                .footer("enter open - e/p/s/S edit - D append - N note - E $EDITOR - esc back")
-                .flat();
-            draw_body_overlay(
-                cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                follow,
-                follow,
-                &self.theme,
-            );
         } else if let Some(m) = pick_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if let Some(m) = facet_popup(b) {
@@ -909,23 +930,13 @@ impl View {
         } else if let Some(m) = colpick_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if self.board_full {
-            let w = cols.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-            let (lines, follow) = render(b, w);
-            let body: Vec<chrome::BodyLine> =
-                lines.iter().map(backlog_style::to_body_line).collect();
-            let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
-                .footer("j/k move - enter detail - e/p/s/S/D/N/E edit - c cols - ? keys - F full")
-                .flat();
-            draw_body_overlay(
+            backlog_panes::paint(
+                b,
                 cells,
                 rows,
                 cols,
-                (0usize, 0usize),
-                (rows, cols),
-                &chrome,
-                &body,
-                follow,
-                follow,
+                (0, 0, rows, cols),
+                b.detail.is_some(),
                 &self.theme,
             );
         }
@@ -1091,6 +1102,7 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b'E') => edit_description(view).await?,
             ModalKey::Byte(b'c') => open_colpick(view),
             ModalKey::Byte(b'?') => open_keys_overlay(view),
+            ModalKey::Byte(b'\t') => toggle_view(view),
             ModalKey::Byte(b'F') => toggle_full(view),
             ModalKey::Byte(b'T') => rank_move(view, "top", None)?,
             ModalKey::Byte(b'K') => rank_move(view, "before", Some(true))?,
@@ -1098,6 +1110,9 @@ pub(crate) async fn board_keys(
             ModalKey::Enter => open_detail(view),
             _ => {}
         }
+    }
+    if let Some(b) = view.backlog_board.as_mut() {
+        backlog_panes::sync_doc(b);
     }
     Ok(StdinFlow::Continue)
 }
@@ -1121,11 +1136,17 @@ fn esc_or_close(view: &mut View) {
     }
 }
 
-/// Move the card cursor within the cell (clamped to the painted cards).
+/// Move the card cursor within the cell (clamped to the painted cards);
+/// in list mode the step walks the flat painted order, past a cell's last
+/// card into the next non-empty column.
 fn move_row(view: &mut View, down: bool) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
+    if b.query.view == backlog_model::View::List {
+        move_row_list(b, down);
+        return;
+    }
     let Some(cell) = b
         .body
         .as_ref()
@@ -1148,13 +1169,52 @@ fn move_row(view: &mut View, down: bool) {
     };
 }
 
+/// The list view's flat cursor walk: one card per (lane, column, row)
+/// position in painted order, one step per press.
+fn move_row_list(b: &mut BoardView, down: bool) {
+    let Some(board) = b.body.as_ref() else {
+        return;
+    };
+    let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+    for (li, lane) in board.lanes.iter().enumerate() {
+        for si in 0..b.layout.columns.len() {
+            let Some(cell) = lane.cells.iter().find(|c| {
+                b.layout
+                    .columns
+                    .get(si)
+                    .is_some_and(|name| &c.column == name)
+            }) else {
+                continue;
+            };
+            for ri in 0..cell.cards.len() {
+                cells.push((li, si, ri));
+            }
+        }
+    }
+    if cells.is_empty() {
+        return;
+    }
+    let cur = cells
+        .iter()
+        .position(|&(l, c, r)| l == b.lane && c == b.col && r == b.row);
+    let next = match (cur, down) {
+        (Some(i), true) => (i + 1).min(cells.len() - 1),
+        (Some(i), false) => i.saturating_sub(1),
+        (None, true) => cells.len() - 1,
+        (None, false) => 0,
+    };
+    let (l, c, r) = cells[next];
+    (b.lane, b.col, b.row) = (l, c, r);
+}
+
 /// Move the column cursor (clamped to the six cells); the row clamps at
-/// render time.
+/// render time. In list mode the columns are display sub-headers, so the
+/// key does nothing.
 fn move_col(view: &mut View, right: bool) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
-    if b.body.is_none() {
+    if b.query.view == backlog_model::View::List || b.body.is_none() {
         return;
     }
     let shown = b.layout.columns.len().saturating_sub(1);
@@ -1204,6 +1264,21 @@ fn cycle_lanes(view: &mut View) {
         return;
     };
     cycle_lanes_b(b);
+}
+
+/// Tab: flip the board between the kanban grid and the uncapped list,
+/// keeping the cursor on the card it left.
+fn toggle_view(view: &mut View) {
+    let focus = view.backlog_board.as_ref().and_then(cursor_card_id);
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    b.query.view = match b.query.view {
+        backlog_model::View::Kanban => backlog_model::View::List,
+        backlog_model::View::List => backlog_model::View::Kanban,
+    };
+    rederive(b);
+    focus_card(b, focus.as_deref());
 }
 
 /// The pure half of the lane cycle, so tests exercise it without a View.
@@ -1699,6 +1774,9 @@ fn facet_keys(view: &mut View, bytes: &[u8]) {
             }
             ModalKey::Up => shift_sel(view, false),
             ModalKey::Down => shift_sel(view, true),
+            ModalKey::Byte(b' ') if b.facet.as_ref().is_some_and(|p| p.value_sel.is_some()) => {
+                facet_toggle(view);
+            }
             ModalKey::Enter => facet_commit(view),
             _ => {}
         }
@@ -1706,32 +1784,29 @@ fn facet_keys(view: &mut View, bytes: &[u8]) {
 }
 
 /// The fixed facet list, one row of the first-level popup.
-pub(crate) const FACET_NAMES: [&str; 6] = ["project", "epic", "status", "priority", "size", "king"];
+pub(crate) const FACET_NAMES: [&str; 8] = [
+    "project", "epic", "status", "type", "priority", "size", "king", "tag",
+];
 
-/// The facets this backend can answer, as `(FACET_NAMES index, name)`.
+/// The facets this backend can answer and whose value list is not empty,
+/// as `(FACET_NAMES index, name)`. A facet with no values (Labels while no
+/// node carries a tag) hides itself.
 fn visible_facets(board: &Board) -> Vec<(usize, &'static str)> {
     (0..FACET_NAMES.len())
         .filter(|&i| unavailable_reason(board, facet_feature(FACET_NAMES[i])).is_none())
+        .filter(|&i| !facet_values(board, i).is_empty())
         .map(|i| (i, FACET_NAMES[i]))
         .collect()
 }
 
-/// The facet's current filter value, for the first-level row label.
+/// The facet's current filter set, for the first-level row label.
 fn facet_current(b: &BoardView, facet: usize) -> String {
-    let empty = String::new();
-    let v = match facet {
-        0 => b.query.project.as_ref().unwrap_or(&empty),
-        1 => b.query.epic.as_ref().unwrap_or(&empty),
-        2 => b.query.status.as_ref().unwrap_or(&empty),
-        3 => b.query.priority.as_ref().unwrap_or(&empty),
-        4 => b.query.size.as_ref().unwrap_or(&empty),
-        5 => b.query.king.as_ref().unwrap_or(&empty),
-        _ => &empty,
-    };
-    if v.is_empty() {
+    let name = FACET_NAMES.get(facet).copied().unwrap_or("");
+    let vals = b.query.sets.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+    if vals.is_empty() {
         "any".into()
     } else {
-        v.clone()
+        vals.join(",")
     }
 }
 
@@ -1769,21 +1844,33 @@ fn facet_values(board: &Board, facet: usize) -> Vec<(String, String)> {
             .collect(),
         3 => board
             .facets
+            .kinds
+            .iter()
+            .map(|k| (k.clone(), k.clone()))
+            .collect(),
+        4 => board
+            .facets
             .priorities
             .iter()
             .map(|p| (p.clone(), p.clone()))
             .collect(),
-        4 => board
+        5 => board
             .facets
             .sizes
             .iter()
             .map(|s| (s.clone(), s.clone()))
             .collect(),
-        5 => board
+        6 => board
             .facets
             .kings
             .iter()
             .map(|k| (k.clone(), k.clone()))
+            .collect(),
+        7 => board
+            .facets
+            .tags
+            .iter()
+            .map(|t| (t.clone(), t.clone()))
             .collect(),
         _ => Vec::new(),
     }
@@ -1801,12 +1888,18 @@ pub(crate) fn facet_popup(b: &BoardView) -> Option<Popup> {
         rows.push(PopupRow::Header(name.into()));
         rows.push(PopupRow::Rule);
         rows.push(pick_row("any"));
-        for (label, _) in facet_values(board, pick.facet) {
-            rows.push(pick_row(&label));
+        let set: Vec<String> = b.query.sets.get(name).cloned().unwrap_or_default();
+        for (label, value) in facet_values(board, pick.facet) {
+            let mark = if set.iter().any(|v| *v == value) {
+                "[x] "
+            } else {
+                "[ ] "
+            };
+            rows.push(pick_row(&format!("{mark}{label}")));
         }
         let mut popup = Popup::new(rows, Anchor::Center)
             .title(format!("filter: {name}"))
-            .footer("enter filter · esc back");
+            .footer("space toggle - enter done - esc back");
         popup.sel = vsel;
         Some(popup)
     } else {
@@ -1874,9 +1967,9 @@ fn shift_sel(view: &mut View, down: bool) {
     }
 }
 
-/// Enter at the value level: set the picked filter (`any` clears), close
-/// the picker, re-derive with the cursor kept on its card when still
-/// shown.
+/// Enter at the value level: return to the facet list without changing
+/// the set (Space toggles; the footer's `enter done` closes). At the
+/// facet list: descend.
 fn facet_commit(view: &mut View) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
@@ -1884,7 +1977,7 @@ fn facet_commit(view: &mut View) {
     let Some(pick) = b.facet else {
         return;
     };
-    let Some(vsel) = pick.value_sel else {
+    if pick.value_sel.is_none() {
         let facet = b
             .body
             .as_ref()
@@ -1897,30 +1990,58 @@ fn facet_commit(view: &mut View) {
             value_sel: Some(0),
         });
         return;
-    };
+    }
+    b.facet = Some(FacetPick {
+        facet: pick.facet,
+        sel: pick.sel,
+        value_sel: None,
+    });
+}
+
+/// Toggle one value row (0 = the `any` row, which clears the set) over
+/// the facet's set, then re-derive with the cursor kept on its card.
+fn toggle_value(b: &mut BoardView, facet: usize, vsel: usize) {
+    let facet_name = FACET_NAMES.get(facet).copied().unwrap_or("");
     let values = b
         .body
         .as_ref()
-        .map(|bd| facet_values(bd, pick.facet))
+        .map(|bd| facet_values(bd, facet))
         .unwrap_or_default();
     let value = match vsel {
         0 => None,
         n => values.get(n - 1).map(|(_, v)| v.clone()),
     };
-    let facet_name = FACET_NAMES.get(pick.facet).copied().unwrap_or("");
-    match (facet_name, value) {
-        ("project", v) => b.query.project = v,
-        ("epic", v) => b.query.epic = v,
-        ("status", v) => b.query.status = v,
-        ("priority", v) => b.query.priority = v,
-        ("size", v) => b.query.size = v,
-        ("king", v) => b.query.king = v,
-        _ => {}
+    let set = b.query.sets.entry(facet_name).or_default();
+    match value {
+        None => set.clear(),
+        Some(v) => match set.iter().position(|have| *have == v) {
+            Some(i) => {
+                set.remove(i);
+            }
+            None => set.push(v),
+        },
     }
-    b.facet = None;
+    if set.is_empty() {
+        b.query.sets.remove(facet_name);
+    }
     let focus = cursor_card_id(b);
     rederive(b);
     focus_card(b, focus.as_deref());
+}
+
+/// Space at the value level: toggle the row under the cursor and stay
+/// open, so several boxes tick in one popup session.
+fn facet_toggle(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    let Some(pick) = b.facet else {
+        return;
+    };
+    let Some(vsel) = pick.value_sel else {
+        return;
+    };
+    toggle_value(b, pick.facet, vsel);
 }
 
 /// The p/s/S picker's popup for the compose pass.
@@ -2025,7 +2146,7 @@ pub(crate) fn open_detail(view: &mut View) {
             node_id: id,
             trail: Vec::new(),
             sel: 0,
-            details_open: false,
+            scroll: 0,
         });
     }
 }
@@ -2033,6 +2154,9 @@ pub(crate) fn open_detail(view: &mut View) {
 #[cfg(test)]
 #[path = "tests/backlog_board_tests.rs"]
 mod tests;
+
+#[path = "backlog_panes.rs"]
+pub(crate) mod backlog_panes;
 
 /// `c`: the column picker (D4). Which columns show, their order, and the
 /// focus width - persisted through the view store on every change.
@@ -2238,6 +2362,7 @@ fn board_keys_popup() -> Popup {
         PopupRow::Rule,
         pick_row("hjkl move - [ ] lane - L lanes"),
         pick_row("/ find - f filter - r re-read"),
+        pick_row("Tab list/kanban - space toggle (in f)"),
         pick_row("enter node detail - F full screen"),
         PopupRow::Header("edit".into()),
         PopupRow::Rule,

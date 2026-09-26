@@ -90,16 +90,13 @@ impl View {
             if let Some(b) = &self.backlog_board {
                 if !self.board_full {
                     let chrome_rows = self.bottom_row_is_chrome() as usize;
-                    let (lines, follow) = backlog_board::render(b, text_w);
-                    backlog_style::paint_panel(
+                    backlog_board::backlog_panes::paint(
+                        b,
                         cells,
                         rows,
                         cols,
-                        0,
-                        text_w,
-                        rows - chrome_rows,
-                        &lines,
-                        follow,
+                        (0, 0, rows - chrome_rows, text_w),
+                        b.detail.is_some(),
                         &self.theme,
                     );
                 }
