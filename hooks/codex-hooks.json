@@ -140,6 +140,12 @@
             "type": "command",
             "command": "bash ${PLUGIN_ROOT}/hooks/format-on-edit.sh",
             "statusMessage": "formatting the edited file"
+          },
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/edit-integrity.sh",
+            "statusMessage": "checking the edited file",
+            "timeout": 10
           }
         ]
       },
