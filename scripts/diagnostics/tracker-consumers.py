@@ -56,6 +56,7 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/backlog/mod.rs",
     "crates/fno-agents/src/backlog/note_history.rs",
     "crates/fno-agents/src/backlog/note_migrate.rs",
+    "crates/fno-agents/src/backlog/settings.rs",  # the porcelain reads' store-path builder (FNO_CONFIG state_dir, then the .fno anchor), never a read
     "crates/fno-agents/src/king_board/scope.rs",  # the scope's default store-path builder (graph_json_path), never a read
     # Unit-test fixture module, included cfg(test) from spawn_gate.rs: its
     # graph.json literals write hermetic tempdir fixtures, never store reads.

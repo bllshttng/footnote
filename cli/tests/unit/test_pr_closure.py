@@ -356,6 +356,50 @@ def test_bind_two_nodes_fills_and_appends():
     assert n2["additional_prs"] == [{"number": 42, "url": "https://github.com/o/r/pull/42"}]
 
 
+def test_bind_skips_node_released_from_a_claimant():
+    # AC3-HP: the owner and an uncontained --extra member bind; the node
+    # released from the owner's containment keeps pr_number None, because its
+    # name on the line predates the release.
+    entries = [
+        _node(id="x-1111"),
+        _node(id="x-2222", released_from="x-1111"),
+        _node(id="x-3333"),
+    ]
+    result = bind_closure_claims(
+        entries,
+        ["x-1111", "x-2222", "x-3333"],
+        pr_number=42,
+        pr_url="https://github.com/o/r/pull/42",
+    )
+    assert result.outcome == "bound"
+    actions = {b.node_id: b.action for b in result.bindings}
+    assert actions == {
+        "x-1111": "filled_primary",
+        "x-2222": "released",
+        "x-3333": "filled_primary",
+    }
+    c = next(e for e in entries if e["id"] == "x-2222")
+    assert c.get("pr_number") is None
+    assert result.bound_ids == ["x-1111", "x-3333"]
+
+
+def test_bind_binds_released_node_that_is_contained_again():
+    # AC4-ERR: containment restored means the claim is live again, so the
+    # released_from marker no longer holds it out.
+    entries = [
+        _node(id="x-1111"),
+        _node(id="x-2222", released_from="x-1111", contained_in="x-1111"),
+    ]
+    result = bind_closure_claims(
+        entries, ["x-1111", "x-2222"], pr_number=42, pr_url="https://github.com/o/r/pull/42"
+    )
+    assert result.outcome == "bound"
+    actions = {b.node_id: b.action for b in result.bindings}
+    assert actions == {"x-1111": "filled_primary", "x-2222": "filled_primary"}
+    c = next(e for e in entries if e["id"] == "x-2222")
+    assert c["pr_number"] == 42
+
+
 def test_bind_appends_without_corrupting_primary_pair():
     # AC3-EDGE
     entries = [_node(id="x-1111", pr_number=10, pr_url="https://github.com/o/r/pull/10")]

@@ -137,6 +137,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
+    /// binary's grouped dispatcher. The argv passes through byte-verbatim
+    /// (the sibling's catalog owns grouped and legacy spellings).
+    Backlog,
     /// `fno inbox law set|stage|match`: the native law-door verbs, classified
     /// lexically the way `fno doctor event` is, because the Python CLI owns
     /// the rest of the `inbox` tree.
@@ -190,6 +194,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    // The backlog namespace claims itself lexically, like doctor-event: the
+    // sibling dispatcher owns the whole namespace's spelling (grouped and
+    // legacy), and anything it does not own yet it forwards to Python
+    // itself, so the front door hands over the argv byte-verbatim.
+    if args.first().and_then(|a| a.to_str()) == Some("backlog") {
+        return Role::Backlog;
     }
     if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
         return Role::InboxLaw(rest);
@@ -305,6 +316,7 @@ fn main() {
     let env_session = mux_cli::env_server();
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
+        Role::Backlog => bootstrap::forward_backlog(&args),
         Role::NotTty => {
             // AC1-EDGE: piped/CI bare `fno` gets a notice, not a TUI. Exit 0 -
             // this is a gate, not a failure.
@@ -651,7 +663,9 @@ mod tests {
 
     #[test]
     fn proto_role_subcommands_forward_to_python_cli() {
-        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Forward);
+        // `backlog` claims itself natively now; every other unclaimed root
+        // still forwards.
+        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Backlog);
         assert_eq!(decide_role(&os(&["--help"]), false), Role::Forward);
         // `fno --version` is a Python-forwarded callback, NOT the mux self-report.
         assert_eq!(decide_role(&os(&["--version"]), false), Role::Forward);

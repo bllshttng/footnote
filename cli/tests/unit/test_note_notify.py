@@ -1015,7 +1015,7 @@ def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert calls, "the native action must run"
-    assert calls[0][1:2] == ["backlog-note"]
+    assert calls[0][1:3] == ["backlog", "note"]
     assert calls[0][-1] == "--blocking"
     assert "x-5a62" in calls[0] and "the gate leak" in calls[0], (
         "the positionals ride through verbatim"

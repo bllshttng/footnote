@@ -11,7 +11,7 @@ registration, so this module never imports graph.cli (the cycle would be
 unimportable).
 
 : these verbs are TRANSPORTS over the native patch door
-(`fno-agents backlog-update`). They keep only what is not store logic: the
+(`fno-agents backlog update`). They keep only what is not store logic: the
 batch atomicity pre-check, the dependents WARN, the boundary events, the
 plan-ruling lines, and the plan projection. Every field write rides the
 door, so a receipt can only describe what the store actually committed.

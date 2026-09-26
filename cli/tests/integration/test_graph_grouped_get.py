@@ -1,4 +1,6 @@
-"""Acceptance tests for the grouped human node view and residue migration."""
+"""Acceptance tests for the residue migration. The grouped human node view
+is the native binary's now (crates/fno-agents/src/backlog/render.rs pins its
+bytes); what stays here is the `__updated_at` residue migration."""
 
 from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
@@ -10,12 +12,6 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.graph.grouped import (
-    GROUPED_ASSIGNED_FIELDS,
-    GROUPED_FIELD_GROUPS,
-    GROUPED_RESIDUAL_FIELDS,
-    GROUPED_SCHEMA_FIELDS,
-)
 
 
 runner = CliRunner()
@@ -41,70 +37,6 @@ def _read_entries(graph: Path) -> list[dict]:
     from fno.graph.store import read_graph_strict
 
     return read_graph_strict(graph)
-
-
-def test_grouped_view_is_opt_in_and_preserves_flat_default(tmp_graph):
-    seed_graph(tmp_graph, json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-851b",
-                        "title": "Grouped node",
-                        "project": "fno",
-                        "source": "origin-node",
-                        "details": "human details",
-                    }
-                ]
-            }
-        )
-        + "\n")
-
-    flat = runner.invoke(app, ["backlog", "get", "x-851b"])
-    grouped = runner.invoke(app, ["backlog", "get", "x-851b", "--grouped"])
-
-    assert flat.exit_code == 0, flat.output
-    assert grouped.exit_code == 0, grouped.output
-    assert json.loads(flat.output)["id"] == "x-851b"
-    assert "Identity" in grouped.output
-    assert "Provenance" in grouped.output
-    assert "source (origin): origin-node" in grouped.output
-    assert "human details" in grouped.output
-
-
-def test_grouped_schema_fields_are_explicitly_assigned():
-    grouped_fields = [field for _, fields in GROUPED_FIELD_GROUPS for field in fields]
-
-    assert len(grouped_fields) == len(set(grouped_fields))
-    assert not set(grouped_fields) & GROUPED_RESIDUAL_FIELDS
-    assert not (GROUPED_SCHEMA_FIELDS - GROUPED_ASSIGNED_FIELDS), sorted(
-        GROUPED_SCHEMA_FIELDS - GROUPED_ASSIGNED_FIELDS
-    )
-
-
-def test_unknown_populated_field_is_visible_in_residual(tmp_graph):
-    seed_graph(tmp_graph, json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-851b",
-                        "future_field": "keep visible",
-                        "reverted": False,
-                        "points": 0,
-                        "tags": [],
-                    }
-                ]
-            }
-        )
-        + "\n")
-
-    result = runner.invoke(app, ["backlog", "get", "x-851b", "--grouped"])
-
-    assert result.exit_code == 0, result.output
-    assert "Residual" in result.output
-    assert "future_field: keep visible" in result.output
-    assert "reverted: false" in result.output
-    assert "points: 0" in result.output
-    assert "tags:" not in result.output
 
 
 def test_updated_at_migration_is_idempotent_and_preserves_other_fields(tmp_graph):

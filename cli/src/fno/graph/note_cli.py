@@ -63,7 +63,7 @@ def cmd_note(
         if binary is None:
             typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
             raise typer.Exit(code=1)
-        argv = [str(binary), "backlog-note", "--graph", str(graph_path)]
+        argv = [str(binary), "backlog", "note", "--graph", str(graph_path)]
         if json_output:
             argv.append("--json")
         if body_file:
@@ -179,7 +179,7 @@ def native_update(
     graph_path,
     json_out: bool = True,
 ) -> "tuple[int, Optional[dict]]":
-    """One native `backlog-update` invocation : the patch door.
+    """One native `backlog update` invocation : the patch door.
 
     Returns `(exit, receipt)`; the receipt is parsed from the child's stdout
     when `json_out` and the exit is 0. Without `json_out` the child's text
@@ -194,7 +194,7 @@ def native_update(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog update`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-update", "--graph", str(graph_path), "--node", node_id]
+    argv = [str(binary), "backlog", "update", "--graph", str(graph_path), "--node", node_id]
     if json_out:
         argv.append("--json")
     argv.extend(args)
@@ -228,7 +228,7 @@ def _write_state(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
+    argv = [str(binary), "backlog", "note", "--graph", str(graph_path), "--stdin",
             "--json", "--node", node_id]
     if reads:
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
@@ -243,26 +243,3 @@ def _write_state(
         sys.stderr.write(proc.stderr or "")
         return proc.returncode, None
     return 0, _receipt(proc.stdout)
-
-
-@cli.command(
-    "notes",
-    hidden=True,  # the advertised backlog menu caps at 12; `fno backlog note` help names this reader
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    add_help_option=False,
-)
-def cmd_notes(ctx: typer.Context) -> None:
-    """Read the note history the note verb archives (passthrough to the Rust reader)."""
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo(
-            "fno backlog notes: the fno-agents binary was not found. Reinstall fno, run "
-            "`fno doctor update --rust`, or set FNO_AGENTS_BIN.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    proc = subprocess.run([str(binary), "backlog-notes", *ctx.args], check=False)
-    raise typer.Exit(code=propagate_returncode(proc.returncode))

@@ -54,108 +54,6 @@ def _read(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
-# -- find --
-
-
-def test_scenario1_hp_find_single_match(tmp_graph):
-    """Scenario 1 (HP): single fuzzy match prints one line."""
-    _seed(tmp_graph, [
-        {"id": "ab-q2000001", "title": "Q2 outreach campaign", "status": "ready",
-         "domain": "research", "project": "acme"},
-        {"id": "ab-other0001", "title": "Unrelated", "status": "ready",
-         "domain": "code", "project": "fno"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "outreach"])
-    assert result.exit_code == 0, result.output
-    assert "ab-q2000001" in result.stdout
-    assert "Q2 outreach campaign" in result.stdout
-    # Single match -> one line
-    nonempty = [ln for ln in result.stdout.splitlines() if ln.strip()]
-    assert len(nonempty) == 1
-
-
-def test_scenario2_hp_find_with_status_filter(tmp_graph):
-    """Scenario 2 (HP): --status filter narrows results."""
-    _seed(tmp_graph, [
-        {"id": "ab-pl000001", "title": "Plan 01", "status": "ready",
-         "domain": "code", "project": "fno"},
-        {"id": "ab-pl000002", "title": "Plan 02", "status": "done",
-         "domain": "code", "project": "fno"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "plan", "--status", "ready"])
-    assert result.exit_code == 0, result.output
-    assert "ab-pl000001" in result.stdout
-    assert "ab-pl000002" not in result.stdout
-
-
-def test_find_with_project_filter(tmp_graph):
-    """--project filter narrows by project."""
-    _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "shared title", "status": "ready",
-         "domain": "code", "project": "fno"},
-        {"id": "ab-aa000002", "title": "shared title", "status": "ready",
-         "domain": "code", "project": "another-project"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "shared", "--project", "fno"])
-    assert result.exit_code == 0, result.output
-    assert "ab-aa000001" in result.stdout
-    assert "ab-aa000002" not in result.stdout
-
-
-def test_find_with_domain_filter(tmp_graph):
-    """--domain filter narrows by domain."""
-    _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "task", "status": "ready",
-         "domain": "research", "project": "p"},
-        {"id": "ab-aa000002", "title": "task", "status": "ready",
-         "domain": "code", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "task", "--domain", "research"])
-    assert result.exit_code == 0
-    assert "ab-aa000001" in result.stdout
-    assert "ab-aa000002" not in result.stdout
-
-
-def test_scenario3_hp_find_json_output(tmp_graph):
-    """Scenario 3 (HP): --json output is parseable as a JSON array."""
-    _seed(tmp_graph, [
-        {"id": "ab-js000001", "title": "Q2 outreach",
-         "status": "ready", "domain": "research", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "outreach", "--json"])
-    assert result.exit_code == 0, result.output
-    data = json.loads(result.stdout)
-    assert isinstance(data, list)
-    assert data[0]["id"] == "ab-js000001"
-
-
-def test_scenario7_err_find_no_matches(tmp_graph):
-    """Scenario 7 (ERR): no matches exits 1 with a clear message."""
-    _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "some title", "status": "ready",
-         "domain": "code", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "xyzzy"])
-    assert result.exit_code == 1
-    combined = result.stdout + (result.stderr or "")
-    assert "xyzzy" in combined
-    assert "no match" in combined.lower()
-
-
-def test_find_shows_multiple_matches(tmp_graph):
-    """Multi-match: all candidates printed."""
-    _seed(tmp_graph, [
-        {"id": "ab-pp000001", "title": "Plan 01", "status": "ready",
-         "domain": "code", "project": "p"},
-        {"id": "ab-pp000002", "title": "Plan 02", "status": "ready",
-         "domain": "code", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "plan"])
-    assert result.exit_code == 0
-    assert "ab-pp000001" in result.stdout
-    assert "ab-pp000002" in result.stdout
-
-
 # -- new --
 
 
@@ -282,17 +180,6 @@ def test_new_sets_created_at_iso8601(tmp_graph):
 
 
 # -- top-level alias sanity --
-
-
-def test_find_under_graph_also_works(tmp_graph):
-    """`fno backlog find ...` alias works the same as `fno find`."""
-    _seed(tmp_graph, [
-        {"id": "ab-fi000001", "title": "findable", "status": "ready",
-         "domain": "code", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "find", "findable"])
-    assert result.exit_code == 0, result.output
-    assert "ab-fi000001" in result.stdout
 
 
 def test_new_under_graph_also_works(tmp_graph):

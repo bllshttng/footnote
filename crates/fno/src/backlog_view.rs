@@ -155,7 +155,7 @@ pub fn read_snapshot() -> Option<String> {
     // that owns this document's schema.
     let mut command =
         crate::process_admission::std_command(crate::digest_overlay::fno_agents_bin());
-    command.arg("graph-get");
+    command.arg("backlog").arg("get");
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
