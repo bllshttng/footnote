@@ -94,7 +94,7 @@ def test_get_two_ids_forwards_graph_get_argv(monkeypatch):
 
     result = runner.invoke(app, ["backlog", "get", "x-997a", "x-374b"], env=_ENV)
     assert result.exit_code == 0
-    assert captured["cmd"] == [_FAKE_GET_BIN, "graph-get", "x-997a", "x-374b", "--json"]
+    assert captured["cmd"] == [_FAKE_GET_BIN, "backlog", "get", "x-997a", "x-374b", "--json"]
 
 
 def test_get_one_id_never_invokes_the_binary(monkeypatch):

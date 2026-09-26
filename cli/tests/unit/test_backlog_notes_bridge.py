@@ -33,7 +33,7 @@ def test_notes_forwards_argv_verbatim(monkeypatch):
         app, ["backlog", "notes", "history", "x-1", "--json"], env=_ENV
     )
     assert result.exit_code == 7
-    assert captured["cmd"] == [_FAKE_BIN, "backlog-notes", "history", "x-1", "--json"]
+    assert captured["cmd"] == [_FAKE_BIN, "backlog", "notes", "history", "x-1", "--json"]
 
 
 def test_notes_missing_binary_exits_2_naming_the_remedy(monkeypatch):

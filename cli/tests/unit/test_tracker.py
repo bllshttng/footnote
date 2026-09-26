@@ -46,7 +46,7 @@ def _stub_verb_call(answer_by_op: dict):
     """A verb_call stand-in keyed by the door's ``tracker`` op."""
 
     def _call(verb, payload, unavailable, *, timeout=30, passthrough_stderr=False):
-        assert verb == "graph-get"
+        assert verb == ["backlog", "get"]
         op = payload["tracker"]
         answer = answer_by_op[op]
         if isinstance(answer, Exception):
