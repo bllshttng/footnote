@@ -1137,20 +1137,26 @@ mod tests {
             }
             (0, String::new(), String::new())
         };
-        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dead-esc"));
-        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        // questions_path sits at home.root()'s PARENT, so the home nests one
+        // level down: a home directly under temp_dir() would share the one
+        // temp_dir()/questions store with every concurrent test in the binary.
+        let esc_root = std::env::temp_dir().join("fno-pn-dead-esc");
+        let _ = std::fs::remove_dir_all(&esc_root);
+        let home = AgentsHome::at(esc_root.join("agents"));
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
         apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
         let ev = last_event(&home, "pr_nudge_escalated");
         assert_eq!(ev["data"]["pr"], serde_json::json!(null));
         assert_eq!(ev["data"]["node"], serde_json::json!("x-node"));
         let store = crate::provider_cap::questions_path(&home);
-        let filed = std::fs::read_to_string(&store).unwrap();
+        let open = crate::fleet_task::open_tasks(&store).unwrap();
+        assert_eq!(open.len(), 1, "one open fleet task: {open:?}");
         assert!(
-            filed.contains("pr-nudge: dead worker on x-node"),
-            "the escalation marker must name the node: {filed}"
+            open[0].text.contains("pr-nudge: dead worker on x-node"),
+            "the escalation marker must name the node: {}",
+            open[0].text
         );
-        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let _ = std::fs::remove_dir_all(&esc_root);
     }
 
     #[test]

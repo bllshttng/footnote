@@ -961,6 +961,10 @@ fn dead_work_sweep(
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
     let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    // The live-peer map only trusts a peer whose transcript is inside the
+    // grace window, so the peer row reads fresh while the dead row stays
+    // quiet past it.
+    let fresh = quiet_transcript(transcripts.path(), "fresh.jsonl", 60);
     state::update_registry(&home.registry_json(), |r| {
         let mut row = claude_worker_row("dead-row", "cccc9999");
         row.origin = Some("spawn".into());
@@ -1009,7 +1013,13 @@ fn dead_work_sweep(
         900,
         false,
         graph,
-        &|_| Some(vec![quiet.clone()]),
+        &|e: &crate::state::RegistryEntry| {
+            if e.name == "fresh-row" {
+                Some(vec![fresh.clone()])
+            } else {
+                Some(vec![quiet.clone()])
+            }
+        },
         roster,
         &|_| true,
     )
@@ -1056,7 +1066,8 @@ fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
 
 /// AC2-EDGE, failed: the death of the worker does not finish the node's
 /// work. A `failed` roster state keeps under dead open work and is
-/// laddered, instead of releasing through the terminal arm.
+/// laddered, instead of releasing through the terminal arm. No registry
+/// peer: a live newer peer releases any dead row, which is AC2-ERR's shape.
 #[test]
 fn ac2_edge_a_failed_state_still_keeps_and_ladders_the_dead_worker() {
     let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
@@ -1117,10 +1128,14 @@ fn a_blocked_row_with_a_pid_stays_open_work_and_is_not_laddered() {
     let summary = dead_work_sweep("gc-dead-work-alive", agents, false);
     assert_eq!(summary.dead_work_rows, vec![]);
     assert_eq!(summary.retired, vec![]);
+    // A live row on open work keeps under either open-work reason: the
+    // 2h-old fixture transcript sits inside the retire window, so the stale
+    // bucket is the one that names it.
     assert!(
-        !summary.kept_open_work.is_empty(),
-        "the ordinary open-work keep holds: {:?}",
-        summary.kept_open_work
+        !summary.kept_open_work.is_empty() || !summary.kept_open_work_stale.is_empty(),
+        "the ordinary open-work keep holds: {:?} / {:?}",
+        summary.kept_open_work,
+        summary.kept_open_work_stale
     );
 }
 

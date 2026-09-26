@@ -2821,10 +2821,16 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     independent.harness = Some("claude".into());
     independent.harness_session_id = Some("11111111-2222-3333-4444-555555555555".into());
     independent.short_id = "99999999-388e-44a3-bd91-017be26bcaa0".into();
+    // The pane row is a legal pure-mux row: the one-live-ref invariant bars a
+    // mux row from any short_id, so the heal's population never includes it.
+    let pane_uuid = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     let mut pane = sample_entry("pane");
     pane.harness = Some("claude".into());
-    pane.harness_session_id = Some(uuid.into());
-    pane.short_id = uuid.into();
+    pane.harness_session_id = Some(pane_uuid.into());
+    pane.short_id = String::new();
+    pane.pid = None;
+    pane.session_id = None;
+    pane.codex_session_id = None;
     pane.mux = Some(MuxRef {
         session: "work".into(),
         pane_id: 7,
@@ -2862,8 +2868,8 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     );
     assert_eq!(
         by_name("pane").short_id,
-        uuid,
-        "a mux row keeps its recorded key"
+        "",
+        "a mux row is outside the heal's population"
     );
 
     // Idempotent: a second pass finds nothing.
