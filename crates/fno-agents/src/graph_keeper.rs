@@ -3352,7 +3352,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = seeded(
             &dir,
-            r#"{"entries":[{"id":"x-left","title":"left","status":"idea"},{"id":"x-right","title":"right","status":"idea"}]}"#,
+            r#"{"entries":[{"id":"x-left","slug":"x-left","title":"left","type":"feature","status":"idea","priority":"p2"},{"id":"x-right","slug":"x-right","title":"right","type":"feature","status":"idea","priority":"p2"}]}"#,
         );
         let state = row_commit_state(graph.clone());
         let begin = handle_begin(&state).unwrap();
@@ -3466,7 +3466,7 @@ mod tests {
     fn three_rows(dir: &tempfile::TempDir) -> PathBuf {
         seeded(
             dir,
-            r#"{"entries":[{"id":"x-a","title":"a","status":"idea"},{"id":"x-b","title":"b","status":"idea"},{"id":"x-c","title":"c","status":"idea"}]}"#,
+            r#"{"entries":[{"id":"x-a","slug":"x-a","title":"a","type":"feature","status":"idea","priority":"p2"},{"id":"x-b","slug":"x-b","title":"b","type":"feature","status":"idea","priority":"p2"},{"id":"x-c","slug":"x-c","title":"c","type":"feature","status":"idea","priority":"p2"}]}"#,
         )
     }
 
@@ -4079,10 +4079,7 @@ mod tests {
         assert_eq!(ready1, ready2);
         assert_eq!(ids1, ids2);
         // The begin pairing: version names the rows it ships.
-        assert!(begin1["version"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:seed"));
+        assert!(begin1["version"].as_str().unwrap().starts_with("sqlite:"));
         assert_eq!(begin1["entries"].as_array().unwrap().len(), 2);
     }
 

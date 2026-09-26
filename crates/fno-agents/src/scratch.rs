@@ -122,9 +122,9 @@ const RULES: &[Rule] = &[
     rule!("pr_state", [
         "gh pr (view|list|merge|create|ready|diff)|fno do pr (info|merge|create|rebase)|pulls/\\d+|mergeable|gh pr status|--body-file",
     ]),
-    // 13. Graph read: subtree walk or batch status.
+    // 13. Graph read: subtree walk or batch status, Python or Rust store seam.
     rule!("graph", [
-        "graph\\.json|fno backlog (get|find|ready|next|board|rank|contain|maintain|groom|reconcile|decisions|demand)|fno inbox board|_kanban_column",
+        "graph\\.json|graph_store|graph_json|read_graph_strict|fno\\.graph\\.store|fno backlog (get|find|ready|next|board|rank|contain|maintain|groom|reconcile|decisions|demand)|fno inbox board|_kanban_column",
     ]),
     // 14. Import fno internals to probe one function.
     rule!("fno_internal", [
@@ -1639,11 +1639,8 @@ mod tests {
             &paths.journal,
             &[filed_row("longtext_arg", "x-live1", now_ts(), "seeded")],
         );
-        std::fs::write(
-            &paths.graph,
-            r#"{"entries":[{"id":"x-live1","status":"idea"}]}"#,
-        )
-        .unwrap();
+        crate::graph_store::seed_rows(&paths.graph, &[json!({"id": "x-live1", "status": "idea"})])
+            .unwrap();
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();
@@ -1679,12 +1676,9 @@ mod tests {
             &paths.journal,
             &[filed_row("longtext_arg", "x-done1", now_ts(), "filed")],
         );
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &paths.graph,
-            format!(
-                "{{\"entries\":[{{\"id\":\"x-done1\",\"status\":\"done\",\"completed_at\":\"{}\"}}]}}",
-                now_ts()
-            ),
+            &[json!({"id": "x-done1", "status": "done", "completed_at": now_ts()})],
         )
         .unwrap();
         let fake = FakeFno::new();
@@ -1717,12 +1711,9 @@ mod tests {
             &paths.journal,
             &[filed_row("longtext_arg", "x-old1", old.clone(), "filed")],
         );
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &paths.graph,
-            format!(
-                "{{\"entries\":[{{\"id\":\"x-old1\",\"status\":\"done\",\"completed_at\":\"{}\"}}]}}",
-                old
-            ),
+            &[json!({"id": "x-old1", "status": "done", "completed_at": old})],
         )
         .unwrap();
         let fake = FakeFno::new();
@@ -1822,11 +1813,8 @@ mod tests {
             &paths.journal,
             &[filed_row("longtext_arg", "x-live1", now_ts(), "seeded")],
         );
-        std::fs::write(
-            &paths.graph,
-            r#"{"entries":[{"id":"x-live1","status":"idea"}]}"#,
-        )
-        .unwrap();
+        crate::graph_store::seed_rows(&paths.graph, &[json!({"id": "x-live1", "status": "idea"})])
+            .unwrap();
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();

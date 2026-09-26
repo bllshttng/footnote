@@ -590,14 +590,13 @@ mod tests {
     fn apply_fills_gaps_and_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            json!({"entries": [{
+            &[json!({
                 "id": "x-f", "slug": "f", "type": "feature", "title": "f",
                 "status": "idea", "priority": "p2",
                 "sessions": [{"phase": "think", "harness": "claude", "session_id": "s", "ended_at": "2026-09-01T09:00:00Z"}]
-            }]})
-            .to_string(),
+            })],
         )
         .unwrap();
         let store = Store::new(&graph);

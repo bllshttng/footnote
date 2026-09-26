@@ -477,9 +477,7 @@ mod tests {
     }
 
     fn hold_entry(f: &Fixture) -> Value {
-        let raw = std::fs::read_to_string(&f.graph).unwrap();
-        let entries: Value = serde_json::from_str(&raw).unwrap();
-        entries["entries"][0].clone()
+        crate::graph_store::read_rows(&f.graph).unwrap()[0].clone()
     }
 
     #[test]

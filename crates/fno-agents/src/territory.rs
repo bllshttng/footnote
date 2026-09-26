@@ -1051,7 +1051,10 @@ path = \"/repo/alpha\"
             json!({"entries": []}),
             registry_fixture(),
         );
-        std::fs::remove_file(tmp.path().join("graph.json")).unwrap();
+        // The store is graph.db beside the anchor name; absent reads as an
+        // empty store (open creates it), so unreadable = corrupt db file.
+        let db = crate::backlog::database_path(&tmp.path().join("graph.json"));
+        std::fs::write(&db, b"not a database").unwrap();
         let err = resolve_territories(&tmp.path().to_path_buf(), &registry).unwrap_err();
         assert!(err.0.contains("graph unreadable"), "{err}");
     }
