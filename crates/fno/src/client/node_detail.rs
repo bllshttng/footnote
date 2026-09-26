@@ -38,6 +38,9 @@ pub(crate) struct NodeDetailOverlay {
 /// session rows. `sel` indexes THIS list.
 fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
     let mut v: Vec<Sel> = Vec::new();
+    for l in view.parent.iter() {
+        v.push(Sel::Link(l.id.clone()));
+    }
     for l in view.children.iter() {
         v.push(Sel::Link(l.id.clone()));
     }
@@ -85,7 +88,7 @@ pub(crate) fn pane_lines(
     let sels = sel_list(&view);
     let sel = match sel_arg {
         None => usize::MAX,
-        Some(s) if sels.is_empty() => usize::MAX,
+        Some(_) if sels.is_empty() => usize::MAX,
         Some(s) => s.min(sels.len() - 1),
     };
     let mut k: usize = 0;

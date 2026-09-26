@@ -547,12 +547,11 @@ pub(crate) fn filter_bar_lines(b: &BoardView, board: &Board, w: usize) -> Vec<BL
     let mut lines: Vec<BLine> = Vec::new();
     let mut line = BLine::plain(String::new());
     let mut used = 0usize;
-    for (i, (label, value)) in cells.iter().enumerate() {
+    for (label, value) in cells.iter() {
         let cell_w = label.chars().count() + 2 + value.chars().count();
         if used > 0 && used + 3 + cell_w > w {
             lines.push(line.trunc(w));
             line = BLine::plain(String::new());
-            used = 0;
             line.push_line(BLine::of(&[
                 BSeg {
                     text: format!("{label}: "),
@@ -913,8 +912,8 @@ impl View {
         cells: &mut [Cell],
         rows: usize,
         cols: usize,
-        overlay_origin: (usize, usize),
-        overlay_dims: (usize, usize),
+        _overlay_origin: (usize, usize),
+        _overlay_dims: (usize, usize),
     ) {
         let Some(b) = &self.backlog_board else {
             return;
@@ -1968,8 +1967,9 @@ fn shift_sel(view: &mut View, down: bool) {
     }
 }
 
-/// Enter at the value level: toggle the row under the cursor, then
-/// return to the facet list. At the facet list: descend.
+/// Enter at the value level: return to the facet list without changing
+/// the set (Space toggles; the footer's `enter done` closes). At the
+/// facet list: descend.
 fn facet_commit(view: &mut View) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
@@ -1977,7 +1977,7 @@ fn facet_commit(view: &mut View) {
     let Some(pick) = b.facet else {
         return;
     };
-    let Some(vsel) = pick.value_sel else {
+    if pick.value_sel.is_none() {
         let facet = b
             .body
             .as_ref()
@@ -1990,8 +1990,7 @@ fn facet_commit(view: &mut View) {
             value_sel: Some(0),
         });
         return;
-    };
-    toggle_value(b, pick.facet, vsel);
+    }
     b.facet = Some(FacetPick {
         facet: pick.facet,
         sel: pick.sel,

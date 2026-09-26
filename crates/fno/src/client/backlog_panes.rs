@@ -143,9 +143,9 @@ pub(crate) fn paint(
         .or_else(|| cursor_card_id(b))
         .unwrap_or_default();
     let detail_inner_w = if framed {
-        detail_w.saturating_sub(chrome::Chrome::FRAME_COLS)
+        detail_rect.3.saturating_sub(chrome::Chrome::FRAME_COLS)
     } else {
-        detail_w
+        detail_rect.3
     };
     let (dlines, dfollow) = if node.is_empty() {
         (vec![BLine::meta("no card under the cursor")], None)
@@ -313,7 +313,7 @@ pub(crate) fn sync_doc(b: &mut BoardView) {
         (Ok(m), Ok(bytes)) if m.len() <= big_cap => {
             (String::from_utf8_lossy(&bytes).into_owned(), String::new())
         }
-        (Ok(m), Ok(_)) => (String::new(), format!("file larger than {big_cap} bytes")),
+        (Ok(_m), Ok(_)) => (String::new(), format!("file larger than {big_cap} bytes")),
         (Ok(_), Err(e)) | (Err(e), _) => (String::new(), e.to_string()),
     };
     b.doc = Some(PaneDoc {
