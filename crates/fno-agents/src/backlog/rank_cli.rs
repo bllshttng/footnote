@@ -282,9 +282,19 @@ enum Receipt {
     },
 }
 
-/// The plan-projection seam: the plan-doc writer's keeper `plan_docs` project
-/// op takes the ranked ids here once it lands on this branch.
-fn project_plans(_ids: &[String]) {}
+/// The plan-projection seam: the plan-doc writer's project op repaints each
+/// ranked node's linked doc; best-effort, warnings only, never fails the pin.
+fn project_plans(ids: &[String]) {
+    let graph = settings::graph_path();
+    let Ok(entries) = crate::backlog::read_entries(&graph) else {
+        return;
+    };
+    let (_rewritten, warnings) =
+        crate::plan_doc::project::project_graph_nodes(&entries, ids, None, None, None, None);
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+}
 
 /// The truthful dispatcher note for a successfully ranked node.
 fn dispatch_note(task_id: &str, graph: &Path) -> Option<String> {

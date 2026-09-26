@@ -5,219 +5,31 @@ carries a PROJECTION so the Obsidian Bases can order "Next up" by priority and
 show blockers without a second lookup. Written only by fno verbs (intake,
 `backlog update`); never read back into the graph here (`size` and `type` flow
 doc->graph at intake, a separate reverse path in `_intake`).
-
-Reuses `_stamp`'s byte-preserving frontmatter reader/writer so the projection
-never reorders keys or reformats opaque blocks like `kill_criteria`.
 """
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fno.plan._stamp import read_plan_file, write_plan_file
-from fno.plan._status import canonical_status, project_plan_status
-from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
-
-# Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
-# native node field - the converger injects it (see project_graph_nodes).
-#
-# `type` and `difficulty` are deliberately ABSENT: their graph value is only
-# sometimes observed. `decompose` mints every child "feature" with no way to
-# say otherwise, so an unconditional mirror rewrote authored `type: bug` docs
-# to `type: feature`. The plan authors its own `difficulty` band and intake
-# reads it INTO the graph, so a repaint never writes the graph band back -
-# only the verb that supplied a value opts in, per node, via `mirror_keys`.
-MIRROR_KEYS: tuple[str, ...] = (
-    "priority",
-    "blocks_everything",
-    "blocked_by",
-    "tags",
-    "project",
-    "size",
-    "parent",
-    "parent_slug",
-)
-
-# Mirror keys that are always lists; an empty list is meaningful (it clears a
-# stale mirror), so they bypass the None-skip path a scalar takes.
-LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
-
-# Mirror keys whose graph value can legitimately be cleared to None (a de-orphan
-# `--parent null`, a `--size null`). For these, an explicit None means "clear the
-# stale doc mirror", not "skip" - otherwise the doc keeps the old parent/size
-# after the graph dropped it. parent_slug is tied to parent: the converger sets
-# it to None whenever parent is null/dangling so it clears in lockstep.
-CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
-
-# difficulty is NOT clearable by a None: a bandless row is born with the key
-# absent or (pre-fix rows, still on disk) present-and-None, and neither is an
-# operator's decision. `update --difficulty` opts in through ``mirror_keys``,
-# and its one explicit clear, `--difficulty null`, names the key through
-# ``clear_keys`` instead.
+from fno import paths
+from fno.graph import store
 
 
-def project_node_to_plan(
-    node: dict[str, Any], plan_path: Path, *, mirror_keys: frozenset[str] = frozenset(),
-    force_status_off_terminal: bool = False,
-    clear_keys: frozenset[str] = frozenset(),
-) -> bool:
-    """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
-
-    Returns True if the file was rewritten (a mirrored value changed), False on
-    a no-op or when the plan file is missing/unreadable. Never raises: a graph
-    mutation must not fail because its projected doc is absent or unreadable
-    (warns to stderr instead).
-
-    ``mirror_keys`` opts this call into writing extra keys (``type``,
-    ``difficulty``) beyond MIRROR_KEYS. Only a caller that took the value from
-    the operator (``backlog update --type`` / ``--difficulty``) may name it;
-    every other path leaves the doc's own value alone, because the graph's
-    value there is a default nobody chose.
-
-    ``force_status_off_terminal`` names the legitimate backward moves, of which
-    there are two: ``unsupersede`` reviving a node whose plan the supersede
-    stamped ``superseded``, and ``reopen`` clearing a completion whose plan the
-    close stamped ``done``. The projector is forward-only by design, so without
-    this the corrected node's graph is active while its plan doc stays terminal
-    and dispatch keeps refusing it - the correction verb appears to work and
-    changes nothing anyone can use.
-    """
+def plan_docs(op: str, **params: Any) -> "dict | None":
+    """One keeper plan_docs call. Never raises: an unreachable keeper warns, returns None."""
+    for key in ("mirror_keys_for", "clear_keys_for"):
+        if params.get(key):
+            params[key] = {"id": params[key][0], "keys": sorted(params[key][1])}
+    params.update(op=op, cwd=str(Path.cwd()), events_path=str(paths.project_events_json()))
     try:
-        target, fields, rest = read_plan_file(plan_path)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        sys.stderr.write(
-            f"warning: plan projection skipped, cannot read {plan_path}: {exc}\n"
-        )
-        return False
-
-    changed = False
-    for key in dict.fromkeys((*MIRROR_KEYS, *sorted(mirror_keys), *sorted(clear_keys))):
-        if key in clear_keys:
-            # Explicit clear: the graph row may not carry the key at all (a
-            # null clear on a bandless row leaves it absent), so this runs
-            # before the presence check.
-            if key in fields:
-                del fields[key]
-                changed = True
-            continue
-        if key not in node:
-            continue
-        value = node[key]
-        if key in LIST_MIRROR_KEYS:
-            # Always a list; empty list is meaningful (clears a stale mirror).
-            # A non-list value is corrupt input - skip, don't crash.
-            if not isinstance(value, list):
-                continue
-        elif value is None:
-            # A clearable key set to None means the graph dropped its value
-            # (de-orphan / --size null): remove the stale doc mirror if present.
-            # Any other None is a partial dict and must never clobber the doc.
-            if key in CLEARABLE_KEYS and key in fields:
-                del fields[key]
-                changed = True
-            continue
-        if fields.get(key) != value:
-            fields[key] = value
-            changed = True
-
-    # Epic rollup counters: epic-only, injected by the converger. A key
-    # present => write it; absent (every leaf doc) => skip, so leaf frontmatter
-    # stays clean. The frontmatter reader returns every scalar as a str, so
-    # compare (and store) the str form or an int counter re-writes forever.
-    # `children_total: 2` still serializes bareword, so Obsidian reads a number.
-    # Derived epic fields: rollup counters, the epic `waves_total` summary, and
-    # a child's `wave` stratum. All computed views, repainted every
-    # projection, never hand-set. The converger passes an explicit None when a
-    # key no longer applies (a node demoted out of epic-hood, a child orphaned
-    # off its epic) so the stale value is CLEARED, not left to rot - the
-    # graph-authoritative contract (codex). Present str value => write; None =>
-    # delete if present; absent => leave alone (a bare direct caller never
-    # clears).
-    #
-    # The summary is `waves_total`, NOT `waves`: `waves` is /blueprint's authored
-    # wave list (BLUEPRINT_WRITE_ALLOWLIST), and while the derived int shared that
-    # name every projection destroyed the list - an epic doc's `waves:\n  - wave:
-    # 1\n  - wave: 2` became `waves: 4`. One key, one owner.
-    for key in (*ROLLUP_KEYS, "waves_total", "wave"):
-        if key not in node:
-            continue
-        if node[key] is None:
-            if key in fields:
-                del fields[key]
-                changed = True
-            continue
-        value = str(node[key])
-        if fields.get(key) != value:
-            fields[key] = value
-            changed = True
-
-    # Heal the docs the old shared-key projection already damaged, and ONLY
-    # those. Two narrowings, both load-bearing: the old int was written only on
-    # the epic branch, so a non-epic's `waves` is authored and must not be
-    # touched (`waves_total` is present-but-None for a non-epic, so key
-    # membership is NOT the epic test); and the value must look like that int,
-    # since the reader also returns a plain str for an authored one-line scalar
-    # and for a bare `waves:` with no children. An authored list arrives as list
-    # or RawBlock and never matches. /blueprint cannot self-heal because its
-    # default fires only on a falsy `waves`, and a stale `3` is truthy.
-    stale_waves = fields.get("waves")
-    if (
-        node.get("waves_total") is not None
-        and isinstance(stale_waves, str)
-        and stale_waves.strip().isdigit()
-    ):
-        del fields["waves"]
-        changed = True
-
-    # Status projection: map the graph derived `status` onto the plan,
-    # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
-    # write (not a straight mirror) and stamps done_at on the terminal write.
-    graph_status = node.get("status")
-    if graph_status:
-        current_status = fields.get("status")
-        if (
-            force_status_off_terminal
-            and canonical_status(current_status) in ("superseded", "done")
-            and graph_status != canonical_status(current_status)
-        ):
-            # Reversal (unsupersede, reopen): the forward-only projector refuses
-            # to leave a terminal status, so force the plan off it or the doc
-            # stays terminal while the graph is active. Only the field-derived
-            # statuses are safe to trust: done (completed_at), in_review
-            # (pr_number) come from graph FIELDS, not the
-            # plan. Every other graph status here was derived from the stale
-            # superseded plan doc itself (`SUPERSEDED` rung -> graph `ready`) or
-            # has no plan rung (blocked), and the prior rung was overwritten by
-            # supersede so it cannot be recovered. Fail closed to
-            # non-dispatchable `design` rather than stamp `ready`, which would
-            # let unfinished planning work auto-dispatch.
-            forced = graph_status if graph_status in ("done", "in_review") else "design"
-            # Only `superseded` is suppressed here, never `done`: unsupersede
-            # reviving a node that carries completed_at legitimately promotes
-            # its plan superseded -> done, and suppressing that left the plan
-            # terminal-superseded while the graph read done.
-            if forced != "superseded" and current_status != forced:
-                fields["status"] = forced
-                changed = True
-                if forced == "done" and not fields.get("done_at"):
-                    fields["done_at"] = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
-        else:
-            projected = project_plan_status(current_status, graph_status)
-            if projected is not None and current_status != projected:
-                fields["status"] = projected
-                changed = True
-                if projected == "done" and not fields.get("done_at"):
-                    fields["done_at"] = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
-
-    if changed:
-        write_plan_file(target, fields, rest)
-    return changed
+        result = store._client_for(store.GRAPH_JSON).request("plan_docs", params)
+    except (store.StoreUnavailable, RuntimeError) as exc:
+        sys.stderr.write(f"warning: plan-doc writer unreachable ({exc}); run `fno doctor`\n")
+        return None
+    for line in result.get("warnings") or []:
+        sys.stderr.write(f"{line}\n")
+    return result
 
 
 def project_graph_nodes(
@@ -229,153 +41,10 @@ def project_graph_nodes(
     force_status_off_terminal_for: str | None = None,
     clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> int:
-    """Project each named node's mirror fields onto its linked plan.
-
-    The shared converger primitive behind both the instrumented mutating verbs
-    and the `fno do plan sync` sweep: for each id, find the node in ``entries``,
-    resolve+absolutize its ``plan_path`` (against ``root``), skip absent files,
-    inject the parent's slug, and call ``project_node_to_plan``. Best-effort and
-    per-node isolated - one unreadable doc never aborts the batch. Returns the
-    count of docs rewritten.
-
-    ``entries`` is the already-read graph (this module never imports
-    ``graph.store`` - Locked Decision 1). ``root`` is resolved lazily only when a
-    relative ``plan_path`` is first seen.
-    """
+    """Project each named node's mirror fields onto its linked plan; returns docs rewritten."""
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
         return 0
-    from fno.graph._intake import _find_node, repo_root
-
-    # Parent-repaint hop (wave 2): a child mutation must also repaint its
-    # parent epic's doc so its rollup counters stay live. Walk one level up.
-    ids = _expand_repaint_targets(entries, ids)
-
-    slug_by_id = {
-        n.get("id"): n.get("slug") for n in entries if isinstance(n, dict)
-    }
-    rewritten = 0
-    for nid in ids:
-        try:
-            node = _find_node(entries, nid)
-            if not node or not node.get("plan_path"):
-                continue
-            p = Path(node["plan_path"])
-            if not p.is_absolute():
-                if root is None:
-                    root = repo_root()
-                p = Path(root) / p
-            if not p.is_file():
-                continue
-            augmented = _with_parent_slug(node, slug_by_id)
-            if node.get("type") == "epic":
-                augmented.update(compute_rollup(node["id"], entries))
-                # Epic-altitude wave summary: max child stratum + 1 (0 when
-                # childless). Derived from intra-epic blocked_by edges (AC4).
-                _, max_wave = compute_waves(node["id"], entries)
-                augmented["waves_total"] = max_wave + 1
-            else:
-                # Not an epic: clear any stale epic-only derived fields a prior
-                # projection left behind (a --type feature demotion) so the doc
-                # stays graph-authoritative (codex).
-                for k in (*ROLLUP_KEYS, "waves_total"):
-                    augmented[k] = None
-            # A node's own stratum within its parent epic (mission or plain);
-            # None (=> cleared) when it has no epic parent, e.g. after --parent
-            # null orphans it off the epic.
-            parent_id = node.get("parent")
-            wave_val: int | None = None
-            if parent_id:
-                parent = _find_node(entries, parent_id)
-                if parent is not None and parent.get("type") == "epic":
-                    wave_map, _ = compute_waves(parent_id, entries)
-                    _wid = node.get("id")
-                    wave_val = wave_map.get(_wid) if isinstance(_wid, str) else None
-            augmented["wave"] = wave_val
-            # Node-scoped, NOT call-scoped: this converger expands one id into
-            # its ancestors and siblings (_expand_repaint_targets above), and a
-            # call-scoped flag would write the graph's mint-time default onto
-            # every one of those sibling docs - the exact corruption the opt-in
-            # exists to prevent. Only the node the operator named opts in.
-            if project_node_to_plan(
-                augmented, p,
-                mirror_keys=(
-                    mirror_keys_for[1]
-                    if mirror_keys_for and nid == mirror_keys_for[0]
-                    else frozenset()
-                ),
-                force_status_off_terminal=(nid == force_status_off_terminal_for),
-                clear_keys=(
-                    clear_keys_for[1]
-                    if clear_keys_for and nid == clear_keys_for[0]
-                    else frozenset()
-                ),
-            ):
-                rewritten += 1
-        except Exception as e:  # noqa: BLE001 - per-node best-effort
-            sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")
-    return rewritten
-
-
-def _expand_repaint_targets(
-    entries: list[dict[str, Any]], ids: list[str]
-) -> list[str]:
-    """Add each projected node's ancestors AND its siblings so a child transition
-    repaints the epic + mission rollup (walk up to the mission -> epic -> leaf
-    cap, two hops) and every sibling's derived wave (AC4: one child's
-    blocked_by edit can restratify the whole epic). Order-preserving, deduped. A
-    missing/dangling parent just stops the walk - a doc-less node is a later no-op.
-    """
-    by_id = {
-        n.get("id"): n for n in entries if isinstance(n, dict) and n.get("id")
-    }
-    children_by_parent: dict[str, list[str]] = {}
-    for n in entries:
-        if isinstance(n, dict):
-            nid = n.get("id")
-            pid = n.get("parent")
-            if isinstance(nid, str) and isinstance(pid, str):
-                children_by_parent.setdefault(pid, []).append(nid)
-    out = list(ids)
-    seen = set(ids)
-
-    def _add(nid: str) -> None:
-        if nid not in seen:
-            seen.add(nid)
-            out.append(nid)
-
-    for nid in ids:
-        cur = by_id.get(nid)
-        hops = 0
-        while cur and hops < 2:
-            parent = cur.get("parent")
-            if not parent:
-                break
-            _add(parent)
-            # Siblings share the IMMEDIATE parent's wave stratification, so an
-            # edge change on one child shifts theirs - repaint them. Only at
-            # hops == 0: at the mission hop the "siblings" are other epics that
-            # share neither strata nor rollup with the moved leaf, so expanding
-            # there is pure over-repaint (gemini).
-            if hops == 0:
-                for sib in children_by_parent.get(parent, ()):
-                    _add(sib)
-            cur = by_id.get(parent)
-            hops += 1
-    return out
-
-
-def _with_parent_slug(
-    node: dict[str, Any], slug_by_id: dict[Any, Any]
-) -> dict[str, Any]:
-    """Return a shallow copy of ``node`` with ``parent_slug`` tied to ``parent``.
-
-    Never mutates the shared ``entries`` element. A resolvable parent sets the
-    slug; a null, absent, or dangling parent sets ``parent_slug`` to None so a
-    stale slug mirror CLEARS in lockstep with the parent (a dangling parent still
-    mirrors its raw id but never a wrong slug).
-    """
-    parent_id = node.get("parent")
-    copy = dict(node)
-    copy["parent_slug"] = slug_by_id.get(parent_id) if parent_id else None
-    return copy
+    result = plan_docs("project", ids=ids, root=root, mirror_keys_for=mirror_keys_for,
+                       force_status_off_terminal_for=force_status_off_terminal_for, clear_keys_for=clear_keys_for)
+    return int(result["rewritten"]) if result else 0

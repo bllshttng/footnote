@@ -24,7 +24,15 @@ from pathlib import Path
 
 import yaml
 
-from fno.plan._stamp import parse_frontmatter
+import re
+
+import yaml
+
+
+def parse_frontmatter(content: str):
+    """PyYAML-based stand-in for the retired Python codec reader."""
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", content, re.DOTALL)
+    return (yaml.safe_load(m.group(1)) if m else {}) or {}, "", ""
 from fno.state.io import read_frontmatter, write_frontmatter
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]

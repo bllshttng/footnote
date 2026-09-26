@@ -14,17 +14,16 @@
 # invisible in review - the whole defect class started as one reasonable-looking
 # `grep '^status:'`.
 #
-# THE RUST SIDE HAS NO PARSER, AND THAT IS THE INVARIANT.
-# The design that produced this check assumed `loopcheck.rs` parsed plan
-# frontmatter status and specified a fixture-corpus parity harness against it.
-# Reading the source says otherwise: loopcheck.rs and loop_target.rs parse
-# `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
-# finalize.rs shells out to `fno do plan validate`/`stamp`. The registered Rust
-# plan readers consume activation-specific keys, never `status:`.
+# THE RUST SIDE HAS NO READINESS CLASSIFIER, AND THAT IS THE INVARIANT.
+# loopcheck.rs and loop_target.rs parse `.fno/target-state.md` (a DIFFERENT
+# vocabulary - COMPLETE|BLOCKED|ABORTED). The registered Rust plan readers
+# consume activation-specific keys, never `status:`. The one Rust code that
+# does touch `status:` is the plan-doc WRITER (crates/fno-agents/src/plan_doc/):
+# it stamps and projects the status line from the graph, and never answers
+# "is this plan ready?". It is registered apart from the readers below.
 #
-# So there is nothing on the far side to pin, and a parity harness would freeze
-# a contract with one participant. What can actually regress is someone ADDING
-# a Rust plan-status reader, so that is what this guards.
+# What can actually regress is someone ADDING a Rust plan-status reader that
+# classifies readiness, so that is what this guards.
 #
 # Pure text extraction: no build, no Rust binary, no Python import.
 set -uo pipefail
@@ -389,6 +388,10 @@ crates/fno-agents/src/surface_check.rs"
 # surface_check.rs reads only the surface: block (shape + the cross-language
 # walk); it never extracts a plan status, so the shelling rule does not
 # apply to it.
+# The plan-doc writer writes the status line the graph decides (stamp,
+# graduate, projection). It reads status only to keep its writes forward-only,
+# so it is exempt from both scans; readiness stays with `fno do plan rung`.
+RUST_PLAN_DOC_WRITER_DIR="crates/fno-agents/src/plan_doc/"
 
 # The spelling detector below catches ordinary plan readers; the semantic
 # fallback (`rust_reads_frontmatter_status`, defined with the self-test
@@ -401,7 +404,8 @@ actual=$(
             echo "$source"
         fi
     done <<EOF
-$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | LC_ALL=C sort || true)
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' \
+    | grep -vF "$RUST_PLAN_DOC_WRITER_DIR" | LC_ALL=C sort || true)
 EOF
 )
 if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then

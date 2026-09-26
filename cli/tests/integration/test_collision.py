@@ -15,9 +15,11 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -65,21 +67,28 @@ def _read_entries(g: Path) -> list[dict]:
 
 def _plan_status(path: Path):
     """Read the `status` field from a plan doc's frontmatter, or None."""
-    from fno.plan._stamp import read_plan_file
-
     try:
-        _target, fields, _rest = read_plan_file(path)
+        text = Path(path).read_text(encoding="utf-8")
     except Exception:
         return None
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.DOTALL)
+    if not m:
+        return None
+    fields = yaml.safe_load(m.group(1)) or {}
     return fields.get("status")
 
 
 def _set_plan_status(path: Path, status: str) -> None:
-    from fno.plan._stamp import read_plan_file, write_plan_file
-
-    target, fields, rest = read_plan_file(path)
-    fields["status"] = status
-    write_plan_file(target, fields, rest)
+    text = Path(path).read_text(encoding="utf-8")
+    m = re.match(r"^(---\n.*?\n---(?:\n|$))", text, re.DOTALL)
+    if m:
+        # Rewrite just the status line inside the existing frontmatter block.
+        head = re.sub(r"(?m)^status:.*$", f"status: {status}", m.group(1))
+        Path(path).write_text(head + text[len(m.group(1)) :], encoding="utf-8")
+    else:
+        Path(path).write_text(
+            f"---\nstatus: {status}\n---\n{text}", encoding="utf-8"
+        )
 
 
 def _write_quick_plan(path: Path, files: list[str], title: str = "Test plan") -> Path:
@@ -872,8 +881,7 @@ def test_force_supersede_does_not_corrupt_shared_plan(tmp_graph, tmp_path):
     )
     assert res.exit_code == 0, res.output
     # The shared plan keeps the OWNER's priority, not a child's p3.
-    from fno.plan._stamp import read_plan_file
-    _t, fields, _r = read_plan_file(shared)
+    fields = yaml.safe_load(re.search(r"(?s)^---\n(.*?)\n---", shared.read_text()).group(1))
     assert fields.get("priority") == "p0", f"shared plan corrupted to {fields.get('priority')!r}"
 
 
@@ -914,8 +922,7 @@ def test_unsupersede_preserves_done_plan(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
     assert _plan_status(plan) == "done"
     # The force path stamps done_at just like a normal done promotion.
-    from fno.plan._stamp import read_plan_file
-    _t, fields, _r = read_plan_file(plan)
+    fields = yaml.safe_load(re.search(r"(?s)^---\n(.*?)\n---", plan.read_text()).group(1))
     assert fields.get("done_at"), "done promotion must carry done_at"
 
 
