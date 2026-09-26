@@ -328,8 +328,8 @@ def enabled(monkeypatch, tmp_path):
     # Same hermeticity for the flake hold: no merge case here is about rerun
     # recovery, so the probe answers never-recovered (tests about it override).
     monkeypatch.setattr(
-        "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
+        "fno.pr._merge._status_rerun",
+        lambda pr, repo, sha=None: {"recovered": False, "failed": []},
     )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
@@ -509,8 +509,8 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
 
 def _flake_recovered(monkeypatch, failed=None):
     monkeypatch.setattr(
-        "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
+        "fno.pr._merge._status_rerun",
+        lambda pr, repo, sha=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
     )
 
 

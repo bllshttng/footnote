@@ -5,8 +5,8 @@ Verbs:
     verify - audit an external PR gate, merged|reviews (-> _verify.py)
     rebase - two-phase rebase with conflict delegation (-> fno-agents pr-rebase)
     push   - the one guarded push: fetch, rebase, preflight, push once (-> fno-agents pr-push)
-    logs   - tail the failing CI job, spool the rest (-> _logs.py)
-    wait   - poll status through the coalescing cache until settled/green (-> _wait.py)
+    logs   - tail the failing CI job, spool the rest (-> the status door)
+    wait   - poll status through the coalescing cache until settled/green (-> the status door)
 
 The four ``scripts/lib/pr-*.sh`` were ported to in-package Python shelling to
 gh/git, so these verbs run from a bare ``pip install fno`` with no repo-root

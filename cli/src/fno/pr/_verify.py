@@ -36,8 +36,8 @@ from typing import Any, List, Optional, Sequence
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.pr._proc import ToolMissing, run
 
-# Check classification lives in fno.pr._status (_classify + _latest_per_name),
-# shared with the merge verb so the two surfaces never disagree (round 12).
+# Check classification is the Rust reader's (pr_status verdict + supersession
+# rows), shared with the merge verb so the two surfaces never disagree.
 
 
 # ---------------------------------------------------------------------------

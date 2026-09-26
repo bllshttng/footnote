@@ -1841,9 +1841,7 @@ def run_merge(
     flake = None
     if auto_merge.require_checks_pass:
         try:
-            from fno.pr._status import rerun_recovery
-
-            flake = rerun_recovery(pr_number, repo, sha=covered_head or None)
+            flake = _status_rerun(pr_number, repo, covered_head or None)
         except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
             sys.stderr.write(
                 f"pr-merge: rerun-recovery probe unavailable ({exc}); "
@@ -1894,6 +1892,23 @@ def run_merge(
             flake=flake,
             authority=authority,
         )
+
+
+def _status_rerun(pr_number: int, repo: str, sha: Optional[str]) -> dict:
+    """The rerun-recovery fact from the one Rust owner (the status-rerun op,
+    fail-open); module-level so tests stub it."""
+    from fno.rust_binary import verb_call
+
+    return verb_call(
+        "authorized-merge",
+        {
+            "op": "status-rerun",
+            "cwd": repo,
+            "pr": int(pr_number),
+            "sha": sha or "",
+        },
+        timeout=120,
+    )
 
 
 def covered_pin(pr_number: int, repo: str, covered_head: str) -> str:
