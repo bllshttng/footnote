@@ -22,7 +22,6 @@ pub mod clipboard;
 pub mod connections_view;
 pub mod context_used;
 pub mod court_overlay;
-pub mod crown_names;
 pub mod digest_overlay;
 pub mod dispatch_launch;
 pub mod event_cli;

@@ -2037,15 +2037,16 @@ mod tests {
         fs::write(&uv, script).unwrap();
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // Released at 400ms; the retry re-execs at ~300ms and ~600ms, so the
-        // first spawn provably hits ETXTBSY and a later one provably runs.
+        // Released at 200ms; the retry re-execs at ~300ms and ~600ms, so the
+        // first spawn provably hits ETXTBSY and a later one provably runs,
+        // with margin for a descheduled writer thread on a loaded runner.
         // The falsification binds on Linux (the kernel denies exec of any
         // file a writer holds open); macOS does not enforce that, so there
         // this degrades to a happy-path run.
         let held = uv.clone();
         let writer = thread::spawn(move || {
             let f = fs::OpenOptions::new().write(true).open(&held).unwrap();
-            thread::sleep(Duration::from_millis(400));
+            thread::sleep(Duration::from_millis(200));
             drop(f);
         });
 
