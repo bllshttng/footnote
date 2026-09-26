@@ -284,6 +284,27 @@ pub(crate) fn claude_cwd_slug(path: &Path) -> String {
 pub struct ClaudeHome {
     home: PathBuf,
     extra_roots: Vec<PathBuf>,
+    /// A fixed `claude agents --json --all` answer. `None` reads the real
+    /// listing.
+    listing: Option<crate::claude_roster::ClaudeAgentsSnapshot>,
+}
+
+/// One job's line in `claude agents --json --all`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobListing {
+    /// Listed, with the state it reports.
+    Listed(Option<String>),
+    Unlisted,
+    /// The listing could not be read, or parsed only in part.
+    Unread,
+}
+
+impl JobListing {
+    /// Listed in a state that is not done, stopped or failed.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Listed(Some(state))
+            if !crate::claude_roster::is_terminal_roster_state(state))
+    }
 }
 
 impl ClaudeHome {
@@ -309,6 +330,32 @@ impl ClaudeHome {
         Self {
             home: home.into(),
             extra_roots: Vec::new(),
+            listing: None,
+        }
+    }
+
+    /// Pin what `claude agents --json --all` answers, for a test that
+    /// stages one.
+    pub fn with_listing(mut self, listing: crate::claude_roster::ClaudeAgentsSnapshot) -> Self {
+        self.listing = Some(listing);
+        self
+    }
+
+    /// What `claude agents --json --all`, read under `config_dir`, says
+    /// about one job. The listing is the only source of job state; the files
+    /// under `jobs/` are Claude's own.
+    pub fn listed_job(&self, short_id: &str, config_dir: Option<&Path>) -> JobListing {
+        let snapshot = match &self.listing {
+            Some(listing) => listing.clone(),
+            None => crate::claude_roster::read_all_agents_in(config_dir),
+        };
+        if let Some(row) = snapshot.find(short_id) {
+            return JobListing::Listed(row.state.clone());
+        }
+        if snapshot.is_known() && snapshot.warning_text().is_empty() {
+            JobListing::Unlisted
+        } else {
+            JobListing::Unread
         }
     }
 

@@ -4443,10 +4443,10 @@ def doctor_command(
                 rmsg, _ = refresh_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,
                     fno_binary=_resolve_fno_binary(),
-                    install_path=os.environ.get("PATH", "/usr/bin:/bin"),
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
                     caller="doctor-fix",
+                    force_bounce=True,
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:

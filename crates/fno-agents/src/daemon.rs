@@ -1543,11 +1543,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                     .emit("keeper_sweep_failed", &json!({"error": msg}));
                             }
                         }
-                        // Startup sweep: every thread row reads hosted. The
-                        // async recovery pass owns resume-and-settle here and
-                        // has not run yet, so settling unhosted rows now would
-                        // stamp Orphaned rows the recovery pass is about to
-                        // resume.
+                        // The reboot revival plans BEFORE this sweep rewrites
+                        // pre-reboot statuses. Startup sweep: every thread row
+                        // reads hosted; the async recovery pass owns resume
+                        // and settle here and has not run yet.
+                        crate::boot_revival::start(&home_sweep);
                         run_reconcile_sweep(&home_sweep, &emitter_sweep, &|_| true, SweepMode::Full)
                     }))
                     .unwrap_or_else(|_| {
@@ -2164,7 +2164,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidParams,
-                "name must be 1-64 chars of [A-Za-z0-9_-]",
+                "name must be 1-64 chars of [A-Za-z0-9_'-]",
             )
         }
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
@@ -6511,12 +6511,10 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread reads the daemon roster:
-    // presence for the zombie flip, a live-pid listing for the crown
-    // revival. See liveness_sweep::BgRoster - the witness moved there with
-    // the crown-revival work (this file is shrink-only). A MISSING roster
+    // Liveness for a `claude --substrate bg` thread reads the daemon roster
+    // and the claude listing: see liveness_sweep::BgRoster. A MISSING roster
     // parses as zero workers and reaps as before; an UNREADABLE one is
-    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
@@ -6591,6 +6589,7 @@ pub(crate) fn run_reconcile_sweep(
         roster_readable,
     );
     changes.append(&mut revivals);
+    witness.serve_listing(&entries, &mut changes);
     outcome.recovered.extend(revived);
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to

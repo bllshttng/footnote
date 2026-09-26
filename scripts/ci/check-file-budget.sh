@@ -187,6 +187,13 @@ else
             exit 2
         fi
     }
+    # A branch cut before main changed this gate measures with an older rule
+    # than the one CI runs on the merge commit. Warn and let the caller decide:
+    # the exit code never changes, and no copy is fetched or swapped.
+    if [[ "$(git rev-parse -q --verify "$BASE:scripts/ci/check-file-budget.sh" 2>/dev/null || true)" \
+            != "$(git rev-parse -q --verify "$BASE_TIP:scripts/ci/check-file-budget.sh" 2>/dev/null || true)" ]]; then
+        echo "check-file-budget: WARN this copy predates main's: main changed scripts/ci/check-file-budget.sh since your merge base. CI runs main's copy on the merge commit, and preflight runs canonical's. Merge origin/main, then re-run." >&2
+    fi
 fi
 
 _CACHED_COUNT=""

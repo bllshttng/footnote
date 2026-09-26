@@ -20,16 +20,16 @@
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
 pub(crate) use crate::agents_event::append_agents_event;
-use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
+use crate::claude_ask::{liveness_probe, ClaudeHome};
+use crate::claude_resume::claude_resume_argv;
 use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
-use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments, mux_pane_run_argv};
+use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
 use crate::resume_route::ResumeRoute;
 use crate::state::REGISTRY_SCHEMA_VERSION;
-use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -1749,210 +1749,6 @@ where
     RowLiveness::Unknown
 }
 
-/// The claude arm of `resume` (Fix 1): liveness-probe first, then pick the
-/// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
-/// behavior); a dead/absent one -> `claude --resume <uuid>` in the recorded cwd.
-/// Probe reality (locate_session + a 250 ms socket connect), never the registry
-/// `status` field: a stale-exited row whose supervisor is actually alive must
-/// attach, not `--resume` into a second writer on one transcript. The chosen lane
-/// is printed to stderr before returning so the operator always knows which
-/// fired. `Err(code)` carries the exit code for the uuid-absent refusal.
-/// Returns `(argv, claim_uuid)`. `claim_uuid` is `Some(uuid)` only for the
-/// dead-arm (`claude --resume`), which the caller must guard with the
-/// `session:<uuid>` single-writer claim before exec; the live attach arm returns
-/// `None` (claude's own supervisor owns attach safety).
-fn claude_resume_argv(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-) -> Result<(Vec<String>, Option<String>), i32> {
-    claude_resume_argv_with_truth(claude_home, entry, name, family1_truth_state_for_resume)
-}
-
-fn claude_resume_argv_with_truth<F>(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-    truth_fn: F,
-) -> Result<(Vec<String>, Option<String>), i32>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
-    let uuid = entry
-        .get("claude_session_uuid")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let has_uuid = is_uuid_shaped(uuid);
-
-    let socket_live = !short_id.is_empty()
-        && locate_session(claude_home, short_id)
-            .map(|loc| liveness_probe(&loc.messaging_socket_path))
-            .unwrap_or(false);
-    // Probe on the canonical uuid whenever one is recorded. This used to also
-    // short-circuit on an empty short_id, so a pane worker (no short_id by
-    // design: _validate_single_live_ref enforces mux XOR worker XOR bg) never
-    // probed and reported "liveness is inconclusive" for a session whose uuid
-    // was resolvable - the bug. The attach arm below gates on a present
-    // short_id, so dropping the short_id term lets a mux row probe without ever
-    // issuing a bare `claude attach ""`.
-    let truth_state = if socket_live || uuid.is_empty() {
-        None
-    } else {
-        truth_fn(uuid)
-    };
-    let live = socket_live
-        || matches!(
-            truth_state.as_deref(),
-            Some("working" | "watching" | "your-move")
-        );
-    let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
-
-    if live && !short_id.is_empty() {
-        // The caller decides whether to print the command, deliver through
-        // control.sock, or use a mux pane; downstream output names the action.
-        eprintln!("fno agents resume: {name} is live");
-        let argv = crate::harness_capabilities::render_session_argv_with_ids(
-            "claude",
-            "interactive_attach",
-            None,
-            Some(short_id),
-        )
-        .map_err(|_| 13)?;
-        Ok((argv, None))
-    } else if dead && has_uuid {
-        // this arm RELAUNCHES (the live arm above only attaches), so it
-        // is the one door on this verb that can lose a route. A row that records
-        // one gets it re-applied through `--settings`, the same mechanism the
-        // original spawn used; a recorded file that is gone refuses rather than
-        // relaunching on the default Anthropic account, which works, bills the
-        // wrong vendor, and reports nothing.
-        let route_settings = entry
-            .get("route_settings_path")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|p| !p.is_empty());
-        let mut argv = crate::harness_capabilities::render_session_argv(
-            "claude",
-            "interactive_resume",
-            Some(uuid),
-        )
-        .map_err(|_| 13)?;
-        if let Some(path) = route_settings {
-            // Present is not enough. The file is the auth-scrub floor with the
-            // route written on top, and claude reads an empty settings value as
-            // UNSET - so a floor-only or malformed file hands claude a settings
-            // file that selects nothing and the worker comes back on the default
-            // account in silence. That is the same outcome as a missing file, so
-            // it takes the same refusal. Python's `read_route_settings` applies
-            // the identical rule; a check here that only tested existence would
-            // make these two doors disagree while the docs call them equivalent.
-            let usable = fs::read_to_string(path).ok().and_then(|raw| {
-                serde_json::from_str::<Value>(&raw).ok().map(|v| {
-                    v.get("env").and_then(Value::as_object).is_some_and(|env| {
-                        env.values()
-                            .any(|x| x.as_str().is_some_and(|s| !s.is_empty()))
-                    })
-                })
-            });
-            if usable != Some(true) {
-                let why = match usable {
-                    None => "cannot be read as a route settings file",
-                    _ => "records no route",
-                };
-                eprintln!(
-                    "fno agents resume: {name} was launched on the route recorded at \
-                     {path}, and it {why}; refusing to relaunch it on the default \
-                     account. Re-spawn with an explicit --route/-P to choose one."
-                );
-                return Err(13);
-            }
-            eprintln!("fno agents resume: restoring recorded route from {path}");
-            argv.splice(1..1, ["--settings".into(), path.into()]);
-        }
-        eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        Ok((argv, Some(uuid.to_string())))
-    } else if !has_uuid {
-        // No resumable uuid and no live socket to attach through: name the cause.
-        // AC2: an id-less row is a definite "nothing to resume", never the
-        // "liveness is inconclusive" that printed an unrunnable empty-id hint and
-        // hid the real bug.
-        eprintln!("fno agents resume: {name} has no session id recorded; nothing to resume.");
-        Err(13)
-    } else if live {
-        // Probe-live but no short_id to attach through: a pane/mux worker that
-        // is already running. There is no resume action here - `claude attach`
-        // needs a short_id this row does not carry, and relaunching would open a
-        // second writer on one transcript. Do not call this "inconclusive": the
-        // probe just answered live, and the old hint sent the operator to re-run
-        // a probe whose answer contradicts the message.
-        eprintln!(
-            "fno agents resume: {name} is live but has no attach short_id \
-             (a pane worker); it is already running - drive it via its mux session, \
-             or re-spawn with `fno agents spawn`."
-        );
-        Err(13)
-    } else {
-        // has_uuid but neither attachable-live nor affirmatively dead: genuinely
-        // inconclusive (a silent-unreachable worker that may still be alive).
-        // Name the uuid the operator can probe, not the empty short_id the old
-        // hint interpolated.
-        eprintln!(
-            "fno agents resume: {name} liveness is inconclusive; refusing to open a second writer. Run 'fno agents truth {uuid}'."
-        );
-        Err(13)
-    }
-}
-
-/// The dead-row pointer for `attach` (Fix 2): `Some(message)` when `entry`
-/// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
-/// session uuid is recorded - the two revival commands to print instead of
-/// dead-ending in claude's own "session not found". `None` when the row is live
-/// (fall through to a normal attach) or carries no revivable uuid (nothing to
-/// point at - never print an unusable command). Probes reality (locate_session +
-/// socket), never the registry `status` field, matching the resume smart verb.
-pub(crate) fn claude_attach_pointer(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-) -> Option<String> {
-    claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
-}
-
-fn claude_attach_pointer_with_truth<F>(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-    truth_fn: F,
-) -> Option<String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
-    let uuid = entry
-        .get("claude_session_uuid")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if short_id.is_empty() || !is_uuid_shaped(uuid) {
-        return None;
-    }
-    let socket_live = locate_session(claude_home, short_id)
-        .map(|loc| liveness_probe(&loc.messaging_socket_path))
-        .unwrap_or(false);
-    if socket_live {
-        return None;
-    }
-    if !matches!(truth_fn(uuid).as_deref(), Some("done" | "stalled")) {
-        return None;
-    }
-    Some(format!(
-        "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
-         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
-    ))
-}
-
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
@@ -2702,49 +2498,6 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         return code;
     }
 
-    // The recorded mux destination wins when there is one: the pane relaunch
-    // returns after the launch so the operator's terminal stays free, and the
-    // account namespace rides the child environment. The launch proves the
-    // worker stayed up before claiming success, and rebinds the row on a live
-    // proof (same contract as the resume pane arm).
-    if let Some(mux_ref) = plan.mux.as_ref() {
-        // W1: same wrapper the resume arm carries. `which_on_path`
-        // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
-        // happens inside mux_pane_run_argv.
-        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
-            Ok(a) => a,
-            Err(why) => {
-                eprintln!("fno agents recover: {why}; refusing an unattributable pane relaunch");
-                return 13;
-            }
-        };
-        let pane = mux_pane_run_argv(
-            &mux_ref.session,
-            &plan.cwd,
-            &plan.argv,
-            &identity,
-            Some(&plan.name),
-        );
-        let plan_env: Vec<(String, String)> = plan
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        return crate::pane_relaunch::relaunch_on_pane(
-            "recover",
-            &plan.name,
-            "claude",
-            &plan.session_id,
-            &plan.cwd,
-            &mux_ref.session,
-            &pane,
-            &plan_env,
-            Some(mux_ref),
-            ("agent_recovered", "agent_recover_failed"),
-            home,
-        );
-    }
-
     // Respawn and bg-resume mechanisms: run and confirm (see
     // run_and_confirm_respawn). Both relaunch shapes exit at once, so the
     // exec below would replace this process with a launcher that immediately
@@ -3446,6 +3199,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_resume::{claude_attach_pointer_with_truth, claude_resume_argv_with_truth};
     use crate::resume_wake::acquire_named_session_claim;
     use serde_json::json;
 
@@ -4219,27 +3973,7 @@ mod tests {
     #[test]
     fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
         // --print-command is the no-side-effect inspection form: the selected
-        // fork id rides the argv and nothing launches. The dead arm probes
-        // jobs/<short>/state.json under $HOME, so pin HOME to a throwaway dir
-        // with that state staged. The state is staged under the REAL $HOME
-        // (jobs/11111111, removed after) rather than by repinning the HOME
-        // env: set_var is process-global and races every concurrent test's
-        // env reads and spawns (a flaked `git` NotFound on CI), and the lock
-        // only serializes the tests that already take it.
-        let home_dir = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let jobs = home_dir.join(".claude").join("jobs").join("11111111");
-        let staged_here = !jobs.join("state.json").exists();
-        if staged_here {
-            std::fs::create_dir_all(&jobs).unwrap();
-            std::fs::write(
-                jobs.join("state.json"),
-                serde_json::json!({"state": "idle"}).to_string(),
-            )
-            .unwrap();
-        }
-
+        // fork id rides the argv and nothing launches.
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
         let entry = forked_row();
@@ -4257,9 +3991,6 @@ mod tests {
             ],
             &home,
         );
-        if staged_here {
-            std::fs::remove_dir_all(&jobs).unwrap();
-        }
         assert_eq!(code, 0);
     }
 
@@ -4415,6 +4146,28 @@ mod tests {
         assert_eq!(
             claude_resume_argv_with_truth(&ch, &entry_idless, "idless", |_| Some("done".into())),
             Err(13)
+        );
+    }
+
+    #[test]
+    fn claude_resume_argv_reads_harness_session_id_when_uuid_is_absent() {
+        // `claude_session_uuid` never serializes, so a row returned by
+        // `serde_json::to_value(&RegistryEntry)` (the manifest adopt path) has
+        // only `harness_session_id`. Resume must still relaunch it.
+        let uuid = "6fb7b615-369e-4a54-bba6-56af7f3cfd8d";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let entry = serde_json::json!({
+            "name": "adopted", "harness": "claude", "short_id": "6fb7b615",
+            "harness_session_id": uuid,
+        });
+        let (argv, claim) =
+            claude_resume_argv_with_truth(&ch, &entry, "adopted", |_| Some("stalled".into()))
+                .expect("a dead adopted row relaunches");
+        assert_eq!(claim.as_deref(), Some(uuid));
+        assert_eq!(
+            argv,
+            vec!["claude".to_string(), "--resume".into(), uuid.into()]
         );
     }
 
@@ -4910,6 +4663,17 @@ mod tests {
             claude_attach_pointer_with_truth(&ch_dead, &no_uuid, "w", |_| Some("done".into())),
             None
         );
+
+        // Adopted typed row: claude_session_uuid never serializes, so only
+        // harness_session_id is present - the pointer still resolves.
+        let adopted = serde_json::json!({
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
+            "harness_session_id": uuid,
+        });
+        let msg =
+            claude_attach_pointer_with_truth(&ch_dead, &adopted, "w", |_| Some("done".into()))
+                .expect("adopted row -> pointer through the canonical id");
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
 
         // Live supervisor -> no pointer (fall through to a real attach).
         let live_home = cv_tmpdir();

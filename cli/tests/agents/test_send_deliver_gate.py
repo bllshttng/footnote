@@ -509,7 +509,6 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
 
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.harnesses import claude as claude_mod
-
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
     # The control.sock inject (mail-inject verb) is the socket-path successor; it
@@ -578,8 +577,6 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
             status="live",
         ),
     ])
-
-    from fno.agents.harnesses import claude as claude_mod
 
     rpc_calls: list = []
     from fno.agents import dispatch as dispatch_mod
@@ -1832,7 +1829,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 ) -> None:
     """A live claude recipient is reached over the control.sock lane (the sole
     live inject path after the PTY worker lane retired, x-3dac), and the injected
-    turn carries the <fno_mail> envelope with an 8-hex `from` and no `session=`."""
+    turn carries a named <fno_mail> envelope with full identity and no `session=`."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1883,22 +1880,40 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
-    import re
-
     framed = inject_calls[0]["text"]
-    # D2: `from` holds the full session id when the sender resolved one.
-    assert re.match(r'^<fno_mail from="[0-9a-f-]{16,}"', framed), framed
+    # The current sender label and the short claude reply handle are recorded.
+    assert framed.startswith('<fno_mail from="5e9de401"'), framed
+    assert 'from_name="sender"' in framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
     assert ' session="' not in framed
 
 
-def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) -> None:
+def test_relay_continuation_into_crowned_session_carries_its_crown(
+    tmp_path, monkeypatch
+) -> None:
     # AC4-HP (x-3dcc via x-d7cf): the recipient-side relay ctx wraps B's replies,
     # which are injected into A, so its to_session is A's session and A reads its
     # own live crown on every continuation hop, not only the first message.
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _run_relay_loop
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="alice", harness="claude", cwd="/repo", log_path="",
+                harness_session_id="a11ce000-1111-4222-8333-444444444444", status="live",
+                crown_level=1, crown_scope="fno",
+            ),
+            AgentEntry(
+                name="bob", harness="claude", cwd="/repo", log_path="",
+                harness_session_id="b0b00000-1111-4222-8333-444444444444", status="live",
+            ),
+        ]
+    )
 
     calls: list = []
 
@@ -1911,23 +1926,16 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) 
         }
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    import fno.mail.envelope as envelope
-
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
-    monkeypatch.setattr(
-        envelope,
-        "crown_at",
-        lambda _path, session: "L1 fno" if session == "session-alice" else None,
-    )
-
     ctxs = {
         "alice": _MailCtx(
             from_="aaaa1111", model="unknown", to="bbbb2222",
-            from_session="session-alice", to_session="session-bob",
+            from_session="a11ce000-1111-4222-8333-444444444444",
+            to_session="b0b00000-1111-4222-8333-444444444444",
         ),
         "bob": _MailCtx(
             from_="bbbb2222", model="unknown", to="aaaa1111",
-            from_session="session-bob", to_session="session-alice",
+            from_session="b0b00000-1111-4222-8333-444444444444",
+            to_session="a11ce000-1111-4222-8333-444444444444",
         ),
     }
     # seed = bob's reply; the first continuation drives alice with it, so the
@@ -1941,7 +1949,10 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) 
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="session-bob"'), body
+    # A claude sender renders the short 8-hex handle, not the full uuid.
+    assert body.startswith('<fno_mail from="b0b00000"'), body
+    assert 'from_name="bob"' in body
+    assert 'to_name="alice"' in body
     assert 'to_rank="L1 fno"' in body, body
 
 
@@ -1951,12 +1962,7 @@ def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
     # AC4-ERR (x-3dcc): a peer whose session id never resolved gets a raw
     # envelope, never "none right now" -- that line is a positive claim about a
     # reader whose address nobody measured.
-    from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import _MailCtx, _wrap_relay_body
-
-    import fno.mail.envelope as envelope
-
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
 
     ctx = _MailCtx(
         from_="bbbb2222", model="unknown", to="aaaa1111",
