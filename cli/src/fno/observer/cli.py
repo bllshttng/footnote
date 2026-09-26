@@ -445,37 +445,38 @@ def _review_evidence(items: list[dict], by_id: dict) -> dict:
     """One review-summary --evidence round-trip; a fault leaves every item a gap, digest named."""
     gap = {"items": [{} for _ in items],
            "evidence_line": "evidence: unread (fno-agents review-summary --evidence failed)"}
-    binary = find_dev_binary() or resolve_binary()
     payload = [{"node": n.get("id"), "pr_number": n.get("pr_number")}
                for n in (by_id.get(i.get("graph_node_id")) or {} for i in items)]
-    try:
-        p = subprocess.run([str(binary), "review-summary", "--evidence"],
-                           input=json.dumps(payload), capture_output=True, text=True, timeout=120)
-        out = json.loads(p.stdout)
-        if p.returncode == 0 and len(out.get("items", [])) == len(items):
-            return out
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        pass
+    out = _judge_via_rust(["--evidence"], verb="review-summary", stdin_payload=payload, timeout=120)
+    if isinstance(out, dict) and len(out.get("items", [])) == len(items):
+        return out
     return gap
 
 
-def _judge_via_rust(argv: list[str]) -> Optional[dict]:
-    """One fno-agents judge round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
+def _judge_via_rust(
+    argv: list[str], *, verb: str = "judge", stdin_payload=None, timeout=None
+) -> Optional[dict]:
+    """One fno-agents verb round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
     # Labels mode caps at rows x dimensions x the spawn's own 600s bound.
-    timeout = 14400 if "--labels" in argv else 3600
+    if timeout is None:
+        timeout = 14400 if "--labels" in argv else 3600
     try:
-        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            [str(binary), verb, *argv],
+            input=json.dumps(stdin_payload) if stdin_payload is not None else None,
+            capture_output=True, text=True, timeout=timeout,
+        )
         out = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         detail = f"bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})" if isinstance(exc, ValueError) else str(exc)
-        typer.echo(f"judge fault: {detail}", err=True)
+        typer.echo(f"{verb} fault: {detail}", err=True)
         return None
     if isinstance(out, dict) and out.get("error"):
-        typer.echo(f"judge fault: {out['error']}", err=True)
+        typer.echo(f"{verb} fault: {out['error']}", err=True)
         return None
     return out
 
