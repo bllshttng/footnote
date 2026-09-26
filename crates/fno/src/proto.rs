@@ -2998,7 +2998,7 @@ fn expand_reign_state_vars(raw: &str) -> String {
         let rest = &raw[i + 1..];
         let (name, consumed) = if let Some(inner) = rest.strip_prefix('{') {
             match inner.find('}') {
-                Some(end) => (Some(&inner[..end]), end + 2),
+                Some(end) => (Some(&inner[..end]), inner[..end].chars().count() + 2),
                 None => (None, 0),
             }
         } else {
