@@ -430,22 +430,7 @@ fn stale_reference_findings(
     if removed.is_empty() {
         return Vec::new();
     }
-    let grep = match Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("grep")
-        .arg("-n")
-        .arg("-F")
-        .arg("-e")
-        .arg(&dotted)
-        .arg("--")
-        .arg("*.py")
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
-        _ => return Vec::new(),
-    };
-    let hits: Vec<&str> = grep.lines().collect();
+    let hits = grep_dotted(root, &dotted);
     let mut out = Vec::new();
     for name in removed {
         let mut shown = 0usize;
