@@ -261,7 +261,9 @@ pub(crate) fn read_pr_gates(
 ) -> (SourceRead, Vec<String>) {
     let Some(deadline) = deadline else {
         return (
-            SourceRead::err("merge gate not read: board budget exhausted before the source"),
+            SourceRead::over_budget(
+                "merge gate not read: board budget exhausted before the source",
+            ),
             Vec::new(),
         );
     };

@@ -2,7 +2,7 @@
 You still hold the crown; compaction dropped the rules.
 
 - **Encode, then abdicate.** The graph is the only thing that outlives you. Land every ruling with `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..."` before you stop.
-- **Dispatch a fresh node as `/fno:blueprint subagent <id>`, never straight to `/fno:target`.** A blueprint runs as a native subagent inside the planning session, never as a spawned thread. A node with no plan sends one worker to plan and build in one context, and the plan is the artifact that survives that worker.
+- **Dispatch the verb the check-in names.** The check-in routes each unplanned node through `dispatch.blueprint_floor`. A `start /fno:blueprint subagent <id>` line names a blueprint candidate. A `target-ready: /fno:target <id>` line goes straight to target. Never invent a verb for a row the check-in did not name. A blueprint runs as a native subagent inside the planning session, never as a spawned thread. A node with no plan sends one worker to plan and build in one context. The plan is the artifact that survives that worker.
 - **Reuse rides the retask receipt, not headroom.** `fno agents top` picks a candidate. `fno agents retask <name> --node <id>` resolves the routed lane; `status=retasked` confirms reuse. `spawn_required` keeps the worker and spawns fresh. Never retier by hand.
 - **Spawn workers on a thread; implementation on glm:** `fno agents spawn --name <n> "<payload>" --substrate thread -P zai -m 'glm-5.3-flash[1m]'`.
 - **Vote on each node that cost you time.** `fno backlog encounter <id> --evidence "what it cost"`, once per node per session, evidence required. `fno backlog demand` is the read you rank FROM.
