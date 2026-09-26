@@ -647,6 +647,16 @@ fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
 /// of question readers folds them.
 pub(crate) const QUESTION_TYPES: &[&str] = &["operator_question", "operator_question_closed"];
 
+/// The kinds the attention projection folds: the question pair plus the
+/// answer and delivery rows that flip an item to answered and feed the
+/// panel's answered rows.
+pub(crate) const PROJECTION_TYPES: &[&str] = &[
+    "operator_question",
+    "operator_question_closed",
+    "attention_answer",
+    "attention_delivery",
+];
+
 /// The event kinds `fold` matches, beside the question pair.
 pub(crate) const NEEDS_TYPES: &[&str] = &[
     "operator_question",
@@ -655,6 +665,10 @@ pub(crate) const NEEDS_TYPES: &[&str] = &[
     "loop_check",
     "termination",
     "loop_terminated",
+    // The answer and delivery rows the projection folds into the answered
+    // state and the panel's answered rows.
+    "attention_answer",
+    "attention_delivery",
 ];
 
 /// One store's read outcome for the `--items` sources readout. A store that
@@ -790,10 +804,12 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
         crate::attention::attach_reach(&mut items, &registry);
     }
     let as_of = now_secs();
+    let answered = crate::attention::answered(&journals_raw, as_of);
     let payload = json!({
         "as_of": as_of,
         "sources": sources,
         "items": items,
+        "answered": answered,
     });
     println!(
         "{}",
