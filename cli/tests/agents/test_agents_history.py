@@ -334,6 +334,28 @@ def test_whoami_ledger_hidden_but_working(tmp_path, monkeypatch):
     assert "#507" in result.output
 
 
+def test_a_revived_row_joins_live_through_the_receipt(history):
+    # The receipt answers the argument, and the session came back under a
+    # registry row re-created under its uuid-shaped name (the SessionStart
+    # register path). The live row joins through the receipt's session id,
+    # so history reports the session LIVE and suppresses its stale receipt:
+    # a live row and its receipt never both describe the present.
+    entry = AgentEntry(
+        name="footnote-" + _REAPED_SID,
+        cwd="/repo/wt",
+        log_path="",
+        harness="claude",
+        harness_session_id=_REAPED_SID,
+        status="idle",
+    )
+    run = history(receipts=[_receipt()], entries=[entry])
+    out = run("t-x6db9-worker")
+    assert "live:" in out
+    assert _REAPED_SID in out
+    assert "resume:   " + _REASUME_VERBATIM not in out
+    assert "EXIT=0" in out
+
+
 def test_agents_help_advertises_history():
     from fno.agents.cli import agents_app
 

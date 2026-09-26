@@ -597,18 +597,36 @@ pub fn resolve_reentry_with(
         let pins = crate::resume_pin::RowPins::from_entry(entry);
         let lookup: crate::resume_pin::RouteProviderOf<'_> =
             &|m| crate::claude_adopt::provider_from_route_settings(m);
-        if let Ok(pin) = crate::resume_pin::resolve(
+        match crate::resume_pin::resolve(
             Some(pins),
             transcript.as_deref(),
             routed,
             &session_id,
             lookup,
         ) {
-            crate::resume_pin::append_axes(
-                &mut argv,
-                pin.argv_model.as_deref(),
-                pin.effort.as_deref(),
-            );
+            Ok(pin) => {
+                crate::resume_pin::append_axes(
+                    &mut argv,
+                    pin.argv_model.as_deref(),
+                    pin.effort.as_deref(),
+                );
+            }
+            Err(unpinned) => {
+                // A revival the resolver cannot pin - a bare re-created row
+                // whose transcript answers nothing - still comes back on the
+                // axes its reap receipt rendered, never on the account
+                // default. A lost-route refusal keeps today's door instead:
+                // a model without its provider routes on the wrong account.
+                if unpinned.lost_route.is_none() {
+                    if let Some((model, effort)) = receipt_resume_axes(&session_id) {
+                        crate::resume_pin::append_axes(
+                            &mut argv,
+                            model.as_deref(),
+                            effort.as_deref(),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -630,6 +648,30 @@ pub fn resolve_reentry_with(
         argv,
         env,
     })
+}
+
+/// The model axes a reap receipt recorded, for a revival the row itself
+/// cannot pin. Reads the claude receipt for `session_id` and harvests the
+/// `--model` / `--effort` token pairs its rendered resume argv carries.
+/// `None` when no receipt answers or it names no axes.
+fn receipt_resume_axes(session_id: &str) -> Option<(Option<String>, Option<String>)> {
+    let path = crate::receipt::reap_receipt_path_for(
+        &crate::paths::AgentsHome::from_env(),
+        "claude",
+        session_id,
+    );
+    let receipt = crate::receipt::read_reap_receipt(&path).ok()?;
+    let mut tokens = receipt.resume_argv.iter();
+    let mut model = None;
+    let mut effort = None;
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "--model" => model = tokens.next().cloned(),
+            "--effort" => effort = tokens.next().cloned(),
+            _ => {}
+        }
+    }
+    (model.is_some() || effort.is_some()).then_some((model, effort))
 }
 
 /// The registry-reading wrapper the CLI action calls: load, resolve, refuse
@@ -1130,6 +1172,61 @@ mod tests {
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
         assert_eq!(plan.mechanism, "attach");
         assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn reentry_plan_pins_the_reap_receipts_model_axes_on_a_bare_row() {
+        // A re-created bare row (no model, no route, no live transcript)
+        // cannot pin its model, so the revival would land on the account
+        // default. The receipt the reaper wrote carries the axes the
+        // original launch ran with; the bg-resume plan harvests them.
+        let _guard = crate::path_test_guard();
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("bare");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        // The receipt lives under the AGENTS home (FNO_AGENTS_HOME is that
+        // root), exactly where the reaper wrote it.
+        let agents_tmp = tempfile::tempdir().unwrap();
+        let receipts = agents_tmp.path().join("reap-receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(
+            receipts.join("claude-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json"),
+            r#"{"row_name":"bare","short_id":"aaaaaaaa","harness":"claude",
+                "harness_session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "cwd":"/tmp","log_path":null,
+                "created_at":"2026-09-24T10:00:00Z","reaped_at":"2026-09-25T10:00:00Z",
+                "resume":"claude --bg --resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --model opus --effort high",
+                "resume_argv":["claude","--bg","--resume","aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","--model","opus","--effort","high"]}"#,
+        )
+        .unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", agents_tmp.path());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        );
+        match &saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        let plan = plan.unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(
+            plan.argv.windows(2).any(|w| w == ["--model", "opus"]),
+            "the receipt's model pin rides the argv: {:?}",
+            plan.argv
+        );
+        assert!(
+            plan.argv.windows(2).any(|w| w == ["--effort", "high"]),
+            "the receipt's effort pin rides the argv: {:?}",
+            plan.argv
+        );
     }
 
     #[test]

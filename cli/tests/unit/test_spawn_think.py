@@ -773,6 +773,26 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     assert "--model" not in cmd
 
 
+def test_spawn_failure_keeps_a_non_gate_error_line(monkeypatch):
+    """AC2-ERR (x-d769): no spawn-gate line on stderr -> the whole stderr is
+    the message. The verdict reader's fallback must not eat it."""
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: pane launch failed\n"
+
+    def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        return _Proc()
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    with pytest.raises(st.SpawnError) as ei:
+        st._spawn_think_worker("x-1", "prompt", None, "slug")
+    assert "Error: pane launch failed" in str(ei.value)
+
+
 def test_spawn_worker_tags_the_spawn_subprocess_with_its_cause(monkeypatch):
     """x-42c5: the reason this spawn happened rides FNO_SPAWN_TRIGGER in the
     `fno agents spawn` subprocess's own environment, so the registry row it

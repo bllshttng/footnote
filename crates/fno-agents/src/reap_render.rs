@@ -249,6 +249,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "hold_escalate_after_s": summary.hold_escalate_after_s,
                 "release_refused": summary.release_refused,
                 "open_pr_rows": summary.open_pr_rows,
+                "dead_work_rows": summary.dead_work_rows,
                 "open_pr_nudge": nudge_json,
                 "crowns": summary.crowns,
                 "schema_skew": match summary.schema_skew {
@@ -663,6 +664,38 @@ fn hold_age(held_s: i64) -> String {
     } else {
         format!("{s}s")
     }
+}
+
+/// The `--all` provenance lane on the client's list payload: reaped and
+/// retired sessions under `retired_sessions` beside their count. Always
+/// present so a consumer can tell "no retired rows" from an older shape;
+/// a null or absent input renders an empty lane.
+pub fn attach_retired(payload: &mut Value, retired: &Value) {
+    let rows = retired.as_array().cloned().unwrap_or_default();
+    payload["retired_sessions"] = Value::Array(rows.clone());
+    payload["retired_count"] = json!(rows.len());
+}
+
+/// The same lane below the client's table: one line per retired session,
+/// newest first, each with when it left, the recorded cause, and the
+/// resume command. Empty input renders nothing.
+pub fn retired_section(retired: &Value) -> String {
+    let Some(rows) = retired.as_array().filter(|r| !r.is_empty()) else {
+        return String::new();
+    };
+    let mut out = String::from("\nREAPED / RETIRED (from reap receipts; --all)\n");
+    for r in rows {
+        let name = r["name"].as_str().unwrap_or("-");
+        let reaped = r["reaped_at"].as_str().unwrap_or("-");
+        let cause = r["cause"].as_str().unwrap_or("-");
+        let basis = r["basis"].as_str().unwrap_or("-");
+        let node = r["node"].as_str().unwrap_or("-");
+        let resume = r["resume"].as_str().unwrap_or("-");
+        out.push_str(&format!(
+            "- {name}  reaped {reaped}  cause {cause}  basis {basis}  node {node}\n  resume: {resume}\n"
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

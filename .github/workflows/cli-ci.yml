@@ -244,6 +244,7 @@ jobs:
           # trial proves the shell harness and the full rust-ci job owns the
           # denominator.
           STRESS_TRIALS: "1"
+          STRESS_SKIP_SLOW: "1"
         run: |
           date +%s > "$RUNNER_TEMP/changed-start"
           start=$SECONDS
@@ -459,10 +460,13 @@ jobs:
         #
         # The 20-trial contract did not move to a smaller number, it moved to
         # rust-ci's `stress` job, which is path-triggered on the crates and on
-        # the harness itself. A local `fno doctor test smoke` still defaults to
-        # 20, because the script's default is what a developer gets.
+        # the harness itself. The two fixed lifecycle waits are excluded from
+        # repeated CI sampling; the crate integration jobs still run them once.
+        # A local `fno doctor test smoke` leaves STRESS_SKIP_SLOW unset and still
+        # runs those waits.
         env:
           STRESS_TRIALS: "3"
+          STRESS_SKIP_SLOW: "1"
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 30 || true' EXIT
