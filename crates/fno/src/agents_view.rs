@@ -1754,6 +1754,21 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// deliberately UNCHANGED - the sideline still renders what it can read. The
 /// count is the fact that was being thrown away, offered to the callers that
 /// cannot safely ignore it.
+/// The attach id a claude row carries: an 8-hex jobId. A legacy row whose
+/// `short_id` holds the FULL uuid (the register path wrote it that way)
+/// still attaches: the jobId is the uuid's own leading segment, so derive
+/// it rather than hand the attach a uuid the verb refuses. Any other shape
+/// passes through untouched - the 8-hex gesture gate stays the judge.
+fn attach_job_id(raw: &str) -> String {
+    if raw.len() > 8 {
+        let lead = raw.split('-').next().unwrap_or(raw);
+        if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return lead.to_ascii_lowercase();
+        }
+    }
+    raw.to_string()
+}
+
 pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     // One store read for the whole derive: the crown-name file contract
@@ -1908,7 +1923,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .or_else(|| row.get("claude_short_id"))
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
-                    .map(str::to_string),
+                    .map(attach_job_id),
                 // A full session id addresses a durable thread, and only a
                 // thread-shaped row may take one.
                 IdKind::Session if is_thread_shape => row
@@ -2898,6 +2913,50 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(unattributable, 0);
+    }
+
+    #[test]
+    fn a_registered_row_with_a_full_uuid_short_id_attaches_by_its_job_id() {
+        // The register path once wrote the FULL uuid into short_id, and
+        // `claude attach <full uuid>` refuses it: the tap showed a dead
+        // viewer. The attach id derives the uuid's own leading segment, so a
+        // legacy row taps into its session; a real 8-hex key passes through.
+        let rows = derive_rows(
+            &reg(concat!(
+                r#"{"name":"warden","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"49a80492-388e-44a3-bd91-017be26bcaa0"},"#,
+                r#"{"name":"spawned","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"abcd1234"}"#
+            )),
+            NOW,
+        )
+        .unwrap();
+        // Rows render in attention order, so look the rows up by name.
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("row {n} missing"))
+        };
+        assert_eq!(by_name("warden").attach_id.as_deref(), Some("49a80492"));
+        assert_eq!(by_name("spawned").attach_id.as_deref(), Some("abcd1234"));
+    }
+
+    #[test]
+    fn attach_job_id_derives_only_from_a_hex_uuid_lead() {
+        // Exactly-8-hex is already a job id. A longer value derives only
+        // when its leading dash segment is 8 hex (a uuid); anything else is
+        // not fno's to rewrite - the gesture gate stays the judge.
+        assert_eq!(attach_job_id("abcd1234"), "abcd1234");
+        assert_eq!(
+            attach_job_id("49a80492-388e-44a3-bd91-017be26bcaa0"),
+            "49a80492"
+        );
+        assert_eq!(attach_job_id("49A80492-388e"), "49a80492", "case-folded");
+        assert_eq!(attach_job_id("n0t-a-uuid"), "n0t-a-uuid");
+        assert_eq!(
+            attach_job_id("too-long-hexstring-abcdef12"),
+            "too-long-hexstring-abcdef12"
+        );
     }
 
     #[test]

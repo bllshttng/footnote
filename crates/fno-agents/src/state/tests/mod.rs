@@ -2800,3 +2800,79 @@ fn registry_schema_fields() {
         "RegistryEntry's serde field set no longer matches `fields` in crates/fno-agents/src/registry_schema.toml.\n  added to the struct: {added:?}\n  removed from the struct: {removed:?}\n  Fix: update `fields`, then bump `version` in crates/fno-agents/src/registry_schema.toml in the same PR, so an fno built before the field landed can never read the new rows as its own version."
     );
 }
+
+#[test]
+fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
+    let dir = tmpdir("heal-short");
+    let path = dir.join("registry.json");
+    let uuid = "49a80492-388e-44a3-bd91-017be26bcaa0";
+    let mut warden = sample_entry("warden");
+    warden.harness = Some("claude".into());
+    warden.harness_session_id = Some(uuid.into());
+    warden.short_id = uuid.into();
+    warden.aliases = vec!["footnote-49a80492".into()];
+    warden.crown_level = Some(1);
+    warden.crown_scope = Some("fleet".into());
+    let mut spawned = sample_entry("spawned");
+    spawned.harness = Some("claude".into());
+    spawned.harness_session_id = Some("abcd1234-1111-2222-3333-444444444444".into());
+    spawned.short_id = "abcd1234".into();
+    let mut independent = sample_entry("independent");
+    independent.harness = Some("claude".into());
+    independent.harness_session_id = Some("11111111-2222-3333-4444-555555555555".into());
+    independent.short_id = "99999999-388e-44a3-bd91-017be26bcaa0".into();
+    // The pane row is a legal pure-mux row: the one-live-ref invariant bars a
+    // mux row from any short_id, so the heal's population never includes it.
+    let pane_uuid = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let mut pane = sample_entry("pane");
+    pane.harness = Some("claude".into());
+    pane.harness_session_id = Some(pane_uuid.into());
+    pane.short_id = String::new();
+    pane.pid = None;
+    pane.session_id = None;
+    pane.codex_session_id = None;
+    pane.mux = Some(MuxRef {
+        session: "work".into(),
+        pane_id: 7,
+    });
+    update_registry(&path, |r| {
+        r.entries = vec![warden, spawned, independent, pane];
+    })
+    .unwrap();
+
+    let healed = heal_full_uuid_short_ids(&path).unwrap();
+    assert_eq!(healed, 1, "only the byte-copy bg row heals");
+    let reg = load_registry(&path).unwrap();
+    let by_name = |n: &str| {
+        reg.entries
+            .iter()
+            .find(|e| e.name == n)
+            .unwrap_or_else(|| panic!("row {n} missing"))
+    };
+    let warden = by_name("warden");
+    assert_eq!(warden.short_id, "49a80492");
+    assert_eq!(
+        warden.harness_session_id.as_deref(),
+        Some(uuid),
+        "the session id is untouched"
+    );
+    assert_eq!(warden.name, "warden", "the name survives");
+    assert_eq!(warden.aliases, vec!["footnote-49a80492"]);
+    assert_eq!(warden.crown_level, Some(1), "the crown fields survive");
+    assert_eq!(warden.crown_scope.as_deref(), Some("fleet"));
+    assert_eq!(by_name("spawned").short_id, "abcd1234");
+    assert_eq!(
+        by_name("independent").short_id,
+        "99999999-388e-44a3-bd91-017be26bcaa0",
+        "an independent transport key is not fno's to rewrite"
+    );
+    assert_eq!(
+        by_name("pane").short_id,
+        "",
+        "a mux row is outside the heal's population"
+    );
+
+    // Idempotent: a second pass finds nothing.
+    assert_eq!(heal_full_uuid_short_ids(&path).unwrap(), 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
