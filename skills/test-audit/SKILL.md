@@ -1,6 +1,6 @@
 ---
 name: test-audit
-description: "Invoke whenever writing, changing, reviewing, or sweeping tests. Authoring gate for new tests plus audit workflow for low-value, implementation-coupled, or duplicative tests and the test-only production seams they demand. Campaign mode prunes one subsystem's whole test surface."
+description: "Use when auditing or pruning an existing test surface, or when explicitly loaded by an execution workflow for its authoring gate."
 ---
 
 # Test Audit

@@ -290,9 +290,11 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_SPAWN_TIMEOUT_S)
     if proc.returncode != 0:
+        from fno.backlog.advance import _gate_refusal_detail
+
         raise RuntimeError(
             f"fno agents spawn exited {proc.returncode}: "
-            f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
+            f"{_gate_refusal_detail(proc.stderr or proc.stdout or '')}"
         )
     for line in (proc.stdout or "").splitlines():
         if '"short_id"' in line:
