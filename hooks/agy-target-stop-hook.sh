@@ -124,7 +124,13 @@ resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
 manifest_owner_cwd() {
     local state="$1" owner
     owner=$(sed -n 's/^owner_cwd:[[:space:]]*//p' "$state" 2>/dev/null \
-        | head -1 | tr -d "\"'" | sed 's/[[:space:]]*$//')
+        | head -1 | sed 's/[[:space:]]*$//')
+    # YAML may quote the value: strip one matching outer pair only, so a
+    # quote that is part of the path (an apostrophe in a user dir) survives.
+    case "$owner" in
+        '"'*'"') owner=${owner#\"}; owner=${owner%\"} ;;
+        "'"*"'") owner=${owner#\'}; owner=${owner%\'} ;;
+    esac
     if [[ -n "$owner" && -d "$owner" ]]; then
         (cd "$owner" && pwd -P)
         return
