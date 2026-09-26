@@ -125,7 +125,11 @@ def leak_refusal_report(subject: str, offenders: list[tuple[str, str, tuple[str,
         from fno.notify._impl import send_notification
 
         detail = "; ".join(f"{i} {'+'.join(c)}" for i, _, c in offenders[:3])
-        send_notification("roadmap render refused", f"{subject}: leak gate refused ({detail})")
+        code, err = send_notification(
+            "roadmap render refused", f"{subject}: leak gate refused ({detail})"
+        )
+        if err:
+            print(f"warning: render alert degraded ({code}): {err}", file=sys.stderr)
     except Exception:  # noqa: BLE001 - an alert must never mask the refusal
         pass
 
