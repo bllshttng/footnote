@@ -1052,7 +1052,7 @@ mod tests {
     /// Stage the saved claude job state the respawn guard reads: the
     /// `respawnFlags` its state.json carries.
     fn stage_job_flags(home: &std::path::Path, short: &str, flags: &[&str]) {
-        let jobs = home.join(".claude").join("jobs").join(short);
+        let jobs = ClaudeHome::at(home).jobs_dir_for(short);
         std::fs::create_dir_all(&jobs).unwrap();
         let payload = serde_json::json!({ "state": "idle", "respawnFlags": flags });
         std::fs::write(jobs.join("state.json"), payload.to_string()).unwrap();
@@ -2440,7 +2440,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&home_dir).unwrap();
         stage_glm_birth_transcript(
-            &home_dir.join(".claude").join("projects"),
+            &ClaudeHome::at(&home_dir).projects_dir(),
             "77770012-2222-3333-4444-555555555555",
         );
         let mut e = row("bare-glm");
@@ -2499,7 +2499,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&home_dir).unwrap();
         stage_glm_birth_transcript(
-            &home_dir.join(".claude").join("projects"),
+            &ClaudeHome::at(&home_dir).projects_dir(),
             "77770013-2222-3333-4444-555555555555",
         );
         let mut e = row("bare-glm");
