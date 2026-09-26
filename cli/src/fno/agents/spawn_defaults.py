@@ -1209,8 +1209,8 @@ def inject_spawn_defaults(
         # --yolo/-Y are the same knob as --permission-mode; the filter must
         # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
-    # One node answer for the grid: the Rust resolver owns the precedence
-    # (flag, then the seed's payload, then FNO_NODE); ask only when both miss.
+    # One node answer for the grid; the resolver owns the precedence.
+    node_id_present = _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
     node = _flag_value(out[1:], "--node") or (env or {}).get("FNO_NODE") or None
     if node is None:
         try:
@@ -1225,7 +1225,7 @@ def inject_spawn_defaults(
             node = _answer.get("node") or None
         except Exception:  # noqa: BLE001 - the grid is advisory, as _grid_node
             node = None
-    node_id_present = node is not None
+    node_id_present = node_id_present or node is not None
 
     def _above_defaults(rung: Optional[str]) -> bool:
         return bool(rung) and rung != "agents.defaults"
