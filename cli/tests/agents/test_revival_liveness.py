@@ -5,13 +5,19 @@ returned a session id while the new session never wrote a transcript line and
 its job state read ``blocked``. The dispatcher then waited on a worker that
 did not exist while the slot was spent and mail queued to nothing.
 
+The poll itself lives in the fno-agents binary (``revive-proof``, with its
+own Rust tests); this file covers the Python side of the contract - the
+verdict branch, the lock-free stop, the refusal naming the state, and the
+journey through the real spawn wiring.
+
 Coverage:
-  - refuse: no transcript inside the window -> DispatchAskError naming the
-    observed transcript/state, the fork stopped (claims released), exit 1.
-  - refuse: transcript present but the job state stays wedged.
-  - pass: transcript plus a live state -> returns, stderr names the path.
-  - pass: a wedged state that recovers inside the window.
-  - the stop itself failing is named in the refusal, never swallowed.
+  - refuse: an ``ok: false`` verdict stops the fork (claude_stop, lock-free
+    because the caller holds the per-agent flock) and raises naming the
+    observed state, exit 1.
+  - pass: an ``ok: true`` verdict returns; the binary printed the verified
+    transcript line itself.
+  - a failed stop is named in the refusal, never swallowed.
+  - a missing binary stands the gate down, keeping today's behavior.
   - journey: ``spawn --resume`` exits non-zero through the real wiring.
 """
 from __future__ import annotations
@@ -22,143 +28,59 @@ from typer.testing import CliRunner
 from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses import _claude_session_registry as reg
 from fno.agents.harnesses._claude_session_registry import (
-    StateSnapshot,
     revive_proof_or_refuse as REAL_GATE,
 )
 
 SOURCE_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
+REFUSED = {
+    "ok": False,
+    "stopped": True,
+    "reason": "transcript absent, job state blocked after 60s; the fork was stopped",
+}
+PROVEN = {"ok": True, "transcript": "/tmp/x/sess-1.jsonl", "job_state": "idle"}
 
-@pytest.fixture(autouse=True)
-def _fast_window(monkeypatch):
-    """Retime the gate and silence its sleep; readers are faked per test."""
-    monkeypatch.setattr(reg, "FORK_LIVENESS_WINDOW_S", 0.3)
-    monkeypatch.setattr(reg, "FORK_LIVENESS_POLL_S", 0.05)
-    monkeypatch.setattr(reg.time, "sleep", lambda _s: None)
 
-
-def _arm(monkeypatch, *, uuid=SOURCE_UUID, transcript=None, state="blocked", stop=None):
-    """Fake the gate's readers and its cleanup seams. A callable reader gets
-    the tick number (counted by the state read, which the gate polls once per
-    tick) and may vary its answer, e.g.
-    ``transcript=lambda n: path if n >= 1 else None``.
-    ``state=None`` reads as state.json being unreadable (OSError). The cleanup
-    is stubbed at the seams the gate actually uses - ``claude_stop`` and the
-    claims ``release-stopped`` op - so a test cannot pass while the real
-    cleanup would deadlock or no-op."""
-    tick = {"n": 0}
-
-    def _by_tick(value):
-        return value(tick["n"]) if callable(value) else value
-
-    def _state_read(*_a, **_k):
-        answer = _by_tick(state)
-        tick["n"] += 1
-        if answer is None:
-            raise OSError("no state.json")
-        return StateSnapshot(state=answer, updated_at=None, output_result=None)
-
-    monkeypatch.setattr(reg, "resolve_session_uuid", lambda _sid: _by_tick(uuid))
-    monkeypatch.setattr(reg, "_fork_transcript", lambda _u: _by_tick(transcript))
-    monkeypatch.setattr(reg, "read_state_json", _state_read)
-
-    cleanup = {"claude_stop": 0, "release": 0}
-
-    def _claude_stop(short_id, **_k):
-        cleanup["claude_stop"] += 1
-        if stop is not None:
-            raise stop
-        return 0, ""
-
-    monkeypatch.setattr("fno.agents.harnesses.claude.claude_stop", _claude_stop)
-
-    def _run_op(op_args, _dirs):
-        cleanup["release"] += 1
-        assert op_args[:2] == ["release-stopped", "--name"]
-        return {"released": []}, None
-
-    monkeypatch.setattr("fno.claims.verdict.run_op", _run_op)
-    return cleanup
+def _arm(monkeypatch, verdict):
+    """Fake the binary verdict (the op owns the poll and the stop)."""
+    monkeypatch.setattr(reg, "_revive_proof_verdict", lambda _sid: verdict)
 
 
 # ---------------------------------------------------------------------------
-# Unit: the gate
+# Unit: the verdict branch
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_a_fork_that_never_wrote_a_transcript(tmp_path, monkeypatch) -> None:
-    cleanup = _arm(monkeypatch)
+def test_refuses_on_a_false_verdict(monkeypatch) -> None:
+    _arm(monkeypatch, REFUSED)
     with pytest.raises(DispatchAskError) as ei:
         REAL_GATE("rev-agent", "deadbeef")
     msg = str(ei.value)
     assert ei.value.exit_code == 1
     assert "never came up" in msg
     assert "transcript absent" in msg
-    assert "'blocked'" in msg
-    assert "spawn a fresh worker" in msg
-    # The cleanup ran at the lock-free seams: the session stopped, the claims
-    # release-stopped op ran.
-    assert cleanup == {"claude_stop": 1, "release": 1}
+    assert "fresh worker" in msg
 
 
-def test_refuses_when_state_stays_wedged_despite_a_transcript(
-    tmp_path, monkeypatch
-) -> None:
-    transcript = tmp_path / "fork.jsonl"
-    _arm(monkeypatch, transcript=transcript)
+def test_a_failed_stop_rides_the_reason(monkeypatch) -> None:
+    verdict = dict(REFUSED, stopped=False, reason="transcript absent; the stop failed")
+    _arm(monkeypatch, verdict)
     with pytest.raises(DispatchAskError) as ei:
         REAL_GATE("rev-agent", "deadbeef")
-    assert "transcript present" in str(ei.value)
+    assert "the stop failed" in str(ei.value)
 
 
-def test_a_stopped_job_state_is_wedged(tmp_path, monkeypatch) -> None:
-    transcript = tmp_path / "fork.jsonl"
-    _arm(monkeypatch, transcript=transcript, state="stopped")
-    with pytest.raises(DispatchAskError):
-        REAL_GATE("rev-agent", "deadbeef")
+def test_passes_on_a_true_verdict(monkeypatch) -> None:
+    _arm(monkeypatch, PROVEN)
+    REAL_GATE("rev-agent", "deadbeef")  # returns; the binary printed the line
 
 
-def test_an_unreadable_job_state_with_a_transcript_passes(
-    tmp_path, monkeypatch
-) -> None:
-    """The transcript is the load-bearing proof: a session streaming lines is
-    up even when its state snapshot cannot be read."""
-    transcript = tmp_path / "fork.jsonl"
-    _arm(monkeypatch, transcript=transcript, state=None)
-    REAL_GATE("rev-agent", "deadbeef")
-
-
-def test_passes_once_transcript_and_live_state_arrive(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    transcript = tmp_path / "fork.jsonl"
-    _arm(
-        monkeypatch,
-        transcript=lambda n: transcript if n >= 1 else None,
-        state=lambda n: "idle" if n >= 1 else "blocked",
-    )
-    REAL_GATE("rev-agent", "deadbeef")  # returns, does not raise
-    err = capsys.readouterr().err
-    assert "revival liveness verified for deadbeef" in err
-    assert str(transcript) in err
-
-
-def test_an_unresolvable_session_id_refuses(monkeypatch) -> None:
-    _arm(monkeypatch, uuid=None, state=None)
-    with pytest.raises(DispatchAskError) as ei:
-        REAL_GATE("rev-agent", "deadbeef")
-    assert "transcript absent" in str(ei.value)
-
-
-def test_a_failed_stop_is_named_not_swallowed(monkeypatch) -> None:
-    cleanup = _arm(monkeypatch, uuid=None, state=None, stop=RuntimeError("boom"))
-    with pytest.raises(DispatchAskError) as ei:
-        REAL_GATE("rev-agent", "deadbeef")
-    msg = str(ei.value)
-    assert "stop failed (boom)" in msg
-    assert "still holds its slot" in msg
-    # The claims release still ran despite the stop failing.
-    assert cleanup == {"claude_stop": 1, "release": 1}
+def test_a_missing_binary_stands_the_gate_down(monkeypatch) -> None:
+    """No fno-agents binary: keep today's behavior instead of refusing every
+    revival on a degraded install."""
+    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: None)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    REAL_GATE("rev-agent", "deadbeef")  # stands down, does not raise
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +132,10 @@ def test_spawn_resume_exits_non_zero_when_the_fork_never_comes_up(
 
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
     _seed_row("rev-agent", "deadbeef", SOURCE_UUID)
-    # Re-arm the real gate the conftest auto-neuter stood down, then fake its
-    # readers: the session record never appears, so proof never does.
+    # Re-arm the real gate the conftest auto-neuter stood down; the binary's
+    # poll is faked to the refused verdict.
     monkeypatch.setattr(reg, "revive_proof_or_refuse", REAL_GATE)
-    monkeypatch.setattr(reg, "resolve_session_uuid", lambda _sid: None)
-    monkeypatch.setattr(
-        "fno.agents.harnesses.claude.claude_stop", lambda short_id, **k: (0, "")
-    )
-    monkeypatch.setattr(
-        "fno.claims.verdict.run_op", lambda op_args, dirs: {"released": []}
-    )
+    monkeypatch.setattr(reg, "_revive_proof_verdict", lambda _sid: REFUSED)
 
     result = CliRunner().invoke(
         agents_app,

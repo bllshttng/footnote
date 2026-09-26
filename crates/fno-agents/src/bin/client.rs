@@ -93,6 +93,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "roster-reap",
     "reconcile",
     "reclaim",
+    "revive-proof",
     "plugin-install",
     "recover",
     "registry-json",
@@ -551,6 +552,15 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
+    }
+
+    // `revive-proof`: the revival liveness gate's poll (see revive_proof.rs).
+    // Direct dispatch, no daemon RPC: a fork that never started must refuse
+    // even when the daemon is the thing wedged. Same `==` dispatch +
+    // ALL_CLIENT_ACTIONS registration as `test-run`, so the parity guard
+    // does not see it - Python's revival path shells it and owns the stop.
+    if verb == "revive-proof" {
+        return fno_agents::revive_proof::run_revive_proof(&args[1..]);
     }
 
     // `prove-it-verdicts`: the one reader for terminal prove-it records

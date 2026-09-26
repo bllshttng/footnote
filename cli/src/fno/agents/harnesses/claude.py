@@ -42,6 +42,7 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 from fno.agents.harnesses._claude_session_registry import (
     locate_session,
     resolve_session_uuid,
+    revive_proof_or_refuse,
 )
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.writable_dirs import worker_writable_dirs
@@ -764,6 +765,8 @@ def bg_create(
 
     short_id = parse_short_id(stdout)
 
+    if resume_session_id:  # a fork that never started must not read as success
+        revive_proof_or_refuse(name, short_id)
     return ProviderResult(
         exit_code=exit_code,
         stdout=stdout,
