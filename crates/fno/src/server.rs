@@ -1614,6 +1614,12 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
+    /// Per-pane last attended-hold arm time (x-0e09): the first keystroke
+    /// past [`attended_hold_window`] since the last arm (re)arms the pane
+    /// session's mail hold, so a typing operator's session holds delivery
+    /// while they type and drains as one digest when they go quiet. Orphan
+    /// entries from reaped panes are inert (the `seen` posture: no GC).
+    hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -11663,9 +11669,16 @@ impl Core {
                     // a human steering this pane; PaneSend (script API) and
                     // relay writes never reach here.
                     self.touch(focus, "inject", true);
+                    // The attended hold (x-0e09): the keystroke arms the pane
+                    // session's mail hold - first byte of a burst or one past
+                    // the window since the last arm; a submit re-arms, the
+                    // notify-self extend, done here so a non-claude harness
+                    // gets it too.
+                    let submitted = human_input::is_submit(&bytes);
+                    self.arm_attended_hold(focus, submitted);
                     // A submit key past the relay guard is a human pressing
                     // Enter: one operator_submit witness row (human_input).
-                    if human_input::is_submit(&bytes) {
+                    if submitted {
                         self.witness_submit(focus);
                     }
                 }
@@ -12890,6 +12903,7 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
