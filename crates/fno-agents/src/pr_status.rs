@@ -1003,6 +1003,104 @@ pub(crate) fn cache_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// The `status-ci` door op: `read_pr`'s rollup mapped to the
+/// name/state/bucket/startedAt/workflow rows the internal gh adapter and the
+/// verify precondition read (`_internal_gh._checks`,
+/// `_verify._failing_required`). `drop_coverage` removes the review-coverage
+/// projections, the same rows the merge verb's covered path ignores.
+pub(crate) fn status_ci(payload: &Value) -> (i32, String, String) {
+    let cwd_str = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
+    let drop_coverage = payload
+        .get("drop_coverage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let cwd = Path::new(cwd_str);
+    let Some(slug) = cache::git_slug(cwd) else {
+        return (
+            1,
+            String::new(),
+            "status-ci: cannot resolve the repo slug from cwd\n".into(),
+        );
+    };
+    let probe = cache::CountingProbe {
+        inner: crate::pr_status_facts::RealGhProbe,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    match status_ci_rows(&probe, cwd, &slug, pr, drop_coverage) {
+        Err(reason) => (1, String::new(), format!("status-ci: {}\n", reason.text)),
+        Ok(rows) => (
+            0,
+            format!("{}\n", serde_json::to_string(&rows).unwrap_or_default()),
+            String::new(),
+        ),
+    }
+}
+
+/// The `status-ci` row mapping over one `read_pr`: name/state/bucket/
+/// startedAt/workflow, the rows the internal gh adapter and the verify
+/// precondition read.
+pub(crate) fn status_ci_rows<P: GhProbe>(
+    probe: &P,
+    cwd: &Path,
+    slug: &str,
+    pr: u64,
+    drop_coverage: bool,
+) -> Result<Vec<Value>, RestReason> {
+    let pr_json = read_pr(probe, cwd, slug, pr)?;
+    let rollup = pr_json
+        .get("statusCheckRollup")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rollup = if drop_coverage {
+        without_coverage_statuses(&rollup)
+    } else {
+        rollup
+    };
+    Ok(rollup
+        .iter()
+        .map(|check| {
+            let raw = {
+                let c = s_str(check, "conclusion");
+                if c.is_empty() {
+                    s_str(check, "state")
+                } else {
+                    c
+                }
+            };
+            let bucket = match raw.to_uppercase().as_str() {
+                "CANCELLED" => "cancel",
+                "SKIPPED" | "NEUTRAL" => "skipping",
+                _ => classify_check(check),
+            };
+            let name = {
+                let n = s_str(check, "name");
+                if n.is_empty() {
+                    s_str(check, "context")
+                } else {
+                    n
+                }
+            };
+            let started = {
+                let st = s_str(check, "startedAt");
+                if st.is_empty() {
+                    s_str(check, "createdAt")
+                } else {
+                    st
+                }
+            };
+            json!({
+                "name": name,
+                "state": raw,
+                "bucket": bucket,
+                "startedAt": started,
+                "workflow": "",
+            })
+        })
+        .collect())
+}
+
 pub(crate) mod cache;
 pub(crate) mod compose;
 pub(crate) mod logs;

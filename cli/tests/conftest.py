@@ -1198,3 +1198,20 @@ def _unbake_constants_facade():
     for name in _FACADE_NAMES:
         if name in vars(gc):
             delattr(gc, name)
+
+
+@pytest.fixture(autouse=True)
+def _no_status_ci_door(monkeypatch):
+    """Hermetic default for the verify checks precondition (x-8ab0).
+
+    `_verify._failing_required` reads the failing set through the
+    `fno-agents` status-ci op. In the test environment that resolver finds
+    no dev binary or a stale installed one, so an unstubbbed call is a real
+    network read or a wrong-shape answer. The default answers an empty row
+    set (no required check failing, the same verdict as the default GREEN
+    rollup); tests pinning the precondition re-stub
+    `fno.pr._verify._status_ci_rows`.
+    """
+    from fno.pr import _verify
+
+    monkeypatch.setattr(_verify, "_status_ci_rows", lambda payload: [])

@@ -143,6 +143,82 @@ fn known_from_prior(_prior: &Value) -> BTreeMap<String, Value> {
     BTreeMap::new()
 }
 
+/// The `status-ci` row mapping: bucket intercepts (cancel, skipping), the
+/// coverage projection dropped only when asked, statuses carried as rows.
+#[test]
+fn status_ci_maps_the_rollup_rows() {
+    struct CiFake;
+    impl GhProbe for CiFake {
+        fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
+            let cmd = args.join(" ");
+            let serve = |v: &Value| Ok((true, v.to_string(), String::new()));
+            if cmd.contains("/pulls/") {
+                return serve(&json!({"head": {"sha": "abc123"}, "state": "open"}));
+            }
+            if cmd.contains("/check-runs") {
+                return serve(&json!({
+                    "total_count": 3,
+                    "check_runs": [
+                        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+                         "started_at": "2026-08-18T00:00:00Z", "details_url": "https://x/runs/1"},
+                        {"name": "flaky", "status": "COMPLETED", "conclusion": "CANCELLED",
+                         "started_at": "2026-08-18T00:00:01Z", "details_url": "https://x/runs/1"},
+                        {"name": "docs", "status": "COMPLETED", "conclusion": "SKIPPED",
+                         "started_at": "2026-08-18T00:00:02Z", "details_url": "https://x/runs/1"}
+                    ]
+                }));
+            }
+            if cmd.contains("/actions/runs?head_sha=") {
+                return serve(&json!([]));
+            }
+            if cmd.contains("/actions/runs/") {
+                return serve(&json!({"total_count": 0, "jobs": []}));
+            }
+            if cmd.ends_with("/status") {
+                return serve(&json!({"statuses": [
+                    {"context": "fno/review-coverage", "state": "FAILURE",
+                     "created_at": "2026-08-18T00:00:03Z", "target_url": ""},
+                    {"context": "deploy", "state": "success",
+                     "created_at": "2026-08-18T00:00:04Z", "target_url": ""}
+                ]}));
+            }
+            if cmd.contains("rate_limit") {
+                return serve(&json!({"resources": {"core": {"remaining": 10}}}));
+            }
+            Err(format!("CiFake has no answer for: {cmd}"))
+        }
+    }
+    let cwd = Path::new("/tmp");
+    let rows = status_ci_rows(&CiFake, cwd, "Owner/Repo", 42, false).unwrap();
+    assert_eq!(rows.len(), 5, "3 check runs + 2 statuses");
+    assert_eq!(rows[0]["bucket"], json!("pass"));
+    assert_eq!(
+        rows[1]["bucket"],
+        json!("cancel"),
+        "CANCELLED intercepts classify"
+    );
+    assert_eq!(
+        rows[2]["bucket"],
+        json!("skipping"),
+        "SKIPPED intercepts classify"
+    );
+    assert_eq!(rows[2]["state"], json!("SKIPPED"));
+    assert_eq!(rows[4]["name"], json!("deploy"));
+    assert_eq!(
+        rows[4]["bucket"],
+        json!("pass"),
+        "a success status is a row too"
+    );
+
+    let rows = status_ci_rows(&CiFake, cwd, "Owner/Repo", 42, true).unwrap();
+    assert_eq!(rows.len(), 4, "the coverage projection is dropped");
+    assert!(
+        rows.iter()
+            .all(|r| r["name"] != json!("fno/review-coverage")),
+        "{rows:?}"
+    );
+}
+
 /// The assembled pr_json the fixture's raw responses produce: the same
 /// construction the Python leg's fake runner drove at capture time.
 fn pr_json_from(name: &str) -> Value {

@@ -106,18 +106,13 @@ def test_the_stop_gate_read_with_merge_state_status_still_routes_rest(monkeypatc
 
 
 def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
+    # The translation is the Rust status-ci op's now; the Python leg pins the
+    # forwarding wiring: the door's rows pass through as the checks payload.
     calls: list[list[str]] = []
     monkeypatch.setattr(
         _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
     )
-    result = _internal_gh.execute(
-        "discretionary",
-        ["pr", "checks", "930", "--json", "name,state,bucket,startedAt,workflow"],
-        runner=_runner(calls),
-        real_gh="/real/gh",
-    )
-    assert result.returncode == 0
-    assert json.loads(result.stdout) == [
+    rows = [
         {
             "name": "unit",
             "state": "success",
@@ -126,6 +121,21 @@ def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
             "workflow": "",
         }
     ]
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        _internal_gh,
+        "_status_ci_rows",
+        lambda cwd, number: (seen.append((cwd, number)), rows)[1],
+    )
+    result = _internal_gh.execute(
+        "discretionary",
+        ["pr", "checks", "930", "--json", "name,state,bucket,startedAt,workflow"],
+        runner=_runner(calls),
+        real_gh="/real/gh",
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == rows
+    assert seen == [(None, 930)]
     assert all("graphql" not in " ".join(call) for call in calls)
 
 

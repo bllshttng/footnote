@@ -142,6 +142,34 @@ def verify(
     raise typer.Exit(code=rc)
 
 
+def _run_status_door(payload: dict) -> None:
+    """Forward a PR-status verb to its Rust owner through the
+    authorized-merge door: payload on stdin, both streams attached, exit
+    propagated. The reads coalesce in the binary's status cache."""
+    import json
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr: the fno-agents binary was not found. It ships in the "
+            "`pip install fno` wheel and with the plugin; reinstall fno or "
+            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    result = subprocess.run(
+        [str(binary), "authorized-merge"],
+        input=json.dumps(payload),
+        text=True,
+        check=False,
+    )
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
 @pr_app.command(
     "status",
     help=(
@@ -172,14 +200,54 @@ def status(
         ),
     ),
 ) -> None:
-    from fno.pr import _status
-
-    # main() routes through the coalescing cache: the watcher
-    # recipe polls this verb every 60s per session, and N sessions polling one
-    # PR must collapse to one network read per TTL or they trip the REST
+    # The coalescing cache lives in the Rust owner: N sessions polling one PR
+    # must collapse to one network read per TTL or they trip the REST
     # secondary limit (which counts request rate, not budget).
-    rc = _status.main([str(pr_number)] + (["--refresh"] if refresh else []))
-    raise typer.Exit(code=rc)
+    _run_status_door(
+        {
+            "op": "status-read",
+            "cwd": os.getcwd(),
+            "pr": pr_number,
+            "refresh": refresh,
+        }
+    )
+
+
+@pr_app.command(
+    "status",
+    hidden=True,
+    help=(
+        "The PR's CI verdict, failure detail and merge readiness. N pollers "
+        "of one PR cost one network read per cache TTL; `--refresh` bypasses "
+        "the coalescing cache (manual use only - it defeats the coalescing "
+        "that keeps a watcher fleet under the REST secondary limit)."
+    ),
+)
+def status(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        "--no-cache",
+        help=(
+            "Bypass the coalescing cache and read GitHub live. Manual use "
+            "only - it defeats the coalescing that keeps a watcher fleet "
+            "under the REST secondary limit, so never put it in a poll loop."
+        ),
+    ),
+) -> None:
+    # The coalescing cache lives in the Rust owner: the watcher recipe polls
+    # this verb every 60s per session, and N sessions polling one PR must
+    # collapse to one network read per TTL or they trip the REST secondary
+    # limit (which counts request rate, not budget).
+    _run_status_door(
+        {
+            "op": "status-read",
+            "cwd": os.getcwd(),
+            "pr": pr_number,
+            "refresh": refresh,
+        }
+    )
 
 
 @pr_app.command(
@@ -208,22 +276,16 @@ def wait(
     timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
 ) -> None:
-    from fno.pr import _wait
-
-    # No ToolMissing handler here: `_wait.main` maps it to 127 itself, and a
-    # second handler for the same exception is a copy that drifts.
-    rc = _wait.main(
-        [
-            str(pr_number),
-            "--until",
-            until,
-            "--timeout",
-            timeout,
-            "--interval",
-            interval,
-        ]
+    _run_status_door(
+        {
+            "op": "status-wait",
+            "cwd": os.getcwd(),
+            "pr": pr_number,
+            "until": until,
+            "timeout": timeout,
+            "interval": interval,
+        }
     )
-    raise typer.Exit(code=rc)
 
 
 @pr_app.command(
@@ -386,20 +448,24 @@ def logs(
     lines: int = typer.Option(40, "--lines", help="Tail length."),
     full: bool = typer.Option(False, "--full", help="Print the whole log, not a tail."),
 ) -> None:
-    from fno.pr import _logs
-    from fno.pr._proc import ToolMissing
+    if pr_number is None:
+        from fno.pr import _rest
 
-    try:
-        rc = _logs.run_logs(
-            str(pr_number) if pr_number is not None else None,
-            job=job,
-            lines=lines,
-            full=full,
-        )
-    except ToolMissing as exc:
-        typer.echo(f"fno do pr logs: {exc.tool} not found on PATH", err=True)
-        rc = 127
-    raise typer.Exit(code=rc)
+        resolved, reason = _rest.resolve_current_pr_number_rest(cwd=os.getcwd())
+        if resolved is None:
+            typer.echo(f"fno do pr logs: cannot read CI state: {reason}", err=True)
+            raise typer.Exit(code=4)
+        pr_number = resolved
+    _run_status_door(
+        {
+            "op": "status-logs",
+            "cwd": os.getcwd(),
+            "pr": pr_number,
+            "job": job,
+            "lines": lines,
+            "full": full,
+        }
+    )
 
 
 def _forward_to_binary(verb: str, args: list[str]) -> None:
