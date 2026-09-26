@@ -3171,7 +3171,7 @@ fn cycle_section_tri_state_filters_then_collapses_then_restores() {
     let mut view = view_with_dead_interleaved();
     assert_eq!(
         agent_names(&view),
-        vec!["live-a", "dead-a", "live-b", "dead-b"],
+        ["live-a", "live-b", "dead-a", "dead-b"], // active sort: live first, exited last
         "expanded shows every row"
     );
 
