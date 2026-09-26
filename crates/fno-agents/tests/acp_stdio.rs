@@ -440,7 +440,16 @@ fn unknown_server_request_is_answered_and_rejected() {
     let error = session.request("initialize", json!({})).unwrap_err();
 
     assert!(matches!(&error, AcpError::ServerRequest { .. }));
-    let answer: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(capture).unwrap()).unwrap();
+    // The error can outrun the fake shell's capture write; wait for the file.
+    let mut raw = None;
+    for _ in 0..250 {
+        if let Ok(bytes) = std::fs::read(&capture) {
+            raw = Some(bytes);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let raw = raw.unwrap_or_else(|| panic!("fake never wrote {}", capture.display()));
+    let answer: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(answer["error"]["code"], -32601);
 }
