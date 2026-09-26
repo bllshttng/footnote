@@ -3172,8 +3172,10 @@ fn run_reap(rest: &[String]) -> i32 {
     summary.crowns = Some(crowns);
 
     // The dry-run JSON read also carries the census (task 4): who would
-    // retire and what was seen, one read.
-    let inventory = if dry_run && json_out {
+    // retire and what was seen, one read. Text dry-runs carry it too now:
+    // the text receipt prints the counts beside the judged rows instead of
+    // the census living only in the JSON read.
+    let inventory = if dry_run {
         Some(fno_agents::gc_inventory::census(&home))
     } else {
         None

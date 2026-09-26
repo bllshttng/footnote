@@ -510,7 +510,11 @@ pub fn render_reap_with_inventory(
         return base;
     };
     if !json_out {
-        return format!("{base}{}", mux_sweep_text_line(mux, dry_run));
+        let mut out = format!("{base}{}", mux_sweep_text_line(mux, dry_run));
+        if let Some(inv) = inventory {
+            out.push_str(&inventory_text_lines(inv));
+        }
+        return out;
     }
     // Splice the census and the mux half into the summary object: one JSON
     // read carries both the would-retire verdicts and the world they were
@@ -619,6 +623,40 @@ pub fn mux_sweep_json(mux: &MuxSweep) -> Value {
         }),
         MuxSweep::Skipped => json!({"state": "skipped"}),
     }
+}
+
+/// The census half of the human receipt, mirroring the `inventory` object
+/// the JSON receipt splices in: the enumerated session count beside the
+/// count the sweep never judged (sessions no registry row names), plus the
+/// coverage gaps that bound the census itself (AC1-EDGE). A sweep that
+/// filtered its candidate set must show what it never looked at - the gap
+/// between the two counts is the only place a scoping bug reads from
+/// outside.
+fn inventory_text_lines(inv: &crate::gc_inventory::Inventory) -> String {
+    let unjudged = inv
+        .sessions
+        .iter()
+        .filter(|s| !s.sources.contains(&crate::gc_inventory::Source::Registry))
+        .count();
+    let mut out = format!(
+        "session inventory: enumerated {} session(s), {} never judged (no registry row)\n",
+        inv.sessions.len(),
+        unjudged
+    );
+    for (source, reason) in &inv.incomplete {
+        out.push_str(&format!(
+            "session inventory (incomplete): {source}: {reason}\n"
+        ));
+    }
+    if let Some(rc) = &inv.root_coverage {
+        if !rc.complete {
+            out.push_str(&format!(
+                "session inventory (partial): transcript roots {} of {} readable\n",
+                rc.enumerated, rc.configured
+            ));
+        }
+    }
+    out
 }
 
 /// The one human-receipt line for the mux half: the closed (or would-close)
@@ -861,6 +899,125 @@ mod tests {
                 "bucket {key} missing from json: {out}"
             );
         }
+    }
+
+    fn inv_session(
+        harness: &str,
+        sid: &str,
+        sources: &[crate::gc_inventory::Source],
+    ) -> crate::gc_inventory::InventorySession {
+        crate::gc_inventory::InventorySession {
+            harness: harness.to_string(),
+            session_id: sid.to_string(),
+            registry_name: None,
+            sources: sources.to_vec(),
+            transcripts: Vec::new(),
+            transcript_age_s: None,
+        }
+    }
+
+    #[test]
+    fn the_text_receipt_prints_the_census_beside_the_judged_rows() {
+        // A sweep that filters its candidate set prints what it never looked
+        // at: the census count beside the judged count, in text exactly as
+        // the JSON read already carries it.
+        let inv = crate::gc_inventory::Inventory {
+            sessions: vec![
+                inv_session(
+                    "claude",
+                    "11111111-1111-4111-8111-111111111111",
+                    &[crate::gc_inventory::Source::Registry],
+                ),
+                inv_session(
+                    "claude",
+                    "22222222-2222-4222-8222-222222222222",
+                    &[
+                        crate::gc_inventory::Source::Registry,
+                        crate::gc_inventory::Source::Store,
+                    ],
+                ),
+                inv_session(
+                    "claude",
+                    "33333333-3333-4333-8333-333333333333",
+                    &[crate::gc_inventory::Source::Store],
+                ),
+                inv_session(
+                    "codex",
+                    "44444444-4444-4444-8444-444444444444",
+                    &[crate::gc_inventory::Source::Mux],
+                ),
+            ],
+            ..Default::default()
+        };
+        let text = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&inv),
+            Some(&MuxSweep::Skipped),
+            false,
+            true,
+        );
+        assert!(
+            text.contains(
+                "session inventory: enumerated 4 session(s), 2 never judged (no registry row)"
+            ),
+            "{text}"
+        );
+        let json = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&inv),
+            Some(&MuxSweep::Skipped),
+            true,
+            true,
+        );
+        let v: Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(v["inventory"]["sessions"].as_array().map(Vec::len), Some(4));
+    }
+
+    #[test]
+    fn the_text_receipt_names_the_census_coverage_gaps() {
+        // An incomplete census has NOT enumerated the world (AC1-EDGE), so
+        // the text receipt names the unread source and the root gap the way
+        // the JSON already does.
+        let inv = crate::gc_inventory::Inventory {
+            sessions: vec![inv_session(
+                "claude",
+                "55555555-5555-4555-8555-555555555555",
+                &[crate::gc_inventory::Source::Store],
+            )],
+            incomplete: vec![(
+                "registry".to_string(),
+                "registry unreadable: boom".to_string(),
+            )],
+            root_coverage: Some(crate::gc_inventory::RootCoverage {
+                complete: false,
+                enumerated: 2,
+                configured: 3,
+            }),
+        };
+        let text = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&inv),
+            Some(&MuxSweep::Skipped),
+            false,
+            true,
+        );
+        assert!(
+            text.contains("session inventory (incomplete): registry: registry unreadable: boom"),
+            "{text}"
+        );
+        assert!(
+            text.contains("session inventory (partial): transcript roots 2 of 3 readable"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_census_prints_no_census_lines() {
+        // Apply-mode receipts build no census; the renderer must stay silent
+        // rather than print a default-shaped zero.
+        let text =
+            render_reap_with_inventory(&summary(&[]), None, Some(&MuxSweep::Skipped), false, true);
+        assert!(!text.contains("session inventory"), "{text}");
     }
 
     #[test]
