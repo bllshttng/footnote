@@ -1127,6 +1127,12 @@ struct PaneEntry {
     /// bare shell `cmd: Some`; the portal doors read
     /// [`Core::portal_seat_is_viewer`], never `cmd` alone.
     portal_hold: Option<String>,
+    /// True when this pane is a TRANSIENT machine view (`FNO_VIEW_TRANSIENT`
+    /// in its own argv, re-derived at keeper re-adoption): a screen a side
+    /// effect opened. It is never a portal (no `portals` entry), never
+    /// captured as anything but an ordinal shell slot, and the restore
+    /// prune reaps it instead of tabbing it.
+    transient_view: bool,
     /// True when this pane was adopted at a fresh id because the pane key its
     /// keeper socket carries could not be reused (zero, or already live). Set
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
@@ -1874,6 +1880,10 @@ struct SlotCapture<'a> {
     /// fill guard) resolved through the same join the reach uses.
     portals: &'a BTreeMap<u8, Portal>,
     agents: &'a [crate::agents_view::RegistryAgent],
+    /// The transient view panes: a leaf wearing the marker captures as an
+    /// ordinal Shell slot (never an owner binding that restore would
+    /// re-attach), and an all-transient tab is not stored at all.
+    transient_views: &'a HashMap<u64, ()>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
@@ -1886,6 +1896,7 @@ impl<'a> SlotCapture<'a> {
         portal_seats: &'a HashMap<u64, (u8, String)>,
         portals: &'a BTreeMap<u8, Portal>,
         agents: &'a [crate::agents_view::RegistryAgent],
+        transient_views: &'a HashMap<u64, ()>,
     ) -> Self {
         SlotCapture {
             pane_owner,
@@ -1893,6 +1904,7 @@ impl<'a> SlotCapture<'a> {
             portal_seats,
             portals,
             agents,
+            transient_views,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -1927,21 +1939,24 @@ impl<'a> SlotCapture<'a> {
     }
 
     fn name_leaf(&mut self, pane: u64) -> String {
-        // Order is portal, owner, ordinal. A portal seat that is
-        // also an attach pane (a LIVE viewer is: the reach inserts the
-        // mapping) captures as the portal slot, never as `Fno(attach_id)` -
-        // an attach binding would re-bind the thread to the rectangle at
-        // restore, the exact thing never-persist rule exists for.
-        // The slot pair is the durable record; the viewer process is not.
-        let base = match self.portal_seats.get(&pane) {
-            Some((index, _)) => format!("portal{index}"),
-            None => match self.pane_owner.get(&pane) {
-                Some(id) => id.to_string(),
-                None => {
-                    self.ordinal += 1;
-                    format!("p{}", self.ordinal)
-                }
-            },
+        // Order is transient, portal, owner, ordinal. A transient view
+        // leaf captures as an ordinal Shell slot: restore may mint a
+        // plain shell in its cell, but no owner binding survives that
+        // would re-attach the row behind the operator's back.
+        let base = if self.transient_views.contains_key(&pane) {
+            self.ordinal += 1;
+            format!("p{}", self.ordinal)
+        } else {
+            match self.portal_seats.get(&pane) {
+                Some((index, _)) => format!("portal{index}"),
+                None => match self.pane_owner.get(&pane) {
+                    Some(id) => id.to_string(),
+                    None => {
+                        self.ordinal += 1;
+                        format!("p{}", self.ordinal)
+                    }
+                },
+            }
         };
         let mut name = base.clone();
         let mut n = 2;
@@ -1949,14 +1964,15 @@ impl<'a> SlotCapture<'a> {
             name = format!("{base}#{n}");
             n += 1;
         }
-        let binding = if self.portal_seats.contains_key(&pane) {
-            LayoutBinding::Shell
-        } else {
-            match self.pane_owner.get(&pane) {
-                Some(id) => LayoutBinding::Fno(id.to_string()),
-                None => LayoutBinding::Shell,
-            }
-        };
+        let binding =
+            if self.transient_views.contains_key(&pane) || self.portal_seats.contains_key(&pane) {
+                LayoutBinding::Shell
+            } else {
+                match self.pane_owner.get(&pane) {
+                    Some(id) => LayoutBinding::Fno(id.to_string()),
+                    None => LayoutBinding::Shell,
+                }
+            };
         let portal = self.portal_seats.get(&pane).map(|(index, row)| {
             // The row facts the fill guard reads back after a restart:
             // harness + FULL session id of the row the seat showed at
@@ -2631,6 +2647,7 @@ impl Core {
             None,
             None,
             None,
+            false,
         )?;
         Ok(id)
     }
@@ -2767,6 +2784,7 @@ impl Core {
             resume_target,
             refused_worker_from_argv(argv),
             portal_hold_from_argv(argv),
+            transient_view_from_argv(argv),
         )?;
         if let Some(keeper_err) = fell_back {
             if let Some(entry) = self.panes.get_mut(&id) {
@@ -2862,6 +2880,7 @@ impl Core {
         resume_target: Option<String>,
         refused_worker: Option<String>,
         portal_hold: Option<String>,
+        transient_view: bool,
     ) -> Result<(), String> {
         let Some(child_pid) = pty.child_pid() else {
             pty.kill();
@@ -2893,6 +2912,7 @@ impl Core {
                 resume_target,
                 refused_worker,
                 portal_hold,
+                transient_view,
                 unreconciled: false,
                 unkept: false,
                 last_output: Instant::now(),
@@ -6236,11 +6256,28 @@ impl Core {
             .iter()
             .map(|(idx, p)| (p.seat, (*idx, p.row_key.clone())))
             .collect();
+        // A view pane is never a slot of its own kind: the capture reads
+        // the marker set once.
+        let transient_views: HashMap<u64, ()> = self
+            .panes
+            .iter()
+            .filter(|(_, e)| e.transient_view)
+            .map(|(pid, _)| (*pid, ()))
+            .collect();
         // Filled per tab below.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         for (i, t) in sq.tabs.iter().enumerate() {
+            let leaves = tree::leaves(&t.root);
+            // A tab whose every leaf is a transient view is never stored:
+            // nothing in it is the operator's to restore.
+            if !leaves.is_empty() && leaves.iter().all(|p| transient_views.contains_key(p)) {
+                if i == sq.active_tab {
+                    active_tab = usize::MAX;
+                }
+                continue;
+            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
@@ -6257,6 +6294,7 @@ impl Core {
                 &portal_seats,
                 &self.portals,
                 &self.agents,
+                &transient_views,
             );
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
@@ -10361,6 +10399,12 @@ impl Core {
                 // decision moved into the reach: a repoint keeps owning its
                 // geometry (ignored, visibly), a fresh open honors the
                 // caller's placement. This edge only resolves WHICH index.
+                if placement.view {
+                    // The transient machine view: never a portal, never an
+                    // entry in the map, never restored. A side effect's
+                    // screen; see `open_transient_view`.
+                    return self.open_transient_view(client_id, view, vp, &id, &placement);
+                }
                 if placement.wants_portal() {
                     // An explicit index wins over "any". `portal_new` names no
                     // index BECAUSE the caller must not choose one: allocating

@@ -8,6 +8,9 @@ mod thread_viewer_tests;
 // The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;
+// The TV-model acceptance family (views, anchors, prune).
+#[path = "server/tests/portal_tv_tests.rs"]
+mod portal_tv_tests;
 // Same treatment: the lifecycle-resolution test family.
 #[path = "server/tests/lifecycle_tests.rs"]
 mod lifecycle_tests;

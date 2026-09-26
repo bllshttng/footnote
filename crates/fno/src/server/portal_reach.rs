@@ -462,6 +462,7 @@ pub(super) struct PendingThreadReply {
     pub(super) client: u64,
     name: String,
     portal: u8,
+    view: bool,
     rx: mpsc::Receiver<ServerMsg>,
     reply: ControlReply,
 }
@@ -890,6 +891,24 @@ impl Core {
                 .iter()
                 .find_map(|s| s.tabs.iter().find(|t| t.id == tid).map(|_| (s.id, tid)))
         });
+        // The named anchor cell (`--from`): resolved once, honored
+        // wherever the caller's geometry is. `at` wins when both name a
+        // pane.
+        let from_anchor = match placement
+            .from
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(from) => match self.resolve_from_anchor(from) {
+                Ok(pid) => Some(pid),
+                Err(e) => {
+                    self.notice(client_id, e);
+                    return Flow::Continue;
+                }
+            },
+            None => None,
+        };
         let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
         let (dest, effective) = match remembered_tab {
             Some((sid, tid)) => {
@@ -900,6 +919,7 @@ impl Core {
                 let eff = PanePlacement {
                     tab: Some(crate::proto::TabSel::Id(tid)),
                     split: placement.split,
+                    at: placement.at.or(from_anchor),
                     ..Default::default()
                 };
                 (Some(sid), eff)
@@ -932,6 +952,9 @@ impl Core {
                 eff.portal = None;
                 eff.portal_new = false;
                 eff.thread_pane = false;
+                eff.view = false;
+                eff.from = None;
+                eff.at = eff.at.or(from_anchor);
                 (dest, eff)
             }
         };
@@ -1142,7 +1165,10 @@ impl Core {
         // caller already sent it. `portal` is the resolved index by
         // here, so a `new` reach names the index the server picked.
         let mut placement = placement;
-        placement.portal = Some(portal);
+        let view = placement.view;
+        if !view {
+            placement.portal = Some(portal);
+        }
         placement.portal_new = false;
         placement.thread_pane = false;
         if needs_plan {
@@ -1161,6 +1187,7 @@ impl Core {
                 client: CONTROL_CLIENT,
                 name: name.to_string(),
                 portal,
+                view,
                 rx,
                 reply,
             });
@@ -1179,6 +1206,19 @@ impl Core {
         // reply still carries the landing.
         let landing = Self::harvest_portal_landing(&mut rx);
         let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
+        // A transient view never enters the portals map, so the landed
+        // check would read a landed view as a refusal: the landing
+        // notice IS the view's verdict.
+        if view {
+            let _ = reply.send(match landing {
+                Some(text) => ServerMsg::Notice { text },
+                None => ServerMsg::Err {
+                    code: err_code::BAD_REQUEST,
+                    msg: format!("view open produced no landing for {name}"),
+                },
+            });
+            return;
+        }
         let landed = self.portal_landed(name, portal);
         let _ = reply.send(portal_reply(landed, landing, name, portal));
     }
@@ -1390,6 +1430,152 @@ impl Core {
             .is_some_and(|e| e.cmd.is_some() && e.portal_hold.is_none())
     }
 
+    /// The pane a `--from` anchor names: `portal N` is that portal's live
+    /// screen, a worker name is the pane the row hosts or the portal
+    /// showing it, and `current` refuses here (the control door has no
+    /// calling pane; callers with one resolve it themselves, the way
+    /// pane_args.rs resolves `--at current` from FNO_PANE).
+    pub(super) fn resolve_from_anchor(&self, from: &str) -> Result<u64, String> {
+        let from = from.trim();
+        if from == "current" {
+            return Err(
+                "--from current needs a calling pane; the thread door has none".to_string(),
+            );
+        }
+        if let Some(rest) = from.strip_prefix("portal") {
+            let idx: u8 = rest.trim().parse().map_err(|_| {
+                format!("--from takes portal N, a worker name, or current (got {from:?})")
+            })?;
+            return self
+                .portals
+                .get(&idx)
+                .map(|p| p.seat)
+                .filter(|seat| {
+                    self.panes.contains_key(seat) && self.session.find_pane(*seat).is_some()
+                })
+                .ok_or_else(|| format!("--from portal {idx} is not open"));
+        }
+        let named = self
+            .agents
+            .iter()
+            .find(|a| a.name == from)
+            .ok_or_else(|| format!("--from: no row answers {from:?}"))?;
+        if let Some((session, pane)) = &named.mux {
+            if session == &self.session_name {
+                return Ok(*pane);
+            }
+        }
+        self.row_portal_marker(named)
+            .and_then(|idx| self.portals.get(&idx).map(|p| p.seat))
+            .filter(|seat| self.panes.contains_key(seat))
+            .ok_or_else(|| format!("--from: {from} hosts no pane here"))
+    }
+
+    /// The transient machine view: the row's viewer opens in a pane that
+    /// is never a portal. A side effect (`fno mux command`) needs a screen
+    /// to type into when a row hosts no pane of its own; the screen
+    /// carries `FNO_VIEW_TRANSIENT` in its own argv, takes no `portals`
+    /// entry, captures as an ordinal shell slot at most, and the restore
+    /// prune reaps it instead of tabbing it. A claude Drive row rides the
+    /// parked re-entry plan's replay exactly as a reach does (the decode
+    /// edge routes `view` the same way).
+    pub(super) fn open_transient_view(
+        &mut self,
+        client_id: u64,
+        view: (u64, TabId),
+        vp: Rect,
+        key: &str,
+        placement: &PanePlacement,
+    ) -> Flow {
+        let mut hits = self.agents.iter().filter(|a| row_answers_key(a, key));
+        let row = match (hits.next(), hits.next()) {
+            (Some(a), None) => a.clone(),
+            (Some(_), Some(_)) => {
+                self.notice(
+                    client_id,
+                    "more than one row goes by that name - reach it by its pane",
+                );
+                return Flow::Continue;
+            }
+            _ => {
+                self.notice(client_id, format!("view open: no live row answers {key}"));
+                return Flow::Continue;
+            }
+        };
+        let tier = agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
+        let spawn_cwd = if row.cwd.is_empty() {
+            self.session
+                .squad(view.0)
+                .map(|s| s.canonical_cwd().to_string())
+                .unwrap_or_default()
+        } else {
+            row.cwd.clone()
+        };
+        let argv = match tier {
+            Reach::Drive => {
+                let id = row.attach_id.clone().expect("Drive implies attach_id");
+                // The canonical re-entry plan; a pending plan emits nothing
+                // here and the park answers the caller.
+                let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, placement) else {
+                    return Flow::Continue;
+                };
+                argv
+            }
+            Reach::Follow => peek_argv(&row.name),
+            Reach::Locate => locate_argv(&row),
+        };
+        // The marker rides the argv: provenance a later server re-derives
+        // on keeper re-adoption. `env` chains (each env execs the next).
+        let mut marked = vec!["env".to_string(), "FNO_VIEW_TRANSIENT=1".to_string()];
+        marked.extend(argv);
+        let (rows, cols) = self
+            .clients
+            .iter()
+            .find(|c| c.id == client_id)
+            .map(|c| c.dims)
+            .filter(|(r, c)| *r > 0 && *c > 0)
+            .unwrap_or((vp.rows, vp.cols));
+        let permit = match crate::process_admission::admit_pane(0, None) {
+            Ok(p) => p,
+            Err(error) => {
+                self.notice(client_id, format!("view open failed: {error}"));
+                return Flow::Continue;
+            }
+        };
+        let pid = match self.spawn_pane_cmd_with_permit(&marked, rows, cols, &spawn_cwd, permit) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notice(client_id, format!("view open failed: {e}"));
+                return Flow::Continue;
+            }
+        };
+        self.name_thread_viewer_pane(pid, &row, &tier);
+        // The view owns a fresh tab; the caller's split/at/from geometry
+        // is not a view's to honor.
+        let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
+        let effective = PanePlacement {
+            tab: Some(crate::proto::TabSel::New),
+            ..Default::default()
+        };
+        let (_sid, _tid, fell_back) =
+            match self.place_with(Some(owner), &spawn_cwd, pid, &effective) {
+                Ok(landing) => landing,
+                Err((_code, e)) => {
+                    self.notice(client_id, e);
+                    return Flow::Continue;
+                }
+            };
+        if let Some(id) = row.attach_id.clone() {
+            self.attached.insert(id, pid);
+        }
+        if fell_back {
+            self.notice(client_id, "tab full - opened as tab");
+        }
+        self.notice(client_id, format!("view pane -> {} (pane {pid})", row.name));
+        self.push_layout(true);
+        Flow::Continue
+    }
+
     /// The parked screen a portal shows when nothing plays on it: a
     /// keeper-hosted process that takes no input and runs no shell. The
     /// channel rides the argv in `FNO_PORTAL_HELD=`, so a later server
@@ -1486,11 +1672,22 @@ impl Core {
             client,
             name,
             portal,
+            view,
             mut rx,
             reply,
         } = pending;
         let landing = Self::harvest_portal_landing(&mut rx);
         let _ = self.self_tx.try_send(CoreMsg::Gone(client));
+        if view {
+            let _ = reply.send(match landing {
+                Some(text) => ServerMsg::Notice { text },
+                None => ServerMsg::Err {
+                    code: err_code::BAD_REQUEST,
+                    msg: format!("view open produced no landing for {name}"),
+                },
+            });
+            return;
+        }
         let landed = self.portal_landed(&name, portal);
         let _ = reply.send(portal_reply(landed, landing, &name, portal));
     }
