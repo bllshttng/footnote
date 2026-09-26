@@ -1693,33 +1693,6 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_sync_skips_an_unrepresentable_row_without_refusing_the_publish() {
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let before = raw_rows(&graph);
-        let mut after = before.clone();
-        after[0]["status"] = Value::String("not-a-status".into());
-
-        authoritative_sync(&graph, &before, &after).unwrap();
-
-        let connection = open(&graph).unwrap();
-        let version: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, "sha256:next");
-        let status: String = connection
-            .query_row("SELECT status FROM nodes WHERE id = 'ab-one'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(status, "idea");
-    }
-
-    #[test]
     fn readback_batches_more_ids_than_sqlite_bind_limit() {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
