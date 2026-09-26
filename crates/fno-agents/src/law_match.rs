@@ -50,10 +50,13 @@ enum MatchRequest {
 
 /// The law door's scope stamp: the recording project by default,
 /// `global` only by explicit flag, because law is never inherited by silence.
+/// `paths` names the repo-relative globs an edit read keys the law by.
 #[derive(Deserialize)]
 struct RecordScopeRequest {
     #[serde(default)]
     r#global: bool,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 /// The `list_decisions` scope filter: rows in, the kept rows plus the
@@ -63,10 +66,14 @@ struct RecordScopeRequest {
 struct ScopeSplitRequest {
     rows: Vec<Value>,
 }
-/// The raw hook payload, verbatim from the harness event.
+/// The raw hook payload, verbatim from the harness event. `paths` carries the
+/// file targets of a PreToolUse Edit|Write payload (the hook reads them off
+/// `tool_input`); non-empty `paths` routes the answer to the edit read.
 #[derive(Deserialize)]
 struct StageRequest {
     hook: serde_json::Value,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 /// The statement `fno inbox law set` wants recorded. `rationale` and
@@ -696,12 +703,17 @@ fn short_law_line(full: &str) -> Option<String> {
 
 /// The stage answer. A readable index with zero matching laws renders
 /// nothing (`hook_output: null`), which is the correct answer for that
-/// input; a failed read is a report, never silence.
+/// input; a failed read is a report, never silence. A request carrying edit
+/// targets (`paths`) answers from the edit read instead of the verb
+/// classifier.
 fn stage_answer_with(
     req: StageRequest,
     index_path: Option<&std::path::Path>,
     graph_path: Option<&std::path::Path>,
 ) -> Value {
+    if !req.paths.is_empty() {
+        return edit_answer(req, index_path, None);
+    }
     let stage = classify_stage(&req.hook);
     let mut hook_output = None;
     let mut unread = Vec::new();
@@ -786,6 +798,129 @@ fn stage_answer_with(
         }
     }
     json!({"ok": true, "stage": stage, "hook_output": hook_output, "unread": unread})
+}
+
+/// Comma-joined flag values read as separate globs: split on commas, trim,
+/// drop empties.
+fn normalize_paths(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .flat_map(|p| p.split(','))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A law names repo paths: a glob is refused when it is absolute or holds a
+/// `..` component.
+fn glob_is_repo_relative(glob: &str) -> bool {
+    !glob.starts_with('/') && glob.split('/').all(|component| component != "..")
+}
+
+/// The state root the edit seen-set lives under: `$FNO_HOME`, else `~/.fno`
+/// (the shared `default_state_path` resolution, taken at its parent).
+fn default_state_root() -> std::path::PathBuf {
+    decision_index::default_state_path("law-edit-seen")
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// The paths a row names. A row with no non-empty `paths` array never
+/// matches the edit read.
+fn row_paths(row: &Value) -> Vec<String> {
+    row.get("paths")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The edit read: the files a PreToolUse Edit|Write payload is about to
+/// change, matched against live laws that name paths (`paths` globs on the
+/// row, matched with the crate's fnmatch, where `*` crosses `/`). The read
+/// prints once per session per decision id, keyed in
+/// `law-edit-seen/<session>.json`; a payload with no `session_id` prints
+/// every time. An unreadable index is a report naming this edit, never
+/// silence, and zero surviving laws render nothing.
+fn edit_answer(
+    req: StageRequest,
+    index_path: Option<&std::path::Path>,
+    state_root: Option<&std::path::Path>,
+) -> Value {
+    let targets = normalize_paths(&req.paths);
+    let hook_event = req
+        .hook
+        .get("hook_event_name")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let laws = match index_path {
+        Some(p) => decision_index::live_laws(p),
+        None => decision_index::default_store_live().map(decision_index::laws_of),
+    };
+    let hook_output = match laws {
+        Ok(index) => {
+            let mut hits: Vec<&Value> = index
+                .rows
+                .iter()
+                .filter(|row| {
+                    let globs = row_paths(row);
+                    !globs.is_empty()
+                        && globs.iter().any(|glob| {
+                            targets
+                                .iter()
+                                .any(|t| crate::sync_canonical::fnmatch(t, glob))
+                        })
+                })
+                .collect();
+            let session_id = req.hook.get("session_id").and_then(Value::as_str);
+            if let Some(session_id) = session_id {
+                let fallback;
+                let root = match state_root {
+                    Some(p) => p,
+                    None => {
+                        fallback = default_state_root();
+                        &fallback
+                    }
+                };
+                let mut seen = crate::announce::load_cursor(root, "law-edit-seen", session_id);
+                hits.retain(|row| {
+                    let id = row.get("decision_id").and_then(Value::as_str).unwrap_or("");
+                    !seen.contains(id)
+                });
+                if !hits.is_empty() {
+                    for row in &hits {
+                        if let Some(id) = row.get("decision_id").and_then(Value::as_str) {
+                            seen.insert(id.to_owned());
+                        }
+                    }
+                    crate::announce::save_cursor(root, "law-edit-seen", session_id, &seen);
+                }
+            }
+            let matching: Vec<String> = hits.iter().filter_map(|row| stage_law_line(row)).collect();
+            (!matching.is_empty()).then(|| {
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": hook_event,
+                        "additionalContext": render_stage_block("edit", &matching, index.damaged, &[]),
+                    }
+                })
+            })
+        }
+        Err(reason) => Some(json!({
+            "hookSpecificOutput": {
+                "hookEventName": hook_event,
+                "additionalContext": format!(
+                    "The decision index could not be read ({reason}), so the rulings that govern this edit are unknown. Run `fno backlog decisions --lane law --state live` before you act on the files you are changing.\n"
+                ),
+            }
+        })),
+    };
+    json!({"ok": true, "stage": "edit", "hook_output": hook_output, "unread": []})
 }
 
 /// The statement validator, a word-for-word port of
@@ -1079,19 +1214,38 @@ fn settings_sources() -> Vec<std::path::PathBuf> {
 /// names what failed, because a row stamped with a guessed project is worse
 /// than a row not written.
 fn record_scope_answer(req: RecordScopeRequest) -> Value {
-    record_scope_answer_in(None, &settings_sources(), req.r#global)
+    record_scope_answer_in(None, &settings_sources(), req.r#global, &req.paths)
 }
 
 fn record_scope_answer_in(
     cwd: Option<&std::path::Path>,
     sources: &[std::path::PathBuf],
     is_global: bool,
+    raw_paths: &[String],
 ) -> Value {
+    // The globs ride the door's validation: split, trim, drop empties, then
+    // refuse any glob that is absolute or holds `..` - a law names repo
+    // paths, and an absolute or escaping glob would match outside the repo.
+    let paths = normalize_paths(raw_paths);
+    for glob in &paths {
+        if !glob_is_repo_relative(glob) {
+            return json!({
+                "ok": false,
+                "refusal": format!(
+                    "not a repo-relative glob: {glob} (a law names repo paths: no leading /, no ..)"
+                )
+            });
+        }
+    }
     if is_global {
-        return json!({"ok": true, "scope": "global"});
+        if paths.is_empty() {
+            return json!({"ok": true, "scope": "global"});
+        }
+        return json!({"ok": true, "scope": "global", "paths": paths});
     }
     match resolve_project(cwd, sources) {
-        Ok(slug) => json!({"ok": true, "scope": format!("project:{slug}")}),
+        Ok(slug) if paths.is_empty() => json!({"ok": true, "scope": format!("project:{slug}")}),
+        Ok(slug) => json!({"ok": true, "scope": format!("project:{slug}"), "paths": paths}),
         Err(reason) => json!({
             "ok": false,
             "refusal": format!("no project stamps this law ({reason}); pass --global to widen")
@@ -1186,7 +1340,7 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split)"
+            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split; record-scope takes paths: comma-separated repo-relative globs - the law prints once per session at the first Edit or Write of a matching file)"
         );
         return 0;
     }
@@ -1496,7 +1650,14 @@ mod tests {
                 "args": "high https://github.com/o/r/pull/1"
             }
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         assert_eq!(answer["stage"], "review");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -1534,7 +1695,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "$fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         assert_eq!(answer["stage"], "review");
         assert_eq!(
             answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
@@ -1553,7 +1721,10 @@ mod tests {
             "prompt": "/fno:review low"
         });
         let answer = stage_answer_with(
-            StageRequest { hook },
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
             Some(std::path::Path::new("/nonexistent/fno/decisions.jsonl")),
             None,
         );
@@ -1588,7 +1759,14 @@ mod tests {
                 "prompt": "/fno:reviewer"
             }),
         ] {
-            let answer = stage_answer_with(StageRequest { hook: hook.clone() }, Some(&path), None);
+            let answer = stage_answer_with(
+                StageRequest {
+                    hook: hook.clone(),
+                    paths: vec![],
+                },
+                Some(&path),
+                None,
+            );
             assert_eq!(answer["stage"], Value::Null, "{hook}");
             assert_eq!(answer["hook_output"], Value::Null, "{hook}");
         }
@@ -1603,7 +1781,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         assert_eq!(answer["stage"], "review");
         assert_eq!(answer["hook_output"], Value::Null);
     }
@@ -1627,7 +1812,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context present");
@@ -1677,7 +1869,14 @@ mod tests {
                 "args": "x-aaaa"
             }
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context present");
@@ -1837,6 +2036,139 @@ mod tests {
              \"decision\":\"{decision}\",\"text\":\"x\",\"authority_source\":\"operator\"}}}}"
         )
     }
+    fn edit_row(id: &str, paths: &str) -> String {
+        format!(
+            "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-12T00:00:00Z\",\
+             \"data\":{{\"decision_id\":\"{id}\",\"subject\":\"path-governed\",\
+             \"decision\":\"the edit-governed ruling\",\"text\":\"x\",\
+             \"authority_source\":\"operator\",\"paths\":{paths}}}}}"
+        )
+    }
+    fn edit_req(session: Option<&str>, targets: &[&str]) -> StageRequest {
+        let mut hook = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "crates/x.rs"}
+        });
+        if let Some(s) = session {
+            hook["session_id"] = serde_json::json!(s);
+        }
+        StageRequest {
+            hook,
+            paths: targets.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn ac1_edit_payload_prints_the_path_law() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = tempfile::tempdir().expect("tempdir");
+        let path = write_index(dir.path(), &[edit_row("d-editlaw01", "[\"crates/**\"]")]);
+        let req = edit_req(Some("S"), &["crates/fno-agents/src/lib.rs"]);
+        let answer = edit_answer(req, Some(&path), Some(state.path()));
+        assert_eq!(answer["stage"], "edit");
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("Law governing edit"), "{ctx}");
+        assert!(ctx.contains("d-editlaw01"), "{ctx}");
+    }
+
+    #[test]
+    fn ac2_the_same_session_prints_the_law_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = tempfile::tempdir().expect("tempdir");
+        let path = write_index(dir.path(), &[edit_row("d-editlaw01", "[\"crates/**\"]")]);
+        let first = edit_answer(
+            edit_req(Some("S"), &["crates/fno-agents/src/lib.rs"]),
+            Some(&path),
+            Some(state.path()),
+        );
+        assert!(first["hook_output"].is_object(), "{first}");
+        let second = edit_answer(
+            edit_req(Some("S"), &["crates/fno/src/main.rs"]),
+            Some(&path),
+            Some(state.path()),
+        );
+        assert!(second["hook_output"].is_null(), "{second}");
+    }
+
+    #[test]
+    fn ac3_a_row_without_paths_never_prints_at_an_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = tempfile::tempdir().expect("tempdir");
+        // The row's TEXT contains the word crates; the edit read matches
+        // paths globs only, never keywords.
+        let row = stage_row(
+            "d-textonly1",
+            "new-code-language",
+            "New code goes in crates.",
+        );
+        let path = write_index(dir.path(), &[row]);
+        let answer = edit_answer(
+            edit_req(Some("S"), &["crates/x.rs"]),
+            Some(&path),
+            Some(state.path()),
+        );
+        assert!(answer["hook_output"].is_null(), "{answer}");
+    }
+
+    #[test]
+    fn ac3_a_request_without_paths_answers_the_verb_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-b6cc1a2a",
+                "new-code-language",
+                "New code goes in crates. Existing Python is shrink-only.",
+            )],
+        );
+        let hook = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Skill",
+            "tool_input": {"skill": "fno:blueprint", "args": "x-aaaa"}
+        });
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
+        assert_eq!(answer["stage"], "blueprint");
+    }
+
+    #[test]
+    fn ac4_an_unreadable_index_reports_never_silence() {
+        let missing = std::path::Path::new("/nonexistent/fno-x-fa1e/decisions.jsonl");
+        let state = tempfile::tempdir().expect("tempdir");
+        let answer = edit_answer(
+            edit_req(Some("S"), &["crates/x.rs"]),
+            Some(missing),
+            Some(state.path()),
+        );
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("could not be read"), "{ctx}");
+    }
+
+    #[test]
+    fn an_edit_with_no_session_prints_every_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = tempfile::tempdir().expect("tempdir");
+        let path = write_index(dir.path(), &[edit_row("d-editlaw02", "[\"crates/**\"]")]);
+        for _ in 0..2 {
+            let answer = edit_answer(
+                edit_req(None, &["crates/x.rs"]),
+                Some(&path),
+                Some(state.path()),
+            );
+            assert!(answer["hook_output"].is_object(), "{answer}");
+        }
+    }
 
     #[test]
     fn ac1_blueprint_payload_surfaces_the_language_law() {
@@ -1857,7 +2189,14 @@ mod tests {
                 "args": "x-aaaa"
             }
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            None,
+        );
         assert_eq!(answer["stage"], "blueprint");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -1906,7 +2245,14 @@ mod tests {
             .to_string(),
         )
         .expect("writes");
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), Some(&graph));
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&path),
+            Some(&graph),
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context present");
@@ -1944,7 +2290,14 @@ mod tests {
                 "prompt": "$fno:execute a-plan-path"
             }),
         ] {
-            let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+            let answer = stage_answer_with(
+                StageRequest {
+                    hook,
+                    paths: vec![],
+                },
+                Some(&path),
+                None,
+            );
             assert_eq!(answer["stage"], "target");
             let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
                 .as_str()
@@ -2021,7 +2374,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:blueprint x-aaaa"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&index),
+            Some(&graph),
+        );
         assert_eq!(answer["unread"], serde_json::json!([]));
         assert!(
             answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
@@ -2048,7 +2408,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:blueprint x-aaaa"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&index),
+            Some(&graph),
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context");
@@ -2070,7 +2437,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:blueprint x-aaaa"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&index),
+            Some(&graph),
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context");
@@ -2096,7 +2470,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:blueprint x-aaaa"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let answer = stage_answer_with(
+            StageRequest {
+                hook,
+                paths: vec![],
+            },
+            Some(&index),
+            Some(&graph),
+        );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context");
@@ -2177,9 +2558,9 @@ mod scope_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_map(tmp.path(), "demo", &tmp.path().join("proj"));
         let cwd = tmp.path().join("proj");
-        let answer = record_scope_answer_in(Some(&cwd), &sources(tmp.path()), false);
+        let answer = record_scope_answer_in(Some(&cwd), &sources(tmp.path()), false, &[]);
         assert_eq!(answer["scope"], "project:demo");
-        let answer = record_scope_answer_in(Some(&cwd), &sources(tmp.path()), true);
+        let answer = record_scope_answer_in(Some(&cwd), &sources(tmp.path()), true, &[]);
         assert_eq!(answer["scope"], "global");
     }
 
@@ -2191,12 +2572,41 @@ mod scope_tests {
             Some(&tmp.path().join("nowhere")),
             &sources(tmp.path()),
             false,
+            &[],
         );
         assert_eq!(answer["ok"], false);
         assert!(answer["refusal"]
             .as_str()
             .expect("refusal")
             .contains("no project stamps this law"));
+    }
+
+    #[test]
+    fn the_record_door_splits_echoes_and_refuses_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_map(tmp.path(), "demo", &tmp.path().join("proj"));
+        let cwd = tmp.path().join("proj");
+        let answer = record_scope_answer_in(
+            Some(&cwd),
+            &sources(tmp.path()),
+            false,
+            &["crates/**, hooks/*.sh".to_string(), "  ".to_string()],
+        );
+        assert_eq!(answer["ok"], true);
+        assert_eq!(answer["scope"], "project:demo");
+        assert_eq!(
+            answer["paths"],
+            serde_json::json!(["crates/**", "hooks/*.sh"])
+        );
+        for bad in ["/etc/**", "../x/**"] {
+            let answer =
+                record_scope_answer_in(Some(&cwd), &sources(tmp.path()), false, &[bad.to_string()]);
+            assert_eq!(answer["ok"], false, "{bad}");
+            assert!(
+                answer["refusal"].as_str().expect("refusal").contains(bad),
+                "{answer}"
+            );
+        }
     }
 
     #[test]

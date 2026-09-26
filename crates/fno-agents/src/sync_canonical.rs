@@ -148,7 +148,7 @@ fn tail(text: &str) -> String {
 
 // Port of Python fnmatch.fnmatch (POSIX case rules): `*` crosses `/`, `?`
 // is one char, `[...]` a class with `!` negation and `-` ranges.
-fn fnmatch(name: &str, pat: &str) -> bool {
+pub(crate) fn fnmatch(name: &str, pat: &str) -> bool {
     match_class(name.as_bytes(), pat.as_bytes())
 }
 
