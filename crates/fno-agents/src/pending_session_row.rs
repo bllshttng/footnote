@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// The session phases a parked row may name, mirroring Python store's
 /// `_SESSION_PHASES`. A phase out of this vocabulary is a producer bug and
 /// refuses rather than stamping a row no reader understands.
-const PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+const PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
 
 /// The transport arm. Reads the JSON payload on stdin, dispatches to
 /// [`park`]/[`open`], prints the JSON answer, and maps the result to an
@@ -188,6 +188,13 @@ fn open(payload: &Value) -> Result<Value, String> {
         .get("phase")
         .and_then(Value::as_str)
         .ok_or("parked payload carries no phase")?;
+    // One-release input alias, matching Python's PHASE_INPUT_ALIASES: a
+    // payload parked before the rename still opens. Drop the alias when the
+    // release window closes.
+    let phase = match phase {
+        "do" => "execute",
+        other => other,
+    };
     if !PHASES.contains(&phase) {
         return Err(format!("parked phase {phase:?} is not in the vocabulary"));
     }
@@ -261,17 +268,17 @@ mod tests {
         let dir = tmp_dir("park");
         let registry = dir.join("registry.json");
         seed_row(&registry, "w1", Some("x-1"));
-        let payload = park_payload(&registry, "do");
+        let payload = park_payload(&registry, "execute");
 
         let first = park(&payload).unwrap();
         assert_eq!(first["parked"], json!(true));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
-        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
+        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("execute"));
 
         let second = park(&park_payload(&registry, "review")).unwrap();
         assert_eq!(second["parked"], json!(false));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
-        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
+        assert_eq!(rows[0]["pending_session_row"]["phase"], json!("execute"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -301,7 +308,7 @@ mod tests {
         )
         .unwrap();
         seed_row(&registry, "w1", Some("x-defr"));
-        park(&park_payload(&registry, "do")).unwrap();
+        park(&park_payload(&registry, "execute")).unwrap();
 
         let answer = open(&open_payload(&registry, &graph, "sid-1")).unwrap();
         assert_eq!(answer["opened"], json!(true));
@@ -311,7 +318,7 @@ mod tests {
         let sessions = rows[0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["session_id"], json!("sid-1"));
-        assert_eq!(sessions[0]["phase"], json!("do"));
+        assert_eq!(sessions[0]["phase"], json!("execute"));
         assert_eq!(sessions[0]["effort"], json!("xhigh"));
         // The row carries the PARK instant as its start, not the open instant.
         assert!(sessions[0]["started_at"].is_string());
@@ -335,13 +342,13 @@ mod tests {
             &graph,
             &[json!({
                 "id": "x-clai", "title": "t", "status": "in_progress",
-                "sessions": [{"phase": "do", "harness": "claude", "session_id": "sid-2",
+                "sessions": [{"phase": "execute", "harness": "claude", "session_id": "sid-2",
                               "started_at": "2026-09-22T00:00:00Z"}],
             })],
         )
         .unwrap();
         seed_row(&registry, "w1", Some("x-clai"));
-        park(&park_payload(&registry, "do")).unwrap();
+        park(&park_payload(&registry, "execute")).unwrap();
 
         let answer = open(&open_payload(&registry, &graph, "sid-2")).unwrap();
         assert_eq!(answer["opened"], json!(true));

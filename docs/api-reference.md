@@ -1,7 +1,7 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # footnote Plugin - API Reference
 
-The **footnote** plugin is an autonomous development workflow for Claude Code that takes features from idea to shipped PR. It provides 24 skills, 17 agents, and a hook system that work together as a pipeline: think, plan, do, review, ship.
+The **footnote** plugin is an autonomous development workflow for Claude Code that takes features from idea to shipped PR. It provides 24 skills, 17 agents, and a hook system that work together as a pipeline: think, plan, execute, review, ship.
 
 - **Repository**: `footnote/`
 - **Plugin manifest**: `.claude-plugin/plugin.json`
@@ -45,7 +45,7 @@ The core pipeline - from idea to shipped PR.
 | `think` | `/fno:think` | inherit | Brainstorming and design exploration with BDD criteria |
 | `blueprint` | `/fno:blueprint "feature"` | inherit | Implementation planning with wave execution strategy. Use `--full` for BDD acceptance criteria. Writes the plan and stops; building starts when you point `/fno:target` at it |
 | `execute` | `/fno:execute` | inherit | Plan execution. Routes between single-session execution (`flat`, default) and wave orchestration (`waves`; alias `/fno:operator`). Supports `--resume` and `--retry <task-id>` |
-| `target` | `/fno:target "feature"` | inherit | Autonomous end-to-end pipeline (think, blueprint, do, review, ship). Also accepts a plan path to skip think/blueprint |
+| `target` | `/fno:target "feature"` | inherit | Autonomous end-to-end pipeline (think, blueprint, execute, review, ship). Also accepts a plan path to skip think/blueprint |
 
 #### target Pipeline Stages
 
@@ -53,7 +53,7 @@ The core pipeline - from idea to shipped PR.
 Input ("feature" or path/to/plan)
   -> think (design exploration)
   -> plan (wave strategy)
-  -> do (execute waves, spawn subagents)
+  -> execute (execute waves, spawn subagents)
   -> review (the owned lane: one inline reviewer, head-pinned attestation)
   -> goal-verification (3-level check)
   -> create-pr (inline create flow)

@@ -2178,7 +2178,7 @@ def abandoned_leg(entries, claimed, graph_path, apply):
                         cand.ended_epoch, tz=timezone.utc
                     ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 rep = reap_open_session_record(
-                    graph_path, cand.node, phase="do",
+                    graph_path, cand.node, phase="execute",
                     harness=cand.harness, session_id=cand.session_id,
                     ended_at=ended_at,
                 )

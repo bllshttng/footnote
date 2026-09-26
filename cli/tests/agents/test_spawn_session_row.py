@@ -220,7 +220,7 @@ def test_spawn_with_prose_and_node_composes_a_labeled_seed(
     assert result.exit_code == 0, result.output
     rows = _node_rows()
     assert len(rows) == 1, f"one row for the composed seed: {_node_rows()!r}"
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     assert rows[0]["session_id"] == FULL_UUID
     assert rows[0]["started_at"]
     assert rows[0].get("ended_at") is None
@@ -344,7 +344,7 @@ def test_spawn_target_family_stamps_do(
     assert result.exit_code == 0, result.output
     rows = _node_rows()
     assert len(rows) == 1
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     assert rows[0]["session_id"] == FULL_UUID
 
 
@@ -371,7 +371,7 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
     assert result.exit_code == 2, result.output
     assert "--session-phase" in result.stderr
     assert "No worker launched" in result.stderr
-    for phase in ("do", "review", "blueprint", "think", "ship"):
+    for phase in ("execute", "review", "blueprint", "think", "ship"):
         assert phase in result.stderr, phase
     assert load_registry() == []  # nothing launched
     assert _node_rows() == []
@@ -587,7 +587,7 @@ def test_roster_renders_review_between_do_and_ship(graph_cli_home) -> None:
     lines, summary = graph_cli._lifecycle_roster(_node_rows())
     text = "\n".join(lines)
     assert "review" in text and "claude" in text
-    assert text.index("do") < text.index("review") < text.index("ship")
+    assert text.index("execute") < text.index("review") < text.index("ship")
     phases = [p["phase"] for p in summary["phases"] if isinstance(p, dict)] if isinstance(
         summary.get("phases"), list) else []
     assert "review" in phases
@@ -631,7 +631,7 @@ def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
     window settles both - each row filled and kept."""
     import fno.graph.cli as graph_cli
 
-    for phase in ("do", "review"):
+    for phase in ("execute", "review"):
         CliRunner().invoke(
             graph_cli.cli,
             ["session", "add", NODE, "--phase", phase,

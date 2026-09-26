@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-_LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
+_LIFECYCLE_PHASES = ("think", "blueprint", "execute", "review", "ship")
 
 
 def registry_status_of(

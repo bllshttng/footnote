@@ -57,7 +57,16 @@ class Priority(str, Enum):
 # session that never holds the claim crossed no stamping chokepoint, so its
 # provenance row had no honest label. The single source of truth for phase
 # validation in store.append_session_record and the `session add` CLI.
-SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "review", "ship"})
+SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "execute", "review", "ship"})
+
+# One-release input alias: "do" names this phase no more (2026-09-25 ruling).
+# Normalize on input; remove to make --phase do refuse naming execute.
+PHASE_INPUT_ALIASES: dict[str, str] = {"do": "execute"}
+
+
+def normalize_phase(value: str) -> str:
+    """Map a retired phase spelling to its live name before validation."""
+    return PHASE_INPUT_ALIASES.get(value, value)
 
 
 # Re-export the canonical PRIORITY_ORDER from _constants so this module

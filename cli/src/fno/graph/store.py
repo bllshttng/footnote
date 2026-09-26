@@ -1603,7 +1603,7 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
 # Bounded ceiling for harness / session-id strings.
 _SESSION_STR_MAX = 200
 
-_SESSION_PHASES = ("think", "blueprint", "do", "review", "ship")
+_SESSION_PHASES = ("think", "blueprint", "execute", "review", "ship")
 
 
 def _utc_session_stamp(label: str, value: str) -> str:
@@ -1815,7 +1815,7 @@ def reap_open_session_record(
         raise ValueError(
             f"invalid phase {phase!r}; expected 'all' or one of {sorted(_SESSION_PHASES)}"
         )
-    identity_phase = "do" if phase == "all" else phase
+    identity_phase = "execute" if phase == "all" else phase
     harness_v, session_v = _validate_session_identity(identity_phase, harness, session_id)
     if ended_at is None:
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
