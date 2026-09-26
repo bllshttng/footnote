@@ -1434,6 +1434,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // silently emptied roster (the false "0 registered agents" outage: a stale
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
+    let _ = state::heal_full_uuid_short_ids(&home.registry_json());
 
     // State: cold_start.
     // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
@@ -1542,11 +1543,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                     .emit("keeper_sweep_failed", &json!({"error": msg}));
                             }
                         }
-                        // Startup sweep: every thread row reads hosted. The
-                        // async recovery pass owns resume-and-settle here and
-                        // has not run yet, so settling unhosted rows now would
-                        // stamp Orphaned rows the recovery pass is about to
-                        // resume.
+                        // The reboot revival plans BEFORE this sweep rewrites
+                        // pre-reboot statuses. Startup sweep: every thread row
+                        // reads hosted; the async recovery pass owns resume
+                        // and settle here and has not run yet.
+                        crate::boot_revival::start(&home_sweep);
                         run_reconcile_sweep(&home_sweep, &emitter_sweep, &|_| true, SweepMode::Full)
                     }))
                     .unwrap_or_else(|_| {
@@ -2163,7 +2164,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidParams,
-                "name must be 1-64 chars of [A-Za-z0-9_-]",
+                "name must be 1-64 chars of [A-Za-z0-9_'-]",
             )
         }
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
@@ -4494,15 +4495,14 @@ where
         "status": filter_status,
         "progress": filter_progress,
     });
-    Response::ok(
-        req.id,
-        json!({
-            "agents": entries,
-            "filters_applied": filters_applied,
-            "fields_omitted": LIST_PROJECTION_OMISSIONS,
-            "truth_probe_asked": truth_probe_asked,
-            "truth_probe_answered": truth_probe_answered,
-        }),
+    list_rows::list_response(
+        req,
+        entries,
+        filters_applied,
+        truth_probe_asked,
+        truth_probe_answered,
+        all,
+        &ctx.home,
     )
 }
 
@@ -5445,16 +5445,8 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Err(interrupt_report) = rm_teardown::end_codex_thread(ctx, &name).await {
-            return Response::err(
-                req.id,
-                ErrorCode::Busy,
-                format!(
-                    "agent {name}: the codex thread's turn did not settle \
-                     ({interrupt_report}); the registry row and the codex index \
-                     entry are kept"
-                ),
-            );
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+            return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
@@ -6519,12 +6511,10 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread reads the daemon roster:
-    // presence for the zombie flip, a live-pid listing for the crown
-    // revival. See liveness_sweep::BgRoster - the witness moved there with
-    // the crown-revival work (this file is shrink-only). A MISSING roster
+    // Liveness for a `claude --substrate bg` thread reads the daemon roster
+    // and the claude listing: see liveness_sweep::BgRoster. A MISSING roster
     // parses as zero workers and reaps as before; an UNREADABLE one is
-    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
@@ -6599,6 +6589,7 @@ pub(crate) fn run_reconcile_sweep(
         roster_readable,
     );
     changes.append(&mut revivals);
+    witness.serve_listing(&entries, &mut changes);
     outcome.recovered.extend(revived);
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to

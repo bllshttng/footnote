@@ -529,6 +529,8 @@ What is shipped instead is observation: `fno agents top --subagents`
 enumerates sidechain transcripts (keyed on `agentId`, not pid, since a limb
 has no pid), lists each with its parent session and an mtime-based liveness
 verdict against a stated threshold, and is claude-only today.
+
+The king check-in also reads its own session's held subagents from the parent transcript's task notifications, and still gives them no slot and no mail.
 The codex, agy, and opencode task primitives have their own on-disk layouts
 that are unmeasured here; a future harness reader slots into the same
 per-harness discovery seam.

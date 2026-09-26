@@ -349,13 +349,25 @@ pub(crate) fn held_from_pages(pages: &[(String, String)], scope: &str) -> Vec<Va
     rows.into_iter().map(|(_, v)| v).collect()
 }
 
-/// The workers payload, one `fno agents top --json` call shared by the
-/// workers and quiet readings.
+/// The workers payload, one `fno agents top --json --subagents` call shared
+/// by the workers and quiet readings.
 pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
-    let (_, out, err) = crate::king_checkin::fno_verb(&["agents", "top", "--json"])?;
+    let (_, out, err) = crate::king_checkin::fno_verb(&["agents", "top", "--json", "--subagents"])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("top payload did not parse: {e}: {}", err.trim()))?;
     Ok(payload)
+}
+
+/// The finished background subagents this session still holds, read from
+/// its own claude transcript; claude-only, the same posture as the refusal
+/// and wake readers, and it fails as a reader on every other harness.
+pub(crate) fn r_subagents() -> Result<Value, String> {
+    let transcript = crate::king_checkin::own_claude_transcript()?;
+    crate::subagent_hold::reading(
+        &transcript,
+        std::time::SystemTime::now(),
+        crate::subagent_hold::live_threshold(),
+    )
 }
 
 /// The payload's worker rows, behind the same positive-predicate guard the
@@ -375,9 +387,20 @@ fn payload_workers(payload: &Value) -> Result<&[Value], String> {
 }
 
 /// The summary the beat journals, folded from the shared top payload, so
-/// the workers and quiet readings cost one `top` call between them.
+/// the workers and quiet readings cost one `top` call between them. The
+/// workers reading journals `live_subagents`, the rows in the payload's
+/// `subagents` array whose verdict reads `active`; a payload with no
+/// `subagents` array journals null, never 0.
 pub(crate) fn workers_summary(payload: &Value) -> Result<Value, String> {
     let workers = payload_workers(payload)?;
+    let live_subagents = payload
+        .get("subagents")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r.get("verdict").and_then(Value::as_str) == Some("active"))
+                .count()
+        });
     let mut oldest: Option<(f64, String)> = None;
     for w in workers {
         let age = w.get("status_age_s").and_then(|a| a.as_f64());
@@ -396,7 +419,55 @@ pub(crate) fn workers_summary(payload: &Value) -> Result<Value, String> {
     Ok(json!({
         "live_workers": workers.len(),
         "oldest_worker_seen": format!("{}s {}", age as i64, handle),
+        "live_subagents": live_subagents,
     }))
+}
+
+/// The subagents render block: the active count rides the workers line;
+/// this block names the finished background subagents this session still
+/// holds, oldest first, each with its TaskStop remedy, and fails loudly.
+pub(crate) fn subagent_lines(readings: &[crate::king_checkin::Reading]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let failed = readings.iter().find(|r| r.name == "subagents" && !r.ok);
+    if let Some(r) = failed {
+        lines.push(format!("READER FAILED subagents: {}", r.error));
+        return lines;
+    }
+    let held = readings
+        .iter()
+        .find(|r| r.name == "subagents")
+        .and_then(|r| r.value.get("held").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    if held.is_empty() {
+        lines.push("subagents: this session holds none finished".into());
+        return lines;
+    }
+    let label = |row: &Value| {
+        row.get("name")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::king_checkin::dash(row.get("id")))
+    };
+    let oldest = held
+        .iter()
+        .max_by_key(|row| row.get("idle_secs").and_then(Value::as_u64).unwrap_or(0));
+    let age = oldest
+        .and_then(|row| row.get("idle_secs").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let remedies = held
+        .iter()
+        .map(|row| format!("TaskStop {}", label(row)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(format!(
+        "subagents: this session holds {} finished and unstopped, oldest {}s {}; {}",
+        held.len(),
+        age,
+        label(oldest.expect("held is non-empty")),
+        remedies
+    ));
+    lines
 }
 
 /// The rows an `ok` rows-carrying reading holds, or its failure reason.

@@ -135,9 +135,7 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
-    /// The crown's display name (`Barnaby II`), read from the crown-name
-    /// store's file contract (`crate::crown_names`); `None` = unnamed or
-    /// no store file.
+    /// Legacy wire field; the sideline uses the king's registry label instead.
     pub crown_name: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
@@ -992,7 +990,20 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     };
     let mut out = Vec::with_capacity(workers.len());
     let mut terminal_skips = 0usize;
+    let mut spare_skips = 0usize;
     for w in &workers {
+        // A pre-warmed idle spare (`dispatch.source == "spare"`, empty seed)
+        // has no conversation to attach: it is daemon inventory, not live
+        // work, and the `cc-<id>` fallback below would mint it a phantom row.
+        // Understood, so it counts like a terminal skip, not schema drift.
+        if w.get("dispatch")
+            .and_then(|d| d.get("source"))
+            .and_then(|v| v.as_str())
+            == Some("spare")
+        {
+            spare_skips += 1;
+            continue;
+        }
         // A terminal `state` means the session is not attachable, so it is
         // not roster presence. An unknown/missing state stays (tolerant, and
         // `parse_claude_agents` holds unknowns rather than dropping them).
@@ -1066,7 +1077,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     // (tolerate-alien-row, tested), and a partial rename degrades visibly on
     // the sideline rather than as a fake-empty success; a ratio guard here
     // would break the documented 1-of-4 alien-row case.
-    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 {
+    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 && spare_skips == 0 {
         return None;
     }
     Some(out)
@@ -1754,11 +1765,23 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// deliberately UNCHANGED - the sideline still renders what it can read. The
 /// count is the fact that was being thrown away, offered to the callers that
 /// cannot safely ignore it.
+/// The attach id a claude row carries: an 8-hex jobId. A legacy row whose
+/// `short_id` holds the FULL uuid (the register path wrote it that way)
+/// still attaches: the jobId is the uuid's own leading segment, so derive
+/// it rather than hand the attach a uuid the verb refuses. Any other shape
+/// passes through untouched - the 8-hex gesture gate stays the judge.
+fn attach_job_id(raw: &str) -> String {
+    if raw.len() > 8 {
+        let lead = raw.split('-').next().unwrap_or(raw);
+        if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return lead.to_ascii_lowercase();
+        }
+    }
+    raw.to_string()
+}
+
 pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
-    // One store read for the whole derive: the crown-name file contract
-    // (`crate::crown_names`). Missing or malformed reads as no names.
-    let (crown_names, crown_names_by_node) = crate::crown_names::read_crown_names();
     let rows = doc
         .get("agents")
         .or_else(|| doc.get("entries"))?
@@ -1908,7 +1931,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .or_else(|| row.get("claude_short_id"))
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
-                    .map(str::to_string),
+                    .map(attach_job_id),
                 // A full session id addresses a durable thread, and only a
                 // thread-shaped row may take one.
                 IdKind::Session if is_thread_shape => row
@@ -1981,12 +2004,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let crown_name = crate::crown_names::crown_name_for(
-            &crown_names,
-            &crown_names_by_node,
-            crown_scope.as_deref(),
-            row.get("node").and_then(|v| v.as_str()),
-        );
+        let crown_name = None;
         let spawned_by_session = row
             .get("spawned_by_session")
             .and_then(|v| v.as_str())
@@ -2328,13 +2346,24 @@ pub async fn watch_registry(
 /// 3. Foreign rows: every roster worker matching no registry short_id becomes
 ///    a synthesized external row (paneless, attachable via `attach_id`).
 /// 4. Sort by name (the determinism rule the change gate and layouts need).
+///
+/// The join key is the FIRST `-` segment of each side, not the raw bytes:
+/// the roster lists the 8-hex sessionId prefix, and a registry row whose
+/// minted `short_id` kept the full uuid must still own its roster worker -
+/// an exact-string join misses it and synthesizes a duplicate `cc-<id>`
+/// foreign row beside the row that is already there. (The mint-side fix
+/// that keeps the stored short_id 8-hex lives in the registry store.)
+fn roster_join_key(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
+}
+
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
     use std::collections::{HashMap, HashSet};
-    // short_id -> source account, so an upgrade can adopt the roster row's
+    // join key -> source account, so an upgrade can adopt the roster row's
     // structural account tag, not just test membership.
     let roster_by_id: HashMap<&str, Option<&str>> = roster
         .iter()
-        .map(|w| (w.short_id.as_str(), w.account.as_deref()))
+        .map(|w| (roster_join_key(&w.short_id), w.account.as_deref()))
         .collect();
 
     // Upgrade in place, then dedup the roster against the (borrowed) registry
@@ -2344,7 +2373,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         let Some(id) = r.attach_id.as_deref() else {
             continue;
         };
-        let Some(&acct) = roster_by_id.get(id) else {
+        let Some(&acct) = roster_by_id.get(roster_join_key(id)) else {
             continue;
         };
         // Structural roster-dir tag wins (Locked Decision 6) for EVERY matching
@@ -2367,10 +2396,14 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
     }
 
-    let reg_ids: HashSet<&str> = out.iter().filter_map(|r| r.attach_id.as_deref()).collect();
+    let reg_ids: HashSet<&str> = out
+        .iter()
+        .filter_map(|r| r.attach_id.as_deref())
+        .map(roster_join_key)
+        .collect();
     let mut foreign = Vec::new();
     for w in roster {
-        if reg_ids.contains(w.short_id.as_str()) {
+        if reg_ids.contains(roster_join_key(&w.short_id)) {
             continue; // adopted / already owned by a registry row
         }
         foreign.push(RegistryAgent {
@@ -2439,7 +2472,10 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
         // Only a roster row that still lists the id live synthesizes a child;
         // nothing lists it -> render nothing, exactly as today (AC4-EDGE).
-        let Some(roster_hit) = roster.iter().find(|w| w.short_id == id) else {
+        let Some(roster_hit) = roster
+            .iter()
+            .find(|w| roster_join_key(&w.short_id) == roster_join_key(id))
+        else {
             continue;
         };
         parked.push(RegistryAgent {
@@ -2647,6 +2683,7 @@ mod tests {
     mod lineage_kind_tests;
     mod liveness_rule_tests;
     mod parked_child_tests;
+    mod roster_join_tests;
     mod spawned_by_name_tests;
     mod thread_row_status_tests;
     fn reg(rows: &str) -> String {
@@ -2898,6 +2935,50 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(unattributable, 0);
+    }
+
+    #[test]
+    fn a_registered_row_with_a_full_uuid_short_id_attaches_by_its_job_id() {
+        // The register path once wrote the FULL uuid into short_id, and
+        // `claude attach <full uuid>` refuses it: the tap showed a dead
+        // viewer. The attach id derives the uuid's own leading segment, so a
+        // legacy row taps into its session; a real 8-hex key passes through.
+        let rows = derive_rows(
+            &reg(concat!(
+                r#"{"name":"warden","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"49a80492-388e-44a3-bd91-017be26bcaa0"},"#,
+                r#"{"name":"spawned","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"abcd1234"}"#
+            )),
+            NOW,
+        )
+        .unwrap();
+        // Rows render in attention order, so look the rows up by name.
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("row {n} missing"))
+        };
+        assert_eq!(by_name("warden").attach_id.as_deref(), Some("49a80492"));
+        assert_eq!(by_name("spawned").attach_id.as_deref(), Some("abcd1234"));
+    }
+
+    #[test]
+    fn attach_job_id_derives_only_from_a_hex_uuid_lead() {
+        // Exactly-8-hex is already a job id. A longer value derives only
+        // when its leading dash segment is 8 hex (a uuid); anything else is
+        // not fno's to rewrite - the gesture gate stays the judge.
+        assert_eq!(attach_job_id("abcd1234"), "abcd1234");
+        assert_eq!(
+            attach_job_id("49a80492-388e-44a3-bd91-017be26bcaa0"),
+            "49a80492"
+        );
+        assert_eq!(attach_job_id("49A80492-388e"), "49a80492", "case-folded");
+        assert_eq!(attach_job_id("n0t-a-uuid"), "n0t-a-uuid");
+        assert_eq!(
+            attach_job_id("too-long-hexstring-abcdef12"),
+            "too-long-hexstring-abcdef12"
+        );
     }
 
     #[test]
@@ -3659,89 +3740,6 @@ unheard_of_field = true
         // not empty: None keeps the caller's last-good rows.
         assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
         assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
-    }
-
-    // The CURRENT claude shape: a bare list, as captured from
-    // `claude agents --json` (claude 2.1.247, 2026-08-27). The fixture is a
-    // mechanically redacted copy of that capture: item count, per-item key
-    // set and order, value types, states, and the id==sessionId-prefix
-    // invariant are the real document's; names/cwds/UUID tails are redacted.
-    #[test]
-    fn parse_roster_bare_list_capture_yields_every_live_session() {
-        let raw = include_str!("../tests/testdata/roster-bare-list.json");
-        let doc: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let items = doc.as_array().unwrap();
-        let live: Vec<&serde_json::Value> = items
-            .iter()
-            .filter(|v| {
-                !v.get("state")
-                    .and_then(|s| s.as_str())
-                    .is_some_and(is_terminal_state)
-            })
-            .collect();
-        assert!(
-            live.len() < items.len(),
-            "capture must carry terminal items for this test to prove they skip"
-        );
-        let workers = parse_roster(raw).unwrap();
-        // Positive marker 1: the parsed count equals the capture's LIVE
-        // session count (terminal-catalog sessions are not roster presence),
-        // and every short_id keys off the item's own id/sessionId.
-        assert_eq!(
-            workers.len(),
-            live.len(),
-            "every LIVE captured session parses; terminal ones skip"
-        );
-        for (w, item) in std::iter::zip(&workers, live) {
-            let sid = item.get("sessionId").and_then(|v| v.as_str()).unwrap();
-            assert_eq!(w.short_id, sid.split('-').next().unwrap());
-            assert_eq!(w.cwd, item.get("cwd").and_then(|v| v.as_str()).unwrap());
-            // Flat `name` is the bare-list field; the fallback convention
-            // must not have fired for a named capture item.
-            assert_eq!(w.name, item.get("name").and_then(|v| v.as_str()).unwrap());
-        }
-    }
-
-    #[test]
-    fn parse_roster_bare_list_state_and_id_semantics() {
-        // Terminal states skip (roster presence means attachable); the
-        // explicit `id` field is the attach key, prefix is the fallback; an
-        // unknown state stays (tolerant, parse_claude_agents holds unknowns).
-        let raw = r#"[
-            {"id":"aaaabbbb","sessionId":"ccccdddd-1","cwd":"/w","name":"live-id-wins",
-             "kind":"background","startedAt":1,"state":"working"},
-            {"id":"ef56ab78","sessionId":"ef56ab78-2","cwd":"/x","name":"unknown-state",
-             "kind":"background","startedAt":2,"state":"weird"},
-            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"done-skips",
-             "kind":"background","startedAt":3,"state":"done"},
-            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"stopped-skips",
-             "kind":"background","startedAt":4,"state":"stopped"}]"#;
-        let workers = parse_roster(raw).unwrap();
-        assert_eq!(workers.len(), 2, "done and stopped skip, unknown stays");
-        assert_eq!(
-            workers[0].short_id, "aaaabbbb",
-            "explicit id wins over prefix"
-        );
-        assert_eq!(workers[0].name, "live-id-wins");
-        assert_eq!(workers[1].short_id, "ef56ab78");
-        assert!(!workers.iter().any(|w| w.name.contains("skips")));
-    }
-
-    #[test]
-    fn parse_roster_all_terminal_roster_is_a_recognized_empty_fleet() {
-        // The fleet finished: every catalog item is terminal (the daemon
-        // lingers on finished sessions). Every skip was RECOGNIZED, so this
-        // is an empty live fleet, not drift - Some(empty) lets the sideline
-        // clear instead of holding last-good rows as fake-live forever
-        // (codex review round 2).
-        let raw = r#"[
-            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"a",
-             "kind":"background","startedAt":3,"state":"done"},
-            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"b",
-             "kind":"background","startedAt":4,"state":"failed"}]"#;
-        assert_eq!(parse_roster(raw), Some(Vec::new()));
-        // Zero recognizable workers (no state, no sessionId) is still drift.
-        assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
     }
 
     // ---- Union merge + dual-doc ReaderState (task 1.2) ----

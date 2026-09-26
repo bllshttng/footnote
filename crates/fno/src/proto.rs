@@ -334,7 +334,9 @@ fn default_true() -> bool {
 /// the crown-name store file; floor stays 58.
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
-pub const PROTO_VERSION: u32 = 90;
+/// v91: `AgentLaunchRequest.provider` + `extra_flags` (serde default),
+/// configured provider selection and argv additions for the composer; floor stays 58.
+pub const PROTO_VERSION: u32 = 91;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1263,10 +1265,8 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
-    /// (v89) The crown's display name (`Barnaby II`), read from the mux's
-    /// crown-name store file (`crown_names.json` beside the registry).
-    /// `None` = unnamed or no store file. Additive, `#[serde(default)]`,
-    /// so the floor stays put.
+    /// (v89) Legacy display name; newer sideline clients use the king's
+    /// registry label instead. Kept optional for wire compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_name: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
@@ -4054,7 +4054,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 90);
+        assert_eq!(PROTO_VERSION, 91);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

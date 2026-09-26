@@ -6,6 +6,7 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::backlog_style::BLine;
 use super::*;
 
 /// The sideline Table's five columns: status word, name, message, PR, age.
@@ -82,9 +83,60 @@ impl View {
         panel_w: usize,
     ) {
         let text_w = panel_w - 1; // last column is the divider
-                                  // Read the clock ONCE per paint, not per row: every row's age is
-                                  // relative to the same instant, so a mid-paint tick cannot make one
-                                  // row read older than the row above it.
+                                  // The backlog view: the board's own render inside THIS column, no
+                                  // second border, the cursor row wearing the sideline band. The
+                                  // divider paints as in the agents view, then the agent path stops.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            if let Some(b) = &self.backlog_board {
+                if !self.board_full {
+                    let chrome_rows = self.bottom_row_is_chrome() as usize;
+                    let (lines, follow) = backlog_board::render(b, text_w);
+                    backlog_style::paint_panel(
+                        cells,
+                        rows,
+                        cols,
+                        0,
+                        text_w,
+                        rows - chrome_rows,
+                        &lines,
+                        follow,
+                        &self.theme,
+                    );
+                }
+            } else {
+                let msg = BLine::meta("backlog off (pref)");
+                let lines = [msg];
+                backlog_style::paint_panel(
+                    cells,
+                    rows,
+                    cols,
+                    0,
+                    text_w,
+                    1,
+                    &lines,
+                    None,
+                    &self.theme,
+                );
+            }
+            let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
+            let (border_fg, border_flags) = if border_active {
+                (self.theme.accent, cell_flags::BOLD)
+            } else {
+                (Color::Default, cell_flags::DIM)
+            };
+            for r in 0..rows {
+                cells[r * cols + (panel_w - 1)] = Cell {
+                    c: '\u{2502}',
+                    fg: border_fg,
+                    bg: Color::Default,
+                    flags: border_flags,
+                };
+            }
+            return;
+        }
+        // Read the clock ONCE per paint, not per row: every row's age is
+        // relative to the same instant, so a mid-paint tick cannot make one
+        // row read older than the row above it.
         let now = crate::digest_overlay::now_secs();
         // Full-screen sideline forces the Extended table (the full column
         // list) for this paint; the stored density returns untouched on exit.
@@ -100,24 +152,13 @@ impl View {
         } else {
             self.display_rows_with_depths()
         };
-        // The docked new-agent composer takes the bottom rows while open in
-        // BOTTOM mode; in sheet mode the sideline paints untouched (the
-        // sheet is an overlay drawn by the client's overlay chain), and the
-        // passive court block yields to an active editor.
+        // The new-agent composer is a centered sheet overlay now, in every
+        // surface: the sideline paints untouched (the sheet is drawn by the
+        // client's overlay chain), and the passive court block yields to an
+        // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
-        let dock_len = if agent_launcher::form_mode(self) == agent_launcher::Mode::Bottom {
-            self.launcher
-                .as_ref()
-                .map_or(0, |l| l.dock_layout(rows - chrome_rows, text_w).0)
-        } else {
-            0
-        };
-        let (block_rows, block_lines) = if dock_len > 0 {
-            (0, Vec::new())
-        } else {
-            self.court_block_layout(rows)
-        };
-        let list_rows = rows.saturating_sub(block_rows + dock_len);
+        let (block_rows, block_lines) = self.court_block_layout(rows);
+        let list_rows = rows.saturating_sub(block_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
@@ -164,19 +205,6 @@ impl View {
             // The render-adjusted state IS the truth: persist it so the hit
             // tests and the confirm anchor read the offset that painted.
             self.sideline_state.set(st);
-        }
-        // The docked composer paints into the SAME Buffer, pinned above the
-        // bottom chrome row. On a panel too small for even the chip rows the
-        // painter clips; the dock never hides while open.
-        if dock_len > 0 {
-            if let Some(l) = &self.launcher {
-                let top = (rows - chrome_rows).saturating_sub(dock_len);
-                l.paint(
-                    self,
-                    &mut buf,
-                    RtRect::new(0, top as u16, text_w as u16, dock_len as u16),
-                );
-            }
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
         // Per-row overlays the widget cannot express: the full-width rows
@@ -482,19 +510,6 @@ impl View {
                 if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                     suffix.push_str(": ");
                     suffix.push_str(reason);
-                }
-                if let Some(level) = a.crown_level {
-                    let scope = a.crown_scope.as_deref().unwrap_or("?");
-                    match a.crown_name.as_deref() {
-                        Some(name) => {
-                            suffix.push_str(&format!(" [L{level} {name} \u{b7} {scope}]"))
-                        }
-                        None => suffix.push_str(&format!(" [L{level} {scope}]")),
-                    }
-                } else if let Some(name) = a.crown_name.as_deref() {
-                    // A worker that rolls up to a named crown: the name rides
-                    // the name cell so the lineage reads without a lookup.
-                    suffix.push_str(&format!(" [{name}]"));
                 }
                 let prefix_width = prefix.width();
                 let suffix_width = suffix.width();
@@ -987,7 +1002,7 @@ pub(super) async fn show_composer(
     }
     // The sheet's minimum is 12 rows; nothing opens and the bottom row says
     // why - the refusal the too-narrow sidebar used to give.
-    if agent_launcher::form_mode(show) == agent_launcher::Mode::Sheet && show.term.0 < 12 {
+    if show.term.0 < 12 {
         if was_none {
             agent_launcher::close(show);
         }

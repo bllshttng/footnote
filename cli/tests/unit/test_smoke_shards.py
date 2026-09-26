@@ -118,16 +118,38 @@ def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
     assert checked == 2, "both full-gate lanes must declare shard matrices"
 
 
-def test_full_gate_shards_follow_affected_selector_changed_packet_is_pr_only() -> None:
+def test_every_pr_affected_job_overrides_the_implicit_success_gate() -> None:
+    """changed-packet-size is PR-only, so on a push it skips and GitHub's
+    implicit success() would skip every transitive dependent with it: main
+    then runs no tests at all. Each job gated on pr-affected must override
+    the implicit gate with !cancelled(); pr-affected itself already does.
+    """
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     jobs = workflow["jobs"]
 
-    assert jobs["smoke-pytest"].get("if") == (
-        "needs.pr-affected.outputs.python_full == 'true'"
-    )
-    assert jobs["smoke-rest"].get("if") == (
-        "needs.pr-affected.outputs.python_full == 'true'"
-    )
+    for name, job in jobs.items():
+        job_if = job.get("if") or ""
+        if "needs.pr-affected" not in job_if:
+            continue
+        assert "!cancelled()" in job_if, (
+            f"{name} is gated on pr-affected without !cancelled(); a push "
+            "run skips it and main runs no tests"
+        )
+
+    # Guard the guard: a shard whose if stops referencing pr-affected would
+    # silently drop out of the loop above.
+    for name in (
+        "smoke-pytest",
+        "smoke-rest",
+        "hook-latency",
+        "test-agents",
+        "test-agents-integration",
+        "test-mux",
+    ):
+        assert "needs.pr-affected" in (jobs[name].get("if") or ""), (
+            f"{name} stopped being gated on pr-affected; update this guard"
+        )
+
     assert "pr-affected" in jobs["smoke"].get("needs", [])
     assert jobs["pr-affected"].get("if") == "${{ !cancelled() }}"
     assert jobs["changed-smoke"].get("if") == "github.event_name == 'pull_request'"

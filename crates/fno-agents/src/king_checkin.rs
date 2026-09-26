@@ -451,7 +451,11 @@ fn apply_crown_naming(
         (Some(n), None) => crate::crown_names::name_crown(&store, &registry, scope, n).map(|_| ()),
         (None, Some(old)) => crate::crown_names::keep_from(&store, &registry, old, scope),
         (None, None) => Ok(()),
+    }?;
+    if !crate::crown_names::ensure_named_crown(&store, &registry, scope)? {
+        return Err("every live crown needs a name; check in with --name <name>".into());
     }
+    Ok(())
 }
 
 /// The first line of every beat: the crown's identity, then the facts.
@@ -954,7 +958,7 @@ fn r_refusal_rate() -> Result<Value, String> {
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
 /// claude session whose transcript cannot be found) reads as an ordinary
 /// failed reading, never a silent zero.
-fn own_claude_transcript() -> Result<PathBuf, String> {
+pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
         return Err("the wake and refusal readers need a claude transcript; \
@@ -1248,6 +1252,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     });
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
+    take("subagents", crate::king_answers::r_subagents());
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
@@ -1301,6 +1306,10 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "oldest_worker_seen".into(),
             workers.value["oldest_worker_seen"].clone(),
         );
+        data.insert(
+            "live_subagents".into(),
+            workers.value["live_subagents"].clone(),
+        );
     }
     if let Some(capacity) = get("capacity").filter(|r| r.ok) {
         for (key, wire) in [
@@ -1323,6 +1332,20 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "refusal_rate".into(),
             rr.value.get("rate").cloned().unwrap_or(Value::Null),
         );
+    }
+    if let Some(sa) = get("subagents").filter(|r| r.ok) {
+        data.insert("idle_subagents".into(), sa.value["held_idle"].clone());
+        let ids: Vec<Value> = sa
+            .value
+            .get("held")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("id").cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        data.insert("idle_subagent_ids".into(), Value::Array(ids));
     }
     if let Some(wm) = get("wake_meter").filter(|r| r.ok) {
         data.insert("wake_machine".into(), wm.value["machine"].clone());
@@ -1465,6 +1488,19 @@ fn derive_change(
             None => "wake ratio n/a (no typed turns) over 3 to 1".to_string(),
         };
         attention.push(item);
+    }
+    if data
+        .get("idle_subagents")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        attention.push(format!(
+            "{} finished subagents held unstopped",
+            data.get("idle_subagents")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
     }
     // Attention outranks silence: a control plane failing for 30 minutes,
     // or a refusal rate climbing two beats running, is never journaled as
@@ -1791,11 +1827,13 @@ fn render_lines(
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
         None => lines.push(format!(
-            "workers: live {}, oldest activity {}",
+            "workers: live {}, oldest activity {}, subagents active {}",
             dash(data.get("live_workers")),
             dash(data.get("oldest_worker_seen")),
+            dash(data.get("live_subagents")),
         )),
     }
+    lines.extend(crate::king_answers::subagent_lines(readings));
 
     match failed("crown") {
         Some(r) => lines.push(format!("READER FAILED crown: {}", r.error)),
@@ -2360,6 +2398,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         eprintln!("fno-agents king-checkin: {e}");
         return 2;
     }
+    if let Err(error) = rename_harness_title_for_crown(&ctx.scope) {
+        eprintln!("fno-agents king-checkin: harness title rename failed: {error}");
+    }
     let (previous, previous_error) = previous_row(&ctx);
     let since = previous
         .as_ref()
@@ -2514,9 +2555,145 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
+    let home = crate::paths::AgentsHome::from_env();
+    let registry = crate::state::load_registry(&home.registry_json())
+        .map_err(|error| format!("registry read failed: {error}"))?;
+    let canonical = crate::territory::canonical_scope(scope);
+    let mut holders = registry.entries.iter().filter(|row| {
+        row.crown_scope
+            .as_deref()
+            .is_some_and(|row_scope| crate::territory::canonical_scope(row_scope) == canonical)
+            && !matches!(
+                row.status,
+                crate::AgentStatus::Exited
+                    | crate::AgentStatus::Orphaned
+                    | crate::AgentStatus::Failed
+                    | crate::AgentStatus::PermanentDead
+            )
+    });
+    let row = holders
+        .next()
+        .ok_or_else(|| format!("no live holder for {canonical}"))?;
+    if holders.next().is_some() {
+        return Err(format!("multiple live holders for {canonical}"));
+    }
+    let session = row
+        .harness_session_id
+        .as_deref()
+        .filter(|session| !session.is_empty())
+        .ok_or_else(|| format!("{} has no harness session id", row.name))?;
+    let harness = row
+        .harness
+        .as_deref()
+        .filter(|harness| !harness.is_empty())
+        .ok_or_else(|| format!("{} has no harness", row.name))?;
+    if crate::claims::resolve_identity().0.as_deref() != Some(session) {
+        return Err("the live crown holder is not this session".into());
+    }
+    let label = row.name.as_str();
+    if row.harness_title.as_deref() == Some(label) {
+        return Ok(());
+    }
+    let command = format!("/rename {label}");
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut child = std::process::Command::new(executable)
+        .args([
+            "mail-inject",
+            "--session",
+            session,
+            "--harness",
+            harness,
+            "--self-send",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("mail-inject start failed: {error}"))?;
+    let mut stdin = child.stdin.take().ok_or("mail-inject stdin unavailable")?;
+    stdin
+        .write_all(command.as_bytes())
+        .map_err(|error| format!("mail-inject write failed: {error}"))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("mail-inject wait failed: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("mail-inject exited {}", output.status)
+        } else {
+            detail
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_registry(home: &crate::paths::AgentsHome, agents: serde_json::Value) {
+        let doc = serde_json::json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": agents,
+        });
+        std::fs::write(home.registry_json(), doc.to_string()).unwrap();
+    }
+
+    #[test]
+    fn an_unnamed_live_crown_cannot_complete_checkin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-a", "status": "live", "crown_scope": "fno",
+                "crown_level": 1, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-a", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+
+        let err = apply_crown_naming(None, None, &home, "fno").unwrap_err();
+
+        assert!(err.contains("every live crown needs a name"), "{err}");
+    }
+
+    #[test]
+    fn a_successor_checkin_carries_the_name_into_its_registry_label() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-old", "status": "live", "crown_scope": "x-aaaa",
+                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-old", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+        crate::crown_names::name_crown(
+            &home.crown_names_json(),
+            &home.registry_json(),
+            "x-aaaa",
+            "barnaby",
+        )
+        .unwrap();
+        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa").unwrap();
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-heir", "status": "live", "crown_scope": "x-aaaa",
+                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-heir", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+
+        apply_crown_naming(None, None, &home, "x-aaaa").unwrap();
+
+        let registry = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(registry.entries[0].name, "barnaby");
+    }
 
     #[test]
     fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
@@ -2540,7 +2717,7 @@ mod tests {
         std::fs::write(&reg, doc.to_string()).unwrap();
         apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
         let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("king-a"), "{err}");
+        assert!(err.contains("barnaby"), "{err}");
     }
 
     #[test]
@@ -2925,8 +3102,8 @@ mod tests {
         let readings = sample_readings(
             json!({"open_prs": 1, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 3, "owned_active": 1, "total_nodes": 15, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            cap_ok(),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -2941,11 +3118,11 @@ mod tests {
     #[test]
     fn the_scope_line_reads_unmeasured_with_the_reason() {
         let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
                    "owned_reason": "territory: registry unreadable (x)", "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            cap_ok(),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -2983,11 +3160,11 @@ mod tests {
             "epic_cap": 15
         });
         let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            board0(),
             court,
             json!({"footprint": "admit", "gate": "admit", "disagree": false,
                    "unparsed_lines": 0, "lanes": ""}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3029,11 +3206,11 @@ mod tests {
             "epics: none in scope holds an open child"
         );
         let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            board0(),
+            court0(),
             json!({"footprint": "admit", "gate": "admit", "disagree": false,
                    "unparsed_lines": 0, "lanes": ""}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            workers_none(),
         );
         set_reading(
             &mut readings,
@@ -3046,6 +3223,32 @@ mod tests {
             "lines: {lines:?}"
         );
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED court: ")));
+    }
+
+    /// The fixture payloads most render tests share, named once here.
+    fn board7() -> Value {
+        json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []})
+    }
+    fn board0() -> Value {
+        json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []})
+    }
+    fn court4() -> Value {
+        json!({"active_nodes": 4, "total_nodes": 6, "rows": []})
+    }
+    fn court0() -> Value {
+        json!({"active_nodes": 0, "total_nodes": 0, "rows": []})
+    }
+    fn cap_ok() -> Value {
+        json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0})
+    }
+    fn workers3() -> Value {
+        json!({"live_workers": 3, "oldest_worker_seen": "90s w1"})
+    }
+    fn workers_none() -> Value {
+        json!({"live_workers": 0, "oldest_worker_seen": "none"})
+    }
+    fn workers_empty() -> Value {
+        json!({"live_workers": 0, "oldest_worker_seen": ""})
     }
 
     fn sample_readings(board: Value, court: Value, cap: Value, workers: Value) -> Vec<Reading> {
@@ -3070,6 +3273,7 @@ mod tests {
             Reading::took("territory", json!([])),
             Reading::took("capacity", cap),
             Reading::took("workers", workers),
+            Reading::took("subagents", json!({"held_idle": 0, "held": []})),
             Reading::took(
                 "crown",
                 json!({"total": 2, "splits": 0, "disagreements": 0, "anomalies": []}),
@@ -3361,12 +3565,7 @@ mod tests {
     /// and no territory line ever contains `blueprinter` again.
     #[test]
     fn the_blueprint_journal_matches_the_lines_and_the_territory_line_is_clean() {
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let bp_line = lines.iter().find(|l| l.starts_with("blueprint:")).unwrap();
@@ -3435,12 +3634,7 @@ mod tests {
         assert_eq!(capacity["disagree"], false);
         assert_eq!(capacity["gate_axis"], "king_share");
         assert_eq!(capacity["gate_cpu"], "pass");
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3465,12 +3659,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capacity["disagree"], true);
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3496,12 +3685,7 @@ mod tests {
         .unwrap();
         assert!(capacity["gate_cpu"].is_null());
         assert_eq!(capacity["disagree"], false);
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3525,12 +3709,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capacity["lanes"], "openai 1/- unmeasured, zai 8/10 closed");
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity.clone(),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity.clone(), workers_none());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
             data.get("capacity_lanes"),
@@ -3551,12 +3730,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unreadable["lanes"], "lanes unreadable");
-        let unread_readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            unreadable,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let unread_readings = sample_readings(board0(), court0(), unreadable, workers_none());
         let unread_data = build_data(&unread_readings, "x-bbbb");
         let unread_line = render_lines(
             "x-bbbb",
@@ -3580,12 +3754,7 @@ mod tests {
                 &json!({"verdict": "accepted"}),
             )
             .unwrap();
-            let readings = sample_readings(
-                json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-                json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-                capacity,
-                json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-            );
+            let readings = sample_readings(board0(), court0(), capacity, workers_none());
             let data = build_data(&readings, "x-bbbb");
             render_lines("x-bbbb", &readings, &data, &None, "", "no change")
                 .into_iter()
@@ -3618,12 +3787,7 @@ mod tests {
 
     #[test]
     fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
@@ -3631,9 +3795,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(19)));
+        assert_eq!(data.get("coverage"), Some(&json!(20)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3641,12 +3805,7 @@ mod tests {
     // journaled data.
     #[test]
     fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3657,16 +3816,105 @@ mod tests {
         assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
     }
 
+    // The subagents reading: the workers line carries the fleet's active
+    // count, the held line names the finished agents this session still
+    // holds with their TaskStop remedy, and held rows raise attention.
+    #[test]
+    fn subagents_reading_names_held_agents_and_raises_attention() {
+        let mut readings = sample_readings(
+            board7(),
+            court4(),
+            cap_ok(),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "subagents",
+                json!({
+                    "held_idle": 2,
+                    "held": [
+                        {"id": "a1", "name": null, "status": "completed", "idle_secs": 7200},
+                        {"id": "a2", "name": "bp-x", "status": "failed", "idle_secs": 3600}
+                    ]
+                }),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(
+            change.starts_with("attention:"),
+            "held rows raise attention: {change}"
+        );
+        assert!(
+            change.contains("2 finished subagents held unstopped"),
+            "change: {change}"
+        );
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
+        assert!(
+            workers_line.contains("subagents active 3"),
+            "line: {workers_line}"
+        );
+        let held_line = lines.iter().find(|l| l.starts_with("subagents:")).unwrap();
+        assert!(
+            held_line.contains("holds 2 finished and unstopped"),
+            "line: {held_line}"
+        );
+        assert!(held_line.contains("TaskStop a1"), "line: {held_line}");
+        assert!(held_line.contains("TaskStop bp-x"), "line: {held_line}");
+    }
+
+    // AC5: a non-claude harness fails the reading, the beat prints
+    // READER FAILED subagents:, and coverage counts it as failed.
+    #[test]
+    fn a_failed_subagents_reader_prints_its_own_line_and_counts_failed() {
+        let mut readings = sample_readings(
+            board7(),
+            court4(),
+            cap_ok(),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::failed(
+                "subagents",
+                "the wake and refusal readers need a claude transcript; \
+                 this session's harness is not claude"
+                    .into(),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("idle_subagents"), None);
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("READER FAILED subagents:")),
+            "lines: {lines:?}"
+        );
+    }
+
+    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
+    #[test]
+    fn workers_payload_without_subagents_renders_a_dash() {
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("live_subagents"), Some(&Value::Null));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
+        assert!(
+            workers_line.contains("subagents active -"),
+            "line: {workers_line}"
+        );
+    }
+
     // AC4: an over-ceiling wake ratio prints the OVER suffix and journals an
     // attention item, so an over beat is never journalled as a quiet one.
     #[test]
     fn wake_ratio_line_prints_and_names_attention_when_over() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::took(
@@ -3692,12 +3940,7 @@ mod tests {
     // prints.
     #[test]
     fn a_failed_wake_meter_reading_prints_the_reader_failed_line() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::failed(
@@ -3721,12 +3964,7 @@ mod tests {
     // the printed n/a line.
     #[test]
     fn wake_attention_without_typed_turns_names_n_a() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -3768,12 +4006,7 @@ mod tests {
 
     #[test]
     fn refusal_rate_rising_line_carries_the_handoff_suffix() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3799,12 +4032,7 @@ mod tests {
 
     #[test]
     fn failed_reader_prints_own_line_and_beat_continues() {
-        let mut readings = sample_readings(
-            Value::Null,
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::failed("board", "board payload names no undriven_pr queue".into()),
@@ -3815,7 +4043,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
+            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -3824,12 +4052,7 @@ mod tests {
 
     #[test]
     fn no_change_refused_while_a_reading_failed() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::failed("drain", "drain unreadable".into()),
@@ -3843,7 +4066,7 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            cap_ok(),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
         set_reading(
@@ -3874,7 +4097,7 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            cap_ok(),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
         set_reading(
@@ -3900,12 +4123,7 @@ mod tests {
 
     #[test]
     fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -3956,12 +4174,7 @@ mod tests {
 
     #[test]
     fn held_rows_render_the_decide_verb_and_none_when_clear() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -3990,17 +4203,12 @@ mod tests {
 
     #[test]
     fn held_absent_reads_none() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 18 of 18 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4031,10 +4239,10 @@ mod tests {
         let (previous, err) = previous_row(&ctx);
         assert!(err.is_empty());
         let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            board7(),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
@@ -4070,8 +4278,8 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         set_reading(
             &mut readings,
@@ -4097,13 +4305,7 @@ mod tests {
         );
 
         // A count that also moved still names itself, after the attention.
-        set_reading(
-            &mut readings,
-            Reading::took(
-                "board",
-                json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            ),
-        );
+        set_reading(&mut readings, Reading::took("board", board7()));
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
         assert_eq!(
@@ -4119,8 +4321,8 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         set_reading(
             &mut readings,
@@ -4138,18 +4340,13 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
+            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
     #[test]
     fn a_quiet_control_plane_reads_ok() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
             data.get("control_plane_attention"),
@@ -4164,12 +4361,7 @@ mod tests {
 
     #[test]
     fn hand_row_baseline_reads_unmeasured_not_no_change() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
             "data": {"scope": "x-bbbb", "change": "resumed the crown"}});

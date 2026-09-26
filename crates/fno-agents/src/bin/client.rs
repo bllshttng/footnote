@@ -266,6 +266,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
+    if matches!(verb, "mail-envelope") {
+        return fno_agents::mail_envelope::run(&args[1..]);
+    }
+
     // Binary-direct mail transport for the events and note Python adapters.
     // It is intentionally not a routable `fno agents` verb.
     if matches!(verb, "machine-mail-send") {
@@ -697,6 +701,12 @@ async fn run(args: Vec<String>) -> i32 {
     // and spawn flags.
     if verb == "fallback-chain" {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
+    }
+
+    // `verbs`: hidden claim-style (matches!); the action list is
+    // shrink-only, so the harness-verbs skill teaches the spelling.
+    if matches!(verb, "verbs") {
+        return fno_agents::harness_verbs::run_verbs(&args[1..]);
     }
 
     // `publish-review`: the reviewer lane's second GitHub identity (see
@@ -2159,13 +2169,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("yolo")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // Optional --model, forwarded to every provider's own --model (
-    // wired codex/gemini/claude-headless; claude --bg was). Exact
-    // passthrough appended to the worker argv.
+    // Optional --model, forwarded as the provider's exact --model token.
     let model = params.get("model").and_then(|v| v.as_str());
     // permission mode for the bg/headless lanes. The pane substrate
     // never reaches here (it re-execs the Python CLI, which owns pane mapping);
-    // this arm handles the claude bg/headless lanes only.
+    // this arm handles the claude and grok headless lanes plus mapped codex threads.
     let permission_mode = params.get("permission_mode").and_then(|v| v.as_str());
     let effort = params.get("effort").and_then(|v| v.as_str());
     // Tier-3 harness-native passthrough. add_dir has 3 real cells
@@ -2204,28 +2212,27 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         eprintln!("--permission-mode and --yolo are mutually exclusive; pass one");
         return Some(2);
     }
-    // Fail-closed (Locked Decision 1/2): only claude's bg/headless lanes accept
-    // a mapped --permission-mode. gemini/agy one-shot lanes and the opencode
+    // Fail closed: claude and the capability-mapped codex thread and grok
+    // headless lanes accept --permission-mode. gemini/agy one-shot lanes and opencode
     // bg serve lane hardcode their own bypass form, so a mode here can't be
     // honored without a silent downgrade - reject it, pointing at the pane
     // substrate (which DOES map every provider's vocabulary). The codex
     // THREAD lane (substrate "bg" after the thread normalization) is exempt:
     // the shared app-server resolves the posture server-side
     // (resolve_thread_posture), so a mapped mode is native there.
-    let codex_thread_lane = provider == "codex"
+    let mapped_permission_lane = (provider == "codex" || substrate == "headless")
         && permission_mode
             .map(|mode| {
                 // The capability table decides, through the one vocabulary
                 // (see codex_posture.rs); a resolution problem answers
                 // false, which degrades to the refusal below, never a
-                // guessed yes. codex only: the shared app-server is the one
-                // served thread destination, so a declared-thread harness
-                // without one still refuses here, at the clearer gate.
+                // guessed yes. Codex threads and declared headless mappings
+                // are the only non-claude lanes admitted here.
                 fno_agents::codex_posture::permission_mappable(provider, mode, substrate)
                     .unwrap_or(false)
             })
             .unwrap_or(false);
-    if permission_mode.is_some() && provider != "claude" && !codex_thread_lane {
+    if permission_mode.is_some() && provider != "claude" && !mapped_permission_lane {
         let remedy = if provider == "codex" {
             "drop --permission-mode and pass -Y/--yolo"
         } else {
@@ -2618,6 +2625,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             ))
         }
 
+        ("grok", "headless") => emit!(fno_agents::grok_ask::dispatch_grok_once(
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            effort,
+            yolo,
+            permission_mode,
+            timeout,
+            &harness_args,
+        )),
+
         // Codex thread is supervisor-hosted by the daemon. Returning `None`
         // preserves the request's `substrate=thread` so the daemon can own the
         // held app-server process and register its full thread identity.
@@ -2640,69 +2661,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // to help. Hard error pointing to headless; never a silent substrate
         // swap.
         (other, "bg") => {
-            eprintln!("{}", bg_substrate_refusal(other));
+            eprintln!(
+                "{}",
+                fno_agents::harness_capabilities::thread_substrate_refusal(other)
+            );
             Some(2)
         }
 
         // Unreachable: provider is validated known above and substrate is
         // validated to pane|bg|headless in build_request.
         _ => None,
-    }
-}
-
-/// The `--substrate bg` refusal, derived from the capability contract instead
-/// of a provider name list.
-///
-/// A name list cannot say what is actually true. A harness whose keeper lane
-/// is built and journey-proven, but whose spawn arm is not, is refused here
-/// today; a list reading "claude + codex + opencode" tells that reader the
-/// harness has no thread lane, which is the opposite of its situation. The
-/// lane is what the reader needs, and the contract already knows it.
-///
-/// Mirrors the wording `resolve_dispatch` uses in `harness_map.py`, so both
-/// runtimes name the same gap: it is in fno, never a harness limitation.
-fn bg_substrate_refusal(harness: &str) -> String {
-    use fno_agents::claude_ask::py_repr;
-
-    // Name `thread`, not the `bg` selector this match arm is keyed on. `bg` is
-    // the deprecated alias, so a user who typed `--substrate thread` was being
-    // refused in a vocabulary they did not use and are being moved off.
-    let head = format!(
-        "substrate 'thread' (detached interactive session) is unavailable on harness {}",
-        py_repr(harness)
-    );
-    let tail = "use --substrate headless for a one-shot";
-    let contract = fno_agents::harness_capabilities::HarnessContract::packaged().ok();
-    // A refused command_surface (a deprecated harness, e.g. gemini) has no
-    // dispatch lane at all - check this BEFORE thread_lane, which would
-    // otherwise describe a retired harness as future lane work (PR 1355
-    // review, P2). Mirrors harness_map._refused_reason's wording so both
-    // runtimes name the same gap the same way.
-    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
-        if caps.command_surface == "refused" {
-            return format!(
-                "harness {} has no maintained footnote dispatch lane and is deprecated; \
-                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
-                 - no prose build brief is generated",
-                py_repr(harness)
-            );
-        }
-    }
-    let lane = contract.and_then(|contract| contract.thread_lane(harness).ok());
-    match lane {
-        // No resume form at all, so there is no lane for fno to build.
-        Some("none") => {
-            format!("{head}: it declares no resume form, so no thread lane exists for it - {tail}")
-        }
-        Some(lane) => format!(
-            "{head}: fno has not built this harness's {lane} lane spawn arm yet, and that gap is \
-             in fno, never a harness limitation - {tail}"
-        ),
-        // An unreadable table is its own diagnosis, and naming a lane we could
-        // not resolve would be a guess wearing a verdict's clothes.
-        None => format!(
-            "{head}: its thread lane could not be resolved from the capability contract - {tail}"
-        ),
     }
 }
 
@@ -3750,10 +3718,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("no_wait".into(), Value::Bool(true));
             }
             "--model" | "-m" => {
-                // Exact model name forwarded to the provider CLI's own --model:
-                // claude --bg/-p, codex exec, gemini, agy (wired the
-                // headless one-shots; claude --bg was). -m is the mobile
-                // short. No fuzzy resolution.
+                // Exact model name forwarded to the provider CLI's own --model.
+                // -m is the mobile short. No fuzzy resolution.
                 params.insert("model".into(), str_arg(&mut it, "-m/--model")?);
             }
             "--from-name" => {
@@ -3867,7 +3833,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // The session-substrate selector: pane (owned-PTY,
                 // default) | bg (claude --bg detached thread; opencode
                 // serve-hosted session) |
-                // headless (claude -p / codex --exec / agy -p one-shot). The
+                // headless (claude -p / codex --exec / agy -p / grok -p / opencode run). The
                 // sole routing key the spawn arm reads (replaces --once).
                 let v = str_arg(&mut it, "--substrate")?;
                 match v.as_str() {
@@ -4450,6 +4416,7 @@ fn format_success(
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
                     result.get("codex_loaded"),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             } else {
                 Some(render_list_table(
@@ -4457,6 +4424,7 @@ fn format_success(
                     &discovered,
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
+                    result.get("retired_sessions").unwrap_or(&Value::Null),
                 ))
             }
         }
@@ -4528,6 +4496,7 @@ fn render_list_json(
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
     codex_loaded: Option<&Value>,
+    retired: &Value,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     // `codex_loaded` is additive and present only when the caller probed the
@@ -4546,6 +4515,7 @@ fn render_list_json(
     if let Some(block) = codex_loaded {
         payload["codex_loaded"] = block.clone();
     }
+    fno_agents::reap_render::attach_retired(&mut payload, retired);
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 
@@ -4708,24 +4678,21 @@ fn truncate_cell(s: &str, width: usize) -> String {
     }
 }
 
-/// Render agents list as a human-readable table (Task 3.1; CHECKED/PID added by
-/// plan, Architecture C).
+/// Render agents list as a human-readable table (Task 3.1).
 ///
-/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD. CHECKED
-/// is the relative age since the last reconcile probe (`never` when unprobed);
-/// it replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid
-/// for a PTY agent (`-` for a one-shot ask, which has no managed process).
-/// EVENT AGE is the relative age of the transcript's newest activity and LAST
-/// MESSAGE the flattened last-turn text - beside the state column on
-/// purpose, so a row claiming to be busy while its transcript is hours old
-/// shows the disagreement instead of hiding it. This is a functional table;
-/// byte-exact match with Python is not required (Python's table is
-/// time-dependent via relative timestamps).
+/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD.
+/// CHECKED is the relative age since the last reconcile probe (`never` when
+/// unprobed); it replaced the always-`-` LIVE column (AC5-UI). PID is the
+/// worker pid for a PTY agent (`-` for a one-shot ask). EVENT AGE and LAST
+/// MESSAGE sit beside the state column on purpose: a row claiming busy while
+/// its transcript is hours old shows the disagreement. Byte-exact match with
+/// Python is not required (its table is time-dependent).
 fn render_list_table(
     agents: &Value,
     discovered: &[Value],
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
+    retired: &Value,
 ) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
@@ -4841,20 +4808,16 @@ fn render_list_table(
     if !discovered.is_empty() {
         out.push_str(&render_discovered_section(discovered));
     }
+    out.push_str(&fno_agents::reap_render::retired_section(retired));
     out
 }
 
 /// Render the host-local discovered-live-sessions lane below the registry
-/// table (AC1-UI). A blank line + banner make it visually
-/// distinct. Columns: ADDRESS (the mailbox) LABEL (friendly alias) STATUS
-/// PROJECT CWD.
-///
-/// ADDRESS leads and the alias is demoted to LABEL, matching the Python
-/// renderer. The alias led this table for its whole life, which made it the
-/// leftmost thing a reader copied, and `<project>-<short8>` is not an address.
-/// The value is read off the row rather than derived here: `to_row` resolves it
-/// from the session's own harness, so this renderer and the Python one cannot
-/// answer differently about the same session.
+/// table (AC1-UI). Columns: ADDRESS (the mailbox) LABEL (friendly alias)
+/// STATUS PROJECT CWD. ADDRESS leads, matching the Python renderer:
+/// `<project>-<short8>` is not an address. The value is read off the row
+/// (`to_row` resolves it from the session's own harness), so this renderer
+/// and the Python one cannot answer differently about the same session.
 fn render_discovered_section(discovered: &[Value]) -> String {
     let headers = ["ADDRESS", "LABEL", "STATUS", "PROJECT", "CWD"];
     let display: Vec<[String; 5]> = discovered

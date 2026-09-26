@@ -66,6 +66,14 @@ impl Core {
                     // used).
                     let pane_entry = self.panes.get(&pid);
                     let pane_dead = pane_entry.is_none();
+                    // A portal seat is never a row of its own. A seat hosting
+                    // a matched registry row renders as THAT row (the mark
+                    // below rides it); a seat matching nothing - a held seat
+                    // whose viewer died, an idle shell - is daemon inventory,
+                    // not live work, so it mints no bare row.
+                    if matched.is_none() && self.portal_of(Some(pid)).is_some() {
+                        continue;
+                    }
                     let row = match matched {
                         Some(i) => {
                             consumed[i] = true;
@@ -93,7 +101,7 @@ impl Core {
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_marker(Some(pid)),
+                                portal: self.row_portal_marker(a),
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
@@ -337,7 +345,10 @@ impl Core {
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
-                        portal: None,
+                        // No pane of its own, but a portal seat can still be
+                        // SHOWING this row: the mark rides the row the seat's
+                        // key answers (absent means not shown, never unknown).
+                        portal: self.row_portal_marker(a),
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,

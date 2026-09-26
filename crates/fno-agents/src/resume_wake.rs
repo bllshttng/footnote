@@ -465,7 +465,6 @@ pub(crate) fn run_and_confirm_respawn(
         ClaudeHome::from_env(),
         family1_truth_state,
         std::thread::sleep,
-        || crate::resume_gate::admit_revival(home, verb, &plan.name, Path::new(&plan.cwd)),
     )
 }
 
@@ -564,7 +563,7 @@ where
     }
 }
 
-pub(crate) fn run_and_confirm_respawn_with_truth<F, S, A>(
+pub(crate) fn run_and_confirm_respawn_with_truth<F, S>(
     plan: &crate::reentry::ReentryPlan,
     name: &str,
     verb: &str,
@@ -573,22 +572,11 @@ pub(crate) fn run_and_confirm_respawn_with_truth<F, S, A>(
     claude_home: ClaudeHome,
     truth_fn: F,
     sleep_fn: S,
-    admit: A,
 ) -> i32
 where
     F: Fn(&str) -> Option<String>,
     S: Fn(std::time::Duration),
-    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
 {
-    // Hold admission through the relaunch and its live confirmation so the
-    // slot count cannot miss the row before it becomes visible.
-    let _admission = match admit() {
-        Ok(guard) => guard,
-        Err(code) => {
-            crate::resume_gate::release_revival_claims(&plan.session_id);
-            return code;
-        }
-    };
     let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
     let bg_resume = plan.mechanism == "bg-resume";
     // A bg resume relaunches a session whose job dir is typically GONE, so
@@ -740,15 +728,20 @@ where
         // Second witness, bg-resume only: claude's own roster. The fno
         // daemon's truth view lags a same-id relaunch (its exit record
         // outranks the new process until reconcile re-adopts), while a
-        // non-terminal roster row IS the session's own account of being
-        // back under the same id.
+        // roster row with a hosted process behind it IS the session's own
+        // account of being back under the same id. A stale pre-death row
+        // (`blocked`, no pid) must not confirm a relaunch. A `working` row
+        // with no pid yet still confirms: the job state file was already
+        // re-created above (the relaunch's own mechanical proof), and a
+        // fresh roster row publishes its pid a beat after its state.
         if plan.mechanism == "bg-resume" {
             let roster = crate::claude_roster::read_all_agents();
             if let Some(row) = roster.find(&plan.short_id) {
-                let state = row.state.as_deref().unwrap_or("present");
-                if !crate::claude_roster::is_terminal_roster_state(state) {
+                if row.has_live_process(roster.carries_pids())
+                    || row.state.as_deref() == Some("working")
+                {
                     live = true;
-                    last_state = format!("roster:{state}");
+                    last_state = format!("roster:{}", row.state.as_deref().unwrap_or("present"));
                     break;
                 }
             }
@@ -911,7 +904,7 @@ fn parked_sender_name(home: &AgentsHome) -> String {
 /// Bring a parked session whose daemon worker is gone back up, then wait for
 /// it to reappear on the roster. Every failure prints its own line naming the
 /// step and returns the exit code it maps to.
-fn revive_parked_claude_session<A>(
+fn revive_parked_claude_session(
     home: &AgentsHome,
     name: &str,
     row_name: &str,
@@ -919,15 +912,7 @@ fn revive_parked_claude_session<A>(
     short_id: &str,
     session_uuid: &str,
     cwd: &str,
-    admit: A,
-) -> Result<(), (i32, String)>
-where
-    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
-{
-    let _admission = match admit() {
-        Ok(guard) => guard,
-        Err(code) => return Err((code, "spawn-gate".to_string())),
-    };
+) -> Result<(), (i32, String)> {
     // A revive brings the session back from down: the same second-writer
     // gate the relaunch arm runs, before anything launches.
     if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, session_id) {
@@ -1032,7 +1017,6 @@ pub(crate) fn parked_claude_route(
                 short,
                 uuid,
                 cwd,
-                || crate::resume_gate::admit_revival(home, "resume", row_name, Path::new(cwd)),
             )
         },
         |uuid, wrapped| {
@@ -1648,23 +1632,6 @@ mod tests {
     }
 
     #[test]
-    fn parked_revive_gate_refusal_prevents_claim_and_launch() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = AgentsHome::at(temp.path().join("agents-home"));
-        let result = revive_parked_claude_session(
-            &home,
-            "w1",
-            "w1",
-            "sess-uuid",
-            "abcd1234",
-            "123e4567-0000-0000-0000-000000000000",
-            "/tmp",
-            || Err(83),
-        );
-        assert_eq!(result, Err((83, "spawn-gate".to_string())));
-    }
-
-    #[test]
     fn respawn_receipt_reads_live_only_when_truth_reads_live() {
         // ClaudeHome is injected (not read off HOME) so the test is hermetic
         // against concurrent tests mutating HOME.
@@ -1717,7 +1684,6 @@ mod tests {
                 Some("working".to_string())
             },
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 0);
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -1725,67 +1691,6 @@ mod tests {
         assert_eq!(row.status, crate::AgentStatus::Live);
         assert_eq!(row.harness_session_id.as_deref(), Some("sess-uuid"));
         std::fs::remove_dir_all(temp.path()).ok();
-    }
-
-    #[test]
-    fn respawn_gate_refusal_prevents_relaunch() {
-        let _env_guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        let claims_root = temp.path().join("claims-root");
-        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
-        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
-        let jobs = claude_home.jobs_dir_for("abcd1234");
-        std::fs::create_dir_all(&jobs).unwrap();
-        let state = jobs.join("state.json");
-        std::fs::write(
-            &state,
-            r#"{"state":"idle","updatedAt":"2026-09-13T00:00:00Z"}"#,
-        )
-        .unwrap();
-        let marker = temp.path().join("launched");
-        let plan = crate::reentry::ReentryPlan {
-            resolved: true,
-            transition: "resume".into(),
-            mechanism: "respawn".into(),
-            name: "w1".into(),
-            fno_id: None,
-            node: None,
-            session_id: "sess-uuid".into(),
-            short_id: "abcd1234".into(),
-            launch_account: "default".into(),
-            claude_config_dir: None,
-            route_settings_path: None,
-            cwd: temp.path().display().to_string(),
-            substrate: "bg".into(),
-            mux: None,
-            argv: vec![
-                "sh".into(),
-                "-c".into(),
-                format!(
-                    "touch '{}' && printf '%s' '{{\"state\":\"working\",\"updatedAt\":\"2026-09-13T00:01:00Z\"}}' > '{}'",
-                    marker.display(),
-                    state.display()
-                ),
-            ],
-            env: Default::default(),
-        };
-        let home = AgentsHome::at(temp.path().join("agents-home"));
-        seed_exited_row(&home, "w1", "sess-uuid");
-        let _ = run_and_confirm_respawn_with_truth(
-            &plan,
-            "w1",
-            "resume",
-            "agent_resumed",
-            &home,
-            claude_home,
-            |_| Some("working".to_string()),
-            |_| {},
-            || Err(83),
-        );
-        assert!(!marker.exists(), "refused revival must not launch a child");
-        std::env::remove_var("FNO_CLAIMS_ROOT");
     }
 
     #[test]
@@ -1835,7 +1740,6 @@ mod tests {
             claude_home,
             |_| Some("stalled".to_string()),
             |_| {}, // no-op sleep: the window must not cost wall clock in tests
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 16);
         std::fs::remove_dir_all(temp.path()).ok();
@@ -1905,7 +1809,6 @@ mod tests {
             claude_home.clone(),
             |_| Some("working".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 0);
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -1977,7 +1880,154 @@ mod tests {
             // The stale fno view: never live, never terminal.
             |_| Some("unreachable".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 0);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Live);
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_refuses_a_stale_pid_less_roster_row() {
+        // AC1-ERR: the pre-death row never went terminal - it still reads
+        // `blocked`, with no pid. In a listing that CARRIES pids (the peer
+        // row has one) the missing pid is the death witness, so the second
+        // witness must not confirm the relaunch: exit 16, and the registry
+        // row keeps its exited status.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
+             echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"blocked\"},\
+             {\"id\":\"peer0001\",\"sessionId\":\"peer-uuid\",\"pid\":5001,\"state\":\"working\"}]'; fi\n",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            // The stale fno view: never live, never terminal.
+            |_| Some("unreachable".to_string()),
+            |_| {},
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 16);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Exited);
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_accepts_a_working_row_whose_pid_has_not_published_yet() {
+        // The relaunch window: the fresh roster row carries its state but
+        // the pid has not published. `working` confirms here because the
+        // job-state leg above ALREADY proved the relaunch mechanically
+        // (state.json re-created), which rules out the frozen pre-death
+        // row; the pid simply publishes a beat later than the state.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
+             echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"working\"},\
+             {\"id\":\"peer0001\",\"sessionId\":\"peer-uuid\",\"pid\":5001,\"state\":\"idle\"}]'; fi\n",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            // The stale fno view: never live, never terminal.
+            |_| Some("unreachable".to_string()),
+            |_| {},
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
@@ -2049,7 +2099,6 @@ mod tests {
                 unreachable!("truth probe must not run on the copy path: {handle}");
             },
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
