@@ -51,7 +51,7 @@ Rank rule: suites that test both legs of a dual implementation first, then src-r
 | 16 | loopcheck, finalize, daemon, gc | 1,642 Rust | absent in production | loopcheck/, daemon/ | coordinate with the CI-sharding plan on loop_check.rs |
 | 17-18 | long tail (adapters 1,027, cli 479, setup, inbox, ...) | about 3,700 Py, split in two by owner | varies | varies | lowest measured density |
 
-(The stress e2e audit predates this queue and is row two below. The skill's own trial campaign on tests/spec is row one.)
+(The stress e2e audit predates this queue and is row two below. The skill's own trial campaign on tests/blueprint is row one.)
 
 ## Running total
 
@@ -59,6 +59,6 @@ Declarations are `def test_` / `#[test]` counts. Campaign rows link their ledger
 
 | Campaign | Declarations before | Declarations after | CI minutes before | CI minutes after | Ledger |
 |---|---|---|---|---|---|
-| 1: tests/spec trial | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | the trial PR body |
+| 1: tests/blueprint trial | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | the trial PR body |
 | 2: stress e2e | 53 | 48 | 20.6 (20-trial job) | 15.9 | stress-e2e-campaign.md |
 | 3: claims | 446 Py + 169 Rust | 431 Py + 168 Rust | shards skipped: the PR touches docs and tests only | same (10 collected cases and 1 Rust test less to run) | claims-campaign.md |
