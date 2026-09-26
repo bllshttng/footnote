@@ -8,7 +8,7 @@
 //! `cli/src/fno/agents/store_fallback.py`, reached through the daemon's
 //! heal-token shellout). The grace window is duplicated across the seam by
 //! design: the file is the contract, not a shared constant. Expired entries
-//! are pruned on write; a failed tombstone write is an event, never a
+//! are pruned on write; a failed write surfaces on the rm receipt, never a
 //! refused removal.
 
 use crate::daemon::now_epoch_secs;
@@ -66,27 +66,4 @@ pub(crate) fn record_at(
     )
     .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
-}
-
-/// True when rm removed this (harness, session) inside the grace window.
-/// Symmetry reader for tests and any future Rust-side door; the production
-/// consumer is the Python healer.
-pub(crate) fn recent(home: &AgentsHome, harness: &str, session_id: &str) -> bool {
-    let raw = match std::fs::read_to_string(path(home)) {
-        Ok(raw) => raw,
-        Err(_) => return false,
-    };
-    let now = now_epoch_secs();
-    let entries: Vec<Value> = match serde_json::from_str(&raw) {
-        Ok(entries) => entries,
-        Err(_) => return false,
-    };
-    entries.iter().any(|row| {
-        row.get("harness").and_then(Value::as_str) == Some(harness)
-            && row.get("session_id").and_then(Value::as_str) == Some(session_id)
-            && row
-                .get("removed_at")
-                .and_then(Value::as_i64)
-                .is_some_and(|at| now.saturating_sub(at) <= GRACE_SECS)
-    })
 }

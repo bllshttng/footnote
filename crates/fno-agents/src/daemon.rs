@@ -5618,7 +5618,7 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
-    rm_teardown::stamp_removed_session_tombstone(ctx, &entry, &name);
+    let tombstone_error = rm_teardown::stamp_removed_session_tombstone(&ctx.home, &entry);
     // The row is gone from the registry: take its worktree, but only
     // as far as the reapable gate allows. The receipt rides the RESULT (the
     // operator's notice), deliberately NOT the event: agent_removed sits
@@ -5702,8 +5702,8 @@ async fn handle_rm_with(
         "worktree_touched": worktree_touched,
         "worktree_outcome": worktree_outcome,
         "reclaimed_bytes": reclaimed_bytes,
-        "event_written": event_error.is_none(),
-        "event_reason": event_error,
+        "event_written": event_error.is_none(), "event_reason": event_error,
+        "tombstone_written": tombstone_error.is_none(), "tombstone_reason": tombstone_error,
         "was_orphaned": entry.status == AgentStatus::Orphaned,
     });
     let mut response = Response::ok(req.id, result);
