@@ -158,7 +158,10 @@ impl View {
         // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
         let (block_rows, block_lines) = self.court_block_layout(rows);
-        let list_rows = rows.saturating_sub(block_rows);
+        let (q_rows, q_lines) = questions::block_rows(self, rows)
+            .map(|(n, lines, _)| (n, lines))
+            .unwrap_or((0, Vec::new()));
+        let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
@@ -384,7 +387,11 @@ impl View {
         // list already stopped above it; the block renders DIM so it reads as
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
-        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
+        // The questions block just above the court block: the row list
+        // stopped above both; the open rows render normal, the not-ready and
+        // answered rows DIM.
+        questions::paint_block(q_lines, cells, list_rows, rows, cols, text_w);
+        court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - US1.
         //
