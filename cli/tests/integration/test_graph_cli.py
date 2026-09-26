@@ -85,7 +85,7 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
             "id": "x-reap0001",
             "title": "Reap me",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "codex",
                 "session_id": "dead-session",
                 "started_at": "2026-08-20T00:00:00Z",
