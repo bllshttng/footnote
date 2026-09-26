@@ -155,7 +155,11 @@ def _xml_escape(value: str) -> str:
 
 def default_agent_path(fno_binary: str = "fno") -> str:
     entries = [str(Path(fno_binary).parent)] if "/" in fno_binary else []
-    entries += [p for p in (str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin",
+    # fno-agents/fno-agents-worker live in the cargo bin dir; launchd PATH
+    # without it fails every tick at binary lookup (the groom agent already
+    # gets it via shutil.which("fno")).
+    cargo_bin = str(Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo") / "bin")
+    entries += [p for p in (cargo_bin, str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin",
                             "/usr/local/bin", "/usr/bin", "/bin") if p not in entries]
     return ":".join(entries)
 
