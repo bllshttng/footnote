@@ -266,8 +266,8 @@ mod tests {
 
     fn fixture_entries() -> Vec<Value> {
         vec![
-            json!({"id": "ab-aaaa1111", "slug": "alpha-node", "title": "Alpha node"}),
-            json!({"id": "ab-bbbb2222", "slug": "beta-node", "title": "Beta node"}),
+            json!({"id": "ab-aaaaaaaa", "slug": "alpha-node", "title": "Alpha node"}),
+            json!({"id": "ab-bbbbbbbb", "slug": "beta-node", "title": "Beta node"}),
         ]
     }
 
@@ -276,11 +276,11 @@ mod tests {
         // The `ab-` fixture keeps the bare-hex tier hermetic: the legacy
         // prefix is always tried second, whatever the machine's config says.
         let entries = fixture_entries();
-        assert!(resolve_tiers(&entries, "ab-bbbb2222").is_some());
+        assert!(resolve_tiers(&entries, "ab-bbbbbbbb").is_some());
         assert!(resolve_tiers(&entries, "ALPHA-NODE").is_some());
-        assert!(resolve_tiers(&entries, "bbbb2222").is_some());
-        assert!(resolve_tiers(&entries, "BBBB2222").is_none());
-        assert!(resolve_tiers(&entries, "ab-zzzz9999").is_none());
+        assert!(resolve_tiers(&entries, "aaaaaaaa").is_some());
+        assert!(resolve_tiers(&entries, "AAAAAAAA").is_none());
+        assert!(resolve_tiers(&entries, "ab-zzzzzzzz").is_none());
     }
 
     #[test]

@@ -555,9 +555,9 @@ mod tests {
 
     #[test]
     fn the_ab_prefix_tier_matches_partial_hex_never_full_or_malformed() {
-        let pool = vec![json!({"id": "ab-bbbb2222", "title": "Beta"})];
+        let pool = vec![json!({"id": "ab-bbbbbbbb", "title": "Beta"})];
         assert_eq!(ab_prefix_hits(&pool, "ab-bbbb").len(), 1);
-        assert!(ab_prefix_hits(&pool, "ab-bbbb2222").is_empty());
+        assert!(ab_prefix_hits(&pool, "ab-bbbbbbbb").is_empty());
         assert!(ab_prefix_hits(&pool, "ab-nothex").is_empty());
     }
 
