@@ -1515,16 +1515,15 @@ impl Probes for RealProbes {
     }
 
     fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
-        match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
-            Ok((_code, stdout, _stderr)) => parse_checks_read(&stdout),
-            Err(_) => ChecksRead {
-                verdict: "unknown".to_string(),
-                github_block: None,
-                optional_unresolved: None,
-                rerun_recovered: None,
-                rerun_failures: None,
-            },
-        }
+        // One owner: the CI verdict answers in process through the status
+        // door. A preview ask never re-enters here (supplied facts win), so
+        // the decision reads the same payload it would have spawned for.
+        let payload = serde_json::json!({
+            "cwd": cwd.display().to_string(),
+            "pr": pr,
+        });
+        let (_code, stdout, _stderr) = crate::pr_status::cache::run_door("status-read", &payload);
+        parse_checks_read(stdout.as_bytes())
     }
 
     fn fno_shell(

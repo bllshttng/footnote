@@ -1,5 +1,6 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting, Budget};
+use super::budget::{run_json, Budget};
+
 use super::{is_terminal, s_i64, s_str, SourceRead};
 use crate::graph_store::entry_id;
 use serde_json::{json, Value};
@@ -226,18 +227,24 @@ pub(crate) fn read_prs(
 /// verdict, still not mergeable), while a crashed gate read renders
 /// not-actionable with a warning naming the exit.
 fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
-    let mut cmd = fno_py_cmd();
-    cmd.extend([
-        "do".to_string(),
-        "pr".to_string(),
-        "status".to_string(),
-        number.to_string(),
-    ]);
-    match run_with_timeout_accepting(&cmd, cwd, timeout, &[0, 1, 2, 3]).map(|o| o.stdout) {
-        Err(f) => Err(f.message().to_string()),
-        Ok(stdout) => serde_json::from_slice::<Value>(&stdout)
-            .map_err(|e| format!("unparseable status payload: {e}")),
+    // One owner: the status read answers in process through the door, so a
+    // board refresh pays no fno-py cold start per candidate.
+    let _ = timeout;
+    let payload = serde_json::json!({
+        "cwd": cwd.display().to_string(),
+        "pr": number.max(0) as u64,
+    });
+    let (code, stdout, stderr) = crate::pr_status::cache::run_door("status-read", &payload);
+    if code > 3 {
+        let why = stderr.trim();
+        return Err(if why.is_empty() {
+            format!("status read failed (exit {code})")
+        } else {
+            why.to_string()
+        });
     }
+    serde_json::from_str::<Value>(stdout.trim())
+        .map_err(|e| format!("unparseable status payload: {e}"))
 }
 
 /// Ask the merge gate about every candidate the listing called green
