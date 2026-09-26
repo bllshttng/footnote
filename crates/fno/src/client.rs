@@ -9357,9 +9357,9 @@ async fn attach_and_run(
                 if let Some(l) = view.launcher.as_mut() {
                     agent_launcher::sync_harness_names(l, &view.launcher_catalog);
                 }
-                // A list open before this read landed shows "reading
-                // models...": reopen it so the rows re-derive.
-                agent_launcher::refresh_open_picker(&mut view);
+                // The tab bodies derive from the catalog at paint time, so a
+                // read landing mid-session re-renders them with no refresh
+                // step; the redraw above is the whole contract.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }

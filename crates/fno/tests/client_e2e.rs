@@ -149,20 +149,18 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
 }
 
 #[test]
-fn launcher_one_esc_closes_the_dock() {
-    // R1 (x-5026): one Esc press must close the composer dock. The chord
+fn launcher_one_esc_closes_the_sheet() {
+    // R1 (x-5026): one Esc press must close the composer. The chord
     // scanner already holds the lone byte and flushes it after the 40ms quiet
     // window, so a trailing lone ESC at the end of a launcher chunk is always
     // a bare Esc press - the rule pick_keys_from_read already applies.
-    // On main the dock's own carry re-buffers the flushed byte
-    // and the dock survives both the Esc and the next key.
     //
     // Every screen match here is `contains`, never line-exact: at 120 columns
     // the sideline is visible and paints the pane title onto the same rows as
     // the shell output, salting every line. And each marker is spelled so the
     // tty ECHO of the typed command cannot contain it - only the pane's
     // OUTPUT can - so `contains` still proves a round trip.
-    let scratch = Scratch::new("esc-dock");
+    let scratch = Scratch::new("esc-sheet");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
     // The input path must forward bytes before the composer chord means
@@ -187,41 +185,35 @@ fn launcher_one_esc_closes_the_dock() {
         "client input never became ready\n{}",
         h.diagnostics()
     );
-    // prefix+i opens the composer. The open marker is its hint row:
-    // `tab next` exists only while the composer is painted, and the chip
-    // row's own labels ellipsize (`La…`) on the 27-column panel.
-    let dock_open = |s: &str| s.contains("tab next");
+    // prefix+i opens the composer. The open marker is the sheet title:
+    // it paints only while the sheet is up.
+    let sheet_open = |s: &str| s.contains("new agent");
     h.type_bytes(b"\x02i");
-    h.wait_screen(15, |s| dock_open(s));
+    h.wait_screen(15, |s| sheet_open(s));
     let before = h.screen();
-    // The PR's rendered evidence: R1_DUMP=1 prints the opened dock's screen
-    // (the after render; the before render is the recorded main failure).
+    // The PR's rendered evidence: R1_DUMP=1 prints the opened sheet's screen
+    // (the after render; the before render is the recorded main failure) and
+    // its type-to-filter body. The sheet has no intermediate popover layer,
+    // so the lone-Esc proof below stays one Esc whatever the body shows.
     if std::env::var("R1_DUMP").is_ok() {
-        eprintln!("--- x-5026 dock render (open, after) ---\n{before}");
-        // Change 7's render: the harness picker, open on the first field
-        // (dock focus starts at Harness), filtered to `co`. The catalog's
-        // inventory read is bounded at 5s; let it settle so the picker lists
-        // real rows instead of the `reading...` placeholder. Esc then closes
-        // ONLY the picker, so the lone-Esc proof below stays one Esc.
-        std::thread::sleep(Duration::from_secs(6));
-        h.type_bytes(&[0x0d]); // enter: open the picker on Harness
-        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("--- x-5026 sheet render (open, after) ---\n{before}");
+        // The catalog read is bounded at 30s; a short settle keeps the
+        // dump's rows real instead of the `reading...` placeholder.
+        std::thread::sleep(Duration::from_secs(2));
         h.type_bytes(b"co");
         std::thread::sleep(Duration::from_millis(500));
-        eprintln!("--- x-5026 picker render (filter: co) ---\n{}", h.screen());
-        h.type_bytes(&[0x1b]); // close the picker, dock stays
-        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("--- x-5026 sheet body (filter: co) ---\n{}", h.screen());
     }
     // Exactly one Esc byte, then silence.
     h.type_bytes(&[0x1b]);
     std::thread::sleep(Duration::from_millis(500));
     let after = h.screen();
     assert!(
-        !dock_open(&after),
-        "one Esc must close the dock; screen still shows it:\n{after}\n--- screen before Esc ---\n{before}"
+        !sheet_open(&after),
+        "one Esc must close the sheet; screen still shows it:\n{after}\n--- screen before Esc ---\n{before}"
     );
-    // The next key reaches the shell, not the dock (which would swallow it
-    // as its close key). Quoting splits the marker in the echo.
+    // The next key reaches the shell, not the composer (which would swallow
+    // it as its close key). Quoting splits the marker in the echo.
     h.type_bytes(b"echo after-\"esc\"\r");
     h.wait_screen(15, |s| s.contains("after-esc"));
 }

@@ -335,7 +335,9 @@ fn default_true() -> bool {
 /// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
 /// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
 /// v91: `PaneMeta.node`/`branch`/`ctx` (serde default), the pane frame's
-/// bottom-edge fields; floor stays 58.
+/// bottom-edge fields; `AgentLaunchRequest.provider` + `extra_flags`
+/// (serde default), configured provider selection and argv additions for the
+/// composer; floor stays 58.
 pub const PROTO_VERSION: u32 = 91;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or

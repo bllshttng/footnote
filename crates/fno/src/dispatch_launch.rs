@@ -147,7 +147,7 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     // launch the row's model id against the WRONG provider. Omitting
     // --harness lets the door resolve the row's harness, route, account
     // and effort itself.
-    if !req.model_names_harness {
+    if !req.model_names_harness || req.provider.is_some() {
         argv.extend(["--harness".to_string(), req.harness.clone()]);
     }
     argv.extend(["--cwd".to_string(), req.cwd.clone()]);
@@ -174,6 +174,9 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(m) = &req.model {
         argv.extend(["--model".to_string(), m.clone()]);
     }
+    if let Some(provider) = &req.provider {
+        argv.extend(["--provider".to_string(), provider.clone()]);
+    }
     if let Some(e) = &req.effort {
         argv.extend(["--effort".to_string(), e.clone()]);
     }
@@ -189,11 +192,51 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(s) = &req.split {
         argv.extend(["--split".to_string(), s.clone()]);
     }
+    argv.extend(req.extra_flags.iter().cloned());
     // The seed rides stdin even when empty: an empty stdin is the honest
     // "no seed requested", never a fabricated task.
     argv.push("--prompt-file".to_string());
     argv.push("-".to_string());
     argv
+}
+
+/// The launcher's extra argv cannot replace values already owned by its
+/// chips, and every token remains one argv element at the spawn boundary.
+pub(crate) fn validate_extra_flags(flags: &[String]) -> Result<(), String> {
+    if flags.len() > 64 {
+        return Err("extra launch flags exceed 64 argv values".to_string());
+    }
+    const COMPOSER_FLAGS: &[&str] = &[
+        "--harness",
+        "--cwd",
+        "--substrate",
+        "--model",
+        "-m",
+        "--provider",
+        "-P",
+        "--route",
+        "--effort",
+        "--permission-mode",
+        "--tab",
+        "--portal",
+        "--split",
+        "--node",
+        "--mux-session",
+        "--no-wait",
+        "--prompt-file",
+    ];
+    for arg in flags {
+        if arg.contains('\0') || arg.chars().count() > 1024 {
+            return Err("an extra launch flag is invalid or too long".to_string());
+        }
+        if arg.starts_with('-') {
+            let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+            if COMPOSER_FLAGS.contains(&name) || arg.starts_with("-m") || arg.starts_with("-P") {
+                return Err(format!("{name} is controlled by a composer chip"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One bounded `fno` shell-out that also feeds `stdin_bytes` to the child:
@@ -723,6 +766,7 @@ mod tests {
             harness: "codex".into(),
             substrate: "pane".into(),
             model: Some("gpt-5.6-luna".into()),
+            provider: None,
             model_names_harness: false,
             effort: Some("high".into()),
             permission_mode: Some("workspace-write:on-request".into()),
@@ -731,6 +775,7 @@ mod tests {
             split: None,
             node: None,
             message: "line one\nline \"two\" $ ` \u{1f600}".into(),
+            extra_flags: Vec::new(),
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "work"),
@@ -759,6 +804,47 @@ mod tests {
                 "-",
             ]
         );
+        let configured_route = AgentLaunchRequest {
+            request_id: 6,
+            revision: 1,
+            cwd: "/tmp/open-models".into(),
+            harness: "opencode".into(),
+            substrate: String::new(),
+            model: Some("openrouter/qwen/qwen3-coder".into()),
+            provider: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            node: None,
+            message: String::new(),
+            extra_flags: vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &configured_route, "work"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "opencode",
+                "--cwd",
+                "/tmp/open-models",
+                "--mux-session",
+                "work",
+                "--no-wait",
+                "--model",
+                "openrouter/qwen/qwen3-coder",
+                "--agent",
+                "abc",
+                "--name",
+                "x",
+                "--prompt-file",
+                "-",
+            ]
+        );
         // Empty substrate omits the flag so the door's default decides; a
         // thread placed through a portal carries --portal and its geometry.
         let thread = AgentLaunchRequest {
@@ -768,6 +854,7 @@ mod tests {
             harness: "claude".into(),
             substrate: String::new(),
             model: None,
+            provider: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -776,6 +863,7 @@ mod tests {
             split: Some("right".into()),
             node: None,
             message: String::new(),
+            extra_flags: Vec::new(),
         };
         assert_eq!(
             launch_spawn_argv("fno", &thread, "s"),
@@ -807,6 +895,7 @@ mod tests {
             harness: "claude".into(),
             substrate: String::new(),
             model: Some("glm-5.3-flash[1m]".into()),
+            provider: None,
             model_names_harness: true,
             effort: None,
             permission_mode: None,
@@ -815,6 +904,7 @@ mod tests {
             split: None,
             node: None,
             message: String::new(),
+            extra_flags: Vec::new(),
         };
         let argv = launch_spawn_argv("fno", &row_pinned, "s");
         assert!(
@@ -835,6 +925,7 @@ mod tests {
             harness: "claude".into(),
             substrate: "thread".into(),
             model: None,
+            provider: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -843,6 +934,7 @@ mod tests {
             split: None,
             node: None,
             message: String::new(),
+            extra_flags: Vec::new(),
         };
         assert_eq!(
             launch_spawn_argv("fno", &new_tab, "s"),
@@ -881,6 +973,7 @@ mod tests {
             harness: "claude".into(),
             substrate: String::new(),
             model: None,
+            provider: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -889,6 +982,7 @@ mod tests {
             split: None,
             node: Some("x-1".into()),
             message: String::new(),
+            extra_flags: Vec::new(),
         };
         assert_eq!(
             launch_spawn_argv("fno", &req, "s"),
