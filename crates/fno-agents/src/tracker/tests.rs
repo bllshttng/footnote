@@ -31,22 +31,23 @@ fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
     // The guard holds the shared env lock for the caller's whole body: the
     // pins above are process-global, and a concurrent test's config read
     // must not observe them mid-flight (the territory EnvGuard discipline).
-    EnvGuard(
-        crate::claims::test_env_lock()
+    EnvGuard {
+        _lock: crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
         saved,
-    )
+    }
 }
 
-struct EnvGuard(
-    std::sync::MutexGuard<'static, ()>,
-    [(&'static str, Option<String>); 4],
-);
+struct EnvGuard {
+    // Underscore-prefixed: held for the drop ordering, never read.
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: [(&'static str, Option<String>); 4],
+}
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        for (key, value) in self.1.iter() {
+        for (key, value) in self.saved.iter() {
             match value {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
