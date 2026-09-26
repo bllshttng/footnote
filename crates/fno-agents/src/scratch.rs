@@ -1661,11 +1661,11 @@ mod tests {
         let paths = sweep_paths(&tmp);
         seed_journal(
             &paths.journal,
-            &[filed_row("ci_probe", "x-7577", now_ts(), "filed")],
+            &[filed_row("ci_probe", "x-hijack1", now_ts(), "filed")],
         );
         seed_graph(
             &paths.graph,
-            &[json!({"id": "x-7577", "status": "in_progress", "created_at": ts_offset(-60)})],
+            &[json!({"id": "x-hijack1", "status": "in_progress", "created_at": ts_offset(-60)})],
         );
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
