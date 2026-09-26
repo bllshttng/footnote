@@ -4,7 +4,7 @@
 //! Python shim resolved: text, flags, identity, live law rows, storage root),
 //! one JSON answer on stdout, and the exit code carries the verdict. It
 //! registers no client verb - the shrink law (d-fe66560a) allows no new
-//! action - and callers reach it through `verb_call`, like `backlog-update`.
+//! action - and callers reach it through `verb_call`, like the patch door.
 //!
 //! Owns: the law refusal (`law_match`), the context parse
 //! (`escalation::parse` with the question-file sections), the node-pointer

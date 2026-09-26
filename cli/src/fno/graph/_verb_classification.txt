@@ -19,8 +19,6 @@ intake
 decompose
 update
 note
-# notes reads the same graph-resident journal the note writer archives to
-notes
 # encounter appends to a node's graph record, exactly like note
 encounter
 remove
@@ -94,7 +92,6 @@ status
 # reads the store's mutation counter; writes nothing
 version
 view
-find
 next
 ready
 worked

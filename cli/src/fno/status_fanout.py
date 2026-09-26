@@ -848,7 +848,7 @@ def _machine_note(graph_path, node_id: str, kind, text: str) -> "dict | None":
     binary = resolve_binary()
     if binary is None:
         return None
-    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin", "--json",
+    argv = [str(binary), "backlog", "note", "--graph", str(graph_path), "--stdin", "--json",
             "--quiet", "--node", str(node_id), "--machine", str(kind)]
     proc = _sp.run(argv, input=text, text=True, check=False, capture_output=True)
     if proc.returncode != 0:

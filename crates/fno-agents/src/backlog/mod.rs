@@ -4,6 +4,7 @@
 //! Every mutation writes only the changed nodes' rows in one transaction.
 
 pub mod api;
+pub mod cli;
 pub mod commands;
 pub mod comments;
 pub mod costs;
@@ -12,7 +13,9 @@ pub mod done_evidence;
 pub mod encounters;
 pub mod entities;
 pub mod epic_cap;
+pub mod find_cli;
 pub mod findings;
+pub mod get_cli;
 pub mod idea_cap;
 pub mod model;
 pub mod node_state;
@@ -26,9 +29,11 @@ pub mod patch;
 pub mod pull_requests;
 pub mod receipt;
 pub mod relations;
+pub mod render;
 pub mod schema_v4;
 pub mod search;
 pub mod sessions;
+pub mod settings;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};

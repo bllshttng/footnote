@@ -53,7 +53,52 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # Seam readers (sidecar projection, guarded metadata/display reads)
     # resolve through paths.graph_json at call time; pin the resolver too.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native binary (which the get read-backs exec) resolves the store
+    # through FNO_CONFIG's state_dir; point it at this same tmp dir so both
+    # sides of the seam read one store.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
+
+
+def _native_get(*args) -> str:
+    """Read one node back through the native binary (the graph-mode get
+    ladder is the binary's now). Returns captured stdout; asserts exit 0."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "get", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def _native_get_raw(*args):
+    """The exit-code-visible shape of the same read: (code, stdout, stderr)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "get", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def _seed_graph_text(path: Path, payload: str, **_kwargs) -> None:
@@ -566,17 +611,15 @@ def test_ac1_hp_graph_get_returns_node(tmp_graph):
     r = _invoke("backlog", "add", "GetTarget")
     node_id = json.loads(r.output)["id"]
 
-    r = _invoke("backlog", "get", node_id)
-    assert r.exit_code == 0
-    data = json.loads(r.output)
+    data = json.loads(_native_get(node_id))
     assert data["id"] == node_id
     assert data["title"] == "GetTarget"
 
 
 def test_ac2_err_graph_get_unknown_exits_nonzero(tmp_graph):
     """AC2-ERR: fno graph get unknown ID exits 1."""
-    r = runner.invoke(app, ["backlog", "get", "ab-deadbeef"], catch_exceptions=True)
-    assert r.exit_code != 0
+    code, _, _ = _native_get_raw("ab-deadbeef")
+    assert code != 0
 def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
     """fno backlog queue ab-X,ab-Y ab-Z queues all three atomically."""
     ids = []
@@ -592,7 +635,7 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
     assert queued_ids == set(ids)
     # Same reason on all three.
     for tid in ids:
-        data = json.loads(_invoke("backlog", "get", tid).output)
+        data = json.loads(_native_get(tid))
         assert data["queued_reason"] == "batch"
 
 
@@ -603,7 +646,7 @@ def test_queue_batch_is_atomic_on_unknown_id(tmp_graph):
     r = _invoke("backlog", "queue", f"{real_id},ab-deadbeef")
     assert r.exit_code != 0
     # Real node was NOT queued because the batch aborted.
-    data = json.loads(_invoke("backlog", "get", real_id).output)
+    data = json.loads(_native_get(real_id))
     assert data.get("queued_at") is None
 
 
@@ -629,7 +672,7 @@ def test_done_clears_queued_state(tmp_graph):
     # clear, not the note path.
     _invoke("backlog", "update", nid, "--completion-note", "queued-state fixture")
     _invoke("backlog", "done", nid)
-    data = json.loads(_invoke("backlog", "get", nid).output)
+    data = json.loads(_native_get(nid))
     assert data.get("queued_at") is None
     assert data["completed_at"] is not None
 
@@ -759,8 +802,7 @@ def test_ac1_hp_graph_cost(tmp_graph):
     # State round-trip (#23): the cost write must be visible via
     # `graph get`. The cost_usd field aggregates across sessions and
     # cost_sessions records the individual session attribution.
-    r = _invoke("backlog", "get", node_id)
-    data = json.loads(r.output)
+    data = json.loads(_native_get(node_id))
     assert data["cost_usd"] == pytest.approx(1.50)
     cost_sessions = data.get("cost_sessions") or []
     assert any(s.get("session_id") == "sess-001" for s in cost_sessions), (
@@ -780,8 +822,8 @@ def test_ac1_hp_graph_remove(tmp_graph):
     r = _invoke("backlog", "remove", node_id, "--force")
     assert r.exit_code == 0
 
-    r = runner.invoke(app, ["backlog", "get", node_id], catch_exceptions=True)
-    assert r.exit_code != 0
+    code, _, _ = _native_get_raw(node_id)
+    assert code != 0
 
 
 # --- defer ---
@@ -795,8 +837,7 @@ def test_ac1_hp_graph_defer(tmp_graph):
     r = _invoke("backlog", "defer", node_id, "--reason", "stale spec")
     assert r.exit_code == 0
 
-    r = _invoke("backlog", "get", node_id)
-    data = json.loads(r.output)
+    data = json.loads(_native_get(node_id))
     assert data.get("deferred_at"), "deferred_at should be set to an ISO timestamp"
     assert data.get("deferred_reason") == "stale spec"
     assert data.get("status") == "deferred"
@@ -813,8 +854,7 @@ def test_ac1_hp_graph_reprioritize(tmp_graph):
     r = _invoke("backlog", "reprioritize", node_id, "p1")
     assert r.exit_code == 0
 
-    r = _invoke("backlog", "get", node_id)
-    data = json.loads(r.output)
+    data = json.loads(_native_get(node_id))
     assert data["priority"] == "p1"
 
 
@@ -1428,13 +1468,13 @@ def test_model_pin_set_visible_and_cleared(tmp_graph):
 
     r = _invoke("backlog", "update", node_id, "--model", "fable")
     assert r.exit_code == 0, r.output
-    got = json.loads(_invoke("backlog", "get", node_id).output)
+    got = json.loads(_native_get(node_id))
     assert got["model"] == "fable"
 
     # 'null' clears (revert to default).
     r = _invoke("backlog", "update", node_id, "--model", "null")
     assert r.exit_code == 0, r.output
-    got = json.loads(_invoke("backlog", "get", node_id).output)
+    got = json.loads(_native_get(node_id))
     assert got.get("model") is None
 
 
@@ -1454,13 +1494,13 @@ def test_model_pin_rejects_whitespace_token(tmp_graph):
         combined = (bad.output or "") + (getattr(bad, "stderr", "") or "")
         assert "single token" in combined
         # Node unchanged: model still unset after every rejection.
-        got = json.loads(_invoke("backlog", "get", node_id).output)
+        got = json.loads(_native_get(node_id))
         assert got.get("model") is None
 
     # A full provider-model id with dots/slashes/dashes/colons is accepted.
     ok = _invoke("backlog", "update", node_id, "--model", "openai/gpt-4.1")
     assert ok.exit_code == 0, ok.output
-    assert json.loads(_invoke("backlog", "get", node_id).output)["model"] == "openai/gpt-4.1"
+    assert json.loads(_native_get(node_id))["model"] == "openai/gpt-4.1"
 
 
 def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
@@ -1567,7 +1607,7 @@ def test_add_pr_appends_to_additional_prs(tmp_graph):
     )
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["additional_prs"] == [
         {"number": 542, "url": "https://github.com/x/y/pull/542", "note": "wrap-up"},
     ]
@@ -1581,7 +1621,7 @@ def test_add_pr_dedups_on_same_number(tmp_graph):
     _invoke("backlog", "update", node_id, "--add-pr", "542", "--add-pr-note", "first")
     _invoke("backlog", "update", node_id, "--add-pr", "542", "--add-pr-note", "updated")
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert len(node["additional_prs"]) == 1
     assert node["additional_prs"][0]["number"] == 542
     assert node["additional_prs"][0]["note"] == "updated"
@@ -1601,7 +1641,7 @@ def test_add_pr_minimal_derives_the_url(tmp_graph, monkeypatch):
     r = _invoke("backlog", "update", node_id, "--add-pr", "777")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["additional_prs"] == [
         {"number": 777, "url": "https://github.com/o/r/pull/777"}
     ]
@@ -1771,7 +1811,7 @@ def test_remove_pr_drops_entry_by_number(tmp_graph):
     r = _invoke("backlog", "update", node_id, "--remove-pr", "542")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     numbers = [e["number"] for e in node["additional_prs"]]
     assert numbers == [543]
 
@@ -1785,7 +1825,7 @@ def test_remove_pr_missing_is_noop(tmp_graph):
     r = _invoke("backlog", "update", node_id, "--remove-pr", "999")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert [e["number"] for e in node["additional_prs"]] == [542]
 
 
@@ -1824,10 +1864,7 @@ def test_legacy_entry_without_additional_prs_loads_with_default(tmp_graph):
          "pr_number": 540, "pr_url": "https://github.com/x/y/pull/540",
          "created_at": "2026-01-01T00:00:00Z"}
     ]}))
-    r = _invoke("backlog", "get", "ab-12345678")
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
-    # Store rows omit null fields; an empty list reads as absent.
+    data = json.loads(_native_get("ab-12345678"))
     assert not data.get("additional_prs")
 
 
@@ -1896,7 +1933,7 @@ def test_update_completion_note_sets_on_empty(tmp_graph):
     r = _invoke("backlog", "update", node_id, "--completion-note", "PR #543 shipped")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["completion_note"] == "PR #543 shipped"
 
 
@@ -1908,7 +1945,7 @@ def test_update_completion_note_appends_to_existing(tmp_graph):
     _invoke("backlog", "update", node_id, "--completion-note", "PR #542 (wrap-up)")
     _invoke("backlog", "update", node_id, "--completion-note", "PR #543 (followups)")
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["completion_note"] == "PR #542 (wrap-up) + PR #543 (followups)"
 
 
@@ -1921,7 +1958,7 @@ def test_update_completion_note_whitespace_only_is_noop(tmp_graph):
     r = _invoke("backlog", "update", node_id, "--completion-note", "   ")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["completion_note"] == "Real note"
 
 
@@ -1934,7 +1971,7 @@ def test_update_completion_note_null_clears(tmp_graph):
     r = _invoke("backlog", "update", node_id, "--completion-note", "null")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node.get("completion_note") is None
 
 
@@ -1973,7 +2010,7 @@ def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkey
     )
 
     assert r.exit_code == 1, r.output
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert not node.get("progress_notes")
 
 
@@ -1990,7 +2027,7 @@ def test_note_with_an_unmeasured_claim_replaces_state_and_warns(tmp_graph, monke
     assert r.exit_code == 0, r.output
     assert "unmeasured code fact" in r.stderr, r.stderr
     assert "--read" in r.stderr, r.stderr
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert node["current_state"]["body"] == "the drain loop is 167 lines"
 
 
@@ -2017,7 +2054,7 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
     assert r.exit_code == 0, r.output
     assert "unmeasured" not in r.stderr, r.stderr
     assert json.loads(r.stdout)["routed"] == "state"
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     reads = node["current_state"]["reads"]
     assert reads[0]["cmd"] == "echo measured"
     assert reads[0]["exit"] == 0
@@ -2043,7 +2080,7 @@ def test_note_whose_read_failed_refuses_cleanly(tmp_graph, monkeypatch):
 
     assert r.exit_code == 1, r.output
     assert "note refused" in r.stderr, r.stderr
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert not node.get("progress_notes")
 
 
@@ -2066,7 +2103,7 @@ def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
     )
 
     assert r.exit_code == 1, r.output
-    node = json.loads(_invoke("backlog", "get", node_id).output)
+    node = json.loads(_native_get(node_id))
     assert not node.get("progress_notes")
 
 
@@ -2119,7 +2156,7 @@ def test_update_parent_sets_value_on_orphan(tmp_graph):
     r = _invoke("backlog", "update", "ab-orphan00", "--parent", a_id)
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", "ab-orphan00").output)
+    node = json.loads(_native_get("ab-orphan00"))
     assert node["parent"] == a_id
 
 
@@ -2129,14 +2166,14 @@ def test_update_parent_null_clears(tmp_graph):
     r = _invoke("backlog", "update", c_id, "--parent", "null")
     assert r.exit_code == 0, r.output
 
-    node = json.loads(_invoke("backlog", "get", c_id).output)
+    node = json.loads(_native_get(c_id))
     assert node.get("parent") is None
 
 
 def test_update_parent_unknown_target_errors(tmp_graph):
     """--parent <missing-id> exits non-zero; node's parent is unchanged."""
     _, _, c_id = _add_with_parent_chain(tmp_graph)
-    original = json.loads(_invoke("backlog", "get", c_id).output)["parent"]
+    original = json.loads(_native_get(c_id))["parent"]
 
     r = runner.invoke(
         app, ["backlog", "update", c_id, "--parent", "ab-deadbeef"],
@@ -2146,14 +2183,14 @@ def test_update_parent_unknown_target_errors(tmp_graph):
     combined = (r.output or "") + (getattr(r, "stderr", "") or "")
     assert "ab-deadbeef" in combined and "not found" in combined.lower()
 
-    after = json.loads(_invoke("backlog", "get", c_id).output)["parent"]
+    after = json.loads(_native_get(c_id))["parent"]
     assert after == original
 
 
 def test_update_parent_rejects_cycle_self(tmp_graph):
     """--parent <self-id> exits non-zero; node's parent is unchanged."""
     a_id, _, _ = _add_with_parent_chain(tmp_graph)
-    original = json.loads(_invoke("backlog", "get", a_id).output).get("parent")
+    original = json.loads(_native_get(a_id)).get("parent")
 
     r = runner.invoke(
         app, ["backlog", "update", a_id, "--parent", a_id],
@@ -2163,7 +2200,7 @@ def test_update_parent_rejects_cycle_self(tmp_graph):
     combined = (r.output or "") + (getattr(r, "stderr", "") or "")
     assert "cycle" in combined.lower()
 
-    after = json.loads(_invoke("backlog", "get", a_id).output).get("parent")
+    after = json.loads(_native_get(a_id)).get("parent")
     assert after == original
 
 
@@ -2190,7 +2227,7 @@ def test_update_parent_rejects_cycle_when_node_passed_as_fuzzy_prefix(tmp_graph)
     combined = (r.output or "") + (getattr(r, "stderr", "") or "")
     assert "cycle" in combined.lower()
     # The on-disk parent must remain None (no silent corruption).
-    after = json.loads(_invoke("backlog", "get", a_id).output).get("parent")
+    after = json.loads(_native_get(a_id)).get("parent")
     assert after is None
 
 
@@ -2398,17 +2435,18 @@ def _make_node_with_project_cwd(project: str, cwd: str) -> dict:
     }
 
 
-def test_resolved_cwd_uses_work_map_root_when_project_mapped(tmp_graph):
+def test_resolved_cwd_uses_work_map_root_when_project_mapped(tmp_graph, monkeypatch, tmp_path):
     """AC1: node with project mapped in settings -> _resolved_cwd == work-map root."""
     import textwrap
-    from unittest.mock import patch
 
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
     _seed_graph_text(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
-    # Write a tmp settings file mapping myproject -> /mapped/root
-    settings_path = tmp_graph.parent / "settings.yaml"
-    settings_path.write_text(textwrap.dedent("""\
+    # The native get resolves the work map through the settings candidates:
+    # isolate the cwd and provide the map at the `<cwd>/.fno` candidate.
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    (fno_dir / "settings.yaml").write_text(textwrap.dedent("""\
         work:
           workspaces:
             main:
@@ -2416,46 +2454,21 @@ def test_resolved_cwd_uses_work_map_root_when_project_mapped(tmp_graph):
                 - name: myproject
                   path: /mapped/root
     """))
+    monkeypatch.chdir(tmp_path)
 
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        r = _invoke("backlog", "get", "ab-resolvetest")
-
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
+    data = json.loads(_native_get("ab-resolvetest"))
     assert data["_resolved_cwd"] == "/mapped/root", (
         f"Expected /mapped/root, got {data.get('_resolved_cwd')!r}"
     )
 
 
-def test_resolved_cwd_falls_back_to_recorded_cwd_when_unmapped(tmp_graph):
+def test_resolved_cwd_falls_back_to_recorded_cwd_when_unmapped(tmp_graph, monkeypatch, tmp_path):
     """AC2: node with unmapped project -> _resolved_cwd == recorded cwd."""
-    import textwrap
-    from unittest.mock import patch
-
     node = _make_node_with_project_cwd("unmapped-project", "/recorded/cwd")
     _seed_graph_text(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
-    settings_path = tmp_graph.parent / "settings.yaml"
-    settings_path.write_text(textwrap.dedent("""\
-        work:
-          workspaces:
-            main:
-              projects:
-                - name: other-project
-                  path: /some/path
-    """))
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        r = _invoke("backlog", "get", "ab-resolvetest")
-
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
+    monkeypatch.chdir(tmp_path)
+    data = json.loads(_native_get("ab-resolvetest"))
     assert data["_resolved_cwd"] == "/recorded/cwd"
 
 
@@ -2470,59 +2483,38 @@ def test_resolved_cwd_falls_back_to_recorded_cwd_when_project_null(tmp_graph):
     }
     _seed_graph_text(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
-    r = _invoke("backlog", "get", "ab-resolvetest")
-    assert r.exit_code == 0, r.output
-    data = json.loads(r.output)
+    data = json.loads(_native_get("ab-resolvetest"))
     assert data["_resolved_cwd"] == "/recorded/cwd"
 
 
-def test_resolved_cwd_field_flag_works(tmp_graph):
+def test_resolved_cwd_field_flag_works(tmp_graph, monkeypatch, tmp_path):
     """AC4: --field _resolved_cwd prints the derived value."""
     import textwrap
-    from unittest.mock import patch
 
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
     _seed_graph_text(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
-    settings_path = tmp_graph.parent / "settings.yaml"
-    settings_path.write_text(textwrap.dedent("""\
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    (fno_dir / "settings.yaml").write_text(textwrap.dedent("""\
         work:
           projects:
             myproject:
               path: /mapped/root
     """))
+    monkeypatch.chdir(tmp_path)
 
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        r = _invoke("backlog", "get", "ab-resolvetest", "--field", "_resolved_cwd")
-
-    assert r.exit_code == 0, r.output
-    assert r.output.strip() == "/mapped/root"
+    out = _native_get("ab-resolvetest", "--field", "_resolved_cwd")
+    assert out.strip() == "/mapped/root"
 
 
-def test_resolved_cwd_never_persisted_to_graph_store(tmp_graph):
+def test_resolved_cwd_never_persisted_to_graph_store(tmp_graph, monkeypatch, tmp_path):
     """AC5: _resolved_cwd is never written back to the graph store."""
-    import textwrap
-    from unittest.mock import patch
-
     node = _make_node_with_project_cwd("myproject", "/recorded/other")
     _seed_graph_text(tmp_graph, json.dumps({"entries": [node]}) + "\n")
 
-    settings_path = tmp_graph.parent / "settings.yaml"
-    settings_path.write_text(textwrap.dedent("""\
-        work:
-          projects:
-            myproject:
-              path: /mapped/root
-    """))
-
-    with patch(
-        "fno.graph._intake._settings_candidate_paths",
-        return_value=[settings_path],
-    ):
-        _invoke("backlog", "get", "ab-resolvetest")
+    monkeypatch.chdir(tmp_path)
+    _native_get("ab-resolvetest")
 
     disk_data = {"entries": _read_graph(tmp_graph)}
     entry = disk_data["entries"][0]
@@ -3238,14 +3230,13 @@ def test_provenance_external_reads_sidecar_edges(
 
 
 def test_local_store_displays_refuse_cleanly_under_external(tmp_path, monkeypatch):
-    """Display renders of the LOCAL store's full records (view, find) refuse
-    with the backend named under an external selection - never a stale render."""
+    """Display renders of the LOCAL store's full records (view) refuse with
+    the backend named under an external selection - never a stale render."""
     absent = tmp_path / "absent.json"
     monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
     monkeypatch.setattr("fno.paths.graph_json", lambda: absent)
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
 
-    for verb_args in (("view",), ("find", "anything")):
-        r = _invoke("backlog", *verb_args)
-        assert r.exit_code == 2, (verb_args, r.output)
-        assert "external" in r.output
+    r = _invoke("backlog", "view")
+    assert r.exit_code == 2, r.output
+    assert "external" in r.output
