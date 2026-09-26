@@ -451,8 +451,8 @@ fn backlog_panel_cells_carry_distinct_attributes() {
     // The CURSOR row (x-2) wears the explicit band pair across its full
     // width, id included: the band is the one place a color pair is legal.
     let band = cell_at(&frame, body_row, 1, cols);
-    assert_eq!(band.bg, crate::proto::Color::Indexed(7), "band bg");
-    assert_eq!(band.fg, crate::proto::Color::Rgb(0, 0, 0), "band text");
+    assert_eq!(band.bg, crate::proto::Color::Indexed(0), "band surface");
+    assert_eq!(band.fg, crate::proto::Color::Indexed(3), "band accent text");
     // A NON-cursor card id takes the accent slot, and its title is plain.
     let id_row = text
         .lines()

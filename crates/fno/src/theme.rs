@@ -67,9 +67,8 @@ pub enum Role {
     /// theme.
     PanelBody,
     /// A backlog panel's heading (lane name, column header, section label,
-    /// node title): bold in the emulator's index-4 slot, on the terminal's
-    /// own bg. The index follows whatever palette the emulator runs, so the
-    /// heading never resolves to a fixed color that can wash out.
+    /// node title): the theme's bold fg slot - the terminal's own fg with
+    /// BOLD carrying the rank - on the terminal's own bg.
     PanelHead,
     /// A backlog panel's handle (node id) or field label: the emulator's
     /// index-3 accent slot, so no hard color enters under any theme.
@@ -129,7 +128,10 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     // the emulator runs, so the same render reads on dark and light both.
     match role {
         Role::PanelBody => return (Color::Default, Color::Default, 0),
-        Role::PanelHead => return (Color::Indexed(4), Color::Default, cell_flags::BOLD),
+        // The heading rides the theme's bold fg slot: the terminal's own fg
+        // with BOLD carrying the rank - never a fixed color that can wash
+        // out on a disagreeing palette.
+        Role::PanelHead => return (Color::Default, Color::Default, cell_flags::BOLD),
         Role::PanelLabel | Role::PanelPill => return (Color::Indexed(3), Color::Default, 0),
         // Index 8, not the DIM flag: the merged band evidence showed DIM
         // washing the default fg out on a light terminal, while index 8 stays
@@ -202,25 +204,26 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
 pub const BAND_TEXT: Color = Color::Rgb(0, 0, 0);
 
 /// `(fg, bg, flags)` for a sideline highlight band. `chosen` is the focused
-/// agent's accent band; selection and hover share the hover band, and the
+/// agent's accent band: dark text on the accent surface. Selection and hover
+/// share the cursor band - a subtle surface under accent text - and the
 /// chosen color wins where they collide. Both legs are explicit colors that
 /// answer each other's contrast, so the band reads identically on a dark and
 /// a light terminal: INVERSE would make the terminal's own background the
-/// text color (pale-on-accent on a dark scheme, light-on-accent on a light
-/// one) and DIM washes the text toward the band. Neither belongs in a band.
+/// text color and DIM washes the text toward the band. Neither belongs in a
+/// band.
 pub fn band_style(chosen: bool, t: &Theme) -> (Color, Color, u8) {
-    let bg = if chosen {
-        t.accent
-    } else if t.inherit {
-        // Index 7 follows the emulator's palette: the light gray every scheme
-        // defines, so the band is visible on a dark and a light terminal both.
-        Color::Indexed(7)
+    if chosen {
+        return (BAND_TEXT, t.accent, 0);
+    }
+    if t.inherit {
+        // The palette's own surface pair: accent text on the deep index, so
+        // both legs follow the emulator's scheme instead of painting a pale
+        // gray bar over it.
+        (Color::Indexed(3), Color::Indexed(0), 0)
     } else {
-        // A named theme's `sel` is a dark band; its light `title` fg answers
-        // it (the BodySel pair).
-        return (t.title, t.sel, 0);
-    };
-    (BAND_TEXT, bg, 0)
+        // A named theme pairs its accent with its `sel` surface.
+        (t.accent, t.sel, 0)
+    }
 }
 
 fn theme_terminal() -> Theme {

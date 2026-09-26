@@ -240,8 +240,8 @@ fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     v.hover_row = Some(agent_i);
     let frame = v.compose();
     for cell in card_pair_cells(&v, &frame, agent_i, detail_i) {
-        assert_eq!(cell.bg, Color::Indexed(7), "one background everywhere");
-        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "explicit band text");
+        assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
+        assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
         assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
     }
 }
