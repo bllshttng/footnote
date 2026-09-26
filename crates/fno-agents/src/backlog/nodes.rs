@@ -564,18 +564,6 @@ fn set_node_claim(node: &mut Node, claim: NodeClaim) {
     node.claim = claim;
 }
 
-pub(crate) fn project_claims(rows: &mut [Value]) -> Result<(), String> {
-    let claims = node_claims_by_id()?;
-    for row in rows {
-        let Some(id) = crate::graph_store::entry_id(row).map(str::to_string) else {
-            continue;
-        };
-        let claim = claims.get(&id).cloned().unwrap_or_default();
-        project_claim_value(row, claim);
-    }
-    Ok(())
-}
-
 pub(crate) fn project_claim_value(row: &mut Value, claim: NodeClaim) {
     let completed = row
         .get("completed_at")
