@@ -202,4 +202,8 @@ Post-cutover runs: the six edited Python files pass (261 passed, 5 skipped). Rus
 
 ## Reconcile
 
-(TBD: merge of main, final counts, CI minutes.)
+origin/main had moved 195 commits ahead by reconcile time (2026-09-26). Merged into the branch (never rebased); the merge touched none of the edited files. No new claims regression needed porting: the owner suites rerun green on the merged head (Python: 438 passed, 25 skipped, 463 collected - exactly baseline 473 minus the 10 removed collections; Rust `claim` filter: 295 passed with the same two pre-existing out-of-scope `cargo_build_dirs` failures, plus two new claim-named tests main added in other files).
+
+Declaration totals: 446 Python + 169 Rust = 615 before; 431 + 168 = 599 after (16 removed: 8 D, 8 C absorbed; 6 to 1 of the parser table keeps its six cases as rows of one test). The `cli/src/fno/claims` production tree is untouched; the campaign's only production-line change is zero.
+
+CI minutes: filled from the smoke-duration lines of this PR's run against the last main run, in the running-total row (README.md).

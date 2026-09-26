@@ -61,4 +61,4 @@ Declarations are `def test_` / `#[test]` counts; campaign rows link their ledger
 |---|---|---|---|---|---|---|
 | 1: tests/spec trial | 2504 | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | PR body |
 | 2: stress e2e | 2520 | 53 | 48 | 20.6 (20-trial job) | 15.9 | stress-e2e-campaign.md |
-| 3: claims | TBD | 446 Py + 169 Rust | TBD | TBD | TBD | claims-campaign.md |
+| 3: claims | TBD | 446 Py + 169 Rust | 431 Py + 168 Rust | TBD (PR run) | TBD (PR run) | claims-campaign.md |
