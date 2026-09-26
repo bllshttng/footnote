@@ -1614,6 +1614,9 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
+    /// Per-pane last attended-hold arm time: a keystroke past the window
+    /// since the last arm re-arms the pane session's mail hold.
+    hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -11659,15 +11662,8 @@ impl Core {
                             }
                         }
                     }
-                    // W4 touch telemetry: a keystroke past the relay guard is
-                    // a human steering this pane; PaneSend (script API) and
-                    // relay writes never reach here.
-                    self.touch(focus, "inject", true);
-                    // A submit key past the relay guard is a human pressing
-                    // Enter: one operator_submit witness row (human_input).
-                    if human_input::is_submit(&bytes) {
-                        self.witness_submit(focus);
-                    }
+                    // Touch telemetry, the attended hold, the submit witness.
+                    self.input_tail(focus, &bytes);
                 }
                 Flow::Continue
             }
@@ -12890,6 +12886,7 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
