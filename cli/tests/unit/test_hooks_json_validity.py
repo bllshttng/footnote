@@ -313,16 +313,15 @@ def test_edit_integrity_wired_on_both_posttooluse_manifests() -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))["hooks"][
             "PostToolUse"
         ]
-        registrations = [
-            registration
+        # law-stage-inject also rides Edit|Write by design, so the count of
+        # registrations is incidental; the shim must appear exactly once.
+        commands = [
+            hook["command"]
             for registration in manifest
             if registration.get("matcher") == "Edit|Write"
+            for hook in registration.get("hooks", [])
         ]
-        assert len(registrations) == 1, manifest_path
-        commands = [
-            hook["command"] for hook in registrations[0].get("hooks", [])
-        ]
-        assert sum("edit-integrity.sh" in command for command in commands) == 1
+        assert sum("edit-integrity.sh" in command for command in commands) == 1, manifest_path
         assert (REPO_ROOT / "hooks" / "edit-integrity.sh").is_file()
 
 
