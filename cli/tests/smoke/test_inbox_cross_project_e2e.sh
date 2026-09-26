@@ -39,8 +39,9 @@ echo '{"action":"create_node","title":"Cross-project chain test","priority":"p2"
 STUB_SCRIPT
 chmod +x "$STUB"
 
-# Initialize the isolated graph.json so `fno new` has somewhere to write.
-echo '{"_lock_version": 1, "entries": []}' > "$FAKE_HOME/.fno/graph.json"
+# Initialize the isolated store through its stable anchor so `fno new` has
+# somewhere to write.
+printf '{"entries": []}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$FAKE_HOME/.fno/graph.json"
 
 run_fno() {
   FNO_INBOX_ROOT="$INBOX_ROOT" HOME="$FAKE_HOME" \

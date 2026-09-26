@@ -65,12 +65,13 @@ use crate::proto::{
 };
 use crate::ratatui_blit::{rt_color, rt_modifier};
 use crate::sideline_color;
-use crate::theme::Theme;
+use crate::theme::{cell_style, Theme};
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
 use crate::vt::ShellActivity;
+use crate::wordmark;
 use overlay_paint::{
     draw_body_overlay, draw_lines_overlay, draw_overlay_layout, draw_popup_overlay,
     layout_lines_overlay, OverlayAnchor, OverlayLayout,
@@ -146,11 +147,13 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
-/// The sideline footer's `+ new` and `☰ menu` labels (US4). The menu
+/// The sideline footer's `+ new` and `menu` labels (US4). The menu
 /// button rides the existing new-workspace footer row's right edge when the
-/// panel is wide enough (see [`View::footer_menu_range`]).
+/// panel is wide enough (see [`View::footer_menu_range`]). ASCII only: the
+/// former `☰` is an ambiguous-width glyph some terminals render wide, which
+/// displaced that row's whole line (the screenshot review's stray fragments).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
-const FOOTER_MENU: &str = "☰ menu";
+const FOOTER_MENU: &str = "menu";
 /// How long a pending prefix chord waits before the hint bar paints.
 /// Zero: the bar paints at once; `prefix+?` shows the full table.
 const HINT_DELAY: Duration = Duration::ZERO;
@@ -1434,6 +1437,9 @@ mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
+// The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
+// of compose_at under the file-budget ratchet .
+mod pane_paint;
 pub(crate) use needs_view::needs_overlay_lines;
 
 /// The move-tab / move-pane destination picker's state (cursored by
@@ -3430,8 +3436,16 @@ impl View {
         let cr = row - TAB_BAR_ROWS;
         let cc = col - left_w;
         for (pid, rect) in &self.layout.panes {
-            if cr >= rect.y && cr < rect.y + rect.rows && cc >= rect.x && cc < rect.x + rect.cols {
-                return Some((*pid, cr - rect.y, cc - rect.x));
+            // A framed pane answers for its CONTENT: the border ring is the
+            // frame's own surface (it focuses, it never forwards), and the
+            // pty grid the coordinates name is the content rect.
+            let content = crate::pane_border::content_rect(*rect);
+            if cr >= content.y
+                && cr < content.y + content.rows
+                && cc >= content.x
+                && cc < content.x + content.cols
+            {
+                return Some((*pid, cr - content.y, cc - content.x));
             }
         }
         None
@@ -5466,258 +5480,11 @@ impl View {
         }
 
         if !self.sideline_full {
-            // Content area: dividers first (uncovered cells), panes blitted over.
             let origin_r = TAB_BAR_ROWS as usize;
             let origin_c = panel_w as usize;
-            let mut covered = vec![false; rows * cols];
-            // cells owned by the focused pane, so the divider pass can accent
-            // the seams that bound it (a standing "you are here" outline).
-            let mut focused = vec![false; rows * cols];
-            for (pid, rect) in &self.layout.panes {
-                let frame = self.frames.get(pid);
-                for fr in 0..rect.rows as usize {
-                    let r = origin_r + rect.y as usize + fr;
-                    if r >= rows {
-                        break;
-                    }
-                    for fc in 0..rect.cols as usize {
-                        let c = origin_c + rect.x as usize + fc;
-                        if c >= cols {
-                            break;
-                        }
-                        covered[r * cols + c] = true;
-                        if *pid == self.layout.focus {
-                            focused[r * cols + c] = true;
-                        }
-                        if let Some(f) = frame {
-                            if fr < f.rows as usize && fc < f.cols as usize {
-                                cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
-                            }
-                        }
-                    }
-                }
-            }
-            // (hover affordance) Underline the accepted link span, client-local:
-            // OR UNDERLINE into exactly the pane-local cells the server named,
-            // after the blit (content is in place) and before the grip/indicator/
-            // overlay passes (chrome and overlays still win their cells). The
-            // cached server `Frame` is untouched, so the span clears on the next
-            // compose the moment it is dropped or invalidated. Suppressed while
-            // ANY modal is open: `menu_usurping_open` names the full set, which
-            // closes the keyboard-opened and overlay-blind cases the pointer-event
-            // clear cannot see (an overlay opened with no pointer motion paints no
-            // hover affordance beneath or around itself).
-            if !self.menu_usurping_open() {
-                if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
-                    if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
-                        for &(fr, fc) in span {
-                            let r = origin_r + rect.y as usize + fr as usize;
-                            let c = origin_c + rect.x as usize + fc as usize;
-                            if r < rows && c < cols {
-                                cells[r * cols + c].flags |= cell_flags::UNDERLINE;
-                            }
-                        }
-                    }
-                }
-            }
-            // pane grips, drawn on cells the pane owns, hence after the blit
-            // - but BEFORE the scroll indicator, which is state rather than an
-            // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
-            // whole gesture, which is what keeps the origin marked (AC3-UI) once
-            // the pointer has run off to a zone somewhere else.
-            let dragged = self.pane_drag.map(|d| d.mover);
-            // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
-            // where none can be pressed.
-            for (pid, rect) in self
-                .layout
-                .panes
-                .iter()
-                .filter(|_| self.layout.panes.len() >= 2)
-            {
-                let Some((grow, gcols)) = self.grip_span(*rect) else {
-                    continue;
-                };
-                let lit =
-                    dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
-                let (fg, flags) = if lit {
-                    (self.theme.accent, cell_flags::BOLD)
-                } else {
-                    (Color::Default, cell_flags::DIM)
-                };
-                let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
-                if r >= rows {
-                    continue;
-                }
-                blank_straddling_pair(&mut cells, cols, r, start, end);
-                for (i, ch) in GRIP.chars().enumerate() {
-                    let c = start + i;
-                    if c < cols {
-                        cells[r * cols + c] = Cell {
-                            c: ch,
-                            fg,
-                            bg: Color::Default,
-                            flags,
-                        };
-                    }
-                }
-            }
-
-            // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
-            // top-right, inverse-video so it reads over content. Present iff the
-            // pane's frame reports a non-zero offset (group 2's status row becomes
-            // its canonical home). A pane too narrow to fit the label skips it.
-            for (pid, rect) in &self.layout.panes {
-                let Some(f) = self.frames.get(pid) else {
-                    continue;
-                };
-                if f.scroll_offset == 0 {
-                    continue;
-                }
-                let label = format!("[+{}]", f.scroll_offset);
-                let w = label.chars().count();
-                let r = origin_r + rect.y as usize;
-                if (rect.cols as usize) < w || r >= rows {
-                    continue;
-                }
-                let start_c = origin_c + rect.x as usize + rect.cols as usize - w;
-                for (k, ch) in label.chars().enumerate() {
-                    let c = start_c + k;
-                    if c < cols {
-                        cells[r * cols + c] = Cell {
-                            c: ch,
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::INVERSE,
-                        };
-                    }
-                }
-            }
-            // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
-            // (the view-scoped clamp); content anchors top-left and everything
-            // beyond `area` up to the local content edge is visibly-inert dim
-            // filler, never divider glyphs. `(0, 0)` is the pre-Layout
-            // placeholder: no filler until the first real Layout names a bound.
-            let (a_rows, a_cols) = self.layout.area;
-            let boxed = self.layout.area != (0, 0);
-            // A drag keeps the accent on the seam it grabbed even as the pointer
-            // runs ahead of it, so the thing being moved stays the thing lit.
-            let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
-            // the candidate drop zone, lit while a relocation drag is live.
-            // The tab-cell and sideline-row drags reuse the SAME content-edge
-            // zone vocabulary, so one of the three lights the seam/band identically.
-            let drop_zone = self
-                .pane_drag
-                .and_then(|d| d.zone)
-                .or_else(|| self.tab_drag.and_then(|d| d.zone))
-                .or_else(|| self.row_drag.as_ref().and_then(|d| d.zone));
-            // Divider glyphs for in-area content cells no pane covers: pick by
-            // which neighbors are panes so vertical strips read '│', horizontal
-            // '─', crossings '┼'. Dim so chrome never shouts over content.
-            for r in origin_r..rows {
-                for c in origin_c..cols {
-                    if covered[r * cols + c] {
-                        continue;
-                    }
-                    if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize)
-                    {
-                        cells[r * cols + c] = Cell {
-                            c: '·',
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::DIM,
-                        };
-                        continue;
-                    }
-                    let horiz = c > origin_c && covered[r * cols + c - 1]
-                        || c + 1 < cols && covered[r * cols + c + 1];
-                    let vert = r > origin_r && covered[(r - 1) * cols + c]
-                        || r + 1 < rows && covered[(r + 1) * cols + c];
-                    // a divider cell that borders the focused pane paints in
-                    // the lattice accent at full brightness (not the DIM chrome), so
-                    // the focused pane wears a standing outline that moves with focus.
-                    // Interior seams only - an edge pane has no divider on that side.
-                    // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
-                    // has a covered horizontal AND vertical neighbour, so every
-                    // visible junction is already orthogonally adjacent to its pane.
-                    // The lone diagonal-only cell is the 1-wide crossing where four
-                    // dividers meet, which renders blank (no covered ortho neighbour)
-                    // - accenting a space would be invisible, so we don't.
-                    let outline = c > origin_c && focused[r * cols + c - 1]
-                        || c + 1 < cols && focused[r * cols + c + 1]
-                        || r > origin_r && focused[(r - 1) * cols + c]
-                        || r + 1 < rows && focused[(r + 1) * cols + c];
-                    // the seam under the pointer (or held in a drag) reads
-                    // BOLD, distinct from both idle DIM chrome and the focus
-                    // outline's plain accent. A terminal cannot portably change the
-                    // cursor shape, so this is the only signal a divider is
-                    // draggable before the press.
-                    let grabbable =
-                        active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
-                    // the candidate zone outranks the hover accent - during
-                    // a drag the only question on screen is where the pane lands.
-                    let dropping =
-                        drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
-                    let (fg, flags) = if dropping {
-                        (self.theme.accent, cell_flags::INVERSE)
-                    } else if grabbable {
-                        (self.theme.accent, cell_flags::BOLD)
-                    } else if outline {
-                        (self.theme.accent, 0)
-                    } else {
-                        (Color::Default, cell_flags::DIM)
-                    };
-                    cells[r * cols + c] = Cell {
-                        c: match (horiz, vert) {
-                            (true, true) => '┼',
-                            (true, false) => '│',
-                            (false, true) => '─',
-                            (false, false) => ' ',
-                        },
-                        fg,
-                        bg: Color::Default,
-                        flags,
-                    };
-                }
-            }
-
-            // an edge drop zone lands on cells a PANE owns, which the
-            // divider pass above skips by construction. Lit here, after the blit,
-            // so the rim reads as a candidate the same way a seam does.
-            if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
-                for r in band_rows.start as usize..(band_rows.end as usize).min(rows) {
-                    for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
-                        if covered[r * cols + c] {
-                            let cell = &mut cells[r * cols + c];
-                            cell.fg = self.theme.accent;
-                            cell.flags |= cell_flags::INVERSE;
-                        }
-                    }
-                }
-            }
-
-            if self.pane_ids_until.is_some_and(|until| now < until) {
-                for (pid, rect) in &self.layout.panes {
-                    let label = format!("pane {pid}");
-                    let width = label.chars().count();
-                    let rect_cols = rect.cols as usize;
-                    let row = origin_r + rect.y as usize;
-                    if rect_cols < width || row >= rows {
-                        continue;
-                    }
-                    let start = origin_c + rect.x as usize + rect_cols - width;
-                    for (offset, ch) in label.chars().enumerate() {
-                        let col = start + offset;
-                        if col < cols {
-                            cells[row * cols + col] = Cell {
-                                c: ch,
-                                fg: Color::Default,
-                                bg: Color::Default,
-                                flags: cell_flags::INVERSE | cell_flags::DIM,
-                            };
-                        }
-                    }
-                }
-            }
+            // Blit, frames, underline, grips, indicator, letterbox +
+            // dividers, empty state, drop band, reveal (the pane-pass move).
+            self.paint_panes(&mut cells, rows, cols, origin_r, origin_c, now);
         }
         self.draw_bottom_row(&mut cells, rows, cols);
         // Chrome, not an overlay: after panes, before modals.
@@ -5970,10 +5737,14 @@ impl View {
                 .find(|(id, _)| *id == self.layout.focus)
             {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
-                    cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
+                    // The cursor sits in the pty grid, which is the CONTENT
+                    // rect for a framed pane.
+                    let content = crate::pane_border::content_rect(*rect);
+                    cur_r =
+                        TAB_BAR_ROWS + content.y + f.cursor_row.min(content.rows.saturating_sub(1));
                     cur_c = self.left_chrome_w()
-                        + rect.x
-                        + f.cursor_col.min(rect.cols.saturating_sub(1));
+                        + content.x
+                        + f.cursor_col.min(content.cols.saturating_sub(1));
                     if !self.sideline_full && self.layout.area != (0, 0) {
                         // Never in the filler (AC1-UI), even mid-race when a
                         // stale rect exceeds the just-shrunk area. Skipped in
@@ -6040,11 +5811,15 @@ impl View {
         // narrow terminal the operator types a name they cannot see - the one
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
-        let body_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS).max(1);
+        // The frame hugs the chrome's own minimum (title + esc chip), and the
+        // body keeps one pad cell beside the text, so the window is that
+        // minimum minus the pad.
+        let body_w = chrome.min_inner_w().saturating_sub(1).max(1);
         let text = format!("{name}_");
         let text = if text.chars().count() > body_w {
-            let drop = text.chars().count() - body_w;
-            let kept: String = text.chars().skip(drop + 1).collect();
+            let keep = body_w.saturating_sub(1);
+            let drop = text.chars().count() - keep;
+            let kept: String = text.chars().skip(drop).collect();
             format!("…{kept}")
         } else {
             text
@@ -6316,13 +6091,26 @@ impl View {
         else {
             return spans;
         };
-        spans.push(TabSpan {
-            text: format!(" {} ", brand_label(&s.name)),
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-            hit: None,
-            role: SpanRole::Squad,
-        });
+        // The home workspace wears the f[no] brand mark in place of its name:
+        // `f` bold, `[no]` dim amber (draw_tab_bar splits the two tones).
+        if s.name == "fno" {
+            let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
+            spans.push(TabSpan {
+                text: format!(" {text} "),
+                flags: cell_flags::BOLD,
+                fg: Color::Default,
+                hit: None,
+                role: SpanRole::Squad,
+            });
+        } else {
+            spans.push(TabSpan {
+                text: format!(" {} ", brand_label(&s.name)),
+                flags: cell_flags::BOLD,
+                fg: Color::Default,
+                hit: None,
+                role: SpanRole::Squad,
+            });
+        }
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
             // US4: a leading max-severity rollup glyph so a background
@@ -6503,7 +6291,20 @@ impl View {
             } else {
                 (span.fg, span.flags)
             };
+            // The brand mark's `[no]` drops to the dim amber wordmark tone for
+            // just those four chars; every other span paints uniform.
+            let is_mark = span.role == SpanRole::Squad && span.text.trim() == "f[no]";
+            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Wordmark, &self.theme);
+            let mut in_no = false;
             for ch in span.text.chars() {
+                if ch == '[' {
+                    in_no = true;
+                }
+                let (fg, flags) = if is_mark && in_no {
+                    (mark_fg, mark_flags)
+                } else {
+                    (fg, flags)
+                };
                 if c >= cols {
                     break 'spans;
                 }
@@ -6514,6 +6315,9 @@ impl View {
                     flags,
                 };
                 c += 1;
+                if is_mark && in_no && ch == ']' {
+                    in_no = false;
+                }
             }
         }
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
@@ -9553,9 +9357,9 @@ async fn attach_and_run(
                 if let Some(l) = view.launcher.as_mut() {
                     agent_launcher::sync_harness_names(l, &view.launcher_catalog);
                 }
-                // A list open before this read landed shows "reading
-                // models...": reopen it so the rows re-derive.
-                agent_launcher::refresh_open_picker(&mut view);
+                // The tab bodies derive from the catalog at paint time, so a
+                // read landing mid-session re-renders them with no refresh
+                // step; the redraw above is the whole contract.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10484,6 +10288,16 @@ async fn handle_stdin(
             // sideline and tab-bar affordances still win their own cells.
             if let Some(seam) = view.seam_at(rep.row, rep.col) {
                 view.begin_seam_drag(seam, Instant::now());
+                continue;
+            }
+            // a press on a framed pane's border ring (name tab included)
+            // focuses that pane and reaches nothing else. After the grip and
+            // seam checks so a drag affordance always wins its own cells
+            // (AC9-EDGE); before the forward, so the frame never forwards.
+            if let Some(pid) = view.border_pane_at(rep.row, rep.col) {
+                write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
+                    .await
+                    .map_err(|e| format!("focus send failed: {e}"))?;
                 continue;
             }
             // Likewise the sideline's own border. Also after chrome_hit, so the

@@ -5,7 +5,7 @@
 //! the engine degrades without network when an owner case reaches it.
 
 use fno_agents::loopcheck::run_loop_check_capture;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -323,7 +323,7 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     // drain read shells to the scripted binary. created_at is NOW: a stale
     // stamp puts the crown past its 96h default span and the term gate
     // blocks before the drain read ever runs. FNO_HOME carries a seeded
-    // graph.json and FNO_CONFIG a workspace config: the scope read demands
+    // graph store and FNO_CONFIG a workspace config: the scope read demands
     // an epic entry and a work.workspaces mapping, and neither may lean on
     // an ambient machine's graph or config.
     let created = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -334,17 +334,16 @@ fn crowned_row_routes_a_real_drain_read_and_the_drain_answers() {
     )
     .unwrap();
     let graph_home = TempDir::new().unwrap();
-    fs::write(
-        graph_home.path().join("graph.json"),
-        r#"{"entries":[{"id":"x-2440","type":"epic","priority":"p1","status":"in_progress"}]}"#,
-    )
-    .unwrap();
+    let graph = graph_home.path().join("graph.json");
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id":"x-2440","slug":"x-2440","title":"scope","type":"epic","priority":"p1","status":"in_progress"})
+    ]).unwrap();
     let config = graph_home.path().join("config.toml");
     fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph_home.path().join("graph.json").to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            graph_home.path().to_string_lossy()
         ),
     )
     .unwrap();

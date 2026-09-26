@@ -1059,7 +1059,9 @@ def test_enabled_honors_project_root(monkeypatch, tmp_path):
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
-    path.write_text(json.dumps({"entries": entries}) + "\n")
+    from tests.fixtures.graph_seed import seed_graph
+
+    seed_graph(path, entries)
 
 
 def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):

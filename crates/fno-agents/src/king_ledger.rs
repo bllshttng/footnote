@@ -1174,7 +1174,7 @@ mod tests {
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
         std::fs::write(&court_path, base_court(json!([base_crown()])).to_string()).unwrap();
-        std::fs::write(&graph_path, json!({"entries": []}).to_string()).unwrap();
+        crate::graph_store::seed_rows(&graph_path, &[]).unwrap();
         let args: Vec<String> = [
             "--court-json",
             court_path.to_str().unwrap(),
@@ -1214,7 +1214,7 @@ mod tests {
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
         std::fs::write(&court_path, base_court(json!([base_crown()])).to_string()).unwrap();
-        std::fs::write(&graph_path, json!({"entries": []}).to_string()).unwrap();
+        crate::graph_store::seed_rows(&graph_path, &[]).unwrap();
         let args: Vec<String> = [
             "--court-json",
             court_path.to_str().unwrap(),

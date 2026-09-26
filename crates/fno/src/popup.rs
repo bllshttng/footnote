@@ -128,10 +128,18 @@ pub struct Popup {
     /// which-key modal scrolls; short anchored menus keep this 0). Clamped in
     /// [`Popup::render`] so it can never scroll past the last screenful.
     pub scroll: usize,
+    /// Extend selectable entry rows to the inner width required by the
+    /// chrome, including a longer footer or title.
+    full_width_selection: bool,
     /// The chrome every modal wears. Its level is derived from `anchor` and
     /// private (no setter), so every centered modal is Full and every anchored
     /// menu is Bare with no way for a call site to disagree.
     pub chrome: Chrome,
+    /// A floor the caller pins so a TABBED modal keeps one width across its
+    /// tabs (tabbed-modal width): the widest tab's content width, capped by
+    /// [`WIDTH_CAP`] in [`Popup::render`]. `0` (the default) measures only
+    /// this tab's own rows.
+    pub min_width: usize,
 }
 
 /// One laid-out line ready to draw, plus its style and the selected sub-span
@@ -190,6 +198,8 @@ impl Popup {
             anchor,
             sel: 0,
             scroll: 0,
+            min_width: 0,
+            full_width_selection: false,
         }
     }
 
@@ -210,6 +220,18 @@ impl Popup {
         self.chrome.footer = Some(f.into());
         self
     }
+    /// Pin the width floor for a tabbed modal (see the field doc).
+    pub fn min_width(mut self, w: usize) -> Self {
+        self.min_width = w;
+        self
+    }
+
+    /// The content width this popup's own rows measure to, BEFORE the
+    /// clamp/frame: the number a tabbed caller takes as one tab's
+    /// contribution to the shared floor.
+    pub fn content_width(&self) -> usize {
+        self.measure_content_w()
+    }
 
     /// Opt this anchored menu into the full chrome (title row + footer row).
     /// `Anchor::At` fixes `Level::Bare` - border-only, the selector menus'
@@ -218,6 +240,13 @@ impl Popup {
     /// both rows must render while the menu stays anchored to its chip.
     pub fn full_chrome(mut self) -> Self {
         self.chrome = self.chrome.full();
+        self
+    }
+
+    /// Make entry hit targets and selection spans fill the rendered inner
+    /// width. Useful when the footer is wider than every row.
+    pub fn full_width_selection(mut self) -> Self {
+        self.full_width_selection = true;
         self
     }
 
@@ -327,15 +356,9 @@ impl Popup {
         }
     }
 
-    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
-    /// width from its content, position it (centered or clamped/flipped anchor),
-    /// and render each row to a padded line with selection + hit-test spans.
-    pub fn render(&self, term: (u16, u16)) -> Rendered {
-        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
-        let sel = self.selected();
-        // Per-cell width for a grid row: the widest cell content + padding.
-        let grid_cell_w = self
-            .rows
+    /// Per-cell width for a grid row: the widest cell content + padding.
+    fn grid_cell_w(&self) -> usize {
+        self.rows
             .iter()
             .flat_map(|r| match r {
                 PopupRow::Grid(cells) => cells
@@ -345,10 +368,13 @@ impl Popup {
                 _ => vec![],
             })
             .max()
-            .unwrap_or(0);
-        // Content width: the widest row before padding.
-        let content_w = self
-            .rows
+            .unwrap_or(0)
+    }
+
+    /// The widest row before padding (the content width). Shared by
+    /// [`Popup::render`] and [`Popup::content_width`].
+    fn measure_content_w(&self) -> usize {
+        self.rows
             .iter()
             .map(|r| match r {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
@@ -364,11 +390,35 @@ impl Popup {
                         + chrome::str_cols(hint)
                         + 2
                 }
-                PopupRow::Grid(cells) => grid_cell_w * cells.len(),
+                PopupRow::Grid(cells) => self.grid_cell_w() * cells.len(),
             })
             .max()
-            .unwrap_or(0);
-        let width = content_w.clamp(1, WIDTH_CAP.min(tcols));
+            .unwrap_or(0)
+    }
+
+    /// Lay the popup out against a `(rows, cols)` terminal: compute the block
+    /// width from its content, position it (centered or clamped/flipped anchor),
+    /// and render each row to a padded line with selection + hit-test spans.
+    pub fn render(&self, term: (u16, u16)) -> Rendered {
+        let (trows, tcols) = (term.0.max(1) as usize, term.1.max(1) as usize);
+        let sel = self.selected();
+        // Content width: the widest row before padding, raised to the caller's
+        // tabbed floor and the chrome's own minimum (title/footer/tabs), so
+        // the frame never pads the extra columns with body background the
+        // selection span does not cover (popup width rules).
+        let content_w = self
+            .measure_content_w()
+            .max(self.min_width)
+            .max(self.chrome.min_inner_w());
+        let width = if self.full_width_selection {
+            content_w
+                .min(WIDTH_CAP)
+                .max(self.chrome.min_inner_w())
+                .min(tcols)
+                .max(1)
+        } else {
+            content_w.clamp(1, WIDTH_CAP.min(tcols))
+        };
 
         let mut target_idx = 0usize;
         let mut lines = Vec::with_capacity(self.rows.len());
@@ -448,12 +498,13 @@ impl Popup {
                     let mut text = String::new();
                     let mut hits = Vec::new();
                     let mut sel_span = None;
+                    let gcw = self.grid_cell_w();
                     for (ci, c) in cells.iter().enumerate() {
-                        let cell = center(&format!("{} {}", c.glyph, c.label), grid_cell_w);
-                        let off = ci * grid_cell_w;
-                        hits.push((target_idx, off, grid_cell_w));
+                        let cell = center(&format!("{} {}", c.glyph, c.label), gcw);
+                        let off = ci * gcw;
+                        hits.push((target_idx, off, gcw));
                         if sel == Some((ri, ci)) {
-                            sel_span = Some((off, grid_cell_w));
+                            sel_span = Some((off, gcw));
                         }
                         target_idx += 1;
                         text.push_str(&cell);
@@ -549,24 +600,12 @@ pub fn origin(anchor: Anchor, w: usize, h: usize, term: (usize, usize)) -> (usiz
 /// Truncate to `w` display columns (ellipsizing) and pad with spaces to `w`, so
 /// a line is a fixed-width block that fully overwrites the content beneath it.
 /// Measured in terminal columns, not chars: a fullwidth glyph is one char and
-/// two cells. Mirrors `client::pad_to` (kept local so the widget is
-/// self-contained).
+/// two cells. The cut is [`crate::chrome::fit_ellipsis`], the one ellipsis
+/// rule; the pad stays local so the widget is self-contained.
 fn pad(s: &str, w: usize) -> String {
     let cols = chrome::str_cols(s);
     if cols > w {
-        let keep = w.saturating_sub(1);
-        let mut t = String::new();
-        let mut used = 0usize;
-        for ch in s.chars() {
-            let cw = chrome::char_cols(ch);
-            if used + cw > keep {
-                break;
-            }
-            t.push(ch);
-            used += cw;
-        }
-        t.push('…');
-        t
+        chrome::fit_ellipsis(s, w)
     } else {
         let mut t = s.to_string();
         t.push_str(&" ".repeat(w - cols));
@@ -803,6 +842,53 @@ mod tests {
     }
 
     #[test]
+    fn the_selection_highlight_spans_the_row() {
+        // highlight-span fix:: a footer wider than the rows widens the frame;
+        // the selected row's highlight must reach the borders, not stop at
+        // the narrower content width.
+        let p = Popup::new(
+            vec![entry("a", "one", ""), entry("b", "two", "")],
+            Anchor::Center,
+        )
+        .title("settings")
+        .footer("tab switches section · esc close");
+        let r = p.render((30, 100));
+        // Line 1 is the first (selected) body row.
+        let body = &r.lines[1];
+        let non_border: Vec<&Role> = body.roles.iter().filter(|r| **r != Role::Border).collect();
+        assert!(
+            !non_border.is_empty() && non_border.iter().all(|r| matches!(r, Role::BodySel)),
+            "every body cell of the selected row is highlighted: {:?}",
+            body.roles
+        );
+    }
+
+    #[test]
+    fn a_tabbed_modal_keeps_one_width_across_tabs() {
+        // tabbed-width fix:: the widest tab's floor pins the modal, so
+        // switching tabs never resizes the box. The footer stays short: a
+        // long footer widens every fixture equally and masks the difference.
+        let narrow = Popup::new(vec![entry("a", "one", "")], Anchor::Center)
+            .title("settings")
+            .footer("esc close");
+        let wide = Popup::new(
+            vec![entry("a", "one", "hint-hint-hint"), entry("b", "two", "")],
+            Anchor::Center,
+        )
+        .title("settings")
+        .footer("esc close");
+        let pinned = Popup::new(vec![entry("a", "one", "")], Anchor::Center)
+            .title("settings")
+            .footer("esc close")
+            .min_width(wide.content_width());
+        let w_narrow = narrow.render((30, 100)).width;
+        let w_wide = wide.render((30, 100)).width;
+        let w_pinned = pinned.render((30, 100)).width;
+        assert!(w_wide > w_narrow, "the fixture tabs differ in width");
+        assert_eq!(w_pinned, w_wide, "the floor pins the narrow tab wide");
+    }
+
+    #[test]
     fn render_marks_selected_line_and_hits() {
         let p = Popup::new(
             vec![entry("a", "one", "x"), entry("b", "two", "y")],
@@ -823,8 +909,9 @@ mod tests {
         // Each body row reports one hit, offset past the left border (+1).
         assert_eq!(body0.hits.len(), 1);
         assert_eq!(body0.hits[0].0, 0);
+        // Border plus the body's one side pad.
         assert_eq!(
-            body0.hits[0].1, 1,
+            body0.hits[0].1, 2,
             "hit offset shifted past the left border"
         );
         assert_eq!(body1.hits[0].0, 1);
@@ -908,7 +995,8 @@ mod tests {
         // The two cells occupy disjoint, adjacent spans, offset past the border.
         let (_, off0, len0) = body.hits[0];
         let (_, off1, _) = body.hits[1];
-        assert_eq!(off0, 1, "first cell past the left border");
+        // Border plus the body's one side pad.
+        assert_eq!(off0, 2, "first cell past the left border");
         assert_eq!(off1, off0 + len0, "cells are disjoint and adjacent");
     }
 
@@ -942,7 +1030,7 @@ mod tests {
         let mut cells = vec![Cell::default(); 24 * 80];
         draw(&mut cells, 24, 80, &r, &theme);
         // Positive control: the popup drew its top-left border corner.
-        assert!(cells.iter().any(|c| c.c == '┌'), "drew the border");
+        assert!(cells.iter().any(|c| c.c == '╭'), "drew the border");
         // Byte-identity: every cell is Default-colored.
         for c in cells.iter() {
             assert_eq!(c.fg, crate::proto::Color::Default);

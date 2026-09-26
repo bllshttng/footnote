@@ -22,10 +22,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Temp home so ~/.fno/graph.json goes to our sandbox
+# Temp home so the graph.db store goes to our sandbox
 HOME_OVERRIDE="$TMP/home"
 mkdir -p "$HOME_OVERRIDE/.fno"
-echo '{"entries":[]}' > "$HOME_OVERRIDE/.fno/graph.json"
+printf '{"entries":[]}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$HOME_OVERRIDE/.fno/graph.json"
 
 # Inbox root
 INBOX_ROOT="$TMP/inbox"
@@ -171,15 +171,17 @@ echo ""
 echo "--- Step 3d: ack message with triaged-into ---"
 cd "$WEB_DIR" && run_fno agents mail ack "$MSG_ID" --triaged-into "$AB_ID" --name acme-web
 
-# Step 4: Verify graph.json has node with all four provenance fields
+# Step 4: Verify graph.db has node with all four provenance fields
 echo ""
-echo "--- Step 4: verify graph.json provenance fields ---"
-python3 -c "
-import json, sys
-graph = json.load(open('$HOME_OVERRIDE/.fno/graph.json'))
+echo "--- Step 4: verify graph.db provenance fields ---"
+uv run --project "$CLI_DIR" python -c "
+import sys
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+graph = {'entries': read_graph_strict(Path('$HOME_OVERRIDE/.fno/graph.json'))}
 matches = [e for e in graph.get('entries', []) if e.get('id') == '$AB_ID']
 if not matches:
-    print('FAIL: node $AB_ID not found in graph.json')
+    print('FAIL: node $AB_ID not found in graph.db')
     sys.exit(1)
 n = matches[0]
 errors = []
@@ -232,7 +234,7 @@ echo "=== Crash-recovery sub-test: idempotent triage ==="
 
 # Reset: remove inbox file and reset graph
 rm -f "$INBOX_ROOT/acme-web.md"
-echo '{"entries":[]}' > "$HOME_OVERRIDE/.fno/graph.json"
+printf '{"entries":[]}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$HOME_OVERRIDE/.fno/graph.json"
 
 # Send a new heads-up
 echo ""
@@ -272,9 +274,11 @@ echo "Created AB_ID2=$AB_ID2 (NOT acking - simulating crash)"
 # Re-run drain: idempotency check - query graph for source_inbox_msg match
 echo ""
 echo "--- CR: drain re-run - idempotency check ---"
-EXISTING_ID=$(python3 -c "
-import json, sys
-graph = json.load(open('$HOME_OVERRIDE/.fno/graph.json'))
+EXISTING_ID=$(uv run --project "$CLI_DIR" python -c "
+import sys
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+graph = {'entries': read_graph_strict(Path('$HOME_OVERRIDE/.fno/graph.json'))}
 matches = [e for e in graph.get('entries', []) if e.get('source_inbox_msg') == '$MSG2_ID']
 if matches:
     print(matches[0]['id'])
@@ -294,9 +298,11 @@ echo "Acked $MSG2_ID --triaged-into $EXISTING_ID"
 # Verify exactly ONE node for MSG2_ID
 echo ""
 echo "--- CR: verify exactly one node for MSG2_ID ---"
-python3 -c "
-import json, sys
-graph = json.load(open('$HOME_OVERRIDE/.fno/graph.json'))
+uv run --project "$CLI_DIR" python -c "
+import sys
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+graph = {'entries': read_graph_strict(Path('$HOME_OVERRIDE/.fno/graph.json'))}
 matches = [e for e in graph.get('entries', []) if e.get('source_inbox_msg') == '$MSG2_ID']
 if len(matches) != 1:
     print('FAIL: expected exactly 1 node for MSG2_ID, got ' + str(len(matches)))

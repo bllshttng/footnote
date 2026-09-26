@@ -16,18 +16,10 @@ fn fixture(id: &str) -> serde_json::Value {
     })
 }
 
-fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
-}
-
 fn temp_graph(tag: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join(format!("{tag}-graph.json"));
-    write_graph(&graph, &[fixture("x-f1"), fixture("x-f2")]);
+    fno_agents::graph_store::seed_rows(&graph, &[fixture("x-f1"), fixture("x-f2")]).unwrap();
     (dir, graph)
 }
 
@@ -101,27 +93,17 @@ fn second_resolve_reports_already_resolved() {
 }
 
 #[test]
-fn findings_survive_backend_flips() {
+fn findings_survive_store_reopen() {
     let (_dir, graph) = temp_graph("flip");
-    // An explicit json name serves the JSON leg; the store migrates on open.
-    fno_agents::backlog::set_backend(&graph, fno_agents::backlog::Backend::Json).unwrap();
     let store = Store::new(&graph);
     let receipt = api::finding_create(&store, "x-f1", input("survives")).unwrap();
     api::finding_resolve(&store, &receipt.finding_id, Some("s1")).unwrap();
 
-    // json -> sqlite import keeps id, body and resolution.
-    fno_agents::backlog::flip_backend(&graph, fno_agents::backlog::Backend::Sqlite).unwrap();
+    // A second store instance reads the same id, body and resolution.
     let reread = api::findings(&Store::new(&graph), Some("x-f1"), false).unwrap();
     assert_eq!(reread.len(), 1);
     assert_eq!(reread[0].finding_id, receipt.finding_id);
     assert_eq!(reread[0].body, "survives");
-    assert!(reread[0].resolved_at.is_some());
-
-    // sqlite -> json export round trip likewise.
-    fno_agents::backlog::flip_backend(&graph, fno_agents::backlog::Backend::Json).unwrap();
-    let reread = api::findings(&Store::new(&graph), Some("x-f1"), false).unwrap();
-    assert_eq!(reread.len(), 1);
-    assert_eq!(reread[0].finding_id, receipt.finding_id);
     assert!(reread[0].resolved_at.is_some());
 }
 

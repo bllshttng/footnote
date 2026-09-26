@@ -626,39 +626,11 @@ pub(super) fn two_pane_view() -> View {
     view
 }
 
-#[test]
-fn client_compose_places_panes_divider_and_chrome() {
-    let view = two_pane_view();
-    let frame = view.compose();
-    assert!(frame.geometry_ok());
-    let text = frame_text(&frame);
-    let lines: Vec<&str> = text.lines().collect();
-    // Tab strip (x-cd67 US1): scoped to the content columns on row 0, so
-    // line 0 carries both the sideline's squad-1 row (cols 0..27) and the
-    // strip (cols 28+) - the active squad name + bracketed active tab.
-    assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
-    // Sideline (x-0090 agents-first): tab rows left the sideline, so an
-    // expanded squad with no agents shows only its name row; the next squad
-    // follows directly. Active squad carries the `*` glyph (x-2f99). The
-    // sideline now owns row 0, so squad 1 leads line 0; a US3 Blank spacer
-    // sits on line 1 and squad 2 follows on line 2.
-    assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
-    assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
-    // Content row 1 (pane a at content origin): the sideline cols are the
-    // blank spacer, then the divider and pane content.
-    let row1: Vec<char> = lines[1].chars().collect();
-    assert_eq!(row1[27], '│', "panel divider column");
-    assert_eq!(row1[28], 'a', "pane 10 starts at content origin");
-    assert_eq!(row1[28 + 35], '│', "pane divider between the panes");
-    assert_eq!(row1[28 + 36], 'b', "pane 11 after the divider");
-    // Cursor: focused pane 11's (0,0) offset by chrome + rect.
-    assert_eq!(frame.cursor_row, 1);
-    assert_eq!(frame.cursor_col, 28 + 36);
-    assert!(frame.cursor_visible);
-}
-
 #[path = "client_tests/pane_id_reveal_tests.rs"]
 mod pane_id_reveal_tests;
+
+#[path = "client_tests/pane_border_tests.rs"]
+mod pane_border_tests;
 
 #[path = "client/tests/focus_outline_tests.rs"]
 mod focus_outline_tests;
@@ -718,36 +690,31 @@ fn four_pane_view() -> View {
 
 #[test]
 fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
-    // x-5a52 AC1-HP (the 2x2 case the horizontal-split test missed): the
-    // focused top-left pane borders on TWO interior sides, so the outline
-    // must accent both its right `│` seam and its bottom `─` seam - and a
-    // seam bordering only the unfocused panes stays dim.
+    // x-5a52 AC1-HP, under the pane frames: the focused top-left pane
+    // delineates itself with its own accent border on both interior sides,
+    // and the gap between two frames reads blank instead of a divider.
     let frame = four_pane_view().compose(); // focus = pane 10 (top-left)
     let cols = frame.cols as usize;
-    // A's right seam: vertical divider at content col 35 -> outer col 63,
-    // within A's rows (outer 1..14). Sample outer row 5.
-    let right_seam = frame.cells[5 * cols + (28 + 35)];
-    assert_eq!(right_seam.c, '│', "A's right border is a vertical divider");
-    assert_eq!(right_seam.fg, LATTICE_ACCENT, "A's right seam is accented");
-    // A's bottom seam: horizontal divider at content row 14 -> outer row 15,
-    // within A's cols (outer 28..62). Sample outer col 40.
-    let bottom_seam = frame.cells[15 * cols + (28 + 10)];
+    // A's right frame border: content col 34 -> outer col 62, within A's
+    // rows (outer 1..14). Sample outer row 5.
+    let right_border = frame.cells[5 * cols + (28 + 34)];
+    assert_eq!(right_border.c, '│', "A's right frame border is a rule");
     assert_eq!(
-        bottom_seam.c, '─',
-        "A's bottom border is a horizontal divider"
+        right_border.fg, LATTICE_ACCENT,
+        "the focused pane's frame is accented"
     );
-    assert_eq!(
-        bottom_seam.fg, LATTICE_ACCENT,
-        "A's bottom seam is accented"
-    );
-    // The C/D vertical seam (below A, outer row 20 col 63) borders only the
-    // unfocused panes and stays dim.
-    let cd_seam = frame.cells[20 * cols + (28 + 35)];
-    assert_eq!(
-        cd_seam.flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "a seam not bordering the focused pane stays dim"
-    );
+    // A's bottom frame border: outer row 14, within A's cols. Sample outer
+    // col 38.
+    let bottom_border = frame.cells[14 * cols + (28 + 10)];
+    assert_eq!(bottom_border.c, '─', "A's bottom frame border is a rule");
+    assert_eq!(bottom_border.fg, LATTICE_ACCENT);
+    // The A/B gap (outer col 63) reads blank: two boxes, not a divider.
+    let gap = frame.cells[5 * cols + (28 + 35)];
+    assert_eq!(gap.c, ' ', "the gap between two frames reads blank");
+    assert_eq!(gap.flags, 0);
+    // The C/D gap (outer row 20 col 63) borders no focused pane: blank too.
+    let cd_gap = frame.cells[20 * cols + (28 + 35)];
+    assert_eq!(cd_gap.c, ' ');
 }
 
 // An agent row hosting a given pane, under squad 1.
@@ -1145,8 +1112,9 @@ fn draw_lines_overlay_centers_within_viewport() {
         "body cells stay inverse under terminal"
     );
     assert_eq!(cells[(origin_r + 2) * cols + a_col].c, 'c');
-    // The top border corner sits one row up and one col left of the body.
-    assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '┌');
+    // The top border corner sits one row up and two cols left of the body
+    // (border, then the body's side pad).
+    assert_eq!(cells[origin_r * cols + (a_col - 2)].c, '╭');
     // Nothing painted at the old hardcoded top-left corner.
     assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
 }
@@ -1225,7 +1193,7 @@ fn draw_lines_overlay_zero_body_budget_paints_no_body() {
         "no body row should paint at zero body budget"
     );
     // Positive control: the chrome border still paints within the viewport.
-    assert!(painted('┌'), "the chrome border must still paint");
+    assert!(painted('╭'), "the chrome border must still paint");
 }
 
 #[test]
@@ -1234,13 +1202,14 @@ fn client_hit_test_maps_pane_and_swallows_chrome() {
     // chrome cells (tab bar, sideline) and dividers resolve to None so the
     // caller swallows them (AC3-UI: nothing forwards to a pane).
     let view = two_pane_view();
-    // Inside pane 10 (content origin at outer (1, 28)).
-    assert_eq!(view.hit_test(5, 30), Some((10, 4, 2)));
-    // Inside pane 11 (content col 36 -> outer col 64), its top-left cell.
-    // Pins press-cell == anchor-cell for a pane with a NONZERO x origin: the
-    // first visible column of an offset pane maps to pane-col 0, so a drag
+    // Inside pane 10: the frame ring insets the content one cell, so the
+    // content origin sits at outer (2, 29).
+    assert_eq!(view.hit_test(5, 30), Some((10, 3, 1)));
+    // Inside pane 11 (content col 37 -> outer col 65), its top-left content
+    // cell. Pins press-cell == anchor-cell for a pane with a NONZERO x origin:
+    // the first visible column of an offset pane maps to pane-col 0, so a drag
     // anchored there selects from that glyph, not N chars late.
-    assert_eq!(view.hit_test(3, 64), Some((11, 2, 0)));
+    assert_eq!(view.hit_test(3, 65), Some((11, 1, 0)));
     // Tab bar row is chrome.
     assert_eq!(view.hit_test(0, 40), None);
     // Sideline column (< panel_w 28) is chrome.
@@ -1376,24 +1345,18 @@ fn hovered_seam_renders_a_distinct_accent_in_compose() {
         let f = view.compose();
         f.cells[row * f.cols as usize + col]
     };
-    // Two different idle states exist. The seam at col 75 (between the
-    // unfocused 11 and 12) is plain dim chrome; the one at col 51 borders
-    // the focused pane 10, so it already wears x-5a52's standing outline.
-    // The hover accent has to be distinct from BOTH.
+    // Between FRAMED panes the idle gap reads blank: each pane is its own
+    // box, so the idle divider and the standing outline are gone. The hover
+    // still redraws the gap as a grabbable seam, distinct from that blank.
     let idle_chrome = cell_at(&view, 5, 75);
-    let focus_outline = cell_at(&view, 5, 51);
-    assert_eq!(idle_chrome.c, '│', "the divider glyph itself is unchanged");
-    assert_eq!(idle_chrome.flags, cell_flags::DIM);
-    assert_eq!(
-        focus_outline.flags, 0,
-        "the focus outline is undimmed accent"
-    );
+    assert_eq!(idle_chrome.c, ' ', "the gap between frames reads blank");
+    assert_eq!(idle_chrome.flags, 0);
 
     view.on_hover(5, 75, Instant::now());
     let lit = cell_at(&view, 5, 75);
     assert_eq!(
         lit.c, '│',
-        "hover accents the divider, it does not redraw it"
+        "hover redraws the gap as the seam, it does not stay blank"
     );
     assert_eq!(lit.flags, cell_flags::BOLD);
     assert_eq!(lit.fg, LATTICE_ACCENT);
@@ -1401,21 +1364,13 @@ fn hovered_seam_renders_a_distinct_accent_in_compose() {
         (lit.flags, lit.fg) != (idle_chrome.flags, idle_chrome.fg),
         "distinct from idle chrome"
     );
-    assert!(
-        (lit.flags, lit.fg) != (focus_outline.flags, focus_outline.fg),
-        "distinct from the focused pane's standing outline, so a hovered \
-             seam beside the focused pane still reads as grabbable"
-    );
-    // Hovering one seam does not light another.
-    assert_eq!(
-        cell_at(&view, 5, 51).flags,
-        0,
-        "still just the focus outline"
-    );
+    // Hovering one seam does not light another: the other gap stays blank.
+    assert_eq!(cell_at(&view, 5, 51).flags, 0, "the other gap stays blank");
 
-    // Leaving the band clears it.
+    // Leaving the band clears it back to blank.
     view.on_hover(5, 40, Instant::now());
-    assert_eq!(cell_at(&view, 5, 75).flags, cell_flags::DIM);
+    assert_eq!(cell_at(&view, 5, 75).c, ' ');
+    assert_eq!(cell_at(&view, 5, 75).flags, 0);
 }
 
 #[test]
@@ -2139,7 +2094,8 @@ fn link_hover_compose_underlines_exactly_the_accepted_cells() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's rect sits at the content origin (row 1, col 28).
+    // Pane 10's content origin sits at (row 2, col 29): the frame ring
+    // insets the content one cell.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
         (0..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
@@ -2148,7 +2104,7 @@ fn link_hover_compose_underlines_exactly_the_accepted_cells() {
     };
     assert_eq!(
         underlined(&lit),
-        vec![(1, 28 + 3), (2, 28 + 4)],
+        vec![(2, 28 + 4), (3, 28 + 5)],
         "exactly the two accepted cells, at the pane's screen position"
     );
     assert!(
@@ -3994,9 +3950,10 @@ fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
     let frame = view.compose();
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
-    let row1: Vec<char> = lines[1].chars().collect();
-    // start_c = origin_c(28) + rect.x(0) + rect.cols(35) - width("[+7]"=4).
-    let seg: String = row1[59..63].iter().collect();
+    // A framed pane anchors the indicator on its first CONTENT row, right
+    // aligned to the content: start_c = 28 + rect.x(0) + 1 + inner(33) - 4.
+    let row2: Vec<char> = lines[2].chars().collect();
+    let seg: String = row2[58..62].iter().collect();
     assert_eq!(seg, "[+7]");
 }
 
@@ -4085,8 +4042,8 @@ fn client_status_off_leaves_bottom_row_as_content() {
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
     assert!(
-        bottom.contains('a') || bottom.contains('b'),
-        "bottom row must keep pane content when status is off: {bottom:?}"
+        bottom.contains('╰'),
+        "bottom row must keep the panes' own frame edges when status is off: {bottom:?}"
     );
     // A pending hint still transiently paints over that content row.
     view.hint = true;
@@ -6945,6 +6902,7 @@ async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
     squad.tabs[0].panes.push(crate::proto::PaneMeta {
         id: focus,
         label: "focused".into(),
+        ..Default::default()
     });
     let ((tr, tc), _) = tab_and_new_tab_cells(&v);
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
@@ -7817,7 +7775,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
         assert!(
             r.lines
                 .iter()
-                .any(|l| l.text.starts_with('┌') || l.text.starts_with('└')),
+                .any(|l| l.text.starts_with('╭') || l.text.starts_with('╰')),
             "a border corner was drawn"
         );
     };
@@ -9103,8 +9061,8 @@ fn client_compose_panel_autohides_below_min_width() {
     let text = frame_text(&frame);
     let row1 = text.lines().nth(1).unwrap();
     assert!(
-        row1.starts_with('a'),
-        "content must start at column 0 when the panel hides: {row1:?}"
+        row1.starts_with("╭─ shell"),
+        "the pane frame must start at column 0 when the panel hides: {row1:?}"
     );
 }
 
@@ -9174,9 +9132,13 @@ fn client_compose_ignores_stale_frames_and_clips_overflow() {
     view.frames.insert(10, text_frame(40, 60, 'X'));
     let frame = view.compose();
     let text = frame_text(&frame);
-    let row1: Vec<char> = text.lines().nth(1).unwrap().chars().collect();
-    assert_eq!(row1[28 + 34], 'X', "last in-rect column draws");
-    assert_eq!(row1[28 + 35], '│', "divider survives an oversized frame");
+    // Screen row 2 is the pane's first CONTENT row (row 1 is the frame's
+    // top edge). The frame ring owns the rect's outer ring, so an oversized
+    // pty frame clips to the content rect inside it.
+    let row2: Vec<char> = text.lines().nth(2).unwrap().chars().collect();
+    assert_eq!(row2[28 + 33], 'X', "last in-rect content column draws");
+    assert_eq!(row2[28 + 34], '│', "the frame's right border wins its ring");
+    assert_eq!(row2[28 + 35], ' ', "the gap survives an oversized frame");
     // set_layout drops frames for panes the new Layout does not know.
     let mut view = two_pane_view();
     view.set_layout(LayoutView {
@@ -9232,8 +9194,9 @@ fn client_compose_letterboxes_beyond_the_clamped_area() {
     view.frames.insert(10, text_frame(20, 50, 'a'));
     let frame = view.compose();
     let cols = frame.cols as usize;
-    // In-area content cell.
-    assert_eq!(frame.cells[cols + 28].c, 'a');
+    // The frame's top-left corner, then the in-area content cell one cell in.
+    assert_eq!(frame.cells[cols + 28].c, '╭');
+    assert_eq!(frame.cells[2 * cols + 29].c, 'a');
     // One column beyond the area: filler, dim.
     let beyond_col = &frame.cells[cols + 28 + 50];
     assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
@@ -11868,10 +11831,12 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         PaneMeta {
             id: 10,
             label: "claude".into(),
+            ..Default::default()
         },
         PaneMeta {
             id: 20,
             label: "htop".into(),
+            ..Default::default()
         },
     ];
     v.layout.agents = vec![AgentRow {
@@ -11940,6 +11905,7 @@ async fn nav_goto_pane_cross_squad_sends_squad_tab_focus() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 55,
         label: "vim".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -11976,6 +11942,7 @@ async fn nav_goto_pane_active_view_is_bare_focus() {
     v.layout.squads[0].tabs[1].panes = vec![PaneMeta {
         id: 77,
         label: "shell".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -12008,6 +11975,7 @@ async fn nav_goto_pane_same_squad_other_tab_selects_tab_only() {
     v.layout.squads[0].tabs[0].panes = vec![PaneMeta {
         id: 88,
         label: "logs".into(),
+        ..Default::default()
     }]; // tab idx 0, id 0
     let idx = v
         .nav_rows()
@@ -14753,6 +14721,7 @@ async fn move_pick_keys_pane_sends_cross_squad_move_pane() {
     v.layout.squads[1].tabs[0].panes.push(PaneMeta {
         id: 200,
         label: "dst".into(),
+        ..Default::default()
     });
     v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
     let mut buf: Vec<u8> = Vec::new();
@@ -16505,6 +16474,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
                 .map(|p| crate::proto::PaneMeta {
                     id: (t * 10 + p) as u64,
                     label: String::new(),
+                    ..Default::default()
                 })
                 .collect();
         }
@@ -16543,6 +16513,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
         .map(|p| crate::proto::PaneMeta {
             id: p,
             label: String::new(),
+            ..Default::default()
         })
         .collect();
     let view = shot_view((24, 100), vec![squad], vec![]);

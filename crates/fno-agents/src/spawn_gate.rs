@@ -4439,9 +4439,9 @@ MemAvailable:    8000000 kB\n";
             std::fs::create_dir_all(&daemon).unwrap();
             std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &daemon);
             // The graph the territory read compiles, reachable via FNO_HOME.
-            std::fs::write(
-                dir.join("graph.json"),
-                serde_json::json!({ "entries": sc["graph"].clone() }).to_string(),
+            crate::graph_store::seed_rows(
+                &dir.join("graph.json"),
+                sc["graph"].as_array().expect("scenario rows"),
             )
             .unwrap();
             std::env::set_var("FNO_HOME", &dir);
@@ -4555,14 +4555,13 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("graph.json"),
-            serde_json::json!({ "entries": [
-                { "id": "x-epic", "type": "epic", "project": "fno" },
-                { "id": "x-1", "parent": "x-epic", "project": "fno" },
-                { "id": "x-out", "project": "other" },
-            ]})
-            .to_string(),
+        crate::graph_store::seed_rows(
+            &dir.join("graph.json"),
+            &[
+                serde_json::json!({ "id": "x-epic", "type": "epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-1", "parent": "x-epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-out", "project": "other" }),
+            ],
         )
         .unwrap();
         let reg = dir.join("registry.json");
@@ -4622,14 +4621,13 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("graph.json"),
-            serde_json::json!({ "entries": [
-                { "id": "x-epic", "type": "epic", "project": "fno" },
-                { "id": "x-1", "parent": "x-epic", "project": "fno" },
-                { "id": "x-out", "project": "other" },
-            ]})
-            .to_string(),
+        crate::graph_store::seed_rows(
+            &dir.join("graph.json"),
+            &[
+                serde_json::json!({ "id": "x-epic", "type": "epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-1", "parent": "x-epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-out", "project": "other" }),
+            ],
         )
         .unwrap();
         let reg = dir.join("registry.json");
@@ -4689,14 +4687,13 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(dir.join(".fno")).unwrap();
-        std::fs::write(
-            dir.join("graph.json"),
-            serde_json::json!({ "entries": [
-                { "id": "x-epic", "type": "epic", "project": "fno" },
-                { "id": "x-1", "parent": "x-epic", "project": "fno" },
-                { "id": "x-root", "project": "fno" },
-            ]})
-            .to_string(),
+        crate::graph_store::seed_rows(
+            &dir.join("graph.json"),
+            &[
+                serde_json::json!({ "id": "x-epic", "type": "epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-1", "parent": "x-epic", "project": "fno" }),
+                serde_json::json!({ "id": "x-root", "project": "fno" }),
+            ],
         )
         .unwrap();
         std::fs::write(
@@ -4804,10 +4801,9 @@ MemAvailable:    8000000 kB\n";
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         // A project-scoped graph so the loose-territory fallback answers.
-        std::fs::write(
-            dir.path().join("graph.json"),
-            serde_json::json!({"entries": [{"id": "x-1", "project": "proj", "status": "idea"}]})
-                .to_string(),
+        crate::graph_store::seed_rows(
+            &dir.path().join("graph.json"),
+            &[serde_json::json!({"id": "x-1", "project": "proj", "status": "idea"})],
         )
         .unwrap();
         std::env::set_var("FNO_HOME", dir.path());
@@ -4848,10 +4844,9 @@ MemAvailable:    8000000 kB\n";
         let fnodir = dir.path().join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(fnodir.join("config.toml"), "schema_version = 1\n").unwrap();
-        std::fs::write(
-            dir.path().join("graph.json"),
-            serde_json::json!({"entries": [{"id": "x-1", "project": "proj", "status": "idea"}]})
-                .to_string(),
+        crate::graph_store::seed_rows(
+            &dir.path().join("graph.json"),
+            &[serde_json::json!({"id": "x-1", "project": "proj", "status": "idea"})],
         )
         .unwrap();
         std::env::set_var("FNO_HOME", dir.path());

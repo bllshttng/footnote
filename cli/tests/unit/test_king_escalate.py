@@ -15,6 +15,7 @@ receives, the lane+key payload the transport receives, and the refusals that
 raise before either.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from pathlib import Path
 
@@ -198,12 +199,9 @@ def _prepare_court(monkeypatch, tmp_path: Path, rows) -> None:
     write_registry(rows)
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps({"entries": [{"id": "x-epic", "title": "x-epic", "slug": "x-epic",
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-epic", "title": "x-epic", "slug": "x-epic",
                                  "type": "epic", "priority": "p2", "project": "fno",
-                                 "status": "ready"}]}),
-        encoding="utf-8",
-    )
+                                 "status": "ready"}]}))
 
 
 def test_ac4_hp_a_live_l1_crown_presides_over_its_epic_set(tmp_path: Path, monkeypatch) -> None:

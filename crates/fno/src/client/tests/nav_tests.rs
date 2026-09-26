@@ -99,6 +99,7 @@ fn nav_filter_matches_pane_id() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 307,
         label: "shell".into(),
+        ..Default::default()
     }];
     v.layout.agents = vec![agent_row("claude", 11, None, false)];
     let rows = |q: &str| {
@@ -317,6 +318,7 @@ fn nav_overlay_lines_show_the_matched_identity_token() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 307,
         label: "shell".into(),
+        ..Default::default()
     }];
     let unseen = NavView {
         query: "307".into(),

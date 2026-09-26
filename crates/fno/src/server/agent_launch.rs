@@ -158,6 +158,13 @@ impl LaunchDesk {
 /// spawn door, refused before any effect. The door itself stays the
 /// authority on harness support, routing, capacity and permissions.
 fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
+    crate::dispatch_launch::validate_extra_flags(&req.extra_flags)?;
+    if req.provider.is_some() && req.model.is_none() {
+        return Err("a provider pin requires a model".to_string());
+    }
+    if req.provider.is_some() && req.model_names_harness {
+        return Err("a provider pin cannot omit the selected harness".to_string());
+    }
     if req.harness.trim().is_empty() {
         return Err("no harness selected".to_string());
     }
@@ -418,6 +425,7 @@ mod tests {
             harness: "claude".to_string(),
             substrate: "pane".to_string(),
             model: None,
+            provider: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
@@ -426,6 +434,7 @@ mod tests {
             split: None,
             node: None,
             message: String::new(),
+            extra_flags: Vec::new(),
         }
     }
 

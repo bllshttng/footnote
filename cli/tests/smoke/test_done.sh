@@ -23,7 +23,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Arrange: ~/.fno/graph.json under a disposable HOME with one entry.
 mkdir -p "$TMP/.fno"
-cat > "$TMP/.fno/graph.json" <<'JSON'
+cat <<'JSON' | uv run python tests/fixtures/graph_seed.py "$TMP/.fno/graph.json"
 {
   "entries": [
     {

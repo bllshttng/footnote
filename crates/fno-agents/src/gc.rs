@@ -1896,22 +1896,19 @@ mod tests {
         let home = AgentsHome::at(dir.path().join("agents"));
         home.ensure_root().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
-        std::fs::write(
-            dir.path().join("graph.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "entries": [{
-                    "id": "x-h1",
-                    "status": "idea",
-                    "project": "p",
-                    "sessions": [{
-                        "phase": "blueprint",
-                        "harness": "codex",
-                        "session_id": "s-h1",
-                        "started_at": "2026-09-01T00:00:00Z",
-                    }],
-                }]
-            }))
-            .unwrap(),
+        crate::graph_store::seed_rows(
+            &dir.path().join("graph.json"),
+            &[serde_json::json!({
+                "id": "x-h1",
+                "status": "idea",
+                "project": "p",
+                "sessions": [{
+                    "phase": "blueprint",
+                    "harness": "codex",
+                    "session_id": "s-h1",
+                    "started_at": "2026-09-01T00:00:00Z",
+                }],
+            })],
         )
         .unwrap();
         crate::state::update_registry(&home.registry_json(), |r| {

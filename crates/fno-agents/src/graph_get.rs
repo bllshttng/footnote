@@ -189,13 +189,11 @@ pub fn run_graph_get(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn write_graph(entries: &[Value]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("graph.json");
-        let mut f = std::fs::File::create(&path).expect("create graph.json");
-        write!(f, "{}", serde_json::json!({"entries": entries})).expect("write graph.json");
+        crate::graph_store::seed_rows(&path, entries).expect("seed graph.db");
         dir
     }
 

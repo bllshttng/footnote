@@ -72,6 +72,20 @@ def launch_overlay(account_id):
         raise ResumeUnpinned(f"account {account_id!r} does not resolve: {exc}", exit_code=2) from exc
 
 
+def respawn_ok(src):
+    """Whether the wake may `claude respawn` this row in place: only when the
+    Rust reentry plan picks respawn, so a saved job that lost the route never
+    replays. A missing row, or an unavailable Rust owner, never respawns; the
+    fork rung below runs with wake_route's route."""
+    if src is None:
+        return False
+    try:
+        answer = spawn_axes_call({"reentry_mechanism": {"name": src.name}})
+    except SpawnAxesUnavailable:
+        return False
+    return answer.get("mechanism") == "respawn"
+
+
 def predecessor_ids(resume_session_id: Optional[str], revive: bool) -> list[str]:
     """A fork to a new name retires the resumed uuid, so the row records it as
     a predecessor: mail addressed to the old id still lands on the surviving

@@ -307,6 +307,24 @@ def test_worktree_activity_writer_is_carried_by_both_posttooluse_manifests() -> 
         assert sum("claim-heartbeat.sh" in command for command in commands) == 1
 
 
+def test_edit_integrity_wired_on_both_posttooluse_manifests() -> None:
+    """Both harnesses run the edit-integrity shim once, under Edit|Write."""
+    for manifest_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))["hooks"][
+            "PostToolUse"
+        ]
+        # law-stage-inject also rides Edit|Write by design, so the count of
+        # registrations is incidental; the shim must appear exactly once.
+        commands = [
+            hook["command"]
+            for registration in manifest
+            if registration.get("matcher") == "Edit|Write"
+            for hook in registration.get("hooks", [])
+        ]
+        assert sum("edit-integrity.sh" in command for command in commands) == 1, manifest_path
+        assert (REPO_ROOT / "hooks" / "edit-integrity.sh").is_file()
+
+
 def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(

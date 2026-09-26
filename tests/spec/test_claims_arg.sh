@@ -87,7 +87,7 @@ echo "AC1.2-HP: ab-id input resolves to CLAIMS_ID and CLAIMS_SEED_ARG"
 FIXTURE_HOME="$(mktemp -d -t parse-claims-fixture.XXXXXX)"
 trap 'rm -rf "$FIXTURE_HOME"' EXIT
 mkdir -p "$FIXTURE_HOME/.fno"
-cat > "$FIXTURE_HOME/.fno/graph.json" <<'JSON'
+cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$FIXTURE_HOME/.fno/graph.json"
 {
   "entries": [
     {
@@ -127,19 +127,13 @@ JSON
 
 # `fno backlog get` is the live binary - it MAY or MAY NOT use the same
 # venv as the source tree. If it's installed and points HOME-aware, this
-# test exercises the real resolution. If not, fall back to the live-graph
-# probe so the assertion still runs in the dogfood env.
+# test exercises resolution against the sandbox store.
 if HOME="$FIXTURE_HOME" fno backlog get ab-feedface >/dev/null 2>&1; then
     OUT="$(HOME="$FIXTURE_HOME" bash "$PARSER" "ab-feedface" 2>&1 || true)"
     assert_contains "CLAIMS_ID set (fixture)" "CLAIMS_ID=ab-feedface" "$OUT"
     assert_contains "CLAIMS_SEED_ARG set (fixture)" "CLAIMS_SEED_ARG=" "$OUT"
-elif [[ -f "${HOME}/.fno/graph.json" ]] \
-   && fno backlog get ab-0973161b >/dev/null 2>&1; then
-    OUT="$(bash "$PARSER" "ab-0973161b" 2>&1 || true)"
-    assert_contains "CLAIMS_ID set (live)" "CLAIMS_ID=ab-0973161b" "$OUT"
-    assert_contains "CLAIMS_SEED_ARG set (live)" "CLAIMS_SEED_ARG=" "$OUT"
 else
-    echo "  SKIP: fno binary not on PATH and no live graph.json"
+    echo "  SKIP: fno binary cannot read the sandbox graph.db"
 fi
 
 # --- AC1.2-EDGE: unknown ab-id exits non-zero with a graceful, eval-able error ---

@@ -86,6 +86,11 @@ pub struct WebArgs {
     /// port, binary, build rev, start time, launching session id), flagging a
     /// bridge whose build rev predates the installed binary.
     pub status: bool,
+    /// `--attention-api`: also serve the attention answer endpoint on its own
+    /// loopback port (`--attention-port`, default 8724). Own router, never
+    /// inside the read-only bridge.
+    pub attention_api: bool,
+    pub attention_port: u16,
 }
 
 impl Default for WebArgs {
@@ -96,6 +101,8 @@ impl Default for WebArgs {
             port: 8722,
             stop: false,
             status: false,
+            attention_api: false,
+            attention_port: crate::attention_api::DEFAULT_ATTENTION_PORT,
         }
     }
 }
@@ -733,6 +740,17 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         shutdown: shutdown_rx,
     };
     let app = router(state);
+
+    // The attention answer endpoint rides the serve process on its own
+    // loopback router and port, never inside the read-only bridge.
+    if args.attention_api {
+        let port = args.attention_port;
+        tokio::spawn(async move {
+            if let Err(e) = crate::attention_api::serve(port).await {
+                eprintln!("fno mux serve --web: attention api: {e}");
+            }
+        });
+    }
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async move {

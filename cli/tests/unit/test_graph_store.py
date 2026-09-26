@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 import types
 from pathlib import Path
@@ -15,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from fno.rust_binary import find_dev_binary
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph.store import (
-    GraphCorruptError,
     _apply_graph_defaults,
     append_session_record,
     _read_json,
@@ -24,6 +23,7 @@ from fno.graph.store import (
     read_graph_strict,
     render_canonical_views,
 )
+
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -41,7 +41,7 @@ pytestmark = requires_rust
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(p, entries)
     return p
 
 
@@ -110,25 +110,24 @@ def test_the_raw_flock_helpers_are_retired():
     assert not hasattr(store_mod, "_release_flock")
 
 
-def test_ac1_hp_read_json_missing_file(tmp_path):
-    """AC1-HP: _read_json returns [] for missing file."""
+def test_read_json_missing_store_is_an_empty_graph(tmp_path):
+    """Opening a missing SQLite store creates its empty graph."""
     p = tmp_path / "nonexistent.json"
-    result = _read_json(p)
-    assert result == []
+    assert _read_json(p) == []
 
 
 def test_ac1_hp_read_json_empty_entries(tmp_path):
-    """AC1-HP: _read_json returns [] for file with empty entries."""
+    """An empty store returns no entries."""
     p = tmp_path / "g.json"
-    p.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(p, [])
     result = _read_json(p)
     assert result == []
 
 
 def test_ac1_hp_read_json_valid_entries(tmp_path):
-    """AC1-HP: _read_json returns entries list."""
+    """_read_json reads entries from graph.db."""
     p = tmp_path / "g.json"
-    p.write_text(json.dumps({"entries": [{"id": "ab-aabbccdd", "title": "X"}]}) + "\n")
+    seed_graph(p, [{"id": "ab-aabbccdd", "title": "X"}])
     result = _read_json(p)
     assert len(result) == 1
     assert result[0]["id"] == "ab-aabbccdd"
@@ -406,7 +405,6 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
-    from fno.graph.store import _worker_binary
 
 
     state_dir = tmp_path / "state"
@@ -414,14 +412,11 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     graph_json = state_dir / "graph.json"
     # The archived row is a stamped resident of the same store, not a sibling
     # advisory file; it must be seeded before the first db open folds the seed.
-    graph_json.write_text(
-        json.dumps({"entries": [
+    seed_graph(graph_json, json.dumps({"entries": [
             {"id": "ab-archive1", "title": "ARCHIVE-AUTO-RENDER-MARKER",
              "status": "done", "project": "fno",
              "archived_at": "2026-08-01T00:00:00Z"},
-        ]}),
-        encoding="utf-8",
-    )
+        ]}))
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
     monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
@@ -827,11 +822,11 @@ def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
     doomed_dir = tmp_path / "doomed"
     doomed_dir.mkdir()
     doomed_graph = doomed_dir / "graph.json"
-    doomed_graph.write_text('{"entries": []}\n')
+    seed_graph(doomed_graph, [])
     doomed = _advertised_keeper(doomed_graph)
     kept_graph = tmp_path / "kept" / "graph.json"
     kept_graph.parent.mkdir()
-    kept_graph.write_text('{"entries": []}\n')
+    seed_graph(kept_graph, [])
     kept = _advertised_keeper(kept_graph)
     try:
         assert doomed.poll() is None and kept.poll() is None
@@ -890,9 +885,9 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
     def stale_request(self, method, params):
         raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
 
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
     monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
-    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
 
@@ -1128,7 +1123,7 @@ def test_dead_socket_serves_by_exec_and_never_spawns(tmp_path, monkeypatch):
     minted, so nothing holds the store to grow on. A live incumbent is still
     preferred, and the exec client answers typed helpers."""
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
+    seed_graph(graph, [])
     monkeypatch.setattr(
         store_mod,
         "_worker_binary",

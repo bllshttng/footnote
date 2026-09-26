@@ -61,6 +61,7 @@ pub mod attach;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
+pub mod attention_http;
 pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
@@ -143,6 +144,7 @@ pub mod escalation;
 pub mod eval_attempt;
 pub mod evals_arm;
 pub mod evals_macro;
+pub mod evals_qualification;
 pub mod evals_trend;
 pub mod event_store;
 pub mod events;
@@ -176,6 +178,8 @@ pub mod grok_ask;
 pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
+pub mod harness_matrix;
+pub mod harness_reader;
 pub mod harness_verbs;
 pub mod heal;
 pub mod honesty_sweep;
@@ -302,11 +306,13 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revive_proof;
 pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
 pub mod route_inventory;
+pub mod route_recovery;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
@@ -346,6 +352,7 @@ pub mod state_path;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
+pub mod subagent_hold;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
@@ -1379,10 +1386,6 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",
-    "graph_export_failed",
-    // One 5-minute parity sample: relational export vs authoritative JSON
-    // while JSON is still the backend (the 7-day soak clock's input).
-    "graph_parity_sample",
     // Choke-point removal accounting: ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

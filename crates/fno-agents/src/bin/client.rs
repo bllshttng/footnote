@@ -50,7 +50,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive-authority",
     "evals-macro",
     "evidence-gate",
-    "law-match",
     "finalize",
     "fleet-incident",
     "graph-get",
@@ -168,23 +167,27 @@ fn main() {
             &args[1..],
         ));
     }
-    // PR-scoped callers resolve the local checkout from the head branch;
-    // transport-only, so this adds no client action to the curated menu.
+    // PR-scoped callers resolve the local checkout from the head branch; transport-only.
     if args.first().map(String::as_str) == Some("pr-worktree") {
         std::process::exit(fno_agents::pr_worktree::run());
     }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
-    // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
-    // no client action (the shrink law allows none); Python's
+    // launch_workdir.rs doc). Transport-only: registers no client action; Python's
     // ensure_launch_workdir reaches it through verb_call, and a `hold`
     // answer is a valid exit-0 answer the caller renders.
     if args.first().map(String::as_str) == Some("launch-workdir") {
         std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-only
-    // (no client action - shrink law); callers: worktree_gate.py, worktree-reapable.sh.
+    // `worktree-reapable`: the worktree-removal gate; callers: worktree_gate.py, worktree-reapable.sh.
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
+    }
+    // `harness-probe` / `harness-matrix`: capability reader + renderers, transport-only.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("harness-probe" | "harness-matrix")
+    ) {
+        std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
@@ -329,6 +332,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if matches!(verb, "claude-birth-exec") {
+        // `revive-proof` rides this action as an argument (the fleet-incident
+        // gh-budget shape): law d-fe66560a allows no new client action, and
+        // the revival liveness gate belongs to the same claude birth/relaunch
+        // door. Direct dispatch, no daemon RPC - a fork that never started
+        // must refuse even when the daemon is the thing wedged.
+        if args.get(1).map(String::as_str) == Some("revive-proof") {
+            return fno_agents::revive_proof::run_revive_proof(&args[2..]);
+        }
         return fno_agents::claude_supervisor::run_birth_exec(&args[1..]);
     }
 
@@ -404,25 +415,18 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
-    // `law-match` is the hidden binary-direct transport for the question-to-law
-    // matcher. Same `matches!` treatment as `evidence-gate`, so no advertised
-    // fno verb is added.
-    if matches!(verb, "law-match") {
-        return fno_agents::law_match::run_law_match(&args[1..]);
-    }
-
     // `king-escalation-text` is the hidden binary-direct transport for the
     // king escalation renderer (ported out of `fno.king.escalate`): Python
     // keeps the question fold and the liveness read, this side only renders.
-    // Same `matches!` treatment as `law-match`, so no advertised fno verb is
-    // added.
+    // Same `matches!` treatment as `component-verdict`, so no advertised fno
+    // verb is added.
     if matches!(verb, "king-escalation-text") {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
     // `fleet-task` is the hidden binary-direct transport the Python reconcile
     // lanes ride through verb_call (fleet_task.rs). Same `matches!` treatment
-    // as `law-match`: no advertised fno verb.
+    // as `component-verdict`: no advertised fno verb.
     if matches!(verb, "fleet-task") {
         return fno_agents::fleet_task::run_fleet_task(&args[1..]);
     }

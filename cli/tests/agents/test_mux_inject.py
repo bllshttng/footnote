@@ -70,6 +70,11 @@ class FakeMux:
     reads it); ``fail_times`` fails a verb for the first N calls (a held claim
     that clears after a retry)."""
 
+    # Captured at import, before any test patches subprocess.run for the whole
+    # process: the mail-envelope render passes through to the real renderer so
+    # the enveloped lane asserts today's bytes, not an empty stub answer.
+    _real_run = staticmethod(subprocess.run)
+
     def __init__(
         self,
         fail_verbs: set[str] | None = None,
@@ -91,7 +96,11 @@ class FakeMux:
         # config layer, which runs `git rev-parse`) and broke both.
         #
         # A foreign call is answered as success and NOT recorded, so `calls`
-        # keeps meaning what its readers think it means.
+        # keeps meaning what its readers think it means -- except the
+        # mail-envelope render, which passes through to the real renderer
+        # (same seam test_dispatch_mux_send.py uses).
+        if "mail-envelope" in argv:
+            return self._real_run(argv, input=input, **kwargs)
         if argv[1:3] != ["mux", "pane"] or len(argv) < 4:
             return subprocess.CompletedProcess(argv, 0, "", "")
         verb = argv[3]
@@ -115,6 +124,16 @@ def _patch_mux(monkeypatch, fake: FakeMux) -> None:
     from fno.agents import dispatch as dispatch_mod
 
     monkeypatch.setattr(dispatch_mod.subprocess, "run", fake)
+    # The wholesale subprocess stub also swallows the Rust envelope renderer's
+    # call, whose empty stdout would wrap every payload as the empty string.
+    # Stub the renderer with a deterministic minimal envelope instead.
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope,
+        "_render_in_rust",
+        lambda payload: "<fno_mail>\n{}\n</fno_mail>".format(payload.get("body", "")),
+    )
 
 
 def test_inject_reads_the_undeclared_posture_instead_of_raising(monkeypatch) -> None:

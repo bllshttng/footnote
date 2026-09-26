@@ -263,6 +263,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3d. An unowned session section (x-e6c3): a king's "## HANDOFF (session)"
+# heading inside correct fno:session markers used to be deleted whole by the
+# refresh, because the writer re-emits only the four labels it knows. The
+# writer now re-emits every marked section it does not regenerate, verbatim,
+# exactly once per fire.
+# ---------------------------------------------------------------------------
+HANDOFF_DOC="$TMP/handoff-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+python3 - "$HANDOFF_DOC" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+block = "\n## HANDOFF (session)\n<!-- fno:session -->\nSENTINEL_HANDOFF_13 the next king must read: merge x before y.\n<!-- /fno:session -->\n"
+marker = "\n## User notes (you write here; the machine only ever reads this)\n"
+assert marker in s, "user notes heading not found"
+open(p, "w").write(s.replace(marker, block + marker, 1))
+PY
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+HANDOFF_COUNT="$(grep -c "SENTINEL_HANDOFF_13" "$HANDOFF_DOC")"
+if [[ "$HANDOFF_COUNT" == "1" ]] && grep -q "^## HANDOFF (session)" "$HANDOFF_DOC"; then
+  pass "unowned HANDOFF (session) section survives the refresh exactly once"
+else
+  fail "unowned session section lost or duplicated: count=$HANDOFF_COUNT"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HANDOFF_DOC\"}" >/dev/null 2>&1
+if [[ "$(grep -c "SENTINEL_HANDOFF_13" "$HANDOFF_DOC")" == "1" ]] \
+  && grep -q "## Merge order and why (session)" "$HANDOFF_DOC" && grep -q "refreshed" "$HANDOFF_DOC"; then
+  pass "HANDOFF section survives the re-fire once; known sections still refresh"
+else
+  fail "re-fire duplicated or dropped the HANDOFF section"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PR section omitted when gh is absent (degrade, never a failed hook).
 # ---------------------------------------------------------------------------
 rm -f "$DOC"

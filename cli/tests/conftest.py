@@ -245,7 +245,6 @@ def _store_keeper_absent() -> bool:
 #: is a nodeid PREFIX (a file, or a file plus a class), so a new case inside a
 #: listed class is covered without a second edit here.
 _NEEDS_STORE_KEEPER = (
-    "tests/unit/test_doctor_graph_backend.py",
     "tests/test_pr_watch_dispatch.py::TestDurableGrantExecution",
     "tests/unit/test_cli_wrappers.py::test_get_one_id_never_invokes_the_binary",
     "tests/unit/test_pr_closure_producer.py::test_supersede_keeps_the_human_reason",
@@ -1032,6 +1031,10 @@ def _hermetic_resume_pin(monkeypatch):
     real = fork_lineage.spawn_axes_call
 
     def _answer(payload):
+        if payload.get("reentry_mechanism") is not None:
+            # The rung-2 respawn gate asks the Rust reentry resolver; the
+            # hermetic default keeps today's respawn-in-place behavior.
+            return {"mechanism": "respawn"}
         pin = payload.get("resume_pin")
         if pin is None:
             return real(payload)

@@ -8,6 +8,7 @@ the same door, so the undefer/unsupersede contracts live here too.
 Filter: ``fno doctor test cli/tests/unit/test_backlog_update_status.py``
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -242,11 +243,11 @@ def test_same_slug_import_dedups_and_each_token_resolves_one_row(tmp_graph):
     suffixes the second same-slug row (-2), so the unsuffixed token resolves
     the ORIGINAL row deterministically and the suffixed slug resolves its own
     row. The door's ambiguity refusal stays an id-hit defense only."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         _node("x-0001", slug="same-slug"),
         _node("x-0002", slug="same-slug"),
         _node("x-0003", slug="only-slug", priority="p1"),
-    ]}), encoding="utf-8")
+    ]}))
 
     # A unique slug resolves: the priority write lands on x-0003.
     r = _invoke("update", "only-slug", "--set", "priority=p0")

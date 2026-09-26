@@ -9,6 +9,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 pub mod agents_view;
+pub mod attention_api;
 pub mod backlog_model;
 pub mod backlog_view;
 pub mod backlog_write;
@@ -20,6 +21,7 @@ pub mod cli_args;
 pub mod client;
 pub mod clipboard;
 pub mod connections_view;
+pub mod context_used;
 pub mod court_overlay;
 pub mod digest_overlay;
 pub mod dispatch_launch;
@@ -30,6 +32,7 @@ pub mod feed_overlay;
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
+pub mod law_cli;
 pub mod link;
 pub mod live_store_fence;
 pub mod mouse;
@@ -37,6 +40,7 @@ pub mod mux_cli;
 pub mod mux_rows;
 pub mod needs_overlay;
 pub mod pane_argv;
+pub mod pane_border;
 pub mod pane_cwd;
 mod pane_send_audit;
 pub mod popup;
@@ -74,4 +78,5 @@ pub mod version;
 pub mod view_store;
 pub mod vt;
 pub mod web;
+pub mod wordmark;
 pub mod yard_overlay;

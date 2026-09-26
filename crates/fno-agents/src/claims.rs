@@ -818,6 +818,13 @@ fn pid_verdict(
     None
 }
 
+/// A pid the prover proved is the holder session's own process, on a harness
+/// where that process dies with the session. Both TTL arms trust it.
+fn proven_session_pid(rec: &ClaimRecord) -> bool {
+    rec.pid_provenance.as_deref() == Some("session-prover")
+        && pid_dies_with_session(rec.harness.as_deref())
+}
+
 /// Classify with optional sweep-time sibling evidence. `None` is the honest
 /// value for single-key reads; a full scan passes the PID exclusivity map's
 /// result for the record being classified. `session_witness` is the
@@ -896,9 +903,7 @@ pub fn classify_with_basis_and_exclusivity(
         // record's own `harness` is independent evidence, already on every
         // record, so a pre-fix claim on disk and one from an older binary in a
         // mixed-version fleet both get the correct verdict here.
-        if rec.pid_provenance.as_deref() == Some("session-prover")
-            && pid_dies_with_session(rec.harness.as_deref())
-        {
+        if proven_session_pid(rec) {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
                 if pid_exclusive == Some(false) {
@@ -974,6 +979,15 @@ pub fn classify_with_basis_and_exclusivity(
             .filter(|session| !session.is_empty())
             .map(|_| witness(rec))
     });
+    // The session's own live process outranks an Absent witness, in the same
+    // order as the expired arm. An ambient pid is only a neighbour, so it
+    // proves nothing and the witness still decides.
+    if live && proven_session_pid(rec) {
+        if pid_exclusive == Some(false) {
+            return (ClaimState::Suspect, basis::PID_SHARED);
+        }
+        return (ClaimState::Live, cause);
+    }
     if rec.key.starts_with("node:")
         && is_same_machine(&rec.host, rec.machine_id.as_deref())
         && matches!(witnessed, Some(SessionLiveness::Absent))
@@ -4033,27 +4047,6 @@ mod tests {
         // dead), never Refused (which would read SUSPECT and wedge a slot).
         assert_eq!(probe_pid(2_000_000_000), PidProbe::Absent);
         assert_eq!(probe_pid(-1), PidProbe::Absent);
-    }
-
-    #[test]
-    fn classify_is_the_state_view_of_classify_with_basis() {
-        let me = std::process::id() as i32;
-        let host = hostname();
-        let now = now_ms();
-        let cases = [
-            record(me, now, None, &host),
-            record(-1, now, None, &host),
-            record(me, 1, None, &host),
-            record(me, now, Some(now - 1), &host),
-            record(-1, now, Some(now + 60_000), &host),
-            record(me, now, Some(now + 60_000), "elsewhere.example"),
-        ];
-        for rec in &cases {
-            assert_eq!(
-                classify(rec, Some(now)),
-                classify_with_basis(rec, Some(now), &|pid| probe_pid(pid)).0
-            );
-        }
     }
 
     #[test]

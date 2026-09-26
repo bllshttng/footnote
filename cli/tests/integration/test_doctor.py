@@ -122,8 +122,8 @@ def test_doctor_exits_nonzero_on_accessor_error(
 ) -> None:
     """Fix 3: accessor ERROR must cause doctor to exit non-zero.
 
-    {vault} in paths.graph_json with obsidian disabled causes the accessor
-    to raise at resolve time (settings loads fine). Doctor must count that
+    {vault} in state_dir with obsidian disabled causes the accessor
+    to raise at resolve time. Doctor must count that
     as an error and return non-zero.
 
     Note: {project} no longer raises for non-git dirs (it uses root.name),
@@ -132,9 +132,7 @@ def test_doctor_exits_nonzero_on_accessor_error(
     settings = _write_settings(
         tmp_path,
         "schema_version: 1\nconfig:\n"
-        f"  state_dir: {str(tmp_path / '.fno')}/\n"
-        "  paths:\n"
-        "    graph_json: '{vault}/graph.json'\n"
+        "  state_dir: '{vault}/fno'\n"
         "  obsidian:\n"
         "    enabled: false\n",
     )

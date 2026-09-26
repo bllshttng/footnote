@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from datetime import datetime
 
@@ -61,7 +62,7 @@ def test_lanes_cli_renders_coverage(tmp_path, monkeypatch):
     monkeypatch.setattr(sb_cli._paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(sb_cli._paths, "agents_registry_path", lambda: tmp_path / "registry.json")
     (tmp_path / "ledger.json").write_text('{"entries": []}')
-    (tmp_path / "graph.json").write_text('{"entries": []}')
+    seed_graph(tmp_path / "graph.json", '{"entries": []}')
     (tmp_path / "registry.json").write_text('{"schema_version": 15, "agents": []}')
 
     app = typer.Typer()
@@ -98,7 +99,7 @@ def test_lanes_cli_reads_provider_limits_after_the_rename(tmp_path, monkeypatch)
     monkeypatch.setattr(sb_cli._paths, "graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(sb_cli._paths, "agents_registry_path", lambda: tmp_path / "registry.json")
     (tmp_path / "ledger.json").write_text('{"entries": []}')
-    (tmp_path / "graph.json").write_text('{"entries": []}')
+    seed_graph(tmp_path / "graph.json", '{"entries": []}')
     (tmp_path / "registry.json").write_text('{"schema_version": 15, "agents": []}')
 
     app = typer.Typer()
