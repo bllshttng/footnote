@@ -73,8 +73,8 @@ use crate::view_store::{
 use crate::vt::ShellActivity;
 use crate::wordmark;
 use overlay_paint::{
-    draw_body_overlay, draw_lines_overlay, draw_overlay_layout, draw_popup_overlay,
-    layout_lines_overlay, OverlayAnchor, OverlayLayout,
+    draw_lines_overlay, draw_overlay_layout, draw_popup_overlay, layout_lines_overlay,
+    OverlayAnchor, OverlayLayout,
 };
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]

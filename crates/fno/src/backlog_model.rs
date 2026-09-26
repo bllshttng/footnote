@@ -65,6 +65,8 @@ pub struct Query {
     priority: Vec<String>,
     size: Vec<String>,
     king: Vec<String>,
+    kind: Vec<String>,
+    tag: Vec<String>,
     q: Option<String>,
     all: bool,
 }
@@ -115,6 +117,8 @@ impl Query {
                 "priority" => push_unique(&mut q.priority, val),
                 "size" => push_unique(&mut q.size, val),
                 "king" => push_unique(&mut q.king, val),
+                "type" => push_unique(&mut q.kind, val),
+                "tag" => push_unique(&mut q.tag, val),
                 "q" => q.q = val.map(str::to_string),
                 "all" => q.all = matches!(v.as_str(), "1" | "true" | ""),
                 _ => {}
@@ -148,6 +152,10 @@ pub struct Card {
     pub status: Option<String>,
     pub project: Option<String>,
     pub parent: Option<String>,
+    /// The row's `type` field.
+    pub kind: Option<String>,
+    /// The row's `tags` array, empty when absent.
+    pub tags: Vec<String>,
     pub blocked: bool,
     pub claimed: bool,
     pub king: Option<King>,
@@ -212,7 +220,9 @@ pub struct Stats {
     pub flow: Value,
 }
 
-/// Values present after the scope and before the filters, for filter menus.
+/// Values present after the scope and before the model's own filters, for
+/// filter menus. `kinds` is the set of row `type` values; `tags` the set of
+/// row `tags`, empty while no row carries one.
 #[derive(Debug, Clone, Serialize)]
 pub struct Facets {
     pub projects: Vec<String>,
@@ -221,6 +231,8 @@ pub struct Facets {
     pub priorities: Vec<String>,
     pub sizes: Vec<String>,
     pub statuses: Vec<String>,
+    pub kinds: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 /// An epic named in the facets.
@@ -315,6 +327,8 @@ pub struct NodeView {
     pub blocked_by: Vec<Link>,
     pub blocks: Vec<Link>,
     pub related: Vec<Link>,
+    /// The node's parent, one link (the row's `parent` id).
+    pub parent: Vec<Link>,
     pub sessions: Vec<SessionView>,
     pub prs: Vec<Pr>,
     pub notes: Vec<Note>,
@@ -436,6 +450,17 @@ pub(crate) fn card_of(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         parent: e.get("parent").and_then(Value::as_str).map(str::to_string),
+        kind: e.get("type").and_then(Value::as_str).map(str::to_string),
+        tags: e
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         blocked,
         claimed,
         king: king_for(
@@ -497,10 +522,10 @@ fn stamped(e: &Value, field: &str) -> bool {
 }
 
 /// Whether the filtered card set keeps the row: any-of project, status,
-/// priority, size and king-name filters, `epic` keeps the epic's own card
-/// plus cards whose parent names any selected epic, and `q` is a
-/// case-insensitive substring of id, slug or title.
-fn keeps_query(card: &Card, q: &Query) -> bool {
+/// priority, size, king-name, type and tag filters, `epic` keeps the
+/// epic's own card plus cards whose parent names any selected epic, and
+/// `q` is a case-insensitive substring of id, slug, title or details.
+fn keeps_query(card: &Card, row: Option<&Value>, q: &Query) -> bool {
     let in_set = |values: &[String], have: Option<&str>| {
         values.is_empty() || values.iter().any(|v| Some(v.as_str()) == have)
     };
@@ -514,6 +539,12 @@ fn keeps_query(card: &Card, q: &Query) -> bool {
         return false;
     }
     if !in_set(&q.size, card.size.as_deref()) {
+        return false;
+    }
+    if !in_set(&q.kind, card.kind.as_deref()) {
+        return false;
+    }
+    if !q.tag.is_empty() && !q.tag.iter().any(|t| card.tags.iter().any(|have| have == t)) {
         return false;
     }
     if !q.king.is_empty()
@@ -535,7 +566,11 @@ fn keeps_query(card: &Card, q: &Query) -> bool {
     if let Some(needle) = &q.q {
         let needle = needle.to_lowercase();
         let slug = card.slug.as_deref().unwrap_or("");
-        let hay = format!("{} {} {}", card.id, slug, card.title).to_lowercase();
+        let details = row
+            .and_then(|r| r.get("details"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let hay = format!("{} {} {} {}", card.id, slug, card.title, details).to_lowercase();
         if !hay.contains(&needle) {
             return false;
         }
@@ -566,6 +601,8 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
                 priorities: vec![],
                 sizes: vec![],
                 statuses: vec![],
+                kinds: vec![],
+                tags: vec![],
             },
             unavailable: unavailable(inp),
             errors: {
@@ -613,7 +650,10 @@ pub fn board(inp: &Inputs, q: &Query) -> Board {
             *status_totals.entry(s.clone()).or_insert(0) += 1;
         }
     }
-    let filtered: Vec<Card> = scoped.into_iter().filter(|c| keeps_query(c, q)).collect();
+    let filtered: Vec<Card> = scoped
+        .into_iter()
+        .filter(|c| keeps_query(c, by_ref.get(c.id.as_str()).copied(), q))
+        .collect();
     // Per-column totals over the filtered set; `open` excludes Done, the
     // header counts keep it.
     let mut open_totals: HashMap<&'static str, usize> = HashMap::new();
@@ -666,6 +706,8 @@ fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
     let mut priorities: BTreeMap<String, ()> = BTreeMap::new();
     let mut sizes: BTreeMap<String, ()> = BTreeMap::new();
     let mut statuses: BTreeMap<String, ()> = BTreeMap::new();
+    let mut kinds: BTreeMap<String, ()> = BTreeMap::new();
+    let mut tags: BTreeMap<String, ()> = BTreeMap::new();
     for c in cards {
         if let Some(p) = &c.project {
             projects.insert(p.clone(), ());
@@ -681,6 +723,12 @@ fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
         }
         if let Some(s) = &c.status {
             statuses.insert(s.clone(), ());
+        }
+        if let Some(k) = &c.kind {
+            kinds.insert(k.clone(), ());
+        }
+        for t in &c.tags {
+            tags.insert(t.clone(), ());
         }
     }
     // Epic facets come from the rows, not the cards: an epic card may sit
@@ -709,6 +757,8 @@ fn facets_of(cards: &[Card], inp: &Inputs) -> Facets {
         priorities: priorities.into_keys().collect(),
         sizes: sizes.into_keys().collect(),
         statuses: statuses.into_iter().map(|(s, _)| s).collect(),
+        kinds: kinds.into_keys().collect(),
+        tags: tags.into_keys().collect(),
     }
 }
 
@@ -926,36 +976,36 @@ pub(crate) fn resolve_row<'a>(inp: &'a Inputs, id: &str) -> Option<&'a Value> {
         })
 }
 
-/// One link from a row field of ids to the nodes the read holds.
+/// One link from a row field of ids to the nodes the read holds. The field
+/// may be a list (`blocked_by`) or a single id (`parent`).
 fn links(inp: &Inputs, e: &Value, field: &str) -> Vec<Link> {
+    let ids: Vec<&str> = match e.get(field) {
+        Some(Value::Array(arr)) => arr.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        _ => Vec::new(),
+    };
     let order = order_of(inp);
-    e.get(field)
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|id| {
-                    let title = resolve_row(inp, id)
-                        .and_then(|r| r.get("title").and_then(Value::as_str))
-                        .map(str::to_string);
-                    let (column, status) = match resolve_row(inp, id) {
-                        Some(r) => {
-                            let blocked = false;
-                            let card = card_of(inp, r, &order, blocked);
-                            (card.as_ref().map(|c| c.column), node_status_text(r))
-                        }
-                        None => (None, None),
-                    };
-                    Link {
-                        id: id.to_string(),
-                        title,
-                        column,
-                        status,
-                    }
-                })
-                .collect()
+    ids.iter()
+        .map(|&id| {
+            let title = resolve_row(inp, id)
+                .and_then(|r| r.get("title").and_then(Value::as_str))
+                .map(str::to_string);
+            let (column, status) = match resolve_row(inp, id) {
+                Some(r) => {
+                    let blocked = false;
+                    let card = card_of(inp, r, &order, blocked);
+                    (card.as_ref().map(|c| c.column), node_status_text(r))
+                }
+                None => (None, None),
+            };
+            Link {
+                id: id.to_string(),
+                title,
+                column,
+                status,
+            }
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Reverse links: rows whose `field` names this node. The field may be a
@@ -1107,6 +1157,7 @@ pub fn node(inp: &Inputs, id: &str) -> Option<NodeView> {
         blocked_by: links(inp, e, "blocked_by"),
         blocks,
         related: links(inp, e, "related"),
+        parent: links(inp, e, "parent"),
         sessions,
         prs,
         notes,
