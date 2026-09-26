@@ -1,11 +1,10 @@
 use super::*;
-use crate::proto::AgentRow;
+use crate::proto::{AgentRow, TemplateName};
 use crate::pty::ChildGuard;
 use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
 #[path = "server/server_thread_viewer_tests.rs"]
 mod thread_viewer_tests;
-use crate::proto::TemplateName;
 // The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;

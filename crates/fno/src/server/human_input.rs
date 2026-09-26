@@ -316,6 +316,19 @@ impl Core {
         self.hold_arm_last.insert(pane, now);
         spawn_hold_arm(&session);
     }
+
+    /// The tail of the `CoreMsg::Input` arm, one call from `handle_msg` so
+    /// server.rs only shrinks: touch telemetry, the attended hold, the
+    /// submit witness. A keystroke here is past the relay guard - PaneSend
+    /// and relay writes never reach this.
+    pub(super) fn input_tail(&mut self, focus: u64, bytes: &[u8]) {
+        self.touch(focus, "inject", true);
+        let submitted = is_submit(bytes);
+        self.arm_attended_hold(focus, submitted);
+        if submitted {
+            self.witness_submit(focus);
+        }
+    }
 }
 
 #[cfg(test)]

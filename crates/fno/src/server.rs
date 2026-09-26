@@ -1614,11 +1614,8 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
-    /// Per-pane last attended-hold arm time (x-0e09): the first keystroke
-    /// past [`attended_hold_window`] since the last arm (re)arms the pane
-    /// session's mail hold, so a typing operator's session holds delivery
-    /// while they type and drains as one digest when they go quiet. Orphan
-    /// entries from reaped panes are inert (the `seen` posture: no GC).
+    /// Per-pane last attended-hold arm time (x-0e09): a keystroke past the
+    /// window since the last arm re-arms the pane session's mail hold.
     hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
@@ -11665,22 +11662,8 @@ impl Core {
                             }
                         }
                     }
-                    // W4 touch telemetry: a keystroke past the relay guard is
-                    // a human steering this pane; PaneSend (script API) and
-                    // relay writes never reach here.
-                    self.touch(focus, "inject", true);
-                    // The attended hold (x-0e09): the keystroke arms the pane
-                    // session's mail hold - first byte of a burst or one past
-                    // the window since the last arm; a submit re-arms, the
-                    // notify-self extend, done here so a non-claude harness
-                    // gets it too.
-                    let submitted = human_input::is_submit(&bytes);
-                    self.arm_attended_hold(focus, submitted);
-                    // A submit key past the relay guard is a human pressing
-                    // Enter: one operator_submit witness row (human_input).
-                    if submitted {
-                        self.witness_submit(focus);
-                    }
+                    // Touch telemetry, the attended hold, the submit witness.
+                    self.input_tail(focus, &bytes);
                 }
                 Flow::Continue
             }
