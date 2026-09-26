@@ -144,7 +144,7 @@ A webhook sink receives the `Delivery` body. The body carries `delivery_id`, `ev
 
 ## Delivery
 
-The arm's mux pass runs on every beat beside the pages: every unsuperseded `attention_answer` row, whatever its sink, drives one reply ladder from the persisted state at `~/.fno/attention/replies.json`. First the clear: while the item is still open, the arm runs `fno inbox outstanding clear` (the same retry cap as the file lane, five). A note item skips the clear, because no door closes a note. Then the rungs, in order:
+The arm's mux pass runs on every beat beside the pages. Every unsuperseded `attention_answer` row, whatever its sink, drives one reply ladder from the persisted state at `~/.fno/attention/replies.json`. First the clear: while the item is still open, the arm runs `fno inbox outstanding clear` (the same retry cap as the file lane, five). A note item skips the clear, because no door closes a note. Then the rungs, in order:
 
 1. `mail` - the clear's mail leg. The posture line decides: `delivered (hosted)` is the end, `rung: mail, outcome: landed`.
 2. `resume` - a durable park under an idle asker. When the asker has a session id, the arm runs `fno agents resume <session_id> --message <answer>`. This is the one resume door, with a 30 s bound and stdin closed. The message carries the question id and a dedupe line. A later beat looks for the question id in the asker's transcript, after the byte offset the resume saved. Seeing it confirms delivery (`rung: resume, outcome: confirmed`).
