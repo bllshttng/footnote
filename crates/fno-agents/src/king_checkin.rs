@@ -451,7 +451,11 @@ fn apply_crown_naming(
         (Some(n), None) => crate::crown_names::name_crown(&store, &registry, scope, n).map(|_| ()),
         (None, Some(old)) => crate::crown_names::keep_from(&store, &registry, old, scope),
         (None, None) => Ok(()),
+    }?;
+    if !crate::crown_names::ensure_named_crown(&store, &registry, scope)? {
+        return Err("every live crown needs a name; check in with --name <name>".into());
     }
+    Ok(())
 }
 
 /// The first line of every beat: the crown's identity, then the facts.
@@ -2360,6 +2364,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         eprintln!("fno-agents king-checkin: {e}");
         return 2;
     }
+    if let Err(error) = rename_harness_title_for_crown(&ctx.scope) {
+        eprintln!("fno-agents king-checkin: harness title rename failed: {error}");
+    }
     let (previous, previous_error) = previous_row(&ctx);
     let since = previous
         .as_ref()
@@ -2514,9 +2521,145 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     finish_checkin(ctx.emit, emitted, output_error)
 }
 
+fn rename_harness_title_for_crown(scope: &str) -> Result<(), String> {
+    let home = crate::paths::AgentsHome::from_env();
+    let registry = crate::state::load_registry(&home.registry_json())
+        .map_err(|error| format!("registry read failed: {error}"))?;
+    let canonical = crate::territory::canonical_scope(scope);
+    let mut holders = registry.entries.iter().filter(|row| {
+        row.crown_scope
+            .as_deref()
+            .is_some_and(|row_scope| crate::territory::canonical_scope(row_scope) == canonical)
+            && !matches!(
+                row.status,
+                crate::AgentStatus::Exited
+                    | crate::AgentStatus::Orphaned
+                    | crate::AgentStatus::Failed
+                    | crate::AgentStatus::PermanentDead
+            )
+    });
+    let row = holders
+        .next()
+        .ok_or_else(|| format!("no live holder for {canonical}"))?;
+    if holders.next().is_some() {
+        return Err(format!("multiple live holders for {canonical}"));
+    }
+    let session = row
+        .harness_session_id
+        .as_deref()
+        .filter(|session| !session.is_empty())
+        .ok_or_else(|| format!("{} has no harness session id", row.name))?;
+    let harness = row
+        .harness
+        .as_deref()
+        .filter(|harness| !harness.is_empty())
+        .ok_or_else(|| format!("{} has no harness", row.name))?;
+    if crate::claims::resolve_identity().0.as_deref() != Some(session) {
+        return Err("the live crown holder is not this session".into());
+    }
+    let label = row.name.as_str();
+    if row.harness_title.as_deref() == Some(label) {
+        return Ok(());
+    }
+    let command = format!("/rename {label}");
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut child = std::process::Command::new(executable)
+        .args([
+            "mail-inject",
+            "--session",
+            session,
+            "--harness",
+            harness,
+            "--self-send",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("mail-inject start failed: {error}"))?;
+    let mut stdin = child.stdin.take().ok_or("mail-inject stdin unavailable")?;
+    stdin
+        .write_all(command.as_bytes())
+        .map_err(|error| format!("mail-inject write failed: {error}"))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("mail-inject wait failed: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("mail-inject exited {}", output.status)
+        } else {
+            detail
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_registry(home: &crate::paths::AgentsHome, agents: serde_json::Value) {
+        let doc = serde_json::json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "agents": agents,
+        });
+        std::fs::write(home.registry_json(), doc.to_string()).unwrap();
+    }
+
+    #[test]
+    fn an_unnamed_live_crown_cannot_complete_checkin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-a", "status": "live", "crown_scope": "fno",
+                "crown_level": 1, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-a", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+
+        let err = apply_crown_naming(None, None, &home, "fno").unwrap_err();
+
+        assert!(err.contains("every live crown needs a name"), "{err}");
+    }
+
+    #[test]
+    fn a_successor_checkin_carries_the_name_into_its_registry_label() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(tmp.path());
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-old", "status": "live", "crown_scope": "x-aaaa",
+                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-old", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+        crate::crown_names::name_crown(
+            &home.crown_names_json(),
+            &home.registry_json(),
+            "x-aaaa",
+            "barnaby",
+        )
+        .unwrap();
+        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa").unwrap();
+        write_registry(
+            &home,
+            serde_json::json!([{
+                "name": "king-heir", "status": "live", "crown_scope": "x-aaaa",
+                "crown_level": 2, "cwd": "/repo", "harness": "claude",
+                "harness_session_id": "sess-heir", "created_at": "2026-09-23T20:00:00Z"
+            }]),
+        );
+
+        apply_crown_naming(None, None, &home, "x-aaaa").unwrap();
+
+        let registry = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(registry.entries[0].name, "barnaby");
+    }
 
     #[test]
     fn a_duplicate_live_name_refuses_naming_and_names_the_holder() {
@@ -2540,7 +2683,7 @@ mod tests {
         std::fs::write(&reg, doc.to_string()).unwrap();
         apply_crown_naming(Some("barnaby"), None, &home, "x-aaaa").unwrap();
         let err = apply_crown_naming(Some("barnaby"), None, &home, "fno").unwrap_err();
-        assert!(err.contains("king-a"), "{err}");
+        assert!(err.contains("barnaby"), "{err}");
     }
 
     #[test]

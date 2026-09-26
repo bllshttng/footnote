@@ -459,9 +459,11 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     v.sideline_width = 80;
     let frame = v.compose();
 
+    // Re-frozen when the bracket crown tag left the sideline: the registry
+    // label is the name, so the tag cells are gone.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0x71346fda85d3f813,
+        0x5c25ff47dfcd3e8e,
         "List frame-cell snapshot"
     );
 }

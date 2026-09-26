@@ -1263,10 +1263,8 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
-    /// (v89) The crown's display name (`Barnaby II`), read from the mux's
-    /// crown-name store file (`crown_names.json` beside the registry).
-    /// `None` = unnamed or no store file. Additive, `#[serde(default)]`,
-    /// so the floor stays put.
+    /// (v89) Legacy display name; newer sideline clients use the king's
+    /// registry label instead. Kept optional for wire compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_name: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no

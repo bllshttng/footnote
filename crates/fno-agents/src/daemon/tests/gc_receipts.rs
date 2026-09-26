@@ -3166,6 +3166,7 @@ fn recovery_does_not_quarantine_a_temp_held_by_an_active_writer() {
 #[test]
 fn agent_name_validation() {
     assert!(state::is_valid_registry_label("worker-A_1"));
+    assert!(state::is_valid_registry_label("o'brien"));
     assert!(!state::is_valid_registry_label(""));
     assert!(!state::is_valid_registry_label(&"x".repeat(65)));
     assert!(!state::is_valid_registry_label("has space"));
