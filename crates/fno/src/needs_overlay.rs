@@ -137,6 +137,8 @@ pub struct QuestionItem {
     #[serde(default)]
     pub reversible: Option<String>,
     #[serde(default)]
+    pub cost_if_wrong: Option<String>,
+    #[serde(default)]
     pub meanwhile: Option<String>,
     #[serde(default)]
     pub class: Option<String>,
