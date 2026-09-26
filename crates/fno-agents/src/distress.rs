@@ -1136,4 +1136,94 @@ print(rec["payload"]["content"][0]["text"], end="")
             serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["kind"], "help");
     }
+
+    #[test]
+    fn an_undeclared_loopcheck_fno_bin_is_refused_under_a_unit_test() {
+        // AC2/AC4 for the loopcheck seam: a declared stub passes through
+        // unchanged; unset under cfg!(test) the resolver answers a path that
+        // cannot exec and whose text names the remedy.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        std::env::remove_var(var);
+        let resolved = loopcheck_fno_bin();
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_exec(tmp.path(), "fno", "#!/bin/sh\nexit 0\n");
+        std::env::set_var(var, stub.to_str().unwrap());
+        let declared = loopcheck_fno_bin();
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        assert_ne!(resolved, "fno");
+        assert!(!Path::new(&resolved).exists());
+        assert!(resolved.contains("FNO_BIN"));
+        assert_eq!(declared, stub.to_str().unwrap());
+    }
+
+    #[test]
+    fn a_blocked_push_with_no_declared_fno_execs_nothing() {
+        // AC1: with a declared recording stub the push fires and the stub
+        // receives the argv (positive control); with the var removed the row
+        // still lands in events.jsonl and the stub log gains nothing - the
+        // durable row never depended on the push.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.log");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\t%s\\n' \"$PWD\" \"$*\" >> {}\nexit 1\n",
+            log.to_string_lossy()
+        );
+        let stub = write_exec(tmp.path(), "fno", &body);
+        std::env::set_var(var, stub.to_str().unwrap());
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let transcript = tmp.path().join("t.jsonl");
+        let wrote = scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "run-a",
+            None,
+            None,
+            &transcript,
+            Some("RESULT: BLOCKED\nREASON: probe reason"),
+        );
+        assert!(wrote);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(
+                "doctor event push-parent --type blocked --run run-a --reason probe reason"
+            ),
+            "the declared stub must receive the push argv, got: {calls}"
+        );
+        std::env::remove_var(var);
+        let project2 = tmp.path().join("events2.jsonl");
+        let global2 = tmp.path().join("global2.jsonl");
+        let wrote2 = scan_and_emit(
+            &project2,
+            &global2,
+            tmp.path(),
+            "run-c",
+            None,
+            None,
+            &transcript,
+            Some("RESULT: BLOCKED\nREASON: probe reason"),
+        );
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        assert!(wrote2);
+        let row: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project2)).unwrap();
+        assert_eq!(row["data"]["reason"], "probe reason");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            calls,
+            "no exec once the fno is undeclared"
+        );
+    }
 }

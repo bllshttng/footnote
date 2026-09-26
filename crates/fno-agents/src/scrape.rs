@@ -167,12 +167,33 @@ pub fn decide(
     }
 }
 
+/// A lib unit test gets only the porcelain it declared: the same rule
+/// `AgentsHome::from_env` applies to `$HOME` (docs/architecture/test-hermeticity.md).
+/// A raw `cargo test` inherits the calling session's identity, and the installed
+/// fno would act on it - its parent push mails that session a false alarm.
+pub(crate) const UNDECLARED_FNO: &str =
+    "/nonexistent/fno-undeclared-in-this-unit-test--set-FNO_BIN";
+
+/// Answer `declared` when set. Otherwise `fno` in every shipped build, and a
+/// path that cannot exec under `cfg!(test)` - every caller treats a spawn
+/// failure as "fno missing, skip", so the refusal costs a test one skipped
+/// shellout, never a production behavior change.
+pub(crate) fn declared_fno<T: From<&'static str>>(declared: Option<T>) -> T {
+    declared.unwrap_or_else(|| {
+        if cfg!(test) {
+            T::from(UNDECLARED_FNO)
+        } else {
+            T::from("fno")
+        }
+    })
+}
+
 /// The `fno` front-door binary (the Rust mux owner), same resolution as the
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
 /// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
 /// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
 pub fn fno_bin() -> std::ffi::OsString {
-    std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
+    declared_fno(std::env::var_os("FNO_BIN"))
 }
 
 /// The `fno-py` Python CLI console script, resolved without relying on PATH
@@ -1040,5 +1061,30 @@ mod tests {
             fno_py_in_tools_dir(tempfile::tempdir().unwrap().path()),
             None
         );
+    }
+
+    #[test]
+    fn an_undeclared_fno_bin_is_refused_under_a_unit_test() {
+        // AC3: unset under cfg!(test) the resolver answers a path that does
+        // not exist and whose text names the remedy; AC2: a declared path
+        // passes through unchanged.
+        let _guard = crate::claims::test_env_lock().lock().unwrap();
+        let prior = std::env::var_os("FNO_BIN");
+        std::env::remove_var("FNO_BIN");
+        let resolved = fno_bin();
+        // The declared leg: the resolver answers the string, it never stats
+        // it, so a tempdir path proves pass-through.
+        let dir = tempfile::tempdir().unwrap();
+        let declared = std::ffi::OsString::from(dir.path().join("fno"));
+        std::env::set_var("FNO_BIN", &declared);
+        let declared_resolved = fno_bin();
+        match prior {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_ne!(resolved, std::ffi::OsString::from("fno"));
+        assert!(!std::path::Path::new(&resolved).exists());
+        assert!(resolved.to_string_lossy().contains("FNO_BIN"));
+        assert_eq!(declared_resolved, declared);
     }
 }
