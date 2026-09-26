@@ -1798,11 +1798,18 @@ fn run_agy_hooks(
 
 /// Read whether footnote's hooks reach grok on THIS machine: run
 /// `grok inspect --json` (no auth needed) and look for an enabled fno plugin
-/// with hooks. Reports `reachable` (naming the plugin path), `absent`, or
+/// with hooks. Trust is read from the plugin's location, because grok's
+/// inspect exposes no trust field: a plugin under `<grok_home>/plugins` or
+/// `<grok_home>/installed-plugins` is trusted, anything else (the
+/// Claude-compat scan) is not. Reports `reachable` (naming the plugin path),
+/// `untrusted` (naming the path with the fix command), `absent`, or
 /// `unknown` (grok missing, inspect failed, or unparseable output).
 fn grok_status_receipt() -> String {
     match grok_reachability() {
         GrokReachability::Reachable { path } => format!("reachable: {path}"),
+        GrokReachability::Untrusted { path } => format!(
+            "untrusted: {path} (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)"
+        ),
         GrokReachability::Absent => "absent: no enabled fno plugin with hooks".to_string(),
         GrokReachability::Unknown { reason } => format!("unknown: {reason}"),
     }
@@ -1811,6 +1818,7 @@ fn grok_status_receipt() -> String {
 #[derive(Debug)]
 enum GrokReachability {
     Reachable { path: String },
+    Untrusted { path: String },
     Absent,
     Unknown { reason: String },
 }
@@ -1822,7 +1830,7 @@ fn grok_reachability() -> GrokReachability {
             reason: "grok not found on PATH".to_string(),
         },
         Some(_) => match run_grok_inspect() {
-            Some(text) => parse_grok_inspect(&text),
+            Some(text) => parse_grok_inspect(&text, &crate::grok_store::grok_home()),
             None => GrokReachability::Unknown {
                 reason: "grok inspect --json failed or timed out".to_string(),
             },
@@ -1849,9 +1857,15 @@ fn run_grok_inspect() -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// Classify recorded `grok inspect --json` text. `Absent` when no enabled fno
-/// plugin carries hooks; `Unknown` on unparseable JSON.
-fn parse_grok_inspect(text: &str) -> GrokReachability {
+/// Classify recorded `grok inspect --json` text. grok exposes no trust
+/// field, so trust is read from the plugin's location: only a path under
+/// `<grok_home>/plugins` or `<grok_home>/installed-plugins` loads hooks
+/// (vendor guide 09-plugins.md). The linked stage is discovered under the
+/// root manifest's name ("footnote"), so entries match by either name.
+/// `Untrusted` when an enabled hooks-bearing fno entry sits outside those
+/// roots (the Claude-compat scan); `Absent` when no such entry exists;
+/// `Unknown` on unparseable JSON.
+fn parse_grok_inspect(text: &str, grok_home: &Path) -> GrokReachability {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return GrokReachability::Unknown {
             reason: "inspect output did not parse as JSON".to_string(),
@@ -1862,50 +1876,117 @@ fn parse_grok_inspect(text: &str) -> GrokReachability {
             reason: "inspect output has no plugins array".to_string(),
         };
     };
+    let trusted_roots = [
+        grok_home.join("plugins"),
+        grok_home.join("installed-plugins"),
+    ];
+    let mut untrusted: Option<GrokReachability> = None;
     for plugin in plugins {
-        let name_ok = plugin.get("name").and_then(Value::as_str) == Some("fno");
+        let name = plugin
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name_ok = name == "fno" || name == "footnote";
         let enabled = plugin.get("enabled").and_then(Value::as_bool) == Some(true);
         let hooks = plugin
             .get("provides")
             .and_then(|p| p.get("hooks"))
             .and_then(Value::as_bool)
             == Some(true);
-        if name_ok && enabled && hooks {
-            let path = plugin
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+        if !(name_ok && enabled && hooks) {
+            continue;
+        }
+        let path = plugin
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let trusted = trusted_roots
+            .iter()
+            .any(|root| Path::new(&path).starts_with(root));
+        if trusted {
             return GrokReachability::Reachable { path };
         }
+        if untrusted.is_none() {
+            untrusted = Some(GrokReachability::Untrusted { path });
+        }
     }
-    GrokReachability::Absent
+    untrusted.unwrap_or(GrokReachability::Absent)
 }
 
-/// grok's own installer, then a second status read: `installed` prints only
-/// when the second read is reachable. grok dedupes plugins by name, so a
-/// Claude-compat copy and a grok-installed copy never both load.
+/// Link the stage into `<grok_home>/plugins/fno`, then a second status
+/// read: the `linked` receipt prints only when that read is reachable. Why
+/// a link and not `grok plugin install --trust`: the plugins directory is
+/// trusted automatically (vendor guide 09-plugins.md), the link follows
+/// every `fno doctor update` restage of the 186 MB stage where a copied
+/// install would go stale, and grok dedupes plugins by name with the
+/// `$GROK_HOME/plugins` copy winning, so the Claude-compat copy drops out.
 fn install_grok(stage: &Path, _force: bool) -> Result<String, String> {
     match grok_reachability() {
         GrokReachability::Reachable { path } => Ok(format!("already installed, reachable: {path}")),
         GrokReachability::Unknown { reason } => Err(format!("unknown: {reason}")),
-        GrokReachability::Absent => {
-            run_checked(
-                &[
-                    "grok".into(),
-                    "plugin".into(),
-                    "install".into(),
-                    stage.display().to_string(),
-                    "--trust".into(),
-                ],
-                None,
-            )?;
+        GrokReachability::Absent | GrokReachability::Untrusted { .. } => {
+            let home = crate::grok_store::grok_home();
+            let receipt = link_grok_plugin(&home, stage)?;
             match grok_reachability() {
-                GrokReachability::Reachable { path } => Ok(format!("installed, reachable: {path}")),
-                _ => Err("installed but post-install status read is not reachable".into()),
+                GrokReachability::Reachable { path } => Ok(format!("{receipt}, reachable: {path}")),
+                GrokReachability::Absent => {
+                    Err("linked but the post-link status read is absent".to_string())
+                }
+                GrokReachability::Untrusted { .. } => {
+                    Err("linked but the post-link status read is untrusted".to_string())
+                }
+                GrokReachability::Unknown { reason } => Err(format!(
+                    "linked but the post-link status read is unknown: {reason}"
+                )),
             }
         }
     }
+}
+
+/// Link `<grok_home>/plugins/fno` to the stage. A real file or directory at
+/// the link path is refused, never deleted. The swap builds the new link as
+/// `plugins/.fno.new-<pid>` and renames it over the link path, so a reader
+/// never sees a half-made link.
+fn link_grok_plugin(grok_home: &Path, stage: &Path) -> Result<String, String> {
+    let plugins = grok_home.join("plugins");
+    std::fs::create_dir_all(&plugins)
+        .map_err(|e| format!("cannot create {}: {e}", plugins.display()))?;
+    let link = plugins.join("fno");
+    let link_str = link.display().to_string();
+    let stage_str = stage.display().to_string();
+    match std::fs::read_link(&link) {
+        Ok(old) if old == stage => Ok(format!("already linked {link_str} -> {stage_str}")),
+        Ok(old) => {
+            swap_grok_symlink(&plugins, &link, stage)?;
+            Ok(format!(
+                "relinked {link_str} -> {stage_str} from {}",
+                old.display()
+            ))
+        }
+        Err(_) if link.symlink_metadata().is_ok() => Err(format!(
+            "refused: {link_str} is not a symlink; move it aside, then rerun fno config plugin install grok"
+        )),
+        Err(_) => {
+            swap_grok_symlink(&plugins, &link, stage)?;
+            Ok(format!("linked {link_str} -> {stage_str}"))
+        }
+    }
+}
+
+fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), String> {
+    let tmp = plugins.join(format!(".fno.new-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(stage, &tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, link).map_err(|e| {
+        format!(
+            "cannot rename {} over {}: {e}",
+            tmp.display(),
+            link.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2262,41 +2343,128 @@ mod tests {
 
     #[test]
     fn grok_parse_reachable_absent_disabled_and_malformed() {
-        // Reachable: the recorded sample names fno enabled with hooks.
-        match parse_grok_inspect(&grok_inspect_sample()) {
-            GrokReachability::Reachable { path } => {
+        // The recorded sample names fno enabled with hooks, but grok found it
+        // only through the Claude-compat scan, which grok does not trust: the
+        // reading is untrusted, naming the path it would load nothing from.
+        match parse_grok_inspect(&grok_inspect_sample(), Path::new("/gh")) {
+            GrokReachability::Untrusted { path } => {
                 assert!(path.ends_with("fno/0.3.2"), "{path}");
             }
-            other => panic!("want Reachable, got {other:?}"),
+            other => panic!("want Untrusted, got {other:?}"),
         }
         // Absent: fno missing entirely.
         let no_fno =
             r#"{"plugins":[{"name":"feature-dev","enabled":true,"provides":{"hooks":false}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(no_fno),
+            parse_grok_inspect(no_fno, Path::new("/gh")),
             GrokReachability::Absent
         ));
         // Disabled, hooks false: both read as absent.
         let disabled = r#"{"plugins":[{"name":"fno","enabled":false,"provides":{"hooks":true}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(disabled),
+            parse_grok_inspect(disabled, Path::new("/gh")),
             GrokReachability::Absent
         ));
         let no_hooks = r#"{"plugins":[{"name":"fno","enabled":true,"provides":{"hooks":false}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(no_hooks),
+            parse_grok_inspect(no_hooks, Path::new("/gh")),
             GrokReachability::Absent
         ));
         // Malformed: unknown, never reads as installed.
         assert!(matches!(
-            parse_grok_inspect("not json {"),
+            parse_grok_inspect("not json {", Path::new("/gh")),
             GrokReachability::Unknown { .. }
         ));
         let no_array = r#"{"plugins":{}}"#;
         assert!(matches!(
-            parse_grok_inspect(no_array),
+            parse_grok_inspect(no_array, Path::new("/gh")),
             GrokReachability::Unknown { .. }
         ));
+    }
+
+    /// AC2-HP: trust reads from the location, not from the name alone.
+    #[test]
+    fn grok_parse_trust_comes_from_location() {
+        let gh = Path::new("/gh");
+        let linked = serde_json::json!({
+            "name": "footnote", "scope": "user", "enabled": true,
+            "path": "/gh/plugins/fno",
+            "provides": {"skills": 25, "agents": 1, "hooks": true, "mcpServers": 0}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [linked] })).unwrap();
+        match parse_grok_inspect(&text, gh) {
+            GrokReachability::Reachable { path } => assert_eq!(path, "/gh/plugins/fno"),
+            other => panic!("want Reachable, got {other:?}"),
+        }
+        // grok's own installer path is trusted too.
+        let installed = serde_json::json!({
+            "name": "fno", "scope": "user", "enabled": true,
+            "path": "/gh/installed-plugins/fno-1a2b",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [installed] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Reachable { .. }
+        ));
+        // Both a compat copy and a linked copy: the trusted one wins.
+        let both = {
+            let compat = serde_json::json!({
+                "name": "fno", "enabled": true,
+                "path": "/claude/plugins/cache/footnote/fno/0.3.2",
+                "provides": {"hooks": true}
+            });
+            let linked_copy = serde_json::json!({
+                "name": "footnote", "enabled": true,
+                "path": "/gh/plugins/fno",
+                "provides": {"hooks": true}
+            });
+            serde_json::json!({ "plugins": [compat, linked_copy] })
+        };
+        let text = serde_json::to_string(&both).unwrap();
+        match parse_grok_inspect(&text, gh) {
+            GrokReachability::Reachable { path } => assert_eq!(path, "/gh/plugins/fno"),
+            other => panic!("want the trusted entry, got {other:?}"),
+        }
+    }
+
+    /// AC4-HP/AC5-EDGE/AC6-ERR: the link installs, relinks, and refuses a
+    /// real directory without deleting it.
+    #[test]
+    fn grok_link_installs_relinks_and_refuses_a_real_dir() {
+        let base = std::env::temp_dir().join(format!("grok-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let gh = base.join("grok-home");
+        let stage = base.join("stage");
+        let other = base.join("other");
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&other).unwrap();
+
+        let receipt = link_grok_plugin(&gh, &stage).unwrap();
+        assert!(receipt.starts_with("linked "), "{receipt}");
+        assert_eq!(fs::read_link(gh.join("plugins/fno")).unwrap(), stage);
+
+        let receipt = link_grok_plugin(&gh, &stage).unwrap();
+        assert!(receipt.starts_with("already linked "), "{receipt}");
+
+        let receipt = link_grok_plugin(&gh, &other).unwrap();
+        assert!(receipt.starts_with("relinked "), "{receipt}");
+        assert!(receipt.contains(" from "), "{receipt}");
+        assert!(receipt.contains(&stage.display().to_string()), "{receipt}");
+        assert_eq!(fs::read_link(gh.join("plugins/fno")).unwrap(), other);
+
+        // A real directory at the link path is refused, contents intact.
+        let real = gh.join("plugins/fno");
+        fs::remove_file(&real).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("keep.txt"), "keep").unwrap();
+        let err = link_grok_plugin(&gh, &stage).unwrap_err();
+        assert!(err.starts_with("refused: "), "{err}");
+        assert!(
+            real.join("keep.txt").exists(),
+            "refused dir must be untouched"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// AC1-HP: with no --stage, the check runs once per enumerated root. A
