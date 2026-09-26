@@ -159,7 +159,11 @@ fi
 # only while its own entry is present, so evicting or graduating an entry
 # releases its phrase instead of wedging this gate on prose the corpus is
 # supposed to have dropped.
-PINNED_PHRASES=$'capability probe\tmail probe'
+# The mail-probe pin retired with its entry's graduation: the guard is
+# scripts/diagnostics/autonomy-probe-audit.py. Pins ride with live entries;
+# add one here as entry-key<TAB>required-phrase when a new corpus entry
+# carries a claim-bearing word a structural check cannot see.
+PINNED_PHRASES=''
 
 while IFS=$'\t' read -r entry_key phrase; do
   [[ -z "$entry_key" || -z "$phrase" ]] && continue

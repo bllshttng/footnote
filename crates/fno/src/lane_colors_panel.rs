@@ -232,9 +232,8 @@ pub(crate) fn build_lane_color_rows(
         return (rows, actions);
     }
     // Axis list: every axis's mappings grouped under its header, each group
-    // followed by its add-key row.
-    rows.push(PopupRow::Header("colors".into()));
-    rows.push(PopupRow::Rule);
+    // followed by its add-key row. No top "colors" header: the tab strip
+    // already names this section (the settings-tab cleanup).
     for axis in LANE_AXES {
         rows.push(PopupRow::Header((*axis).into()));
         push_lane_axis_rows(
@@ -490,7 +489,7 @@ mod tests {
             let row = r0 + i;
             let at = |col: usize| cells[row * cols + col].c;
             assert!(
-                matches!(at(c0 + w - 1), '│' | '┐' | '┘'),
+                matches!(at(c0 + w - 1), '│' | '╮' | '╯'),
                 "row {i} closes its right border on one column: {:?}",
                 line.text
             );

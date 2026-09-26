@@ -171,9 +171,23 @@ pub fn strip_prompts(line: &str) -> &str {
 
 /// True when any screen row is exactly `want` once leading prompts are
 /// stripped. The one matcher for "did this command's output line render?" -
-/// an exact trim-equality compare misses output wearing a late prompt.
+/// an exact trim-equality compare misses output wearing a late prompt. A
+/// framed pane wears sideline text, the panel divider and two frame rules on
+/// the same physical row, so every `│`-delimited segment gets its own compare.
 pub fn screen_has_line(screen: &str, want: &str) -> bool {
-    screen.lines().any(|l| strip_prompts(l) == want)
+    screen.lines().any(|l| line_is_segment(l, want))
+}
+
+/// True when the row's pane-content segment (between the frame rules) is
+/// exactly `want` once leading prompts are stripped.
+pub fn line_is_segment(line: &str, want: &str) -> bool {
+    line.split('│').any(|seg| strip_prompts(seg.trim()) == want)
+}
+
+/// True when the row ends a shell prompt: a `$` at the end of any
+/// `│`-delimited segment (the framed prompt row closes with its border rule).
+pub fn line_ends_with_prompt(line: &str) -> bool {
+    line.split('│').any(|seg| seg.trim_end().ends_with('$'))
 }
 
 impl Drop for Scratch {
@@ -360,7 +374,7 @@ impl ClientHarness {
                 if self
                     .screen()
                     .lines()
-                    .any(|line| strip_prompts(line) == "fno-input-ready")
+                    .any(|line| line_is_segment(line, "fno-input-ready"))
                 {
                     return;
                 }
@@ -487,8 +501,17 @@ impl ClientHarness {
             s.lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
-                .take(2)
-                .any(|l| l.trim_end().ends_with('$'))
+                // A framed pane keeps its bottom edge and the status row below
+                // the prompt, so the prompt is no longer one of the last two
+                // rendered lines.
+                .take(8)
+                .any(|l| {
+                    // A framed pane closes the prompt row with its border
+                    // rule, so strip one trailing rule before looking for `$`.
+                    let l = l.trim_end();
+                    let l = l.strip_suffix('│').unwrap_or(l).trim_end();
+                    l.ends_with('$')
+                })
         };
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
