@@ -25,7 +25,7 @@ use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
-use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments, mux_pane_run_argv};
+use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
 use crate::resume_route::ResumeRoute;
 use crate::state::REGISTRY_SCHEMA_VERSION;
@@ -2702,49 +2702,6 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         return code;
     }
 
-    // The recorded mux destination wins when there is one: the pane relaunch
-    // returns after the launch so the operator's terminal stays free, and the
-    // account namespace rides the child environment. The launch proves the
-    // worker stayed up before claiming success, and rebinds the row on a live
-    // proof (same contract as the resume pane arm).
-    if let Some(mux_ref) = plan.mux.as_ref() {
-        // W1: same wrapper the resume arm carries. `which_on_path`
-        // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
-        // happens inside mux_pane_run_argv.
-        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
-            Ok(a) => a,
-            Err(why) => {
-                eprintln!("fno agents recover: {why}; refusing an unattributable pane relaunch");
-                return 13;
-            }
-        };
-        let pane = mux_pane_run_argv(
-            &mux_ref.session,
-            &plan.cwd,
-            &plan.argv,
-            &identity,
-            Some(&plan.name),
-        );
-        let plan_env: Vec<(String, String)> = plan
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        return crate::pane_relaunch::relaunch_on_pane(
-            "recover",
-            &plan.name,
-            "claude",
-            &plan.session_id,
-            &plan.cwd,
-            &mux_ref.session,
-            &pane,
-            &plan_env,
-            Some(mux_ref),
-            ("agent_recovered", "agent_recover_failed"),
-            home,
-        );
-    }
-
     // Respawn and bg-resume mechanisms: run and confirm (see
     // run_and_confirm_respawn). Both relaunch shapes exit at once, so the
     // exec below would replace this process with a launcher that immediately
@@ -4219,27 +4176,7 @@ mod tests {
     #[test]
     fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
         // --print-command is the no-side-effect inspection form: the selected
-        // fork id rides the argv and nothing launches. The dead arm probes
-        // jobs/<short>/state.json under $HOME, so pin HOME to a throwaway dir
-        // with that state staged. The state is staged under the REAL $HOME
-        // (jobs/11111111, removed after) rather than by repinning the HOME
-        // env: set_var is process-global and races every concurrent test's
-        // env reads and spawns (a flaked `git` NotFound on CI), and the lock
-        // only serializes the tests that already take it.
-        let home_dir = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let jobs = home_dir.join(".claude").join("jobs").join("11111111");
-        let staged_here = !jobs.join("state.json").exists();
-        if staged_here {
-            std::fs::create_dir_all(&jobs).unwrap();
-            std::fs::write(
-                jobs.join("state.json"),
-                serde_json::json!({"state": "idle"}).to_string(),
-            )
-            .unwrap();
-        }
-
+        // fork id rides the argv and nothing launches.
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
         let entry = forked_row();
@@ -4257,9 +4194,6 @@ mod tests {
             ],
             &home,
         );
-        if staged_here {
-            std::fs::remove_dir_all(&jobs).unwrap();
-        }
         assert_eq!(code, 0);
     }
 
