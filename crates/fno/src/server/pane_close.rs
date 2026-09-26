@@ -112,16 +112,12 @@ impl Core {
                 self.reap_pane(screen_pid);
             }
         }
-        // No stand-in took the seat. The entry is deliberately LEFT
-        // naming the now-dead pane, exactly as closing the single dedicated
-        // pane always did: the reach treats a recorded pane the tree no longer
-        // knows as absent, and reads its remembered tab id so a replacement
-        // viewer lands back where the operator had it. Liveness is computed
-        // from `panes` above, so a stale row can never be mistaken for an open
-        // portal.
-        // A portal vanishing under a live operator destroys the
-        // evidence they were reading, so the loss is broadcast, never silent.
-        // The swap above keeps the view, so it does not reach this.
+        // No screen took the seat. The portal is GONE: an operator close
+        // removes the entry, and a death whose parked screen failed to
+        // spawn loses it too - a portal lives until the operator closes
+        // it, and every survivor keeps a live screen on its entry. The
+        // reach still reads a remembered tab for one generation, but the
+        // map no longer carries a stale row.
         if seat {
             let idx = seat_portal.expect("seat implies a portal");
             if let Some(portal) = self.portals.get(&idx) {
@@ -130,6 +126,7 @@ impl Core {
                     portal.row_key
                 ));
             }
+            self.portals.remove(&idx);
         }
         self.reap_pane(pid);
         let ident = self.squad_identity(sid);

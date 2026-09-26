@@ -99,24 +99,17 @@ pub(super) fn rearm_held_portal_seats(
     let mut held = 0;
     let mut live = 0;
     for (index, row, seat, tid, recorded_sid) in seats {
-        let index = if core.portals.contains_key(&index) {
-            match core.next_free_portal() {
-                Some(free) => {
-                    core.notice_all(format!(
-                        "restore: portal {index} was taken; held {row} at portal {free} instead"
-                    ));
-                    free
-                }
-                None => {
-                    core.notice_all(format!(
-                        "restore: all portal indices live; portal slot for {row} skipped"
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            index
-        };
+        // A stored index already present is a duplicate slot, never a
+        // collision to reshuffle: portal 3 is held once at 3, the second
+        // seat closes with a notice, and no index above the stored maximum
+        // ever appears.
+        if core.portals.contains_key(&index) {
+            core.notice_all(format!(
+                "restore: portal {index} stored twice; kept the first, closing the second seat"
+            ));
+            core.close_by_operator(seat);
+            continue;
+        }
         core.portals.insert(
             index,
             Portal {
@@ -1268,29 +1261,24 @@ impl Core {
             })
     }
 
-    /// The lowest portal index nothing LIVE holds.
+    /// The lowest portal index with no entry.
     ///
     /// Server-side on purpose. A client computing this from the rows it last
     /// rendered races every other client: two of them pick the same number and
     /// the second reach repoints the first one's brand-new portal. The server
     /// handles reaches one at a time, so allocating here cannot collide.
     ///
-    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
-    /// pane closed elsewhere is stale, and its index is free to reuse. The
-    /// reach's own stale-slot path then reads the leftover entry for its
-    /// remembered tab, so reusing the index lands the new viewer where the old
-    /// one was.
+    /// Presence, not liveness: an operator close removes the entry, so every
+    /// entry still in the map names a live screen, and an index with no entry
+    /// is free. A reach landing on a stale leftover (a screen reaped by
+    /// another path) reads the remembered tab and opens fresh through the
+    /// reach's own stale-slot path.
     ///
-    /// `None` means every index holds a portal whose seat is live.
-    /// The old saturation at `u8::MAX` was itself an occupied index, so a
-    /// full space silently REPOINTED portal 255; the caller refuses instead.
+    /// `None` means every index holds a portal. The old saturation at
+    /// `u8::MAX` was itself an occupied index, so a full space silently
+    /// REPOINTED portal 255; the caller refuses instead.
     pub(super) fn next_free_portal(&self) -> Option<u8> {
-        (0..=u8::MAX).find(|idx| {
-            !self
-                .portals
-                .get(idx)
-                .is_some_and(|portal| self.panes.contains_key(&portal.seat))
-        })
+        (0..=u8::MAX).find(|idx| !self.portals.contains_key(idx))
     }
 
     /// A claude portal seat follows the session its viewer's OSC title names.
@@ -1344,38 +1332,28 @@ impl Core {
             };
             // Skip when the seat already agrees: the one row the title names
             // is the seated row with the attach mapping in place, or an
-            // unclaimed seat whose key is already the title text (stable, so
-            // a title naming no row costs no layout push per tick).
-            let agrees = match named.as_slice() {
-                [row] => {
-                    row_answers_key(row, &self.portals[&idx].row_key)
-                        && row
-                            .attach_id
-                            .as_deref()
-                            .is_some_and(|id| self.attached.get(id) == Some(&seat))
-                }
-                _ => false,
-            } || (claim.is_none()
-                && self.portals[&idx].row_key == title
-                && !self.attached.values().any(|p| *p == seat));
+            // The channel only ever holds a key a row answered: a title
+            // that names no single free row drops the attach claim and
+            // leaves the channel and the pane name alone.
+            let Some(id) = claim else {
+                self.attached.retain(|_, p| *p != seat);
+                continue;
+            };
+            // Skip when the seat already agrees: the one row the title
+            // names is the seated row with the attach mapping in place.
+            let agrees = named.iter().any(|row| {
+                row.attach_id.as_deref() == Some(id.as_str())
+                    && row_answers_key(row, &self.portals[&idx].row_key)
+                    && self.attached.get(&id) == Some(&seat)
+            });
             if agrees {
                 continue;
             }
             self.attached.retain(|_, p| *p != seat);
-            match claim {
-                Some(id) => {
-                    self.attached.insert(id.clone(), seat);
-                    let (_, cd) = self.attach_account_ctx(&id);
-                    self.portals.get_mut(&idx).expect("candidate idx").row_key = id.clone();
-                    self.name_attached_pane(seat, &id, cd.as_deref());
-                }
-                None => {
-                    self.portals.get_mut(&idx).expect("candidate idx").row_key = title.clone();
-                    if let Some(entry) = self.panes.get_mut(&seat) {
-                        entry.name = Some(title.clone());
-                    }
-                }
-            }
+            self.attached.insert(id.clone(), seat);
+            let (_, cd) = self.attach_account_ctx(&id);
+            self.portals.get_mut(&idx).expect("candidate idx").row_key = id.clone();
+            self.name_attached_pane(seat, &id, cd.as_deref());
             self.notice_all(format!("portal {idx} now shows {title}"));
             changed = true;
         }
