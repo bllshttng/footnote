@@ -420,9 +420,12 @@ fn mail_crown(
 /// asker's node (or its first block). Reuses the one resolver the drain
 /// and the court read: territory's node_owners over live_crowns.
 fn crown_holder(item: &AttentionItem, cwd: &Path) -> Option<String> {
+    // A literal `none` node is the projection's "no node"; fall through to
+    // the blocks, which still name what the answer unblocks.
     let node = item
         .node
         .as_deref()
+        .filter(|n| !n.is_empty() && *n != "none")
         .or_else(|| item.blocks.first().map(String::as_str));
     let crowns =
         crate::territory::live_crowns(&crate::paths::AgentsHome::from_env().registry_json())
