@@ -16,7 +16,7 @@ fn table_keys_are_session_phases_and_verbs_are_unique() {
         .expect("[phases] section")
         .as_table()
         .expect("phase rows");
-    let allowed: BTreeSet<&str> = ["think", "blueprint", "do", "review", "ship"]
+    let allowed: BTreeSet<&str> = ["think", "blueprint", "execute", "review", "ship"]
         .into_iter()
         .collect();
     let mut seen = BTreeSet::new();

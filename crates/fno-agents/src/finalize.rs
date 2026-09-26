@@ -2341,7 +2341,7 @@ fn do_stamp_args(
         "add".to_string(),
         node.to_string(),
         "--phase".to_string(),
-        "do".to_string(),
+        "execute".to_string(),
         "--require-session".to_string(),
         session.to_string(),
     ];

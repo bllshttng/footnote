@@ -27,7 +27,7 @@ fn ac1_graph() -> Vec<Value> {
                 {"number": 2046, "url": "https://github.com/o/r/pull/2046"},
                 {"number": 2045, "url": "https://github.com/o/r/pull/2045"}
             ],
-            "sessions": [{"phase": "do", "harness": "claude", "session_id": "sess-spec",
+            "sessions": [{"phase": "execute", "harness": "claude", "session_id": "sess-spec",
                           "started_at": "2026-09-01T01:00:00Z"}]
         }),
         done_node("x-af66", json!("merged"), json!([]), vec![]),

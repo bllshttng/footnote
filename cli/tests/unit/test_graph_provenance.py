@@ -867,9 +867,9 @@ def test_append_session_record_dedup_preserves_first_ended_at(tmp_path, monkeypa
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record
 
-    append_session_record(g, "ab-add00003", phase="do", harness="codex",
+    append_session_record(g, "ab-add00003", phase="execute", harness="codex",
                           session_id="S", ended_at="2026-07-12T04:00:00Z")
-    found, added = append_session_record(g, "ab-add00003", phase="do", harness="codex",
+    found, added = append_session_record(g, "ab-add00003", phase="execute", harness="codex",
                                          session_id="S", ended_at="2026-07-12T05:00:00Z")
     assert (found, added) == (True, False)
     rows = _node_sessions(g, "ab-add00003")
@@ -895,7 +895,7 @@ def test_append_session_record_unknown_node(tmp_path, monkeypatch):
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record
 
-    found, added = append_session_record(g, "ab-missing", phase="do",
+    found, added = append_session_record(g, "ab-missing", phase="execute",
                                          harness="claude", session_id="S")
     assert (found, added) == (False, False)
 
@@ -908,9 +908,9 @@ def test_append_session_record_duplicate_fills_missing_ended_at(tmp_path, monkey
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record
 
-    append_session_record(g, "ab-fill00001", phase="do", harness="claude",
+    append_session_record(g, "ab-fill00001", phase="execute", harness="claude",
                           session_id="S", started_at="2026-08-10T01:00:00Z")
-    found, added = append_session_record(g, "ab-fill00001", phase="do",
+    found, added = append_session_record(g, "ab-fill00001", phase="execute",
                                          harness="claude", session_id="S",
                                          ended_at="2026-08-10T02:00:00Z")
     assert (found, added) == (True, False)  # no NEW row added
@@ -927,9 +927,9 @@ def test_append_session_record_duplicate_keeps_first_started_at(tmp_path, monkey
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record
 
-    append_session_record(g, "ab-fill00002", phase="do", harness="claude",
+    append_session_record(g, "ab-fill00002", phase="execute", harness="claude",
                           session_id="S", started_at="2026-08-10T01:00:00Z")
-    append_session_record(g, "ab-fill00002", phase="do", harness="claude",
+    append_session_record(g, "ab-fill00002", phase="execute", harness="claude",
                           session_id="S", started_at="2026-08-10T09:00:00Z",
                           ended_at="2026-08-10T02:00:00Z")
     rows = _node_sessions(g, "ab-fill00002")
@@ -979,7 +979,7 @@ def test_append_session_record_rejects_empty_identity(tmp_path, monkeypatch, har
     from fno.graph.store import append_session_record
 
     with pytest.raises(ValueError):
-        append_session_record(g, "ab-add00007", phase="do", harness=harness, session_id=sid)
+        append_session_record(g, "ab-add00007", phase="execute", harness=harness, session_id=sid)
 
 
 @pytest.mark.parametrize("bad_ended_at", [
@@ -995,7 +995,7 @@ def test_append_session_record_rejects_non_utc_ended_at(tmp_path, monkeypatch, b
     from fno.graph.store import append_session_record
 
     with pytest.raises(ValueError):
-        append_session_record(g, "ab-add00008", phase="do", harness="claude",
+        append_session_record(g, "ab-add00008", phase="execute", harness="claude",
                               session_id="S", ended_at=bad_ended_at)
 
 
@@ -1009,7 +1009,7 @@ def test_append_session_record_accepts_utc_ended_at(tmp_path, monkeypatch, good_
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record, read_graph_strict
 
-    append_session_record(g, "ab-add00009", phase="do", harness="claude",
+    append_session_record(g, "ab-add00009", phase="execute", harness="claude",
                           session_id="S", ended_at=good_ended_at)
     assert read_graph_strict(g)[0]["sessions"][0]["ended_at"] == stored
 
@@ -1029,7 +1029,7 @@ def test_merge_grant_round_trips_on_the_row(tmp_path, monkeypatch):
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record, read_graph_strict
 
-    append_session_record(g, "ab-grant001", phase="do", harness="claude",
+    append_session_record(g, "ab-grant001", phase="execute", harness="claude",
                           session_id="S", started_at="2026-08-24T11:59:00Z",
                           merge_grant={**_GRANT, "recorded_at": "2026-08-24T12:00:00+00:00"})
     grant = read_graph_strict(g)[0]["sessions"][0]["merge_grant"]
@@ -1054,7 +1054,7 @@ def test_merge_grant_malformed_is_refused(tmp_path, monkeypatch, bad, frag):
     from fno.graph.store import append_session_record
 
     with pytest.raises(ValueError, match=frag):
-        append_session_record(g, "ab-grant002", phase="do", harness="claude",
+        append_session_record(g, "ab-grant002", phase="execute", harness="claude",
                               session_id="S", merge_grant=bad)
     assert _node_sessions(g, "ab-grant002") == []
 
@@ -1068,9 +1068,9 @@ def test_merge_grant_duplicate_fills_but_never_overwrites(tmp_path, monkeypatch)
     from fno.graph.store import append_session_record
 
     refusal = {**_GRANT, "approved": False, "source": "no-merge-flag"}
-    append_session_record(g, "ab-grant003", phase="do", harness="claude",
+    append_session_record(g, "ab-grant003", phase="execute", harness="claude",
                           session_id="S", merge_grant=refusal)
-    append_session_record(g, "ab-grant003", phase="do", harness="claude",
+    append_session_record(g, "ab-grant003", phase="execute", harness="claude",
                           session_id="S", merge_grant=_GRANT)
     rows = _node_sessions(g, "ab-grant003")
     assert len(rows) == 1
@@ -1083,7 +1083,7 @@ def test_merge_grant_absent_on_plain_rows(tmp_path, monkeypatch):
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record, read_graph_strict
 
-    append_session_record(g, "ab-grant004", phase="do", harness="claude",
+    append_session_record(g, "ab-grant004", phase="execute", harness="claude",
                           session_id="S", ended_at="2026-08-24T12:00:00Z")
     assert "merge_grant" not in read_graph_strict(g)[0]["sessions"][0]
 
@@ -2300,7 +2300,7 @@ def test_started_at_lands_on_row_and_bounds_the_window(tmp_path, monkeypatch):
 
     g = _guard_graph(tmp_path, monkeypatch)
     append_session_record(
-        g, "ab-guard001", phase="do", harness="claude", session_id="S",
+        g, "ab-guard001", phase="execute", harness="claude", session_id="S",
         ended_at="2026-07-20T12:00:00Z", started_at="2026-07-20T10:00:00Z",
     )
     row = _sessions(g)[0]
@@ -2314,7 +2314,7 @@ def test_started_at_absent_is_never_fabricated(tmp_path, monkeypatch):
     from fno.graph.store import append_session_record
 
     g = _guard_graph(tmp_path, monkeypatch)
-    append_session_record(g, "ab-guard001", phase="do", harness="claude", session_id="S")
+    append_session_record(g, "ab-guard001", phase="execute", harness="claude", session_id="S")
     assert _sessions(g)[0]["started_at"] is None
 
 
@@ -2325,7 +2325,7 @@ def test_started_at_rejects_non_utc_like_at(tmp_path, monkeypatch, bad):
     g = _guard_graph(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="started_at"):
         append_session_record(
-            g, "ab-guard001", phase="do", harness="claude", session_id="S", started_at=bad,
+            g, "ab-guard001", phase="execute", harness="claude", session_id="S", started_at=bad,
         )
     assert _sessions(g) == []
 
@@ -2338,7 +2338,7 @@ def test_effort_is_recorded_as_an_independent_session_axis(tmp_path, monkeypatch
     append_session_record(
         g,
         "ab-guard001",
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="S",
         effort="xhigh",
@@ -2357,7 +2357,7 @@ def test_started_at_is_not_part_of_the_idempotency_key(tmp_path, monkeypatch):
     g = _guard_graph(tmp_path, monkeypatch)
     for started in ("2026-07-20T10:00:00Z", "2026-07-20T11:00:00Z"):
         append_session_record(
-            g, "ab-guard001", phase="do", harness="claude", session_id="S",
+            g, "ab-guard001", phase="execute", harness="claude", session_id="S",
             started_at=started,
         )
     rows = _sessions(g)
@@ -2393,7 +2393,7 @@ def test_require_session_match_stamps(tmp_path, monkeypatch):
     assert r.exit_code == 0
     rows = _sessions(g)
     assert len(rows) == 1
-    assert rows[0]["phase"] == "do" and rows[0]["started_at"] == "2026-07-20T10:00:00Z"
+    assert rows[0]["phase"] == "execute" and rows[0]["started_at"] == "2026-07-20T10:00:00Z"
 
 
 def _plan(tmp_path, claims: str) -> str:
@@ -2668,7 +2668,7 @@ def _patch_observe(monkeypatch, *values):
 def _add(g, node_id, **kw):
     from fno.graph.store import append_session_record
     return append_session_record(
-        g, node_id, phase="do", harness="claude", session_id=_SID, **kw)
+        g, node_id, phase="execute", harness="claude", session_id=_SID, **kw)
 
 
 def test_observed_model_records_the_whole_variant_dict(tmp_path, monkeypatch):

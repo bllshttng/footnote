@@ -33,9 +33,11 @@
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR
 # exception with the file-budget-exception label; agents never apply it, and
-# it waives the tree tally alone, never a per-file grow. One case needs no
-# label: a king-approved blocking-bug repair to existing Python, no new verb,
-# flag or feature, within the thirty-added-line budget.
+# it waives the tree tally alone, never a per-file grow. Two cases need no
+# label: a change whose Python tree net is negative (a port that deletes more
+# than it adds forward passes the tally), and a king-approved blocking-bug
+# repair to existing Python, no new verb, flag or feature, within the
+# thirty-added-line budget.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget
@@ -45,8 +47,9 @@
 #
 # Env (all optional):
 #   FILE_BUDGET_LINES  per-file line budget. Default 5000.
-#   PY_ADDED_BUDGET    added lines cli/src/fno Python may add per change.
-#                      Deletions do not offset. Resolution: this env, then
+#   PY_ADDED_BUDGET    added lines a cli/src/fno change that does not shrink
+#                      the tree may add. A change whose tree net is negative
+#                      passes the tally regardless. Resolution: this env, then
 #                      `fno config get blueprint.python_repair_added_lines`,
 #                      then 30.
 #   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
@@ -83,8 +86,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
 BUDGET="${FILE_BUDGET_LINES:-5000}"
-# Added-line budget for the cli/src/fno Python tree. Deletions do not offset:
-# the repair law sets the ceiling on ADDED lines, never the net. Resolution
+# Added-line budget for the cli/src/fno Python tree. It binds a change whose
+# tree net is zero or positive; a net-negative change passes the tally. A
+# net-zero rewrite still faces the ceiling on its ADDED lines, so a branch
+# cannot buy growth with its deletions. Resolution
 # order: the env override, then the config key on a machine with fno, then
 # the law's starting value. An env override is caller configuration, so
 # garbage there is refused loudly; only the config read falls back silently.
@@ -279,25 +284,29 @@ done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
 
 # The tree tally is its own pass because it needs no HEAD blob: a deleted
 # module banks its lines here. --no-renames counts a module moved into or out
-# of the tree as the growth or shrink it is. Only ADDED lines are summed:
-# the repair law's ceiling is on additions, so a branch cannot buy growth
-# with deletions.
+# of the tree as the growth or shrink it is. NET decides the tally: a
+# net-negative change (a port that deletes more than it adds forward) passes,
+# and a change whose net is zero or positive faces the added-line ceiling, so
+# a branch cannot buy growth with its deletions.
 py_added=0
+py_deleted=0
 while IFS= read -r -d '' row; do
     added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
     deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
     [[ "$added" == "-" ]] && continue
     is_test_path "$path" && continue
     py_added=$((py_added + added))
+    py_deleted=$((py_deleted + deleted))
 done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
+py_net=$((py_added - py_deleted))
 
 exc_waived=0
-if [[ "$py_added" -gt "$PY_ADDED_BUDGET" ]]; then
+if [[ "$py_net" -ge 0 && "$py_added" -gt "$PY_ADDED_BUDGET" ]]; then
     if [[ -n "$EXC_LABEL" ]] || label_live; then
         EXC_LABEL="${EXC_LABEL:-file-budget-exception}"
         exc_waived=1
     else
-        echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The ceiling is on ADDED lines; deletions do not offset it, so a branch cannot buy growth with a rewrite. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it. The label is read from the PR when the check runs, so re-run the check after labeling." >> "$findings"
+        echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The tree did not shrink (net $(printf '%+d' "$py_net")), so the ceiling is on ADDED lines and deletions do not offset it: a rewrite cannot buy growth. A net-negative port passes without a label. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it. The label is read from the PR when the check runs, so re-run the check after labeling." >> "$findings"
         fails=1
     fi
 fi
@@ -319,6 +328,6 @@ fi
 if [[ "$QUIET" -eq 0 ]]; then
     waived=""
     [[ "$exc_waived" -eq 1 ]] && waived="; label $EXC_LABEL waives the tree allowance"
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno added $(printf '%+d' "$py_added"), budget $PY_ADDED_BUDGET$waived)"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno added $(printf '%+d' "$py_added"), net $(printf '%+d' "$py_net"), budget $PY_ADDED_BUDGET$waived)"
 fi
 exit 0

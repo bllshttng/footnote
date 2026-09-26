@@ -945,11 +945,11 @@ def test_maintain_abandoned_leg_settles_gone_holds_active(
     live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed(tmp_graph, [
         _node("ab-gone01", cwd="/repo/x", sessions=[
-            {"phase": "do", "harness": "claude", "session_id": _SID_GONE,
+            {"phase": "execute", "harness": "claude", "session_id": _SID_GONE,
              "started_at": gone_at},
         ]),
         _node("ab-held01", cwd="/repo/x", sessions=[
-            {"phase": "do", "harness": "claude", "session_id": _SID_LIVE,
+            {"phase": "execute", "harness": "claude", "session_id": _SID_LIVE,
              "started_at": live_at},
         ]),
     ])

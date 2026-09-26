@@ -774,7 +774,7 @@ fn a_row_fno_stopped_keeps_for_open_work() {
         "abcd1234",
         "abcd1234-1111-2222-3333-444444444444",
         "in_progress",
-        "do",
+        "execute",
         true,
     );
     let fake = FakeClaude::install_as("abcd1234", "abcd1234-1111-2222-3333-444444444444", true);
@@ -879,7 +879,7 @@ fn a_row_the_harness_stopped_itself_still_releases() {
         "abcd1234",
         "abcd1234-1111-2222-3333-444444444444",
         "in_progress",
-        "do",
+        "execute",
         false,
     );
     let fake = FakeClaude::install_as("abcd1234", "abcd1234-1111-2222-3333-444444444444", true);

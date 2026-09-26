@@ -273,7 +273,7 @@ def test_container_rollup_preserves_parent_open_do_row():
             "ab-parent006",
             sessions=[
                 {
-                    "phase": "do",
+                    "phase": "execute",
                     "harness": "codex",
                     "session_id": "session-006",
                     "started_at": "2026-01-01T00:00:00Z",
@@ -694,7 +694,7 @@ def test_a_plan_cannot_mark_its_own_node_done(tmp_path):
 
 def _do_row(started_at: str, session_id: str = "s-do") -> dict:
     return {
-        "phase": "do",
+        "phase": "execute",
         "harness": "claude",
         "session_id": session_id,
         "started_at": started_at,

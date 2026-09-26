@@ -312,6 +312,13 @@ impl AgentsHome {
         self.root.join("pr-nudge")
     }
 
+    /// Directory of per-session burn-ladder state (one JSON file per open-do
+    /// session: last sample, attempts, escalated). Beside the nudge state;
+    /// the daemon's burn arm owns it.
+    pub fn burn_watch_dir(&self) -> PathBuf {
+        self.root.join("burn-watch")
+    }
+
     /// Operator override dir for detection manifests: a readable
     /// `<provider>.toml` here beats the bundled copy
     /// (`crate::manifest::load_manifest` resolution chain).
