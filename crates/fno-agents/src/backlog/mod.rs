@@ -1665,12 +1665,16 @@ pub fn parity(graph: &Path) -> Result<ParityReport, String> {
     let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
     let doc: Value = serde_json::from_str(&text)
         .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-    let json_rows = canonical_rows(
-        doc.get("entries")
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("{} has no entries array", graph.display()))?,
-        "graph.json",
-    )?;
+    let mut json_entries: Vec<Value> = doc
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{} has no entries array", graph.display()))?
+        .clone();
+    // Both legs serve the projected word: the file's stored lock fields are
+    // the retired mirror, so comparing them raw against the projected
+    // export would name every holder-bearing row divergent.
+    nodes::project_claims(&mut json_entries)?;
+    let json_rows = canonical_rows(&json_entries, "graph.json")?;
     let connection = open(graph)?;
     let export = export_rows(&connection)?;
     let db_rows = canonical_rows(&export, "relational export")?;
@@ -2025,6 +2029,18 @@ mod tests {
         drop(dir);
     }
 
+    /// Pin an empty claims root so the read projection is deterministic and
+    /// the operator's live claims never reach an assertion. The guard must
+    /// stay bound for the test's whole body.
+    fn pin_empty_claims_root() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        (guard, root)
+    }
+
     fn two_node_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
         std::fs::write(
@@ -2143,6 +2159,7 @@ mod tests {
     fn parity_clean_copies_compare_clean_and_a_mutated_row_diverges() {
         // AC2-HP's mechanical core: clean compares clean, one changed
         // title diverges naming that id.
+        let (_guard, _root) = pin_empty_claims_root();
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let rows = read_entries(&graph).unwrap();
@@ -2522,6 +2539,7 @@ mod tests {
 
     #[test]
     fn flipgate_child_extras_note_reads_key_survives_the_roundtrip() {
+        let (_guard, _root) = pin_empty_claims_root();
         // AC4-HP: a progress note carrying an unknown key keeps it through
         // save + export, so the two legs agree.
         let dir = TempDir::new().unwrap();

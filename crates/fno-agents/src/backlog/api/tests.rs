@@ -202,13 +202,17 @@ fn api_node_fails_closed_when_claims_path_is_unreadable() {
     let graph_dir = TempDir::new().unwrap();
     let store = arm(&graph_dir, crate::backlog::Backend::Json);
 
-    let error = node(&store, "ab-one").expect_err("unreadable claim state must refuse");
-    let message = format!("{error:?}");
+    // The board projection degrades (a claims outage cannot take a board
+    // read down; the strict gates refuse closed on their own), so the read
+    // serves the row with the unreadable claim projecting no holder.
+    let one = node(&store, "ab-one")
+        .expect("an unreadable claims path must degrade, not take the read down")
+        .expect("ab-one served");
     assert!(
-        message.contains(&claims_dir.display().to_string()),
-        "{message}"
+        one.claim.locked_by.is_none(),
+        "an unreadable claim projects no holder: {:?}",
+        one.claim
     );
-    assert!(message.contains("claim state is unavailable"), "{message}");
 }
 
 #[test]
@@ -226,14 +230,21 @@ fn api_nodes_refuse_when_a_node_claim_lockfile_is_corrupted() {
     let graph_dir = TempDir::new().unwrap();
     let store = arm(&graph_dir, crate::backlog::Backend::Json);
 
-    let error = nodes(&store, &NodeFilter::default(), &Page::default())
-        .expect_err("bulk graph reads must not treat a corrupted claim as absent");
-    let message = format!("{error:?}");
+    // The board projection degrades (a claims outage cannot take a board
+    // read down; the strict gates above refuse on their own), so the bulk
+    // read serves the rows with the corrupted claim projecting no holder.
+    let conn = nodes(&store, &NodeFilter::default(), &Page::default())
+        .expect("a corrupted claim must degrade, not take the read down");
+    let one = conn
+        .nodes
+        .iter()
+        .find(|node| node.id == "ab-one")
+        .expect("ab-one served");
     assert!(
-        message.contains(&lockfile.display().to_string()),
-        "{message}"
+        one.claim.locked_by.is_none(),
+        "a corrupted claim projects no holder: {:?}",
+        one.claim
     );
-    assert!(message.contains("claim state is unavailable"), "{message}");
 }
 
 #[test]

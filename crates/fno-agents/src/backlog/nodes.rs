@@ -322,14 +322,26 @@ pub fn ensure_table(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     // The mirror table is retired: claims project from the holder store at
     // read time, so a v4 store's node_claims (and any re-create) drops here
-    // on every open. A claims store sharing this file leaves node_claims as
-    // a VIEW (claim_store's DDL), so the view goes first.
-    connection
-        .execute_batch(
-            "DROP VIEW IF EXISTS node_claims;
-             DROP TABLE IF EXISTS node_claims;",
+    // on every open. The name can be a claims store's VIEW (claim_store's
+    // DDL) or a v4 mirror TABLE, and SQLite refuses a mismatched DROP, so
+    // the stored object type picks the statement.
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name = 'node_claims'",
+            [],
+            |row| row.get(0),
         )
-        .map_err(|error| error.to_string())
+        .optional()
+        .map_err(|error| error.to_string())?;
+    match kind.as_deref() {
+        Some("view") => connection
+            .execute_batch("DROP VIEW IF EXISTS node_claims;")
+            .map_err(|error| error.to_string()),
+        Some("table") => connection
+            .execute_batch("DROP TABLE IF EXISTS node_claims;")
+            .map_err(|error| error.to_string()),
+        _ => Ok(()),
+    }
 }
 
 fn claims_directory() -> Result<std::path::PathBuf, String> {

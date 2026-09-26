@@ -429,6 +429,13 @@ mod tests {
 
     #[test]
     fn a_schema_3_store_migrates_to_4_with_its_wire_json_kept() {
+        // The claim projection rides every read, so pin an empty claims root:
+        // the served word must not depend on the operator's live claims.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let claims_root = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", claims_root.path());
         let (dir, graph) = v3_store();
         let connection = crate::backlog::open(&graph).unwrap();
         assert_eq!(
@@ -481,7 +488,15 @@ mod tests {
             "2026-09-11T03:00:00+00:00"
         );
         assert!(a["encounters"][0].get("ts").is_none());
-        assert_eq!(a["locked_at"], "2026-09-11T01:00:00+00:00");
+        // The retired mirror's stamps stay in storage (the fold minted the
+        // claude-shaped session id and stamped the node's session_id), while
+        // the served word projects the holder store: no live claim projects
+        // no holder and no lock stamp.
+        assert_eq!(
+            rows(&connection, "SELECT session_id FROM nodes WHERE id = 'x-a'"),
+            vec!["20260911T051456Z-cl67883-05ec5f".to_string()]
+        );
+        assert_eq!(a["locked_at"], serde_json::Value::Null);
         assert_eq!(a["blocked_by"], serde_json::json!(["x-9999"]));
         assert_eq!(a["request_origin"], "operator_request");
         assert_eq!(a["origin_evidence"], "said so");
@@ -492,7 +507,7 @@ mod tests {
                 {"session_id": "s-2", "cost_usd": 0.5}
             ])
         );
-        assert_eq!(a["session_id"], "20260911T051456Z-cl67883-05ec5f");
+        assert_eq!(a["session_id"], serde_json::Value::Null);
         let b = entries.iter().find(|row| row["id"] == "x-b").unwrap();
         assert_eq!(
             b["progress_notes"][1],

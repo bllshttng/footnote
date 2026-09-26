@@ -29,11 +29,13 @@ fn territory_cap_counts_live_and_suspect_node_claims_without_registry_node_field
     let reg = dir.path().join("registry.json");
     std::fs::write(
         &reg,
-        serde_json::json!({"schema_version": 1, "entries": [
+        serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
             {"name": "w-x-1", "status": "busy", "node": null,
-             "pid": std::process::id(), "cwd": "/tmp"},
+             "pid": std::process::id(), "cwd": "/tmp",
+             "created_at": "2026-09-07T00:00:00Z", "log_path": ""},
             {"name": "w-x-2", "status": "busy", "node": null,
-             "pid": std::process::id(), "cwd": "/tmp"}
+             "pid": std::process::id(), "cwd": "/tmp",
+             "created_at": "2026-09-07T00:00:00Z", "log_path": ""}
         ]})
         .to_string(),
     )

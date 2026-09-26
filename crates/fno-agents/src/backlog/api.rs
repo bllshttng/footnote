@@ -289,11 +289,17 @@ pub fn defaulted(mut rows: Vec<Value>) -> Vec<Value> {
 }
 
 pub fn node_in(rows: &[Value], id: &str) -> Option<Node> {
+    // The holder of record comes from the live claim projection, never from
+    // the parsed row; an unreadable projection degrades to unclaimed.
+    let claims = crate::backlog::nodes::node_claims_by_id().unwrap_or_default();
     rows.iter()
         .enumerate()
         .filter_map(|(ordinal, row)| {
             Node::from_json(row).ok().map(|mut node| {
                 node.ordinal = ordinal as i64;
+                if let Some(claim) = claims.get(&node.id) {
+                    node.claim = claim.clone();
+                }
                 node
             })
         })
@@ -303,12 +309,18 @@ pub fn node_in(rows: &[Value], id: &str) -> Option<Node> {
 /// Filter, then drop archived rows unless asked. Ordering and pagination
 /// happen in [`nodes`], so `first` counts the rows the caller would see.
 pub fn nodes_in(rows: &[Value], filter: &NodeFilter, page: &Page) -> Connection<Node> {
+    // The claimed filter reads the projection, so claims attach at the same
+    // parse that feeds it; an unreadable projection degrades to unclaimed.
+    let claims = crate::backlog::nodes::node_claims_by_id().unwrap_or_default();
     let mut rows: Vec<Node> = rows
         .iter()
         .enumerate()
         .filter_map(|(ordinal, row)| {
             Node::from_json(row).ok().map(|mut node| {
                 node.ordinal = ordinal as i64;
+                if let Some(claim) = claims.get(&node.id) {
+                    node.claim = claim.clone();
+                }
                 node
             })
         })
