@@ -1005,7 +1005,7 @@ struct View {
     /// options, resolved liveness) from both the MINE lane and the bare
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
-    questions_fold: Option<Vec<crate::needs_overlay::QuestionItem>>,
+    questions_fold: Option<crate::needs_overlay::QuestionsFold>,
     /// The questions command failed/timed out; same degrade contract as
     /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
@@ -1013,11 +1013,11 @@ struct View {
     /// question: `Some((question_id, text))` while open, `None` when closed.
     /// Same keyboard-ownership contract as `mine_adding`.
     question_answering: Option<(String, String)>,
-    /// (task 2.3) A queued question answer, mirroring
+    /// A queued question answer, mirroring
     /// `mine_action`/`mine_acting` exactly (its own single-flight guard - a
     /// question answer and a MINE write are independent, so one in flight
     /// never blocks the other).
-    question_action: Option<(String, String)>,
+    question_action: Option<(String, crate::needs_overlay::AnswerPick)>,
     question_acting: bool,
     /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
@@ -2458,15 +2458,18 @@ impl View {
         }
     }
 
-    /// (task 2.3) Same contract as [`Self::apply_mine_action_result`]
+    /// Same contract as [`Self::apply_mine_action_result`]
     /// for a question answer: success re-folds so the row leaves the queue on
-    /// the next fold (AC1-HP), a failure shows the reason and leaves the
-    /// question open (AC3-ERR).
-    fn apply_question_action_result(&mut self, result: Result<(), String>) {
+    /// the next fold, a failure shows the reason and leaves the
+    /// question open (AC6-ERR: the refusal line is the door's own words).
+    fn apply_question_action_result(&mut self, result: Result<String, String>) {
         self.question_acting = false;
         match result {
-            Ok(()) => self.needs_want = true,
-            Err(msg) => self.set_notice(format!("outstanding: {msg}")),
+            Ok(receipt) => {
+                self.needs_want = true;
+                self.set_notice(format!("needs: {receipt}"));
+            }
+            Err(msg) => self.set_notice(msg),
         }
     }
 
@@ -7389,7 +7392,7 @@ impl NeedsOverlayRow {
     fn label(&self) -> &str {
         match self {
             Self::Mine(item) => &item.text,
-            Self::Question(q) => q.ask.as_deref().unwrap_or(&q.question),
+            Self::Question(q) => &q.title,
             Self::Need(row) => &row.name,
         }
     }
@@ -8504,12 +8507,12 @@ async fn attach_and_run(
     let (mine_act_tx, mut mine_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
-    // task 2.3: a queued question answer, same shape and independence
+    // A queued question answer, same shape and independence
     // as the MINE mutation channel above - its own single-flight
     // (`question_acting`) so an answer and a MINE write never block each
     // other.
     let (question_act_tx, mut question_act_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
+        tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -8676,10 +8679,10 @@ async fn attach_and_run(
         // task 2.3: kick a queued question answer off the UI loop.
         // `question_acting` is set by the stdin handler at enqueue time,
         // same discipline as the MINE mutation above.
-        if let Some((qid, answer)) = view.question_action.take() {
+        if let Some((qid, pick)) = view.question_action.take() {
             let tx = question_act_tx.clone();
             tokio::spawn(async move {
-                let result = crate::needs_overlay::answer_question(&qid, &answer).await;
+                let result = crate::needs_overlay::answer(&qid, pick).await;
                 let _ = tx.send(result);
             });
         }
@@ -9244,12 +9247,12 @@ async fn attach_and_run(
                         }
                     }
                     match outcome.questions {
-                        Some(items) => {
-                            view.questions_fold = Some(items);
+                        Some(fold) => {
+                            view.questions_fold = Some(fold);
                             view.questions_degraded = false;
                         }
                         None => {
-                            view.questions_fold = Some(Vec::new());
+                            view.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
                             view.questions_degraded = true;
                         }
                     }
@@ -13791,7 +13794,8 @@ async fn answer_keys(
                     let qid = qid.clone();
                     view.question_answering = None;
                     if !text.is_empty() && !view.question_acting {
-                        view.question_action = Some((qid, text));
+                        view.question_action =
+                            Some((qid, crate::needs_overlay::AnswerPick::Words(text)));
                         view.question_acting = true;
                     }
                 }
@@ -13855,9 +13859,16 @@ async fn answer_keys(
                 // always beeps too, same as a non-answerable NEED row.
                 if let Some(q) = projection.rows[cur].question() {
                     let n = (k - b'0') as usize;
-                    match n.checked_sub(1).and_then(|i| q.options.get(i)) {
-                        Some(opt) if !view.question_acting => {
-                            view.question_action = Some((q.id.clone(), opt.clone()));
+                    match n
+                        .checked_sub(1)
+                        .and_then(|i| q.options.get(i))
+                        .filter(|_| !view.question_acting)
+                    {
+                        Some(opt) => {
+                            view.question_action = Some((
+                                q.id.clone(),
+                                crate::needs_overlay::AnswerPick::Option(opt.n),
+                            ));
                             view.question_acting = true;
                         }
                         _ => {
