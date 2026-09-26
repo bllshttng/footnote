@@ -812,11 +812,26 @@ mod tests {
             posture: "outstanding: q-err answered; mail to w1: queued (durable)".into(),
             clears: 0,
         };
-        let staged = |_argv: &[String]| -> (i32, String, String) { (17, String::new(), String::new()) };
+        let staged =
+            |_argv: &[String]| -> (i32, String, String) { (17, String::new(), String::new()) };
         let state_dir = tempfile::tempdir().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let (_a1, _d1) = tick_answers(&items, Path::new("."), state_dir.path(), deadline, &mut io, &staged);
-        let (_a2, _d2) = tick_answers(&items, Path::new("."), state_dir.path(), deadline, &mut io, &staged);
+        let (_a1, _d1) = tick_answers(
+            &items,
+            Path::new("."),
+            state_dir.path(),
+            deadline,
+            &mut io,
+            &staged,
+        );
+        let (_a2, _d2) = tick_answers(
+            &items,
+            Path::new("."),
+            state_dir.path(),
+            deadline,
+            &mut io,
+            &staged,
+        );
         let j = journal();
         assert!(j.contains("\"rung\":\"none\""), "{j}");
         assert!(j.contains("\"outcome\":\"failed\""), "{j}");
