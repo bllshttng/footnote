@@ -43,7 +43,7 @@ pub fn run(args: &[OsString]) -> i32 {
         .any(|a| a.to_str() == Some("-h") || a.to_str() == Some("--help"))
     {
         println!(
-            "usage: fno inbox law set <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]... | fno inbox law stage | fno inbox law match (one JSON request on stdin) | fno inbox law retract <subject-or-id> --reason <why> | fno inbox law history <subject-or-id> [--json]"
+            "usage: fno inbox law set <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]... | fno inbox law stage | fno inbox law match (one JSON request on stdin) | fno inbox law retract <subject-or-id> --reason <why> | fno inbox law history <subject-or-id>"
         );
         return 0;
     }
@@ -54,9 +54,9 @@ pub fn run(args: &[OsString]) -> i32 {
                 .iter()
                 .filter_map(|a| a.to_str().map(str::to_owned))
                 .collect();
-            // A piped stdin rides the request ONLY for `--decision-file -`
-            // (x-b373): every other call never touches stdin, so a daemon
-            // whose stdin is an open pipe cannot block the verb.
+            // A piped stdin rides the request ONLY for `--decision-file -`:
+            // every other call never touches stdin, so a daemon whose stdin
+            // is an open pipe cannot block the verb.
             let stdin_text = if stdin_requested(&argv) {
                 let mut buf = String::new();
                 let _ = std::io::stdin().read_to_string(&mut buf);
@@ -70,7 +70,7 @@ pub fn run(args: &[OsString]) -> i32 {
                 "stdin": stdin_text,
             })
             .to_string();
-            law_exec(&request)
+            law_exec(&request, Attended::No)
         }
         "stage" | "match" => {
             // The caller shapes the request (the hook wraps its payload as a
@@ -81,24 +81,34 @@ pub fn run(args: &[OsString]) -> i32 {
                 eprintln!("fno inbox law {sub}: could not read the request from stdin");
                 return 2;
             }
-            law_exec(&buf)
+            law_exec(&buf, Attended::No)
         }
-        "retract" | "history" => {
+        "retract" => {
             let argv: Vec<String> = rest
                 .iter()
                 .filter_map(|a| a.to_str().map(str::to_owned))
                 .collect();
-            let mode = if sub == "retract" {
-                "retract"
-            } else {
-                "history"
-            };
             let request = serde_json::json!({
-                "mode": mode,
+                "mode": "retract",
                 "argv": argv,
             })
             .to_string();
-            law_exec(&request)
+            // Attended: the request rides argv and the worker inherits this
+            // terminal as stdin, so the door's operator proof is the real
+            // tty - the one credential a piped lane can never carry.
+            law_exec(&request, Attended::Yes)
+        }
+        "history" => {
+            let argv: Vec<String> = rest
+                .iter()
+                .filter_map(|a| a.to_str().map(str::to_owned))
+                .collect();
+            let request = serde_json::json!({
+                "mode": "history",
+                "argv": argv,
+            })
+            .to_string();
+            law_exec(&request, Attended::No)
         }
         _ => {
             eprintln!("error: expected a subcommand (set | stage | match | retract | history)");
@@ -116,19 +126,38 @@ fn stdin_requested(argv: &[String]) -> bool {
         .any(|(flag, value)| flag == "--decision-file" && value == "-")
 }
 
-/// One request through the worker's `--law-exec` one-shot lane. The child
-/// owns stdout and the exit code; the request rides stdin. A missing worker
-/// is the door's refused exit (3), never an empty answer.
-fn law_exec(request: &str) -> i32 {
+/// Whether the child inherits this process's stdin. `Yes` is the attended
+/// shape: the request rides argv and the worker's fd 0 is the caller's real
+/// terminal, which is the operator proof the retract door reads.
+enum Attended {
+    Yes,
+    No,
+}
+
+/// One request through the worker's one-shot law lane. The child owns stdout
+/// and the exit code; unattended, the request rides a piped stdin. A missing
+/// worker is the door's refused exit (3), never an empty answer.
+fn law_exec(request: &str, attended: Attended) -> i32 {
     let Some(binary) = crate::store_client::worker_binary() else {
         eprintln!(
             "fno inbox law: refused: the fno-agents-worker binary is unavailable (set FNO_AGENTS_WORKER, or install the worker beside fno)."
         );
         return 3;
     };
-    let mut child = match Command::new(&binary)
-        .arg("--law-exec")
-        .stdin(Stdio::piped())
+    let mut cmd = Command::new(&binary);
+    let piped = match attended {
+        Attended::Yes => {
+            cmd.arg("--law-exec-arg").arg(request);
+            cmd.stdin(Stdio::inherit());
+            None
+        }
+        Attended::No => {
+            cmd.arg("--law-exec");
+            cmd.stdin(Stdio::piped());
+            Some(request)
+        }
+    };
+    let mut child = match cmd
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -139,18 +168,20 @@ fn law_exec(request: &str) -> i32 {
             return 3;
         }
     };
-    let sent = child
-        .stdin
-        .take()
-        .ok_or(())
-        .and_then(|mut stdin| stdin.write_all(request.as_bytes()).map_err(|_| ()));
-    if sent.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        eprintln!("fno inbox law: refused: could not send the law request");
-        return 3;
+    if let Some(request) = piped {
+        let sent = match child.stdin.as_mut() {
+            Some(stdin) => stdin.write_all(request.as_bytes()).map_err(|_| ()),
+            None => Err(()),
+        };
+        if sent.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("fno inbox law: refused: could not send the law request");
+            return 3;
+        }
+        drop(child.stdin.take());
+        // stdin dropped here: the child sees EOF and answers.
     }
-    // stdin dropped here: the child sees EOF and answers.
     match child.wait() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
@@ -166,7 +197,7 @@ mod tests {
 
     #[test]
     fn stdin_only_for_decision_file_dash() {
-        // x-b373: a daemon whose stdin is an open pipe must never block the
+        // A daemon whose stdin is an open pipe must never block the
         // verb. Only `--decision-file -` asks for stdin.
         assert!(stdin_requested(&[
             "subject".to_string(),

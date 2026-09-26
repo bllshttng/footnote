@@ -796,7 +796,7 @@ fn stage_answer_with(
                 );
                 // Graduated laws ride the stage block: a live law whose
                 // graduation follow-up node has closed asks for its own
-                // retraction by subject (x-9ca3). The retraction obligation
+                // retraction by subject. The retraction obligation
                 // is not stage-local, so the check reads every live law -
                 // and pays its graph reads only when such a law exists.
                 // Hermetic callers (an explicit index path) skip it.
@@ -1370,7 +1370,7 @@ pub(crate) struct RecordDoor {
 
 const RECORD_USAGE: &str = "usage: fno inbox law set <subject> [decision] [--decision-file f|-] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--read cmd]... [--global] [--paths glob,glob]";
 const RETRACT_USAGE: &str = "usage: fno inbox law retract <subject-or-decision-id> --reason <why>";
-const HISTORY_USAGE: &str = "usage: fno inbox law history <subject-or-decision-id> [--json]";
+const HISTORY_USAGE: &str = "usage: fno inbox law history <subject-or-decision-id>";
 
 fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
     let mut door = RecordDoor {
@@ -1853,7 +1853,7 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
     }
     // Auto-supersede: on a subject with exactly one live law, an edit IS a
     // supersession - the operator should never have to name the id that the
-    // index already knows (x-9ca3). Two or more live laws refuse: the caller
+    // index already knows. Two or more live laws refuse: the caller
     // must say which one dies. An explicit --supersedes always wins, and an
     // unreadable index never blocks a write that is legal without it.
     let mut supersedes = door.supersedes.clone();
@@ -2055,7 +2055,6 @@ fn text_cap(text: &str, cap: usize) -> String {
 struct RetractDoor {
     token: String,
     reason: String,
-    json: bool,
 }
 
 fn parse_retract_door(args: &[String], usage: &str) -> Result<RetractDoor, String> {
@@ -2070,7 +2069,6 @@ fn parse_retract_door(args: &[String], usage: &str) -> Result<RetractDoor, Strin
                     .ok_or_else(|| format!("--reason needs a value\n{usage}"))?
                     .clone();
             }
-            "--json" => door.json = true,
             f if f.starts_with('-') && f != "-" => {
                 return Err(format!("no such option: {f}\n{usage}"));
             }
@@ -2365,6 +2363,7 @@ fn history_answer(token: &str, rows: &[Value]) -> Value {
         }
     } else {
         rows.iter()
+            .filter(|r| decision_index::is_law(r))
             .filter(|r| row_subject(r).trim().eq_ignore_ascii_case(&subject_cf))
             .collect()
     };
@@ -2453,8 +2452,8 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
 }
 
 /// A live law whose graduation follow-up node has closed asks for its own
-/// retraction, by subject, in the stage block every session already reads
-/// (x-9ca3). The graph read pays only when such a law exists.
+/// retraction, by subject, in the stage block every session already reads.
+/// The graph read pays only when such a law exists.
 fn graduated_retraction_lines(index: &decision_index::Index) -> Vec<String> {
     graduated_retraction_lines_in(index, node_is_closed)
 }
