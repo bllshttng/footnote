@@ -552,7 +552,7 @@ def install_groom_agent(
     import shutil
     import sys
 
-    from fno.pr_watch._install import bounce
+    from fno.pr_watch._install import _write_if_changed, bounce, default_agent_path
 
     if sys.platform != "darwin":
         return {
@@ -563,7 +563,7 @@ def install_groom_agent(
 
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
-    install_path = install_path if install_path is not None else os.environ.get("PATH", "")
+    install_path = install_path or default_agent_path(fno_binary)
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.
@@ -579,16 +579,10 @@ def install_groom_agent(
 
     plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
     try:
-        launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(
-            render_groom_plist(
-                fno_binary=fno_binary,
-                install_path=install_path,
-                hour=hour,
-                workdir=workdir,
-            ),
-            encoding="utf-8",
-        )
+        rendered = render_groom_plist(
+            fno_binary=fno_binary, install_path=install_path, hour=hour, workdir=workdir)
+        if not _write_if_changed(plist_path, rendered):
+            return {"status": "unchanged", "detail": "plist matches; not re-registered"}
     except OSError as exc:
         return {"status": "failed", "detail": f"write {plist_path}: {exc}"}
 

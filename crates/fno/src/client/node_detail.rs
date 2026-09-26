@@ -9,7 +9,8 @@
 //! time so a worker that exited between paint and press answers with its
 //! reason, never a stale launch.
 
-use super::backlog_board::{trunc, BoardView};
+use super::backlog_board::{rule, trunc, BoardView};
+use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
 /// One selectable row of the drill-down: a link to another node, or a
@@ -55,21 +56,24 @@ fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
     v
 }
 
-/// The overlay body: header, meta, column and rank, epic, plan, details
-/// (first 12 lines until `d` opens the whole text), the links block, PRs,
-/// the session table, and the newest notes. `w` truncates every line.
-/// Returns the lines and the selected row for the painter's follow.
-pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usize>) {
-    let mut lines: Vec<String> = Vec::new();
+/// The drill-down's body: the styled title (id, bold title, the
+/// status/priority pill), dim fields, and every section (body, links,
+/// sessions, notes) under a bold header with a thin rule. `w` truncates
+/// every line.
+pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usize>) {
+    let mut lines: Vec<BLine> = Vec::new();
     let Some(o) = &b.detail else {
         return (lines, None);
     };
     let Some(inputs) = b.inputs.as_ref() else {
-        return (vec!["reading board...".into()], None);
+        return (vec![BLine::meta("reading board...")], None);
     };
     let Some(view) = crate::backlog_model::node(inputs, &o.node_id) else {
         return (
-            vec![format!("no node {} in the board read", o.node_id)],
+            vec![BLine::meta(format!(
+                "no node {} in the board read",
+                o.node_id
+            ))],
             None,
         );
     };
@@ -82,76 +86,109 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
     let mut k: usize = 0;
     let mut follow: Option<usize> = None;
     let t = |s: &str| trunc(s, w);
-
-    // Header: the id first (the handle every verb takes), then the title.
-    lines.push(t(&format!("{}  {}", view.card.id, view.card.title)));
+    // Title: the id (accent), the title (bold), and the status/priority pill.
+    let status = view.card.status.clone().unwrap_or_else(|| "none".into());
+    let prio = view.card.priority.clone().unwrap_or_else(|| "none".into());
+    let mut title = BLine::of(&[
+        BSeg {
+            text: view.card.id.clone(),
+            role: BRole::Label,
+        },
+        BSeg {
+            text: format!("  {}", t(&view.card.title)),
+            role: BRole::Head,
+        },
+        BSeg {
+            text: format!("  [{} {}]", status, prio),
+            role: BRole::Pill,
+        },
+    ]);
+    title = title.trunc(w);
+    lines.push(title);
     // Meta.
     let king = match &view.card.king {
         Some(king) => format!("{} (L{})", king.name, king.level),
         None => "none".into(),
     };
-    lines.push(t(&format!(
-        "{} · {} · {} · {} · {} · king: {}",
-        view.card.status.as_deref().unwrap_or("none"),
+    lines.push(BLine::meta(t(&format!(
+        "{} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} king: {}",
+        status,
         view.card.project.as_deref().unwrap_or("none"),
-        view.card.priority.as_deref().unwrap_or("none"),
+        prio,
         view.card.size.as_deref().unwrap_or("none"),
         view.difficulty.as_deref().unwrap_or("none"),
         king
-    )));
-    lines.push(t(&format!(
-        "kind: {}",
-        view.kind.as_deref().unwrap_or("none")
-    )));
-    lines.push(t(&format!(
-        "column: {} · rank: {}",
-        view.card.column,
-        view.card
-            .rank
-            .map(|r| r.to_string())
-            .unwrap_or_else(|| "unranked".into())
-    )));
-    lines.push(t(&format!(
-        "plan: {}",
-        view.plan_path.as_deref().unwrap_or("none")
-    )));
-    lines.push(t(&format!(
-        "cwd: {}",
-        view.cwd.as_deref().unwrap_or("none")
-    )));
+    ))));
+    lines.push(BLine::plain(String::new()));
+    // Field lines: the label dim (the accent-dim slot is the id's, so a
+    // field label reads as the meta rank) and the value plain.
+    let field = |label: &str, value: String| {
+        BLine::of(&[
+            BSeg {
+                text: format!("{label}:"),
+                role: BRole::Meta,
+            },
+            BSeg {
+                text: format!(" {}", t(&value)),
+                role: BRole::Body,
+            },
+        ])
+    };
+    lines.push(field(
+        "kind",
+        view.kind.clone().unwrap_or_else(|| "none".into()),
+    ));
+    lines.push(field(
+        "column",
+        format!(
+            "{} \u{b7} rank {}",
+            view.card.column,
+            view.card
+                .rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unranked".into())
+        ),
+    ));
+    lines.push(field(
+        "plan",
+        view.plan_path.clone().unwrap_or_else(|| "none".into()),
+    ));
+    lines.push(field(
+        "cwd",
+        view.cwd.clone().unwrap_or_else(|| "none".into()),
+    ));
     for f in &view.unavailable {
-        lines.push(t(&format!("{}: {}", f.feature, f.reason)));
+        lines.push(BLine::meta(t(&format!("{}: {}", f.feature, f.reason))));
     }
-    lines.push(String::new());
-
-    // Details: word-wrapped to the width; the first 12 lines until `d`
-    // opens the whole text.
+    lines.push(BLine::plain(String::new()));
+    // Body section: bold header + thin rule, then the details text.
+    lines.push(BLine::head(t("body")));
+    lines.push(BLine::meta(rule(w)));
     if let Some(details) = view.details.as_ref().and_then(|d| d.as_str()) {
         let mut wrapped: Vec<String> = Vec::new();
         for para in details.split('\n') {
             wrap_line(para, w, &mut wrapped);
         }
         if o.details_open || wrapped.len() <= 12 {
-            wrapped.truncate(wrapped.len());
             for l in &wrapped {
-                lines.push(t(l));
+                lines.push(BLine::plain(t(l)));
             }
         } else {
             let shown = wrapped.iter().take(12);
             for l in shown {
-                lines.push(t(l));
+                lines.push(BLine::plain(t(l)));
             }
-            lines.push(t(&format!(
+            lines.push(BLine::meta(t(&format!(
                 "\u{2026} {} more lines (d opens)",
                 wrapped.len() - 12
-            )));
+            ))));
         }
     } else {
-        lines.push(t("details: none"));
+        lines.push(BLine::meta(t("details: none")));
     }
-    lines.push(String::new());
+    lines.push(BLine::plain(String::new()));
 
-    // Links block: one row per id under each heading, selectable.
+    // Links section: one row per id under each bold heading, selectable.
     let groups: [(&str, &Vec<crate::backlog_model::Link>); 5] = [
         ("children", &view.children),
         ("contained", &view.contained),
@@ -159,11 +196,14 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
         ("blocks", &view.blocks),
         ("related", &view.related),
     ];
+    let mut any_links = false;
     for (name, group) in groups {
         if group.is_empty() {
             continue;
         }
-        lines.push(t(&format!("{} ({}):", name, group.len())));
+        any_links = true;
+        lines.push(BLine::head(t(&format!("{name} ({}):", group.len()))));
+        lines.push(BLine::meta(rule(w)));
         for l in group.iter() {
             let marker = if k == sel {
                 follow = Some(lines.len());
@@ -173,18 +213,31 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
                 k += 1;
                 " "
             };
-            let col = l.column.unwrap_or("");
-            let title = l.title.as_deref().unwrap_or("");
-            lines.push(t(&format!("{marker} {} {} {}", l.id, col, title)));
+            let col = l.column.clone().unwrap_or_default();
+            let title = l.title.clone().unwrap_or_default();
+            lines.push(
+                BLine::of(&[
+                    BSeg {
+                        text: format!("{marker} "),
+                        role: BRole::Body,
+                    },
+                    BSeg {
+                        text: l.id.clone(),
+                        role: BRole::Label,
+                    },
+                    BSeg {
+                        text: format!(" {} {}", col, title),
+                        role: BRole::Body,
+                    },
+                ])
+                .trunc(w),
+            );
         }
     }
-    if view.children.is_empty()
-        && view.contained.is_empty()
-        && view.blocked_by.is_empty()
-        && view.blocks.is_empty()
-        && view.related.is_empty()
-    {
-        lines.push(t("links: none"));
+    if !any_links {
+        lines.push(BLine::head(t("links")));
+        lines.push(BLine::meta(rule(w)));
+        lines.push(BLine::meta(t("none")));
     }
     if !view.prs.is_empty() {
         let pr: Vec<String> = view
@@ -195,17 +248,27 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
                 None => format!("#{}", p.number),
             })
             .collect();
-        lines.push(t(&format!("prs: {}", pr.join(", "))));
+        lines.push(BLine::of(&[
+            BSeg {
+                text: "prs:".into(),
+                role: BRole::Meta,
+            },
+            BSeg {
+                text: format!(" {}", t(&pr.join(", "))),
+                role: BRole::Body,
+            },
+        ]));
     }
-    lines.push(String::new());
+    lines.push(BLine::plain(String::new()));
 
-    // Session table: phase harness id model action.
-    lines.push(t(&format!(
+    // Session section: bold header + thin rule, then the phase table.
+    lines.push(BLine::head(t("sessions")));
+    lines.push(BLine::meta(rule(w)));
+    lines.push(BLine::meta(t(&format!(
         "{:<9} {:<7} {:<9} {:<12} {}",
         "phase", "harness", "id", "model", "action"
-    )));
-    for (i, s) in view.sessions.iter().enumerate() {
-        let _ = i;
+    ))));
+    for s in view.sessions.iter() {
         let marker = if k == sel {
             follow = Some(lines.len());
             k += 1;
@@ -218,29 +281,33 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<String>, Option<usi
             "none" => s.reason.clone().unwrap_or_else(|| "none".into()),
             other => other.to_string(),
         };
-        lines.push(t(&format!(
+        lines.push(BLine::plain(t(&format!(
             "{marker} {:<8} {:<7} {:<9} {:<12} {}",
             s.phase.as_deref().unwrap_or("-"),
             s.harness.as_deref().unwrap_or("-"),
             short_id(s.session_id.as_deref().unwrap_or("-")),
             s.model.as_deref().unwrap_or("-"),
             action
-        )));
+        ))));
     }
     if view.sessions.is_empty() {
-        lines.push(t("sessions: none"));
+        lines.push(BLine::meta(t("sessions: none")));
     }
-    lines.push(String::new());
+    lines.push(BLine::plain(String::new()));
 
-    // The newest notes, then the decision count.
-    lines.push(t(&format!(
-        "notes ({}) - decisions ({})",
+    // Notes section: bold header + thin rule, the newest three.
+    lines.push(BLine::head(t(&format!(
+        "notes ({}) \u{b7} decisions ({})",
         view.notes.len(),
         view.decisions.len()
-    )));
+    ))));
+    lines.push(BLine::meta(rule(w)));
     for note in view.notes.iter().take(3) {
-        lines.push(t(&format!("   {}", note.text)));
+        lines.push(BLine::plain(t(&format!("   {}", note.text))));
     }
+    lines.push(BLine::meta(t(&format!(
+        "e/p/s/S edit - D append - N note - E description in $EDITOR - esc back"
+    ))));
     (lines, follow)
 }
 
@@ -297,7 +364,20 @@ pub(crate) async fn detail_keys(
         .map(|b| b.detail_esc.is_empty())
         .unwrap_or(true);
     if bytes == [0x1b] && esc_carry_empty {
-        pop_or_close(view);
+        // The keys overlay opened from the detail closes first; the second
+        // Esc pops the detail itself.
+        let overlay_open = view
+            .backlog_board
+            .as_ref()
+            .map(|b| b.keys_overlay)
+            .unwrap_or(false);
+        if overlay_open {
+            if let Some(b) = view.backlog_board.as_mut() {
+                b.keys_overlay = false;
+            }
+        } else {
+            pop_or_close(view);
+        }
         return Ok(StdinFlow::Continue);
     }
     let toks = {
@@ -332,6 +412,13 @@ pub(crate) async fn detail_keys(
             ModalKey::Byte(b's') => backlog_board::edit_size(view)?,
             ModalKey::Byte(b'S') => backlog_board::edit_status(view)?,
             ModalKey::Byte(b'D') => backlog_board::append_details(view)?,
+            ModalKey::Byte(b'N') => backlog_board::add_note(view)?,
+            ModalKey::Byte(b'E') => backlog_board::edit_description(view).await?,
+            ModalKey::Byte(b'?') => {
+                if let Some(b) = view.backlog_board.as_mut() {
+                    b.keys_overlay = !b.keys_overlay;
+                }
+            }
             _ => {}
         }
     }
