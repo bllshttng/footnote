@@ -3192,9 +3192,11 @@ fn agent_names(view: &View) -> Vec<String> {
 #[test]
 fn cycle_section_tri_state_filters_then_collapses_then_restores() {
     let mut view = view_with_dead_interleaved();
+    // The default view reads the active sort, like the extended table: live
+    // rows first, exited last, name tiebreak inside each half.
     assert_eq!(
         agent_names(&view),
-        vec!["live-a", "dead-a", "live-b", "dead-b"],
+        vec!["live-a", "live-b", "dead-a", "dead-b"],
         "expanded shows every row"
     );
 
