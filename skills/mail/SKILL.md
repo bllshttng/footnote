@@ -84,7 +84,7 @@ the matching section. Messaging is free, so **nothing here confirms** (contrast
 | `view` | `fno agents mail view` | no (read) | free |
 | `status` | `fno agents mail status` | no (read) | free |
 | `drain` | `fno agents mail drain` | no | free |
-| `hold [minutes\|off\|status]` | `/fno:dnd` with the same argument | natural-language duration | free |
+| `hold [minutes\|off\|status]` | `/fno:dnd` (codex `$fno:dnd`) with the same argument | natural-language duration | free |
 
 An unrecognized leading token is an error - tell the user the verb set above; do
 NOT guess a send. (Unlike `/agent`, a bare non-verb is not a default action here,
