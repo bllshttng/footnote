@@ -40,10 +40,29 @@ def _idle_pane(monkeypatch):
     transport failing. Stub the verdict so each test keeps asserting the thing
     it was written for. The gate itself has its own tests in
     ``test_dispatch_mux_send.py``, which does NOT use this fixture.
+
+    The wholesale stub also swallows the Rust envelope renderer's subprocess
+    call, whose empty stdout wrapped every payload as the empty string -- so
+    the confirm-by-content marker was empty and nothing could ever confirm.
+    Stub the renderer with a deterministic minimal envelope instead.
     """
     monkeypatch.setattr(
         "fno.mail.pane_transport.prompt_refusal",
         lambda **_kwargs: None,
+    )
+    _stub_envelope(monkeypatch)
+
+
+def _stub_envelope(monkeypatch):
+    """Replace the Rust ``mail-envelope`` render with a minimal open tag, body,
+    and close tag: everything the envelope contract's confirm marker needs,
+    nothing that reaches for an ambient binary."""
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope,
+        "_render_in_rust",
+        lambda payload: "<fno_mail>\n{}\n</fno_mail>".format(payload.get("body", "")),
     )
 
 
