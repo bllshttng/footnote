@@ -161,8 +161,12 @@ pub fn tick_answers(
     runner: &dyn Fn(&[String]) -> (i32, String, String),
 ) -> (u64, Vec<String>) {
     let now = now_secs();
-    let answers = fold_answer_rows(items);
+    let (answers, delivered) = fold_answer_rows(items);
+    // A delivery row is the ladder's durable terminal marker: answers that
+    // already carry one never re-enter the ladder, and their terminal states
+    // are pruned so replies.json stays bounded.
     let mut states: HashMap<String, ReplyState> = load_states(state_dir);
+    states.retain(|id, _| !delivered.contains(id));
     let mut acted: u64 = 0;
     let mut detail: Vec<String> = Vec::new();
     for (item_id, sink, answer) in &answers {
@@ -202,11 +206,20 @@ pub fn tick_answers(
                         }
                     }
                 }
-            } else {
-                // Already closed elsewhere (the endpoint, a terminal, or the
-                // file lane), or a note item: the clear needs no running, and
-                // the ladder starts from the answer row alone.
+            } else if item_id.starts_with("note-") {
+                // A note: no door closes it, so the note mail rung follows.
                 state.cleared = true;
+            } else {
+                // Closed by another lane (the endpoint, a terminal, or the
+                // file lane): that clear's own mail leg addressed the asker,
+                // so the ladder ends here instead of waking anyone twice.
+                state.cleared = true;
+                state.rung = "mail".into();
+                state.outcome = "landed".into();
+                state.evidence =
+                    "question closed by another lane; its clear mailed the asker".into();
+                acted += 1;
+                emit_delivery(state);
             }
         }
         // The ladder phase: effects through the injected runner, one delivery
@@ -466,17 +479,29 @@ fn transcript_len(path: &Path) -> u64 {
 /// Fold the unsuperseded `attention_answer` rows: id -> (sink, answer text).
 /// The answer text maps the row's option onto the item's option text when the
 /// projection has the item; words and done stand alone.
-fn fold_answer_rows(items: &[AttentionItem]) -> Vec<(String, String, String)> {
+fn fold_answer_rows(
+    items: &[AttentionItem],
+) -> (Vec<(String, String, String)>, std::collections::HashSet<String>) {
     let home = crate::paths::AgentsHome::from_env();
     let path = crate::provider_cap::questions_path(&home);
     let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut delivered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut won: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in crate::event_store::journal_text(&path, &[]).lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if v.get("type").and_then(Value::as_str) != Some("attention_answer") {
-            continue;
+        match v.get("type").and_then(Value::as_str) {
+            Some("attention_answer") => {}
+            Some("attention_delivery") => {
+                let Some(did) = v.get("data").and_then(|d| d.get("item_id")).and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                delivered.insert(did.to_string());
+                continue;
+            }
+            _ => continue,
         }
         let data = v.get("data").cloned().unwrap_or(Value::Null);
         let Some(id) = data.get("item_id").and_then(Value::as_str) else {
@@ -515,7 +540,7 @@ fn fold_answer_rows(items: &[AttentionItem]) -> Vec<(String, String, String)> {
         };
         out.push((id.to_string(), sink, text));
     }
-    out
+    (out, delivered)
 }
 
 /// Load the ladder states from `replies.json` beside the settle state.
