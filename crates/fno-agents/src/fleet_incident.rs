@@ -163,7 +163,7 @@ impl IncidentRecord {
         }
     }
 
-    fn holds_scope(&self, scope: &str) -> bool {
+    pub(crate) fn holds_scope(&self, scope: &str) -> bool {
         self.held_scopes().iter().any(|s| s == scope)
     }
 
