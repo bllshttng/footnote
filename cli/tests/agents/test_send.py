@@ -231,7 +231,8 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     """A fresh send resolves the sender row through its mailbox address.
 
     The CLI passes the sender's canonical handle, not its registry label.
-    The envelope uses the full session id for every harness.
+    The envelope renders the sender's wire address: the short handle for
+    claude and opencode, the full time-ordered id for codex.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -287,7 +288,10 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'from="{sender_session}"' in envelope
+    expected_from = (
+        sender_session[:8] if sender_harness in ("claude", "opencode") else sender_session
+    )
+    assert f'from="{expected_from}"' in envelope
 
 
 def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
@@ -518,7 +522,7 @@ def test_dispatch_send_durable_fallback_resolves_sender_once(
     assert result.delivery == "durable"
     assert proof_calls == [canonical_handle(sender_session)]
     record = next(m for m in iter_messages() if m.id == result.msg_id)
-    assert f'from="{sender_session}"' in record.body
+    assert 'from="12345678"' in record.body
 
 
 @pytest.mark.parametrize(
@@ -588,7 +592,10 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    assert f'from="{sender_session}"' in record.body
+    expected_from = (
+        sender_session[:8] if sender_harness in ("claude", "opencode") else sender_session
+    )
+    assert f'from="{expected_from}"' in record.body
     assert f'harness="{wire_harness}"' in record.body
 
 
