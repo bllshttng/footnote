@@ -201,3 +201,28 @@ def test_dead_probes_answer_unknown_exit_4(tmp_path: Path, monkeypatch, capsys) 
     rc = _merge_result.run_merge_result_check(1, str(tmp_path))
     assert rc == _merge_result.UNKNOWN
     assert "merge-result: unknown" in capsys.readouterr().err
+
+
+def test_fetch_pull_head_writes_no_fetch_head(tmp_path: Path) -> None:
+    """A PR-ref fetch must leave no for-merge entry behind.
+
+    The canonical two-parent merge happened because a racing `git pull`
+    merged the for-merge entries a PR-ref probe had just written to
+    FETCH_HEAD. --no-write-fetch-head removes the seed.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "test")
+    (repo / "f.txt").write_text("1\n")
+    _commit(repo, "c1")
+    _bare_origin(repo, tmp_path)
+    _git(repo, "push", "-q", "origin", "main")
+    head = _git(repo, "rev-parse", "main")
+    bare = tmp_path / "origin.git"
+    _git(bare, "update-ref", "refs/pull/7/head", head)
+    fetched = _merge_result._fetch_pull_head(7, str(repo))
+    assert fetched == head, "the probe fetch itself still works"
+    fetch_head = repo / ".git" / "FETCH_HEAD"
+    assert not fetch_head.exists(), "no for-merge PR entry may survive the probe"
