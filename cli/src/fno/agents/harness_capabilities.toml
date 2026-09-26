@@ -1287,11 +1287,14 @@ resume = "native-session"
 # wk-x61bc journey and is not re-proven per harness.
 autonomous_pane = false
 route_on_pane = false
-# grok runs the plugin's Stop group only from a trusted location, so the row
-# is `native` and the dispatch gate asks the grok plugin status (a trusted
-# fno plugin reachable through `grok inspect`) before it admits a looping
-# dispatch.
-loop_participation = "native"
+# grok's Stop CONTRACT is real (project hook, block-and-continue measured),
+# and the trusted link installs, but the live 2026-09-26 linked-stage run
+# recorded grok auto-disabling the discovered plugin: no stop event fired and
+# no loop-check decision exists, so a trusted location alone does not put
+# plugin hooks on the wire. "" keeps looping dispatch refused until plugin
+# hooks are proven end to end; the dispatch gate already carries the grok
+# plugin-status probe for the flip.
+loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
