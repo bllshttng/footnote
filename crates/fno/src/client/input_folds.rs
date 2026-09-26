@@ -179,6 +179,19 @@ pub(super) enum SearchKey {
 /// bare-Esc close lands on the following keypress (which is swallowed);
 /// `q` closes instantly.
 pub(super) fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+    fold_selector_keys_mode(esc, bytes, false)
+}
+
+/// The placement-pickers' fold: Shift+arrows (`ESC [ 1 ; 2 X`) fold to their
+/// UPPERCASE twins - the split keys - instead of dropping as unmapped, so the
+/// picker hint's "shift+arrows/HJKL split" is true. Scoped to the pickers:
+/// the sideline selector reads uppercase J/K as a row reorder, so a global
+/// fold would turn shift+down into a row move.
+pub(super) fn fold_selector_keys_with_split_arrows(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+    fold_selector_keys_mode(esc, bytes, true)
+}
+
+fn fold_selector_keys_mode(esc: &mut Vec<u8>, bytes: &[u8], split_arrows: bool) -> Vec<u8> {
     if bytes.is_empty() {
         return if crate::keys::take_lone_esc(esc) {
             vec![0x1b]
@@ -211,15 +224,30 @@ pub(super) fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
                 // door at once instead of guarding the two that were probed.
                 if (0x40..=0x7e).contains(&b) {
                     // A BARE `ESC [ X` is a plain arrow. A parameterised one is a
-                    // modified arrow (ctrl/shift/alt) and means something this
-                    // layer has no mapping for, so it is dropped entirely rather
-                    // than aliased onto the unmodified key.
+                    // modified arrow (ctrl/shift/alt): in the picker mode a
+                    // Shift-modified one folds to its UPPERCASE twin (the split
+                    // keys); every other modifier means something this layer has
+                    // no mapping for, so it is dropped entirely rather than
+                    // aliased onto the unmodified key.
                     if esc.len() == 2 {
                         match b {
                             b'A' => keys.push(b'k'),
                             b'B' => keys.push(b'j'),
                             b'C' => keys.push(b'l'),
                             b'D' => keys.push(b'h'),
+                            _ => {} // unknown final byte: swallowed whole
+                        }
+                    } else if split_arrows
+                        && esc.len() == 5
+                        && esc[2] == b'1'
+                        && esc[3] == b';'
+                        && esc[4] == b'2'
+                    {
+                        match b {
+                            b'A' => keys.push(b'K'),
+                            b'B' => keys.push(b'J'),
+                            b'C' => keys.push(b'L'),
+                            b'D' => keys.push(b'H'),
                             _ => {} // unknown final byte: swallowed whole
                         }
                     }
