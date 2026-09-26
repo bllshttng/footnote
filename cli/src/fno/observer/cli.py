@@ -169,17 +169,19 @@ def _capped_gh(gh_runner, cap: int):
     return wrapped
 
 
-def _score_item(item: dict, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
+def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
     """Score one corpus item, returning ``{dimension: verdict|None}``. A gh/disk
     failure for an attributed item yields all-None (a coverage gap), never a
     crash (AC1-ERR / AC1-EDGE)."""
     node = by_id.get(item.get("graph_node_id"))
     try:
-        plan_text = _read_plan_text(item, node, gh_runner)
-        return fold.score_blueprint_item(item, plan_text=plan_text)
+        if skill == "blueprint":
+            plan_text = _read_plan_text(item, node, gh_runner)
+            return fold.score_blueprint_item(item, plan_text=plan_text)
     except Exception as exc:  # any unforeseen I/O fault -> coverage gap, not crash
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
-        return {d: None for d in fold.BLUEPRINT_DIMENSIONS}
+        dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
+        return {d: None for d in dims}
 
 
 # --------------------------------------------------------------------------- #
@@ -275,8 +277,6 @@ def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
         if mode == "replay"
         else ""
     )
-    evidence_line = summary.get("evidence_line")
-    ev_part = f"{evidence_line}\n" if evidence_line else ""
     path.write_text(
         f"# Observer {mode}: {summary['skill_id']} ({date})\n\n"
         f"run_id: `{summary['run_id']}`{ref_line}\n"
@@ -284,8 +284,8 @@ def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
         f"({summary['corpus_size']} attributable items)\n"
         f"verdicts: pass={summary['pass_count']} "
         f"degraded={summary['degraded_count']} fail={summary['fail_count']}\n"
-        f"{ev_part}"
-        f"{caveat}\n"
+        + (f"{summary['evidence_line']}\n" if summary.get("evidence_line") else "")
+        + f"{caveat}\n"
         f"## Failure ranking\n{ranking}\n",
         encoding="utf-8",
     )
@@ -362,7 +362,7 @@ def sweep(
         if review_ev is not None:
             scores = {"finding_precision": (review_ev["items"][n] or {}).get("finding_precision")}
         else:
-            scores = _score_item(item, by_id, gh_runner)
+            scores = _score_item(item, skill, by_id, gh_runner)
         item_scored = False
         for dimension, verdict in scores.items():
             if verdict is None:
@@ -445,19 +445,12 @@ def _review_evidence(items: list[dict], by_id: dict) -> dict:
     item stays a coverage gap and the digest names it, never a fabricated verdict."""
     gap = {"items": [{} for _ in items],
            "evidence_line": "evidence: unread (fno-agents review-summary --evidence failed)"}
-    # A missing binary dies inside subprocess.run and lands in the gap below,
-    # same as any other unread evidence.
     binary = find_dev_binary() or resolve_binary()
-    payload = [
-        {"node": (by_id.get(item.get("graph_node_id")) or {}).get("id"),
-         "pr_number": (by_id.get(item.get("graph_node_id")) or {}).get("pr_number")}
-        for item in items
-    ]
+    payload = [{"node": n.get("id"), "pr_number": n.get("pr_number")}
+               for n in (by_id.get(i.get("graph_node_id")) or {} for i in items)]
     try:
-        p = subprocess.run(
-            [str(binary), "review-summary", "--evidence"],
-            input=json.dumps(payload), capture_output=True, text=True, timeout=120,
-        )
+        p = subprocess.run([str(binary), "review-summary", "--evidence"],
+                           input=json.dumps(payload), capture_output=True, text=True, timeout=120)
         out = json.loads(p.stdout)
         if p.returncode == 0 and len(out.get("items", [])) == len(items):
             return out
