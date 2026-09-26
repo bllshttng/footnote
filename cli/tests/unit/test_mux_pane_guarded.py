@@ -130,9 +130,16 @@ def _install_fake_run(monkeypatch, exit_codes):
     """Stub ``subprocess.run`` to pop one exit code per ``fno mux pane`` verb and
     record every argv. Also no-ops the paste->CR settle sleep."""
     calls: list[list[str]] = []
+    # Captured before the patch below replaces subprocess.run process-wide: the
+    # mail-envelope render passes through so the enveloped lane asserts today's
+    # bytes, not an empty stub answer (same seam test_dispatch_mux_send.py
+    # uses).
+    real_run = dispatch.subprocess.run
 
-    def _run(argv, **_kwargs):
+    def _run(argv, **kwargs):
         calls.append(list(argv))
+        if "mail-envelope" in argv:
+            return real_run(argv, **kwargs)
         # Only ``fno mux pane`` calls consume a scripted exit code; unrelated
         # subprocess activity (e.g. the audit emit's state-dir git lookup when
         # cwd is not the pinned root) returns a neutral 0 without shifting the
@@ -199,6 +206,10 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
     calls: list[list[str]] = []
+    # The mail-envelope render passes through to the real renderer (captured
+    # before the patch below replaces subprocess.run process-wide), so the
+    # echoed marker below is the envelope this run actually pastes.
+    real_run = dispatch.subprocess.run
 
     def _run(argv, **kwargs):
         # The envelope render (`fno-agents mail-envelope`) is a foreign call
@@ -207,6 +218,8 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
         if argv[1:3] != ["mux", "pane"]:
             return _REAL_RUN(argv, **kwargs)
         calls.append(list(argv))
+        if "mail-envelope" in argv:
+            return real_run(argv, **kwargs)
         if "--stdin" in argv:
             # The recipient "processes" the paste and it lands in its transcript
             # before the confirm poll runs. Echo back what was actually pasted:
