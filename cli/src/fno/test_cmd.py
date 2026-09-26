@@ -1485,7 +1485,9 @@ def _import_refs(text: str, mod: str, is_package: bool = False) -> set[str]:
     inside its fixtures), so this walks the AST rather than the first
     column. `from X import y` records both X and X.y: which of the two is a
     module is not knowable without executing, and recording both is the
-    optimistic reading a selector should take.
+    optimistic reading a selector should take. Every ancestor package is
+    recorded too: importing any submodule executes its __init__, so a
+    change to the package owns those importers.
     """
     try:
         tree = ast.parse(text)
@@ -1508,7 +1510,12 @@ def _import_refs(text: str, mod: str, is_package: bool = False) -> set[str]:
             if base:
                 refs.add(base)
                 refs.update(f"{base}.{alias.name}" for alias in node.names)
-    return refs
+    expanded: set[str] = set()
+    for ref in refs:
+        parts = ref.split(".")
+        for i in range(1, len(parts) + 1):
+            expanded.add(".".join(parts[:i]))
+    return expanded
 
 
 def _fno_importers(root: Path) -> dict[str, set[str]]:

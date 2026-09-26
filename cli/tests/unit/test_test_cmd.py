@@ -235,6 +235,19 @@ def test_repo_wide_lints_ride_a_packet_only_with_their_scripts(tmp_path: Path) -
     assert lints == ["placement rule"]
 
 
+def test_changed_package_init_selects_submodule_importers(tmp_path: Path) -> None:
+    """Importing any submodule executes its __init__, so a package change owns
+    the submodule's importers: importing records ancestor packages, not just
+    the exact dotted path."""
+    _write(tmp_path / "cli/src/fno/mail/__init__.py", "")
+    _write(tmp_path / "cli/src/fno/mail/envelope.py", "def wrap(): ...\n")
+    _write(tmp_path / "cli/tests/unit/test_envelope_user.py",
+           "import fno.mail.envelope\n")
+    sel, _ = select_changed(tmp_path, ["cli/src/fno/mail/__init__.py"])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("python-source-importers", "cli/tests/unit/test_envelope_user.py") in by_rule
+
+
 def test_always_lints_are_registered_steps_backed_by_real_scripts() -> None:
     """A drifted step name would KeyError the packet runner; a deleted script
     would silently drop the lint from every packet. Pin both to the repo."""
