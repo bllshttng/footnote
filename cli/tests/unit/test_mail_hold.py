@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from fno.agents import dispatch, format as fmt
+from fno.harness_identity import session_identity_key
 from fno.mail import hold as hold_mod
 
 HANDLE = "abcd1234"
@@ -212,6 +213,34 @@ def test_the_gate_finds_a_clock_filed_under_the_canonical_handle(monkeypatch):
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
+def test_two_same_window_codex_rows_never_share_one_clock():
+    """Writers key the full session identity key.
+
+    Codex UUIDv7 ids opened in one 65.536-second window share their first
+    eight, so two same-window sessions used to share one clock file: one
+    release deleted the shared clock while only the first matching row's
+    policy cleared, leaving the sibling stamped bus-only with no clock, which
+    never lapses.
+    """
+    sid_a = "0198a3f2-77e3-7000-8000-000000000001"
+    sid_b = "0198a3f2-77e3-7000-8000-000000000002"
+    row_a = SimpleNamespace(
+        name="alpha", short_id="", harness_session_id=sid_a, delivery_policy="bus-only"
+    )
+    row_b = SimpleNamespace(
+        name="beta", short_id="", harness_session_id=sid_b, delivery_policy="bus-only"
+    )
+
+    hold_mod.arm(session_identity_key(sid_a), 5)
+
+    assert hold_mod.read_any(row_a) is not None
+    assert hold_mod.read_any(row_b) is None
+    # The sibling's clock cannot satisfy its row either way: B is stamped
+    # with no clock of its own, and that must read as refusing, not as held
+    # on A's clock.
+    assert dispatch._delivery_policy_refusal(row_b) == dispatch.BUS_ONLY_POLICY
+
+
 def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypatch):
     """The x-e21e guarantee, unchanged for every row busy mode never touched."""
     monkeypatch.setattr(dispatch, "load_registry", lambda: [_entry()])
@@ -290,7 +319,12 @@ def _capture_release(monkeypatch, messages, delivered=True):
     emitted = []
     advanced = []
     monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
-    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: messages)
+    # release() drains every mailbox form the row owns; only the canonical
+    # form carries mail in these tests.
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda name, **k: messages if name == HANDLE else [],
+    )
     monkeypatch.setattr(
         "fno.bus.cursor.advance_cursor", lambda name, mid: advanced.append(mid)
     )
@@ -452,6 +486,32 @@ def test_a_missed_inject_leaves_the_mail_on_the_bus(monkeypatch):
     assert result["outcome"] == "inject-missed"
     assert advanced == [], "a missed delivery must never consume the cursor"
     assert emitted[0][1]["outcome"] == "inject-missed"
+
+
+def test_release_by_the_clock_key_still_drains_the_canonical_mailbox(monkeypatch):
+    """Durable mail is filed under the canonical first-eight (the name lane's
+    recipient) while the clock sits under the full identity key: the release
+    the clock triggers must scan the row's mailbox forms, not the clock key.
+    """
+    sid = "0198a3f2-77e3-7000-8000-000000000009"
+    _emitted, advanced = _capture_release(monkeypatch, [])
+    monkeypatch.setattr(
+        hold_mod,
+        "resolve_entry",
+        lambda handle: SimpleNamespace(
+            name="worker", short_id="", harness_session_id=sid, delivery_policy=None
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.bus.cursor.scan_unread",
+        lambda name, **k: [_msg("m1", "w", "b")] if name == "0198a3f2" else [],
+    )
+
+    result = hold_mod.release(session_identity_key(sid), held_for_s=10)
+
+    assert result["outcome"] == "delivered"
+    assert result["held_count"] == 1
+    assert advanced == ["m1"]
 
 
 # --- Task 5: the bounce -----------------------------------------------------

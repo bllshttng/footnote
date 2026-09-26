@@ -25,19 +25,17 @@ use crate::state::{load_registry, update_registry};
 /// operator armed by hand.
 pub(crate) const DEFAULT_MINUTES: u64 = 5;
 
-/// The canonical mailbox address: the first eight characters of the session
-/// identity key (harness_identity.canonical_handle). UUID-family ids compare
-/// case-insensitively; opencode's `ses_` ids do not.
+/// The full normalized session id: the collision-free clock key. Mirrors
+/// Python's `session_identity_key` (harness_identity.py), so the two legs
+/// agree on the file both write. UUID-family ids compare case-insensitively;
+/// opencode's `ses_` ids do not. The retired first-eight key stays readable
+/// through hold.py's `addresses()` sweep.
 fn identity_key(session_id: &str) -> String {
     if session_id.starts_with("ses_") {
         session_id.to_string()
     } else {
         session_id.to_lowercase()
     }
-}
-
-fn canonical_handle(session_id: &str) -> String {
-    identity_key(session_id).chars().take(8).collect()
 }
 
 /// The state root the Python `hold_dir()` resolves to: `$FNO_HOME`, else
@@ -204,8 +202,8 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     };
     if off {
         match set_policy(session_id, None) {
-            Some(_) => {
-                let _ = std::fs::remove_file(hold_sidecar_path(&canonical_handle(session_id)));
+            Some(matched) => {
+                let _ = std::fs::remove_file(hold_sidecar_path(&identity_key(&matched)));
                 0
             }
             None => {
@@ -221,7 +219,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             eprintln!("mail-hold: no registry row carries session {session_id}");
             return 3;
         };
-        let handle = canonical_handle(&matched);
+        let handle = identity_key(&matched);
         if let Err(exc) = write_idle_clock(&handle, minutes * 60) {
             eprintln!("mail-hold: could not write the clock for {handle}: {exc}");
             return 1;
@@ -314,7 +312,7 @@ mod tests {
                 registry.entries[0].delivery_policy.as_deref(),
                 Some("bus-only")
             );
-            let row = clock(dir, "cccccccc");
+            let row = clock(dir, "cccccccc-1111-2222-3333-444455556666");
             assert_eq!(row["clock_kind"], "idle");
             assert_eq!(row["window_s"], 300);
             assert!(row["ceiling"].as_str().unwrap() > row["until"].as_str().unwrap());
@@ -337,7 +335,9 @@ mod tests {
             ]);
             assert_eq!(code, 3);
             assert!(
-                !dir.join("mail-hold").join("dddddddd.json").exists(),
+                !dir.join("mail-hold")
+                    .join("dddddddd-1111-2222-3333-444455556666.json")
+                    .exists(),
                 "no sidecar for a session no row carries"
             );
             let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
@@ -371,11 +371,76 @@ mod tests {
                 0
             );
             assert!(
-                !dir.join("mail-hold").join("cccccccc.json").exists(),
+                !dir.join("mail-hold")
+                    .join("cccccccc-1111-2222-3333-444455556666.json")
+                    .exists(),
                 "the clock file is gone"
             );
             let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
             assert!(registry.entries[0].delivery_policy.is_none());
+        });
+    }
+
+    #[test]
+    fn two_codex_ids_in_one_uuidv7_window_get_distinct_clocks() {
+        // A codex id is a UUIDv7: the first 12 hex chars are the ms timestamp,
+        // so two ids opened in the same 65.536s bucket share the first eight.
+        // Each row must get its own clock file, and releasing one must leave
+        // the sibling stamped bus-only WITH its clock (the never-lapses state
+        // is a stamped row whose clock is gone).
+        with_hold_env(|dir| {
+            write_registry(
+                dir,
+                serde_json::json!([
+                    registry_row("alpha", "0198a3f2-77e3-7000-8000-000000000001"),
+                    registry_row("beta", "0198a3f2-77e3-7000-8000-000000000002"),
+                ]),
+            );
+            assert_eq!(
+                run_mail_hold(&[
+                    "--session".into(),
+                    "0198a3f2-77e3-7000-8000-000000000001".into()
+                ]),
+                0
+            );
+            assert_eq!(
+                run_mail_hold(&[
+                    "--session".into(),
+                    "0198a3f2-77e3-7000-8000-000000000002".into()
+                ]),
+                0
+            );
+            let holds = dir.join("mail-hold");
+            assert!(holds
+                .join("0198a3f2-77e3-7000-8000-000000000001.json")
+                .exists());
+            assert!(holds
+                .join("0198a3f2-77e3-7000-8000-000000000002.json")
+                .exists());
+            assert!(
+                !holds.join("0198a3f2.json").exists(),
+                "the colliding first-eight key must never be written"
+            );
+            assert_eq!(
+                run_mail_hold(&[
+                    "--session".into(),
+                    "0198a3f2-77e3-7000-8000-000000000001".into(),
+                    "--off".into()
+                ]),
+                0
+            );
+            assert!(!holds
+                .join("0198a3f2-77e3-7000-8000-000000000001.json")
+                .exists());
+            assert!(
+                holds
+                    .join("0198a3f2-77e3-7000-8000-000000000002.json")
+                    .exists(),
+                "the sibling's clock survives the release"
+            );
+            let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+            let beta = registry.entries.iter().find(|e| e.name == "beta").unwrap();
+            assert_eq!(beta.delivery_policy.as_deref(), Some("bus-only"));
         });
     }
 
