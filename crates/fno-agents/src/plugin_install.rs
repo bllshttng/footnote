@@ -1025,9 +1025,9 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
             cache.display()
         )),
         _ => {
-            // A bare removed-path line reads as an install failure (x-448f),
-            // so the receipt names the live root the harness loads instead.
-            // Rides the second channel: call sites print its lines verbatim.
+            // A bare removed-path line reads as an install failure, so the
+            // receipt names the live root the harness loads instead. Rides
+            // the second channel: call sites print its lines verbatim.
             let live = live_roots
                 .iter()
                 .map(|r| r.path.display().to_string())
