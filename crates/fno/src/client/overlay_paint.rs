@@ -4,7 +4,6 @@
 //! the cursor band; the string variant stays byte-identical for the seven
 //! family-B overlays.
 
-use super::backlog_style;
 use super::blank_straddling_pair;
 use crate::chrome;
 use crate::popup;
@@ -26,9 +25,9 @@ pub(crate) struct OverlayLayout {
     pub(crate) framed: chrome::Framed,
     /// The body window the layout chose: first visible body line, and how
     /// many it took.
-    window: (usize, usize),
+    pub(crate) window: (usize, usize),
     /// The framed-line index the first body line paints at.
-    body_top: usize,
+    pub(crate) body_top: usize,
 }
 
 impl OverlayLayout {
@@ -279,46 +278,4 @@ pub(crate) fn draw_lines_overlay<S: AsRef<str>>(
         OverlayAnchor::Center,
     );
     draw_overlay_layout(cells, rows, cols, &layout, theme);
-}
-
-/// The backlog panels' paint: [`layout_body_overlay`], [`draw_overlay_layout`],
-/// then the cursor row's explicit highlight band across the framed body. The
-/// band is the sideline's pair ([`theme::band_style`]), so the cursor reads
-/// as the same highlight everywhere; zero DIM lands inside it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_body_overlay(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    body: &[chrome::BodyLine],
-    follow: Option<usize>,
-    band: Option<usize>,
-    theme: &Theme,
-) {
-    let layout = layout_body_overlay(
-        content_origin,
-        content_dims,
-        chrome,
-        body,
-        follow,
-        OverlayAnchor::Center,
-    );
-    draw_overlay_layout(cells, rows, cols, &layout, theme);
-    if let Some(band) = band {
-        let (start, take) = layout.window;
-        if band >= start && band < start + take {
-            backlog_style::paint_framed_band(
-                cells,
-                rows,
-                cols,
-                layout.origin,
-                layout.framed.width,
-                layout.body_top + (band - start),
-                theme,
-            );
-        }
-    }
 }
