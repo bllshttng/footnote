@@ -104,16 +104,11 @@ def _checks(
     number, reason = _pr_number(args, cwd=cwd, runner=rest_runner)
     if number is None:
         return Result(1, "", reason)
-    # The bucketed rows are the Rust reader's status-ci op; the rollup read
-    # and the classify live there now.
+    # The bucketed rows are the Rust reader's status-ci op; classify lives there.
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        rows = verb_call(
-            "authorized-merge",
-            {"op": "status-ci", "cwd": cwd or os.getcwd(), "pr": int(number)},
-            timeout=120,
-        )
+        rows = verb_call("authorized-merge", {"op": "status-ci", "cwd": cwd or os.getcwd(), "pr": int(number)}, timeout=120)
     except VerbUnavailable as exc:
         return Result(1, "", str(exc))
     return Result(0, json.dumps(rows) + "\n", "")

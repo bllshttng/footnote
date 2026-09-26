@@ -1843,11 +1843,7 @@ def run_merge(
         try:
             from fno.rust_binary import verb_call
 
-            flake = verb_call(
-                "authorized-merge",
-                {"op": "status-rerun", "cwd": repo, "pr": int(pr_number), "sha": covered_head or ""},
-                timeout=120,
-            )
+            flake = verb_call("authorized-merge", {"op": "status-rerun", "cwd": repo, "pr": int(pr_number), "sha": covered_head or ""}, timeout=120)
         except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
             sys.stderr.write(
                 f"pr-merge: rerun-recovery probe unavailable ({exc}); "
