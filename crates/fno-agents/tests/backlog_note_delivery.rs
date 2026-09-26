@@ -1,4 +1,4 @@
-//! x-920a wave 2: the native note action (backlog-note), real-store tests.
+//! wave 2: the native note action (the grouped `backlog note` door), real-store tests.
 
 use fno_agents::backlog::node_state;
 use serde_json::json;
@@ -35,14 +35,18 @@ fn read_graph(path: &PathBuf) -> serde_json::Value {
 fn note(_graph: &std::path::Path, args: &[&str], body: &str) -> i32 {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
-        .args(std::iter::once("backlog-note").chain(args.iter().copied()))
+        .args(
+            std::iter::once("backlog")
+                .chain(std::iter::once("note"))
+                .chain(args.iter().copied()),
+        )
         // The client lazy-starts a daemon that inherits this env, so the
         // daemon dies with this test run instead of idling an hour (x-5533).
         .envs(fno_agents::test_run::self_owner_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("spawn fno-agents backlog-note");
+        .expect("spawn fno-agents backlog note");
     child
         .stdin
         .as_mut()
@@ -63,13 +67,17 @@ fn graph_arg(graph: &std::path::Path) -> [String; 2] {
 fn note_captured(args: &[&str], body: &str) -> (i32, String, String) {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
-        .args(std::iter::once("backlog-note").chain(args.iter().copied()))
+        .args(
+            std::iter::once("backlog")
+                .chain(std::iter::once("note"))
+                .chain(args.iter().copied()),
+        )
         .envs(fno_agents::test_run::self_owner_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn fno-agents backlog-note");
+        .expect("spawn fno-agents backlog note");
     child
         .stdin
         .as_mut()

@@ -75,7 +75,7 @@ pub fn run(rest: &[String]) -> i32 {
 /// The registry the payload names, or the ambient home when it does not.
 /// Python passes `paths.agents_registry_path()` explicitly so a caller
 /// pinned to a non-default state root (tests, `config.state_dir`) and the
-/// binary agree - the `backlog-update --graph` contract.
+/// binary agree - the patch door's `--graph` contract.
 fn payload_registry(payload: &Value) -> PathBuf {
     match payload
         .get("registry")

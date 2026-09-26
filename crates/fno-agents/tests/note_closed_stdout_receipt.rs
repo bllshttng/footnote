@@ -38,7 +38,8 @@ fn a_closed_stdout_pipe_neither_loses_the_note_nor_fails_the_verb() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args([
-            "backlog-note",
+            "backlog",
+            "note",
             "--graph",
             graph.to_str().unwrap(),
             "--stdin",

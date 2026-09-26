@@ -73,5 +73,5 @@ def _dispatch(ids: List[str], *, field: object, grouped: bool, strict: bool) -> 
             "FNO_AGENTS_BIN. Pass one id at a time to use the all-Python path instead.", err=True,
         )
         raise typer.Exit(code=2)
-    result = subprocess.run([str(binary), "graph-get", *ids, "--json"], check=False)
+    result = subprocess.run([str(binary), "backlog", "get", *ids, "--json"], check=False)
     raise typer.Exit(code=propagate_returncode(result.returncode))

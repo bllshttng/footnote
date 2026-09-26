@@ -50,7 +50,7 @@ class _RustTracker:
         self.name = name
 
     def _call(self, op: str, id: str | None = None) -> dict:
-        out = rust_binary.verb_call("graph-get", {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
+        out = rust_binary.verb_call(["backlog", "get"], {"tracker": op, "backend": self.name, "id": id}, TrackerError, timeout=120)
         if out.get("not_found"):
             raise NodeNotFound(id)
         if out.get("error"):

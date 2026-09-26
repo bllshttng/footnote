@@ -137,6 +137,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
+    /// binary's grouped dispatcher. The argv passes through byte-verbatim
+    /// (the sibling's catalog owns grouped and legacy spellings).
+    Backlog,
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -184,6 +188,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    // The backlog namespace claims itself lexically, like doctor-event: the
+    // sibling dispatcher owns the whole namespace's spelling (grouped and
+    // legacy), and anything it does not own yet it forwards to Python
+    // itself, so the front door hands over the argv byte-verbatim.
+    if args.first().and_then(|a| a.to_str()) == Some("backlog") {
+        return Role::Backlog;
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -296,6 +307,7 @@ fn main() {
     let env_session = mux_cli::env_server();
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
+        Role::Backlog => bootstrap::forward_backlog(&args),
         Role::NotTty => {
             // AC1-EDGE: piped/CI bare `fno` gets a notice, not a TUI. Exit 0 -
             // this is a gate, not a failure.

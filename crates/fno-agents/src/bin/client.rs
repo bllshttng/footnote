@@ -31,8 +31,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "authorized-merge",
-    "backlog-note",
-    "backlog-notes",
     "bash-census",
     "board",
     "claim",
@@ -53,7 +51,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "law-match",
     "finalize",
     "fleet-incident",
-    "graph-get",
     "grid",
     "help",
     "host",
@@ -138,8 +135,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Transport-only early dispatches, before the runtime builds: the shrink
     // law (d-fe66560a) bars new client verbs; each module's doc carries its shape.
-    if args.first().map(String::as_str) == Some("backlog-update") {
-        std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
+    // `backlog`: the grouped backlog dispatcher (see backlog::cli's doc).
+    // Transport-only, unregistered in ALL_CLIENT_ACTIONS (the shrink law
+    // allows no new action): the `fno` front door execs this binary with
+    // `backlog` as the first token, and the folded engines keep their exact
+    // argv contracts for the internal bridges.
+    if args.first().map(String::as_str) == Some("backlog") {
+        std::process::exit(fno_agents::backlog::cli::run(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("question-intake") {
         std::process::exit(fno_agents::question_intake::run_question_intake());
@@ -735,9 +737,6 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `graph-get`/`bash-census`/`session-start-bytes`: daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
-    if verb == "graph-get" {
-        return fno_agents::graph_get::run_graph_get(&args[1..]);
-    }
     // `judge`: the blueprint judge's grading half (lens prompts,
     // model spawn, verdict parsing). Daemon-free like graph-get; the Python
     // `fno doctor observer judge` / `sweep --judge` wrappers shell HERE and
@@ -746,20 +745,8 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::blueprint_judge::run_judge(&args[1..]);
     }
 
-    // `backlog-notes` (wave 3): inventory, digest migration, and
-    // history readback over the note corpus. Direct dispatch, daemon-free.
-    if verb == "backlog-notes" {
-        return fno_agents::backlog::note_migrate::run_notes(&args[1..]);
-    }
-
-    // `backlog-note`: the native note action. Daemon-free write; the
-    // Python `fno backlog note` bridge owns evidence checks, identity,
-    // archived refusal, crown candidates and the mail transport, this action
-    // owns the bounded-state policy, revision-checked replacement, history
-    // routing, and the nobody-bound pre-write refusal (exit 3).
-    if verb == "backlog-note" {
-        return fno_agents::backlog::note_cli::run_note(&args[1..]);
-    }
+    // `backlog-notes` and `backlog-note` folded into the grouped `backlog`
+    // dispatcher (the early transport arm); see backlog::cli's doc.
     // `court-orphans`: the orphan-crown sweep for `fno agents court`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.

@@ -235,17 +235,13 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
-        # Batch graph read, bash-census, and session-start bytes: all
-        # three dispatch directly in client.rs before build_request, never `fno agents`.
-        "graph-get",
+        # bash-census and session-start bytes: both dispatch directly in
+        # client.rs before build_request, never `fno agents`. The batch graph
+        # read and the backlog note actions folded into the grouped
+        # `fno-agents backlog` dispatcher and left this set.
         "bash-census",
         "session-start-bytes",
         "judge",
-        # backlog-note + backlog-notes (the bounded-state change): direct
-        # client.rs dispatch, never `fno agents` routing; keeps the
-        # client.rs<->router parity test in sync.
-        "backlog-note",
-        "backlog-notes",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
@@ -526,9 +522,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
     "recover": "Restore a recorded claude session under its account and route: <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
-    "graph-get": "Batch graph.json read by id; invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
-    "backlog-note": "The native note action: bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
-    "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback; the migration runbook drives it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",

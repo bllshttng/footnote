@@ -63,7 +63,7 @@ def cmd_note(
         if binary is None:
             typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
             raise typer.Exit(code=1)
-        argv = [str(binary), "backlog-note", "--graph", str(graph_path)]
+        argv = [str(binary), "backlog", "note", "--graph", str(graph_path)]
         if json_output:
             argv.append("--json")
         if body_file:
@@ -194,7 +194,7 @@ def native_update(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog update`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-update", "--graph", str(graph_path), "--node", node_id]
+    argv = [str(binary), "backlog", "update", "--graph", str(graph_path), "--node", node_id]
     if json_out:
         argv.append("--json")
     argv.extend(args)
@@ -228,7 +228,7 @@ def _write_state(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
+    argv = [str(binary), "backlog", "note", "--graph", str(graph_path), "--stdin",
             "--json", "--node", node_id]
     if reads:
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
@@ -264,5 +264,5 @@ def cmd_notes(ctx: typer.Context) -> None:
             err=True,
         )
         raise typer.Exit(code=2)
-    proc = subprocess.run([str(binary), "backlog-notes", *ctx.args], check=False)
+    proc = subprocess.run([str(binary), "backlog", "notes", *ctx.args], check=False)
     raise typer.Exit(code=propagate_returncode(proc.returncode))
