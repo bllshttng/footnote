@@ -1,6 +1,6 @@
 # Test-audit campaigns
 
-Running home for the global test audit: one campaign PR per subsystem, one ledger per campaign in this folder. Method, value bar, and junk patterns live in the test-audit skill (`skills/test-audit/`); campaign order of work in its `CAMPAIGN.md`. Optimize for confidence, not deletion count.
+Running home for the global test audit: one campaign PR per subsystem, one ledger per campaign in this folder. Method, value bar, and junk patterns live in the test-audit skill (`skills/test-audit/`). Campaign order of work is that skill's `CAMPAIGN.md`. Optimize for confidence, not deletion count.
 
 ## Census
 
@@ -11,7 +11,7 @@ git ls-files -z '*.py' | xargs -0 grep -hcE '^[[:space:]]*(async )?def test_' | 
 git ls-files -z 'crates/*.rs' | xargs -0 grep -hcE '#\[(tokio::)?test\]' | awk '{s+=$1} END {print s}'
 ```
 
-20,337 Python declarations in 1,130 files; 10,137 Rust in 672 files; about 287 test-shaped shell files. About 30,500 declarations before parametrize expansion.
+20,337 Python declarations in 1,130 files. 10,137 Rust in 672 files. About 287 test-shaped shell files. About 30,500 declarations before parametrize expansion.
 
 The src-read column counts tests in files that read repo source or docs (`SKILL.md`, `AGENTS.md`, `getsource`, `.md` read_text). It is a suspicion signal for the exact-source-grep junk pattern, not a verdict.
 
@@ -51,11 +51,11 @@ Rank rule: suites that test both legs of a dual implementation first, then src-r
 | 16 | loopcheck, finalize, daemon, gc | 1,642 Rust | absent in production | loopcheck/, daemon/ | coordinate with the CI-sharding plan on loop_check.rs |
 | 17-18 | long tail (adapters 1,027, cli 479, setup, inbox, ...) | about 3,700 Py, split in two by owner | varies | varies | lowest measured density |
 
-(The stress e2e audit predates this queue and is row two below; the skill's own trial campaign on tests/spec is row one.)
+(The stress e2e audit predates this queue and is row two below. The skill's own trial campaign on tests/spec is row one.)
 
 ## Running total
 
-Declarations are `def test_` / `#[test]` counts; campaign rows link their ledger in this folder. CI minutes come from the smoke-duration-report lines of the campaign PR run against the last main run.
+Declarations are `def test_` / `#[test]` counts. Campaign rows link their ledger in this folder. CI minutes come from the smoke-duration-report lines of the campaign PR run against the last main run.
 
 | Campaign | PR | Declarations before | Declarations after | CI minutes before | CI minutes after | Ledger |
 |---|---|---|---|---|---|---|
