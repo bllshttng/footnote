@@ -8,6 +8,7 @@
 //! before the tokio runtime builds, never in `run`, so the verb-surface
 //! ratchet never sees them (shrink law d-fe66560a).
 
+pub mod edit_integrity;
 pub mod king_guard;
 pub mod pipe_guard;
 pub mod prompt;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 /// calls this before the runtime builds, so a fire costs one process.
 pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
+        Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("king-guard") => king_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
@@ -29,7 +31,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("stop") => stop::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected king-guard, pipe-guard, prompt, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected edit-integrity, king-guard, pipe-guard, prompt, test-run-guard or stop"
             );
             2
         }
