@@ -1374,7 +1374,14 @@ fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
             "--graduation-ref" => door.graduation_ref = Some(take(&mut i)?),
             "--read" => door.reads.push(take(&mut i)?),
             "--paths" => door.raw_paths.push(take(&mut i)?),
-            "--global" => door.is_global = true,
+            "--global" => {
+                // An inline value parses like a bool flag should: --global=false
+                // must never widen because the value was ignored.
+                door.is_global = match inline.as_deref() {
+                    None => true,
+                    Some(v) => matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+                };
+            }
             f if f.starts_with('-') && f != "-" => {
                 return Err(format!("no such option: {f}\n{RECORD_USAGE}"));
             }
@@ -3279,11 +3286,19 @@ mod scope_tests {
 
     /// Hermetic state for a door write: tmp FNO_HOME (index, questions,
     /// graph) + tmp FNO_REPO_ROOT (journal, evidence root) + a work map.
-    /// Restores every variable it touched.
-    struct DoorEnv(tempfile::TempDir, tempfile::TempDir);
+    /// The env is process-global, so the lock serializes every env-touching
+    /// door test; the guard drops after the env restore.
+    static DOOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DoorEnv(
+        tempfile::TempDir,
+        tempfile::TempDir,
+        std::sync::MutexGuard<'static, ()>,
+    );
 
     impl DoorEnv {
         fn new() -> Self {
+            let guard = DOOR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             let home = tempfile::tempdir().expect("tempdir");
             let root = tempfile::tempdir().expect("tempdir");
             std::fs::create_dir_all(root.path().join(".fno")).expect("mkdir");
@@ -3303,7 +3318,7 @@ mod scope_tests {
             )
             .expect("writes");
             std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &map);
-            Self(home, root)
+            Self(home, root, guard)
         }
 
         // The appends land in the SQLite store beside the journal, so the
