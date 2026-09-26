@@ -1,0 +1,101 @@
+{
+  "manifest_version": 1,
+  "kind": "product-qualification",
+  "release": {
+    "product": "footnote",
+    "footnote_version": "0.4.0",
+    "footnote_rev": "98ebf97d3285ecafe37cda6968f60b1c86636a1d",
+    "bank_rev": "98ebf97d3285ecafe37cda6968f60b1c86636a1d",
+    "declared_at": "2026-09-26"
+  },
+  "tool_versions": {
+    "python": ">=3.11"
+  },
+  "units": {
+    "duration": "seconds",
+    "effort": "minutes",
+    "spend": "usd"
+  },
+  "bank_task": "product-delivery-journey",
+  "comparison": {
+    "repeats_per_scenario": 2,
+    "runnable_repositories": ["footnote"],
+    "import_only_targets": [
+      {
+        "repository": "external-product-a",
+        "reason": "no supported runner exists; observations arrive only as imports with provenance"
+      },
+      {
+        "repository": "external-product-b",
+        "reason": "no supported runner exists; observations arrive only as imports with provenance"
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "install-first-use",
+      "family": "isolated install and first use",
+      "bank_task": "product-delivery-journey",
+      "repo": "footnote",
+      "cohort": "install-first-use",
+      "cohort_class": "conformance",
+      "serving": "grade-only",
+      "lane": null,
+      "repeats": 2,
+      "expected_cases": ["install-first-use/footnote/r1", "install-first-use/footnote/r2"]
+    },
+    {
+      "id": "viewer-detach-cold-resume",
+      "family": "viewer detach plus separately tested cold native resume",
+      "bank_task": "product-delivery-journey",
+      "repo": "footnote",
+      "cohort": "viewer-detach-cold-resume",
+      "cohort_class": "conformance",
+      "serving": "grade-only",
+      "lane": null,
+      "repeats": 2,
+      "expected_cases": ["viewer-detach-cold-resume/footnote/r1", "viewer-detach-cold-resume/footnote/r2"]
+    },
+    {
+      "id": "two-worker-missing-result",
+      "family": "two-worker coordination with a missing required result",
+      "bank_task": "product-delivery-journey",
+      "repo": "footnote",
+      "cohort": "two-worker-missing-result",
+      "cohort_class": "conformance",
+      "serving": "grade-only",
+      "lane": null,
+      "repeats": 2,
+      "expected_cases": ["two-worker-missing-result/footnote/r1", "two-worker-missing-result/footnote/r2"]
+    },
+    {
+      "id": "delivery-evidence-failure",
+      "family": "failed or stale delivery evidence under current policy",
+      "bank_task": "product-delivery-journey",
+      "repo": "footnote",
+      "cohort": "delivery-evidence-failure",
+      "cohort_class": "conformance",
+      "serving": "grade-only",
+      "lane": null,
+      "repeats": 2,
+      "expected_cases": ["delivery-evidence-failure/footnote/r1", "delivery-evidence-failure/footnote/r2"]
+    },
+    {
+      "id": "operator-effort-per-outcome",
+      "family": "human effort per accepted outcome",
+      "bank_task": "product-delivery-journey",
+      "repo": "footnote",
+      "cohort": "operator-effort-per-outcome",
+      "cohort_class": "live-trial",
+      "serving": "headless-worker",
+      "lane": null,
+      "repeats": 2,
+      "expected_cases": ["operator-effort-per-outcome/footnote/r1", "operator-effort-per-outcome/footnote/r2"]
+    }
+  ],
+  "measurements": {
+    "operator_active_minutes": {"unit": "minutes", "status": "not_measured", "source": null},
+    "observed_spend_usd": {"unit": "usd", "status": "not_measured", "source": null}
+  },
+  "imports": []
+}
