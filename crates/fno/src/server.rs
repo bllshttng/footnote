@@ -1614,8 +1614,8 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
-    /// Per-pane last attended-hold arm time (x-0e09): a keystroke past the
-    /// window since the last arm re-arms the pane session's mail hold.
+    /// Per-pane last attended-hold arm time: a keystroke past the window
+    /// since the last arm re-arms the pane session's mail hold.
     hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane

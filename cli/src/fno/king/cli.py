@@ -162,7 +162,8 @@ def init_cmd(
 
 def _reign_hold(argv: list[str] | None = None) -> None:
     """Fire-and-forget the reign hold: default arms `--for <checkin_interval>`
-    on this session (x-0e09); the beat's `hold --off` drains it."""
+    on this session; the beat's `hold --off` drains it."""
+    import os
     import re
     import shutil
     import subprocess
@@ -173,7 +174,10 @@ def _reign_hold(argv: list[str] | None = None) -> None:
         match = re.match(r"(\d+)([smhd])", str(load_settings().king.checkin_interval))
         count, unit = match.groups() if match else ("55", "m")
         minutes = max(1, int(count) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] // 60)
-        argv = [shutil.which("fno") or sys.argv[0], "agents", "mail", "hold", "--for", str(minutes)]
+        # The running binary first (the cmd_hold idiom): a PATH `fno` can be
+        # several merges behind the code that just armed the hold.
+        binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
+        argv = [binary or sys.argv[0], "agents", "mail", "hold", "--for", str(minutes)]
     try:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -528,7 +532,7 @@ def cancel_cmd(
             sentinel.touch()
             _emit_cancel_signal(sentinel, scope)
             typer.echo(f"king: cancel signal set: {sentinel}")
-            # The cancelled crown's hold lifts (x-0e09): clock and stamp both leave.
+            # The cancelled crown's hold lifts: clock and stamp both leave.
             from fno.rust_binary import resolve_binary
 
             session_id = parse_manifest(manifest).get("harness_session_id") or ""

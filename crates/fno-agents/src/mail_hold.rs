@@ -85,20 +85,19 @@ fn set_policy(session_id: &str, policy: Option<&str>) -> Option<String> {
 }
 
 /// Write the sidecar clock in hold.py `_write`'s exact shape: one JSON
-/// object, trailing newline, atomic via temp file + rename. Idle clock:
-/// `until = now + window`, `ceiling = until + window` (the 2x window arm).
+/// object, Python's `, `/`: ` separators and key order, trailing newline,
+/// atomic via temp file + rename. Idle clock: `until = now + window`,
+/// `ceiling = until + window` (the 2x window arm).
 fn write_idle_clock(handle: &str, window_s: u64) -> std::io::Result<()> {
     let now = chrono::Utc::now();
     let until = now + chrono::Duration::seconds(window_s as i64);
     let ceiling = until + chrono::Duration::seconds(window_s as i64);
+    let until_s = until.format("%Y-%m-%dT%H:%M:%SZ");
+    let ceiling_s = ceiling.format("%Y-%m-%dT%H:%M:%SZ");
     let payload = format!(
-        "{}\n",
-        serde_json::json!({
-            "until": until.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "window_s": window_s as i64,
-            "clock_kind": "idle",
-            "ceiling": ceiling.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        })
+        "{{\"until\": \"{until_s}\", \"window_s\": {window}, \
+         \"clock_kind\": \"idle\", \"ceiling\": \"{ceiling_s}\"}}\n",
+        window = window_s
     );
     let dir = state_root().join("mail-hold");
     std::fs::create_dir_all(&dir)?;
@@ -125,7 +124,11 @@ fn spawn_release_timer(handle: &str) {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let _ = cmd.spawn();
+    if let Err(exc) = cmd.spawn() {
+        // The hold still lifts on the next send attempt or prompt; say why
+        // the clock-alone lift will not fire.
+        eprintln!("mail-hold: release timer did not start: {exc}");
+    }
 }
 
 /// `fno-agents mail-hold --session <id> [--minutes N] | [--off]`
@@ -144,9 +147,11 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         match arg.as_str() {
             "--session" => session = iter.next(),
             "--minutes" => match iter.next().and_then(|v| v.parse::<u64>().ok()) {
-                Some(n) if n >= 1 => minutes = n,
+                // The window feeds `minutes * 60` seconds into a chrono
+                // i64 duration: bound it well inside both overflows.
+                Some(n) if (1..=1_000_000).contains(&n) => minutes = n,
                 _ => {
-                    eprintln!("mail-hold: --minutes must be an integer of at least 1");
+                    eprintln!("mail-hold: --minutes must be an integer between 1 and 1000000");
                     return 2;
                 }
             },
@@ -195,19 +200,28 @@ mod tests {
     /// Pin FNO_AGENTS_HOME (registry) and FNO_HOME (hold sidecars) to one
     /// tempdir for `f`, under the crate-wide env lock (claim_verbs idiom).
     /// FNO_PY points at `true` so the detached release-timer spawn is a
-    /// no-op the test never waits on.
+    /// no-op the test never waits on. Prior values are restored, so an
+    /// ambient FNO_HOME survives the test.
     fn with_hold_env(f: impl FnOnce(&std::path::Path)) {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let prior: Vec<(String, Option<std::ffi::OsString>)> =
+            ["FNO_AGENTS_HOME", "FNO_HOME", "FNO_PY"]
+                .iter()
+                .map(|k| (k.to_string(), std::env::var_os(k)))
+                .collect();
         let td = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", td.path());
         std::env::set_var("FNO_HOME", td.path());
         std::env::set_var("FNO_PY", "true");
         f(td.path());
-        std::env::remove_var("FNO_AGENTS_HOME");
-        std::env::remove_var("FNO_HOME");
-        std::env::remove_var("FNO_PY");
+        for (key, value) in prior {
+            match value {
+                Some(v) => std::env::set_var(&key, v),
+                None => std::env::remove_var(&key),
+            }
+        }
     }
 
     fn registry_row(name: &str, session: &str) -> serde_json::Value {

@@ -40,9 +40,9 @@ fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> 
     }
 }
 
-/// The attended hold window (x-0e09): a keystroke past this since the
-/// pane's last arm re-arms the hold. One arm per 5-minute window; the idle
-/// clock the arm writes lifts the hold and delivers the digest ~5 minutes
+/// The attended hold window: a keystroke past this since the pane's last
+/// arm re-arms the hold. One arm per 5-minute window; the idle clock the
+/// arm writes lifts the hold and delivers the digest about five minutes
 /// after the operator goes quiet. Same value as mail_hold::DEFAULT_MINUTES.
 const ATTENDED_HOLD_WINDOW: Duration = Duration::from_secs(300);
 
@@ -291,7 +291,7 @@ impl Core {
         }
     }
 
-    /// Arm (or, on a submit, re-arm) the pane session's mail hold (x-0e09).
+    /// Arm (or, on a submit, re-arm) the pane session's mail hold.
     /// The one arm source that sees the keystrokes: a session the registry
     /// carries holds delivery while its operator types and drains as one
     /// digest at the idle clock. One spawn per window (`hold_arm_due`);
