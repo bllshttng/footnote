@@ -735,6 +735,24 @@ fn wide_cell_headers_carry_one_style_per_header() {
     }
 }
 
+// The wide layout keeps every shown column inside the row width: at the
+// WIDE_CELLS_AT threshold with the six default columns, the last column's
+// header still paints (the 12-column floors never overrun `w`).
+#[test]
+fn wide_layout_fits_every_shown_column_at_the_threshold() {
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, WIDE_CELLS_AT);
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide header row renders at the threshold");
+    assert!(
+        header.contains("Done"),
+        "last column survives the cut: {header}"
+    );
+}
+
 // The crown's finding: a summary cut mid-word (`Nex`) reads as a broken
 // word; the cut lands after a whole word and carries an ellipsis.
 #[test]

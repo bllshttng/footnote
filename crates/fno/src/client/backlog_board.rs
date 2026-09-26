@@ -551,13 +551,32 @@ pub(crate) fn trunc(s: &str, w: usize) -> String {
 /// fits and mark the cut with an ellipsis: a summary truncated mid-word
 /// (`Nex`) reads as a broken word, not a cut.
 pub(crate) fn elide_words(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
+    // Walk by display columns, not chars: a wide glyph is two cells and the
+    // ellipsis must stay inside `w` or the painter re-cuts the line and the
+    // marker is lost.
+    if s.chars().map(backlog_style::char_w).sum::<usize>() <= w {
         return s.to_string();
     }
-    let cut: String = s.chars().take(w.saturating_sub(1)).collect();
-    match cut.rfind(' ') {
-        Some(i) if i > 0 => format!("{}\u{2026}", &cut[..i]),
-        _ => format!("{cut}\u{2026}"),
+    let mut used = 0usize;
+    let mut cut_byte = s.len();
+    let mut last_space = 0usize;
+    for (i, ch) in s.char_indices() {
+        let cw = backlog_style::char_w(ch);
+        if used + cw > w.saturating_sub(1) {
+            cut_byte = i;
+            break;
+        }
+        used += cw;
+        cut_byte = i + ch.len_utf8();
+        if ch == ' ' {
+            last_space = cut_byte;
+        }
+    }
+    if last_space > 0 {
+        // Drop the space the word boundary sits on, ellipsis takes its slot.
+        format!("{}\u{2026}", &s[..last_space - 1])
+    } else {
+        format!("{}\u{2026}", &s[..cut_byte])
     }
 }
 
@@ -691,11 +710,20 @@ fn push_wide_cells(
         })
         .collect();
     let gaps = shown.len().saturating_sub(1);
-    let focus_w = (w * b.layout.focus_pct as usize / 100).max(12);
     let others = shown.len().saturating_sub(1);
-    let rest = w.saturating_sub(focus_w + gaps);
+    let mut focus_w = (w * b.layout.focus_pct as usize / 100).max(12);
+    // Every other column keeps a 12-column floor INSIDE `w`: when the focus
+    // share leaves less than that, the focus column shrinks first - a column
+    // squeezed past the row's width paints cut off while the cursor can
+    // still rest on it.
     let other_w = if others > 0 {
-        (rest / others).max(12)
+        let share = w.saturating_sub(focus_w + gaps) / others;
+        if share < 12 {
+            focus_w = w.saturating_sub(12 * others + gaps).max(12);
+            w.saturating_sub(focus_w + gaps) / others
+        } else {
+            share
+        }
     } else {
         0
     };

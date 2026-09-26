@@ -146,7 +146,7 @@ impl PartialEq<String> for BLine {
 }
 
 /// Display width of one char (fullwidth = 2, else 1).
-fn char_w(ch: char) -> usize {
+pub(crate) fn char_w(ch: char) -> usize {
     unicode_width::UnicodeWidthChar::width(ch)
         .unwrap_or(1)
         .max(1)
