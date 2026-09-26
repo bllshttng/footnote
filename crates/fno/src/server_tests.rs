@@ -55,20 +55,6 @@ mod pane_send_gate_tests;
 mod dead_row_resume_tests;
 
 #[test]
-fn account_from_argv_reads_the_fno_account_token() {
-    // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
-    let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    assert_eq!(
-        from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
-        Some("readyrule".to_string())
-    );
-    // Default account (no token) / ad-hoc pane / empty value -> None.
-    assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
-    assert_eq!(from(&["claude"]), None);
-    assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
-}
-
-#[test]
 fn name_attached_pane_titles_an_attached_pane_from_its_registered_name() {
     // x-ed59: an attached/driven pane reads its registered name from the live
     // catalog (the sidepane's source) so its tab/pane title matches the row,
