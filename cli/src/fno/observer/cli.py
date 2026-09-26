@@ -182,6 +182,7 @@ def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Opt
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
         dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
         return {d: None for d in dims}
+    return {"finding_precision": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -441,8 +442,7 @@ def _arg_value(args: list[str], flag: str) -> Optional[str]:
 
 
 def _review_evidence(items: list[dict], by_id: dict) -> dict:
-    """One fno-agents review-summary --evidence round-trip; on any fault every
-    item stays a coverage gap and the digest names it, never a fabricated verdict."""
+    """One review-summary --evidence round-trip; a fault leaves every item a gap, digest named."""
     gap = {"items": [{} for _ in items],
            "evidence_line": "evidence: unread (fno-agents review-summary --evidence failed)"}
     binary = find_dev_binary() or resolve_binary()
