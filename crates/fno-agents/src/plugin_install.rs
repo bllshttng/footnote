@@ -1915,7 +1915,7 @@ fn parse_grok_inspect(text: &str, grok_home: &Path) -> GrokReachability {
             .to_string();
         let trusted = trusted_roots
             .iter()
-            .any(|root| Path::new(&path).starts_with(root));
+            .any(|root| lexically_normalized(&path).starts_with(root));
         if trusted {
             return GrokReachability::Reachable { path };
         }
@@ -1986,6 +1986,22 @@ fn link_grok_plugin(grok_home: &Path, stage: &Path) -> Result<String, String> {
             Ok(format!("linked {link_str} -> {stage_str}"))
         }
     }
+}
+
+/// Resolve `.` and `..` lexically so a reported path cannot name a parent
+/// directory while a raw-component prefix check still matches a trusted root.
+fn lexically_normalized(path: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), String> {
@@ -2440,6 +2456,29 @@ mod tests {
             GrokReachability::Reachable { path } => assert_eq!(path, "/gh/plugins/fno"),
             other => panic!("want the trusted entry, got {other:?}"),
         }
+        // A .. inside the reported path resolves outside the trusted root,
+        // so the raw prefix must not match.
+        let escape = serde_json::json!({
+            "name": "fno", "enabled": true,
+            "path": "/gh/plugins/../evil/fno",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [escape] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Untrusted { .. }
+        ));
+        // A .. that stays inside the trusted root still reads trusted.
+        let inner = serde_json::json!({
+            "name": "fno", "enabled": true,
+            "path": "/gh/plugins/sub/../fno",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [inner] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Reachable { .. }
+        ));
     }
 
     /// AC4-HP/AC5-EDGE/AC6-ERR: the link installs, relinks, and refuses a
