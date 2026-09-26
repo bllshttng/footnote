@@ -101,11 +101,9 @@ pub(crate) fn mux_pane_run_argv(
 }
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::client_verbs::shlex_quote;
-use crate::pane_stop::{pane_list_via_fno, PaneSighting};
-use crate::scrape::mux_pane_read;
 
 /// How long a relaunched keeper gets to prove the worker stayed up (mirrors
 /// `_BINDING_WINDOW_S` in mux_spawn.py). It fits inside the watchdog's 180s
