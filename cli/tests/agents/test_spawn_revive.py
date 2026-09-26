@@ -44,13 +44,7 @@ def _admit_spawn_gate(monkeypatch):
     stub the same seam; the gate's own behavior is covered in
     test_spawn_gate_agreement.py.
     """
-    from fno.agents import spawn_gate
-
-    class _Gate:
-        def release(self) -> None:
-            pass
-
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    _admitting_gate(monkeypatch)
 
 
 @pytest.fixture
