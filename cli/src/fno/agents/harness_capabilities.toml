@@ -56,8 +56,14 @@ slash_prefix = ""
 # installed CLI's palette and the vendor docs. The verb normalizer skips
 # a leading-slash token naming one of these, so a native verb driven
 # through dispatch reaches the TUI verb instead of a footnote skill that
-# does not exist.
-native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status"]
+# does not exist. /clear and /loop were measured 2026-09-25 from the same
+# vendor commands doc (both ship; the palette scan had missed them).
+native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status", "/clear", "/loop"]
+# Per-verb teaching metadata: when to reach for the verb, and the risk
+# class the raw-mail guard enforces. claude use_when/risk are measured
+# from the vendor commands doc; risk vocabulary is the mail guard's
+# (safe | context-destroying | session-ending).
+native_verb_meta = { "/agents" = { use_when = "manage or create subagent configs", risk = "safe" }, "/code-review" = { use_when = "review the current diff or a PR for correctness bugs", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/doctor" = { use_when = "diagnose installation and settings health", risk = "safe" }, "/memory" = { use_when = "edit CLAUDE.md memory files", risk = "safe" }, "/model" = { use_when = "switch the AI model", risk = "safe" }, "/rename" = { use_when = "rename the current session", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id or name", risk = "context-destroying" }, "/status" = { use_when = "show version, model, account, connectivity", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/loop" = { use_when = "run a prompt on a repeat until the session ends", risk = "safe" } }
 ready_marker = "live_prompt_box"
 ready_rule_ids = ["live_prompt_box", "osc_title_idle"]
 manifest_rules = [
@@ -204,6 +210,12 @@ command_surface = "codex-skill"
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
 native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
+# Per-verb teaching metadata: the roster is palette-measured
+# (2026-09-01) and compact/goal corroborated by the provider_actions
+# rows below; use_when lines are name-derived from that measurement,
+# risk classes all safe (compact is a driven provider action, goal is
+# a structured set/get - neither ends the session nor discards it).
+native_verb_meta = { "/review" = { use_when = "run the native review skill", risk = "safe" }, "/code-review" = { use_when = "review the current diff for correctness bugs", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/status" = { use_when = "show session status", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/goal" = { use_when = "set or show the session goal", risk = "safe" } }
 # The subset the shared app-server daemon maps to its review/start RPC. Every
 # other native verb has no prompt line on a daemon thread, and the mail lane
 # refuses it by name.
@@ -472,6 +484,11 @@ slash_prefix = ""
 # reference's slash-command table (aliases folded into their canonical
 # name; argument-taking verbs listed by name).
 native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config", "/context", "/copy", "/credits", "/diff", "/exit", "/fast", "/feedback", "/fork", "/help", "/hooks", "/keybindings", "/logout", "/mcp", "/model", "/open", "/permissions", "/planning", "/rename", "/resume", "/rewind", "/skills", "/statusline", "/tasks", "/title", "/usage"]
+# Per-verb teaching metadata. agy is claude-shaped (the same
+# hook-event names and a Gemini-family core), so use_when lines are
+# name-derived, not vendor-measured; the dangerous classes follow the
+# claude semantics of the shared verbs.
+native_verb_meta = { "/add-dir" = { use_when = "add a working directory for this session", risk = "safe" }, "/agents" = { use_when = "manage or create subagent configs", risk = "safe" }, "/artifact" = { use_when = "open or manage an artifact", risk = "safe" }, "/btw" = { use_when = "ask a side question without adding to the conversation", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/config" = { use_when = "open settings", risk = "safe" }, "/context" = { use_when = "show context-window usage", risk = "safe" }, "/copy" = { use_when = "copy the last response to the clipboard", risk = "safe" }, "/credits" = { use_when = "show credit usage", risk = "safe" }, "/diff" = { use_when = "review working-tree changes", risk = "safe" }, "/exit" = { use_when = "exit the CLI", risk = "session-ending" }, "/fast" = { use_when = "toggle fast mode", risk = "safe" }, "/feedback" = { use_when = "send product feedback", risk = "safe" }, "/fork" = { use_when = "copy the conversation into a new session", risk = "safe" }, "/help" = { use_when = "show help and commands", risk = "safe" }, "/hooks" = { use_when = "view hook configuration", risk = "safe" }, "/keybindings" = { use_when = "open the keyboard shortcuts file", risk = "safe" }, "/logout" = { use_when = "sign out of the account", risk = "session-ending" }, "/mcp" = { use_when = "manage MCP server connections", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/open" = { use_when = "open a file or URL", risk = "safe" }, "/permissions" = { use_when = "manage tool permission rules", risk = "safe" }, "/planning" = { use_when = "enter plan mode", risk = "safe" }, "/rename" = { use_when = "rename the current session", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id or name", risk = "context-destroying" }, "/rewind" = { use_when = "rewind the conversation or code to an earlier point", risk = "context-destroying" }, "/skills" = { use_when = "list available skills", risk = "safe" }, "/statusline" = { use_when = "configure the status line", risk = "safe" }, "/tasks" = { use_when = "view background work in this session", risk = "safe" }, "/title" = { use_when = "set the session title", risk = "safe" }, "/usage" = { use_when = "show usage and limits", risk = "safe" } }
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -620,6 +637,11 @@ slash_prefix = "fno:"
 # commands doc: five built-ins ship, and a custom command can override a
 # built-in by name.
 native_verbs = ["/help", "/init", "/redo", "/share", "/undo"]
+# Per-verb teaching metadata, measured from the same vendor
+# commands doc as the roster. Every opencode row carries built_in = true
+# because a user-defined command can override a built-in by name; a
+# custom override is invisible to this table by construction.
+native_verb_meta = { "/help" = { use_when = "show help and built-in commands", risk = "safe", built_in = true }, "/init" = { use_when = "write the project AGENTS.md guide", risk = "safe", built_in = true }, "/redo" = { use_when = "re-apply the last undone change", risk = "safe", built_in = true }, "/share" = { use_when = "create a share link for this session", risk = "safe", built_in = true }, "/undo" = { use_when = "undo the agent's last file change", risk = "safe", built_in = true } }
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = [{ id = "permission_required", state = "blocked" }]
@@ -786,6 +808,8 @@ slash_prefix = "skill:"
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
 native_verbs = ["/name"]
+# Per-verb teaching metadata; pi's single measured verb.
+native_verb_meta = { "/name" = { use_when = "rename the pi session", risk = "safe" } }
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
 # the cost, the subscription tag, the context percentage and the compaction
 # tag, and it is the lowest-priority rule in manifests/pi.toml precisely
@@ -960,6 +984,12 @@ slash_prefix = ""
 # vendor slash-commands reference (aliases folded into their canonical
 # name).
 native_verbs = ["/about", "/ask", "/bedrock", "/clear", "/config", "/copy", "/copy-conversation-id", "/copy-request-id", "/debug", "/exit", "/feedback", "/fork", "/help", "/line-numbers", "/logs", "/max-mode", "/mcp", "/model", "/open", "/plan", "/plugin", "/quit", "/rename", "/resume", "/rewind", "/run-everything", "/sandbox", "/setup-terminal", "/shell", "/show-thinking", "/status-indicators", "/summarize", "/update", "/vim"]
+# Per-verb teaching metadata; cursor-agent ships no vault doc in
+# the measurement set, so use_when lines are name-derived. The chat id is
+# CALLEE-minted and the store is remote (see the conversion row and
+# docs/HARNESSES.md), which is why /resume and /rewind read
+# context-destroying: they swap or roll back the live conversation.
+native_verb_meta = { "/about" = { use_when = "show version and build info", risk = "safe" }, "/ask" = { use_when = "ask a question in the current chat", risk = "safe" }, "/bedrock" = { use_when = "configure Amazon Bedrock access", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/config" = { use_when = "open settings", risk = "safe" }, "/copy" = { use_when = "copy the last response", risk = "safe" }, "/copy-conversation-id" = { use_when = "copy the conversation id", risk = "safe" }, "/copy-request-id" = { use_when = "copy the last request id", risk = "safe" }, "/debug" = { use_when = "toggle debug output", risk = "safe" }, "/exit" = { use_when = "exit the CLI", risk = "session-ending" }, "/feedback" = { use_when = "send product feedback", risk = "safe" }, "/fork" = { use_when = "copy the conversation into a new chat", risk = "safe" }, "/help" = { use_when = "show help and commands", risk = "safe" }, "/line-numbers" = { use_when = "toggle line numbers", risk = "safe" }, "/logs" = { use_when = "show recent logs", risk = "safe" }, "/max-mode" = { use_when = "toggle max mode", risk = "safe" }, "/mcp" = { use_when = "manage MCP servers", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/open" = { use_when = "open a file in the chat", risk = "safe" }, "/plan" = { use_when = "enter plan mode", risk = "safe" }, "/plugin" = { use_when = "manage plugins", risk = "safe" }, "/quit" = { use_when = "exit the CLI", risk = "session-ending" }, "/rename" = { use_when = "rename the chat", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id", risk = "context-destroying" }, "/rewind" = { use_when = "rewind the conversation to an earlier point", risk = "context-destroying" }, "/run-everything" = { use_when = "run every queued item", risk = "safe" }, "/sandbox" = { use_when = "toggle the sandbox", risk = "safe" }, "/setup-terminal" = { use_when = "configure terminal keybindings", risk = "safe" }, "/shell" = { use_when = "open a shell escape", risk = "safe" }, "/show-thinking" = { use_when = "toggle thinking display", risk = "safe" }, "/status-indicators" = { use_when = "toggle status indicators", risk = "safe" }, "/summarize" = { use_when = "summarize the conversation", risk = "safe" }, "/update" = { use_when = "update the CLI", risk = "safe" }, "/vim" = { use_when = "toggle vim keybindings", risk = "safe" } }
 ready_marker = "idle_plan_build"
 ready_rule_ids = ["idle_plan_build"]
 manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
@@ -1269,6 +1299,9 @@ slash_prefix = ""
 # user guide's slash-command sections. Skill-provided verbs (/commit and
 # the like) are excluded: they ride enabled skills, not the harness.
 native_verbs = ["/always-approve", "/compact", "/hooks-add", "/hooks-list", "/hooks-remove", "/hooks-trust", "/hooks-untrust", "/model", "/new"]
+# Per-verb teaching metadata; grok ships no vault doc in the
+# measurement set, so use_when lines are name-derived.
+native_verb_meta = { "/always-approve" = { use_when = "toggle the approval bypass", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/hooks-add" = { use_when = "add a hook rule", risk = "safe" }, "/hooks-list" = { use_when = "list hook rules", risk = "safe" }, "/hooks-remove" = { use_when = "remove a hook rule", risk = "safe" }, "/hooks-trust" = { use_when = "trust a hook", risk = "safe" }, "/hooks-untrust" = { use_when = "untrust a hook", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/new" = { use_when = "start a new conversation", risk = "context-destroying" } }
 # Read off a live grok TUI (2026-09-02): the idle composer carries the status
 # bar `Shift+Tab:mode | Ctrl+x:shortcuts` and the footer
 # `Grok 4.6 (high) · always-approve`; while a turn runs the mode hint is
