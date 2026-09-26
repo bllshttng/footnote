@@ -172,14 +172,9 @@ pub fn graph_path() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn the_state_dir_carrier_outranks_config_and_home() {
-        let _guard = env_lock();
+        let _guard = crate::claims::test_env_lock();
         let prior = std::env::var_os("FNO_STATE_DIR");
         std::env::set_var("FNO_STATE_DIR", "/pinned-state");
 

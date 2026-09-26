@@ -1299,3 +1299,16 @@ def test_locks_dir_stays_home_anchored_without_the_carrier(
     from fno.paths import locks_dir
 
     assert locks_dir() == Path.home() / ".fno" / "locks"
+
+
+def test_ledger_json_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sealed worker's ledger follows the pinned root, never the raw
+    relative-config fallback that would strand it under the moved HOME."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import ledger_json
+
+    assert ledger_json() == (tmp_path / "pinned").resolve() / "ledger.json"

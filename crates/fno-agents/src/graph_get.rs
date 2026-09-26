@@ -32,22 +32,35 @@ pub(crate) fn entry_status<'a>(entry: &'a Value) -> &'a str {
 /// `$FNO_HOME/graph.json`, else `$HOME/.fno/graph.json`. `FNO_STATE_DIR` first:
 /// it is the root `fno.paths.state_dir` resolves, and `seal_state_root` pins it
 /// around a forwarded HOME, so a sealed Rust child reads the graph its parent
-/// wrote. Mirrors the FNO_HOME-first resolution every other client-side verb in
-/// this crate uses (see `finalize::append_corrections_pointer`). Does not read
+/// wrote. A `~`-prefixed carrier expands like Python's, so both legs resolve
+/// the same store. Mirrors the FNO_HOME-first resolution every other
+/// client-side verb in this crate uses (see
+/// `finalize::append_corrections_pointer`). Does not read
 /// `config.paths.graph_json` - a batch convenience read is not where a
 /// config-driven relocation belongs, and `--graph` covers a test or an
 /// operator override in the meantime.
 pub(crate) fn default_graph_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_STATE_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(v).join("graph.json");
+        return expand_home_prefix(&v).join("graph.json");
     }
     if let Some(v) = std::env::var_os("FNO_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(v).join("graph.json");
     }
-    let home = std::env::var_os("HOME")
+    var_os_home().join(".fno").join("graph.json")
+}
+
+fn var_os_home() -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".fno").join("graph.json")
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn expand_home_prefix(v: &std::ffi::OsStr) -> PathBuf {
+    let s = v.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        return var_os_home().join(rest);
+    }
+    PathBuf::from(v)
 }
 
 /// Whether an external tracker backend is selected, resolved exactly as the
@@ -196,14 +209,9 @@ pub fn run_graph_get(args: &[String]) -> i32 {
 mod tests {
     use super::*;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn the_state_dir_carrier_outranks_fno_home_for_the_default_graph() {
-        let _guard = env_lock();
+        let _guard = crate::claims::test_env_lock();
         let prior_state = std::env::var_os("FNO_STATE_DIR");
         let prior_home = std::env::var_os("FNO_HOME");
         std::env::set_var("FNO_STATE_DIR", "/pinned-state");
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn without_the_state_dir_carrier_fno_home_still_wins() {
-        let _guard = env_lock();
+        let _guard = crate::claims::test_env_lock();
         let prior_state = std::env::var_os("FNO_STATE_DIR");
         let prior_home = std::env::var_os("FNO_HOME");
         std::env::remove_var("FNO_STATE_DIR");
