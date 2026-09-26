@@ -435,16 +435,25 @@ pub fn resolve_reentry_with(
     } else {
         derived_short_id(&session_id)
     };
+    // Route evidence: a recorded path must still hold a route.
+    if let Some(path) = entry.route_settings_path.as_deref() {
+        if !path.is_empty() {
+            validate_route_settings(path)?;
+        }
+    }
+
+    // One binding read serves both the listing root and the config dir.
+    let binding = entry
+        .launch_account
+        .as_deref()
+        .filter(|id| *id != "default")
+        .map(account_binding);
     // A revive of a running job IS an attach, so it takes the attach rules
     // below; any other job relaunches first and takes the launch rules.
     let listing = if transition == ReentryTransition::Attach || short_id.is_empty() {
         JobListing::Unread
     } else {
-        let root = entry
-            .launch_account
-            .as_deref()
-            .filter(|id| *id != "default")
-            .and_then(|id| account_binding(id).ok().flatten());
+        let root = binding.clone().and_then(|b| b.ok().flatten());
         claude_home.listed_job(&short_id, root.as_deref().map(Path::new))
     };
     // Without the listing a live session cannot be told from a dead one, and
@@ -469,13 +478,6 @@ pub fn resolve_reentry_with(
         ));
     }
 
-    // Route evidence: a recorded path must still hold a route.
-    if let Some(path) = entry.route_settings_path.as_deref() {
-        if !path.is_empty() {
-            validate_route_settings(path)?;
-        }
-    }
-
     // The account axis. Routed or non-Anthropic rows refuse on an unknown
     // account; a proven default row keeps the historical bare behavior.
     let routed = entry
@@ -495,7 +497,7 @@ pub fn resolve_reentry_with(
             ))
         }
         None | Some("default") => None,
-        Some(id) => match account_binding(id) {
+        Some(id) => match binding.unwrap_or_else(|| account_binding(id)) {
             // An account that resolves to NO config dir is an api-key lane:
             // its credential lives in env the secret-free binding never
             // carries, so a plan built here would launch WITHOUT the account's
