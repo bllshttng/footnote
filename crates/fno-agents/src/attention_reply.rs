@@ -203,6 +203,7 @@ pub fn tick_answers(
                             state.rung = "none".into();
                             state.outcome = "failed".into();
                             state.evidence = format!("the clear kept failing: {e}");
+                            emit_delivery(state);
                         }
                     }
                 }
@@ -221,6 +222,11 @@ pub fn tick_answers(
                 acted += 1;
                 emit_delivery(state);
             }
+        }
+        // A terminal set in the clear phase (cap spent, closed elsewhere) is
+        // done: never fall through to the ladder and wake anyone.
+        if state.terminal() {
+            continue;
         }
         // The ladder phase: effects through the injected runner, one delivery
         // row per item.
