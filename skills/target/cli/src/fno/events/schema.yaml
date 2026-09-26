@@ -2959,6 +2959,39 @@ event_types:
         pr:
           type: [integer, "null"]
 
+  - name: burn_watch_wake
+    description: "The burn arm waked a worker whose spend or node age grew while its branch and node touched_at stayed flat. attempt counts from 1; delivered is receipt-confirmed landing; via names the leg that carried it (mail, resume, or a durable receipt held over a busy turn)."
+    sources: [daemon]
+    data:
+      required: [session_id, node, attempt, delivered, via, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        attempt:
+          type: integer
+        delivered:
+          type: boolean
+        via:
+          type: string
+          enum: [mail, resume, durable]
+        reason:
+          type: string
+
+  - name: burn_watch_escalated
+    description: "The burn arm's wake budget is spent with no progress on any sampled axis: one fleet task was filed through the pr-nudge store (deduplicated on lane and key) and the arm now waits for progress or the operator. The task closes itself when progress lands."
+    sources: [daemon]
+    data:
+      required: [session_id, node, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        reason:
+          type: string
+
   - name: state_reap
     description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
     sources: [daemon, test]
