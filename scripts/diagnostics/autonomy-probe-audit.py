@@ -111,6 +111,14 @@ def scan(path: str, pattern: str):
             p = d.get("payload")
             parsed += 1
 
+            # A mail injection into a busy claude session lands as a queue row,
+            # not a user turn (docs/architecture/fno-agents-deliver-gate.md).
+            if t == "queue-operation" and d.get("operation") == "enqueue":
+                text = str(d.get("content") or "")
+                if text.strip() and not _is_noise(text):
+                    prompt_seen = True
+                continue
+
             # claude turns
             if t in ("user", "assistant") and isinstance(d.get("message"), dict):
                 if t == "user":
@@ -143,7 +151,11 @@ def scan(path: str, pattern: str):
                 if text.strip() and not _is_noise(text):
                     prompt_seen = True
             elif t == "response_item" and p.get("type") in CODEX_TOOL_TYPES:
-                hay = _serial(p.get("input") or p.get("arguments"))
+                # Field order mirrors the canonical extractor
+                # (transcript_activity.rs codex_call_text): a local_shell_call
+                # keeps its command in `action`.
+                raw = next((p[k] for k in ("input", "arguments", "action") if p.get(k) is not None), None)
+                hay = _serial(raw)
                 if rx.search(hay):
                     verdict = "user-triggered" if prompt_seen else "autonomous"
                     return verdict, f"matched {p.get('type')}"
@@ -205,21 +217,28 @@ def self_check() -> int:
     PATTERN = "code-review"
     cases = [
         # claude: the invocation with no prompt before it is the one valid yes
-        ("claude-autonomous", [cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+        ("claude-autonomous", [cl_tool("Bash", {"command": "/code-review"})], "autonomous"),
         ("claude-user-first", [cl_user("please run /code-review"),
-                               cl_tool("Bash", {"command": "/code-review high"})], "user-triggered"),
+                               cl_tool("Bash", {"command": "/code-review"})], "user-triggered"),
         # the trap: a mail injection is plain user text; it must read user-triggered
         ("claude-mail-shaped", [cl_user("can you run /code-review yourself? try it"),
-                                cl_tool("Bash", {"command": "/code-review high"})], "user-triggered"),
+                                cl_tool("Bash", {"command": "/code-review"})], "user-triggered"),
         # harness rides are not prompts: tool results and system reminders never count
         ("claude-tool-result-noise", [cl_tool_result(),
-                                      cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+                                      cl_tool("Bash", {"command": "/code-review"})], "autonomous"),
         ("claude-system-reminder-noise", [cl_user("<system-reminder>context low</system-reminder>"),
-                                          cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+                                          cl_tool("Bash", {"command": "/code-review"})], "autonomous"),
         ("claude-meta-noise", [cl_user("Caveat: the messages below were generated", meta=True),
-                               cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+                               cl_tool("Bash", {"command": "/code-review"})], "autonomous"),
+        # a busy-session mail injection lands as a queue row, not a user turn
+        ("claude-queued-mail", [{"type": "queue-operation", "operation": "enqueue",
+                                 "content": "run /code-review for me"}],
+         "not-invoked"),
+        ("claude-queued-then-call", [{"type": "queue-operation", "operation": "enqueue",
+                                      "content": "run /code-review for me"},
+                                     cl_tool("Bash", {"command": "/code-review"})], "user-triggered"),
         ("claude-task-notification-noise", [cl_user("<task-notification>bg task done</task-notification>"),
-                                            cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+                                            cl_tool("Bash", {"command": "/code-review"})], "autonomous"),
         # codex shapes
         ("codex-user-first", [cx_usermsg("run /code-review"),
                               cx_tool("custom_tool_call", "exec /code-review")], "user-triggered"),
@@ -227,6 +246,10 @@ def self_check() -> int:
                                   cx_tool("function_call", {"arguments": "run /code-review"})], "autonomous"),
         ("codex-role-user-first", [cx_role_user("run /code-review please"),
                                    cx_tool("local_shell_call", "code-review")], "user-triggered"),
+        # a local_shell_call keeps its command in the action field
+        ("codex-action-field", [{"type": "response_item", "payload": {"type": "local_shell_call",
+                                      "action": ["bash", "-lc", "code-review --all"]}}],
+         "autonomous"),
         # the honest no, and the loud unreadable
         ("not-invoked", [cx_usermsg("hello")], "not-invoked"),
     ]
