@@ -7,6 +7,7 @@ dropped=1 - making _validate_proposal's previously-silent drops a first-class
 number.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -22,7 +23,7 @@ runner = CliRunner()
 @pytest.fixture()
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -45,11 +46,9 @@ def events_file(tmp_path, monkeypatch):
 
 
 def test_apply_emits_triage_applied_with_drop_count(tmp_graph, events_file, tmp_path):
-    tmp_graph.write_text(
-        json.dumps(
+    seed_graph(tmp_graph, json.dumps(
             {"entries": [{"id": "ab-1", "title": "N", "priority": "p2", "status": "ready"}]}
-        )
-    )
+        ))
     proposal = tmp_path / "proposal.json"
     proposal.write_text(
         json.dumps(
@@ -85,9 +84,7 @@ def test_apply_emit_failure_never_breaks_apply(tmp_graph, tmp_path, monkeypatch)
 
     monkeypatch.setattr(triage, "_events_path", lambda: Path("/nonexistent-dir-xyz/does/not/exist/e.jsonl"))
     monkeypatch.setattr(triage, "_emit_triage_applied", triage._emit_triage_applied)
-    tmp_graph.write_text(
-        json.dumps({"entries": [{"id": "ab-1", "title": "N", "priority": "p2", "status": "ready"}]})
-    )
+    seed_graph(tmp_graph, json.dumps({"entries": [{"id": "ab-1", "title": "N", "priority": "p2", "status": "ready"}]}))
     proposal = tmp_path / "proposal.json"
     proposal.write_text(json.dumps({"priority_changes": [{"id": "ab-1", "to": "p1", "reason": "x"}]}))
 

@@ -7,6 +7,7 @@
   blocks the close.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -26,7 +27,7 @@ def _route_graph(tmp_path, monkeypatch) -> tuple[Path, Path]:
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -165,7 +166,7 @@ def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
 
 
 def _seed_node(g: Path, plan_path: str) -> None:
-    g.write_text(json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Costed node",
         "slug": "ab-cost0001",
@@ -210,7 +211,7 @@ def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
     """Fill-only: a node that already carries cost (e.g. from `fno done`) keeps
     it; backlog done never clobbers a richer prior stamp (codex P2)."""
     g, ledger = _route_graph(tmp_path, monkeypatch)
-    g.write_text(json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Pre-costed",
         "slug": "ab-cost0001",

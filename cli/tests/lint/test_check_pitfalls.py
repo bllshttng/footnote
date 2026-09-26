@@ -11,6 +11,7 @@ graph fails loud, and an absent graph is the legitimate skip. Fixture runs pin
 `FNO_GRAPH_JSON` to an absent path so the operator's live graph never decides
 a test.
 """
+from tests.fixtures.graph_seed import seed_graph
 import os
 import shutil
 import subprocess
@@ -29,9 +30,15 @@ def _run(
     target: Path, *, lint: Path = LINT, env_extra: dict | None = None
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
-    # operator's live graph: the default env pins an absent graph, which is
-    # the gate's legitimate skip.
-    env = {**os.environ, "FNO_GRAPH_JSON": str(target.parent / "absent-graph.json")}
+    # operator's live graph: pin an empty state root with an absent store.
+    state = target.parent / "state"
+    config = target.parent / "config.toml"
+    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
+    env = {
+        **os.environ,
+        "FNO_CONFIG": str(config),
+        "FNO_GRAPH_JSON": str(state / "graph.json"),
+    }
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -286,19 +293,28 @@ def test_an_absent_registry_still_skips_the_verb_check(tmp_path: Path) -> None:
 # already pass on that deletion.
 
 
-def _agents_without(tmp_path: Path, old: str, new: str) -> Path:
-    """The shipped corpus with one qualifier edited out."""
-    text = AGENTS.read_text(encoding="utf-8")
-    assert text.count(old) == 1, f"expected exactly one {old!r}"
-    path = tmp_path / "AGENTS.md"
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
-    return path
+def _pinned_lint_repo(tmp_path: Path, entries) -> Path:
+    """A fixture repo whose lint carries an injected pin.
+
+    Pins ride live entries, so the shipped table can be empty while the
+    mechanism stays tested: the pin and its corpus travel together here.
+    """
+    lint, stub = _copied_lint_repo(tmp_path, entries)
+    text = lint.read_text(encoding="utf-8")
+    old = "PINNED_PHRASES=''"
+    assert old in text, "shipped pin table shape changed; update this fixture"
+    lint.write_text(
+        text.replace(old, "PINNED_PHRASES=$'capability probe\\tmail probe'", 1),
+        encoding="utf-8",
+    )
+    stub.write_text('#!/usr/bin/env bash\necho "preamble: 1 / 100 B"\nexit 0\n')
+    return lint
 
 
-def test_dropping_the_mail_probe_qualifier_fails(tmp_path: Path) -> None:
+def test_dropping_a_pinned_qualifier_fails(tmp_path: Path) -> None:
     """Broadened to "mail", it rejects a worker's own autonomous evidence."""
-    path = _agents_without(tmp_path, "a mail probe", "mail")
-    r = _run(path)
+    lint = _pinned_lint_repo(tmp_path, [("capability probe", "a probe", FRESH)])
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
     assert r.returncode == 1
     assert "mail probe" in r.stderr
 
@@ -309,8 +325,8 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
     Without this, the first entry to age out at 60 days wedges the gate on
     prose the corpus is supposed to have dropped.
     """
-    path = _fixture(tmp_path, [GOOD])
-    r = _run(path)
+    lint = _pinned_lint_repo(tmp_path, [GOOD])
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
     assert r.returncode == 0, r.stderr
     assert "live lockfile" not in r.stderr
 
@@ -320,11 +336,8 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
 
 def _seeded_graph(tmp_path: Path) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        '{"entries": [{"id": "x-1234", "title": "A real guard", "slug": "x-1234",'
-        ' "type": "feature", "priority": "p2", "status": "idea"}]}',
-        encoding="utf-8",
-    )
+    seed_graph(graph, '{"entries": [{"id": "x-1234", "title": "A real guard", "slug": "x-1234",'
+        ' "type": "feature", "priority": "p2", "status": "idea"}]}')
     return graph
 
 
@@ -369,10 +382,11 @@ def test_graduates_to_resolves_by_title_after_normalization(tmp_path: Path) -> N
 
 
 def test_an_unreadable_graph_fails_loud(tmp_path: Path) -> None:
-    graph = tmp_path / "graph.json"
-    graph.write_text("{not json", encoding="utf-8")
+    graph_db = tmp_path / "state" / "graph.db"
+    graph_db.parent.mkdir(parents=True)
+    graph_db.write_bytes(b"not sqlite")
     path = _fixture(tmp_path, [GOOD])
-    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    r = _run(path)
     assert r.returncode == 1
     assert "cannot be read" in r.stderr
 

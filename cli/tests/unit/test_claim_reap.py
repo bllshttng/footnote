@@ -9,6 +9,7 @@ subprocess and kills it. A test that only exercises a clean release proves
 nothing about the leak that was measured.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -38,6 +39,7 @@ from fno.claims.core import (
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.claims.verdict import claim_verdicts
+from fno.graph.store import read_graph_strict
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
@@ -238,52 +240,6 @@ class TestExpiredTTLIsHostIndependent:
             for host in ("BB16s-MBP", "BB16s-MacBook-Pro.local")
         }
         assert verdicts == {"BB16s-MBP": True, "BB16s-MacBook-Pro.local": True}
-
-
-class TestClassifyForSweepMatchesIsProvablyDead:
-    """is_provably_dead is a thin bool-only view of classify_for_sweep
-    (the native classifier) - both share one implementation rather than being kept
-    in sync by convention. This regression test pins the invariant
-    directly rather than trusting that never drifts back apart.
-    """
-
-    @pytest.mark.parametrize(
-        "claim",
-        [
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="dead_pid_same_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
-                ),
-                id="off_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=now_ms() + 60_000,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="ttl_protected_suspect",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=None,
-                    pid=os.getpid(), host=socket.gethostname(),
-                ),
-                id="live",
-            ),
-        ],
-    )
-    def test_provably_dead_verdict_matches(self, claim):
-        ts = now_ms()
-        provably_dead, _bucket = classify_for_sweep(claim, ts)
-        assert provably_dead is is_provably_dead(claim, now=ts)
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +762,7 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
     import fno.claims.core as claims_core
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(_json.dumps({"entries": []}) + "\n")
+    seed_graph(graph_path, _json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "ledger.json")

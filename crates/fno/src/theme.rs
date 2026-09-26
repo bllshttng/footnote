@@ -59,6 +59,9 @@ pub enum Role {
     /// click. DIM under `terminal`, the theme's `dim` color under a named theme.
     BodyDim,
     ScrollTrack,
+    /// The `f[no]` brand mark's raised `[no]`: the accent, dimmed, so the
+    /// mark reads as one word without shouting (the wave note).
+    Wordmark,
     ScrollThumb,
     /// A backlog panel's body cell: plain text on the terminal's own bg. The
     /// old body was an INVERSE block, which read as one pale fill under a
@@ -158,6 +161,9 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
             ),
+            // Amber under `terminal` too: `accent` survives the inherit branch
+            // (see the field doc), so the brand mark keeps its two-tone read.
+            Role::Wordmark => (t.accent, Color::Default, cell_flags::DIM),
             // The backlog panel's slots resolved above the theme split.
             // Body, Border: plain inverse.
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
@@ -178,10 +184,11 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             Color::Default,
             cell_flags::INVERSE | cell_flags::BOLD,
         ),
-        // A disabled body entry: the theme's dim color, still on the inverse
-        // body block (matching Body/BodySel/BodyHead) so the row stays part of
-        // the block instead of punching a plain-background hole in it.
-        Role::BodyDim => (t.dim, Color::Default, cell_flags::INVERSE | cell_flags::DIM),
+        // A disabled body entry: the theme's dim color on the plain
+        // background. The inverse block it used to sit on turned the light
+        // `dim` into the BACKGROUND, so the row rendered light-on-light and
+        // near invisible under every named theme (the screenshot review).
+        Role::BodyDim => (t.dim, Color::Default, 0),
         Role::Border => (t.border, Color::Default, 0),
         Role::Title => (t.title, Color::Default, cell_flags::BOLD),
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
@@ -191,6 +198,7 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         Role::Footer => (t.dim, Color::Default, 0),
         Role::ScrollTrack => (t.dim, Color::Default, cell_flags::DIM),
         Role::ScrollThumb => (t.border, Color::Default, cell_flags::BOLD),
+        Role::Wordmark => (t.accent, Color::Default, cell_flags::DIM),
         // The panel slots resolved above the theme split; unreachable keeps
         // a future role from silently inheriting a body style.
         _ => unreachable!("panel roles resolve above the theme split"),

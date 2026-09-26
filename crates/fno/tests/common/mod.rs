@@ -91,6 +91,9 @@ impl Scratch {
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
         cmd.envs(test_owner::self_owner_env());
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
+        }
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -122,6 +125,9 @@ impl Scratch {
         // CommandBuilder has no batch envs(); apply the pair one call each.
         for (k, v) in test_owner::self_owner_env() {
             cmd.env(k, v);
+        }
+        if let Some(worker) = store_worker() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
         }
     }
 
@@ -171,9 +177,23 @@ pub fn strip_prompts(line: &str) -> &str {
 
 /// True when any screen row is exactly `want` once leading prompts are
 /// stripped. The one matcher for "did this command's output line render?" -
-/// an exact trim-equality compare misses output wearing a late prompt.
+/// an exact trim-equality compare misses output wearing a late prompt. A
+/// framed pane wears sideline text, the panel divider and two frame rules on
+/// the same physical row, so every `│`-delimited segment gets its own compare.
 pub fn screen_has_line(screen: &str, want: &str) -> bool {
-    screen.lines().any(|l| strip_prompts(l) == want)
+    screen.lines().any(|l| line_is_segment(l, want))
+}
+
+/// True when the row's pane-content segment (between the frame rules) is
+/// exactly `want` once leading prompts are stripped.
+pub fn line_is_segment(line: &str, want: &str) -> bool {
+    line.split('│').any(|seg| strip_prompts(seg.trim()) == want)
+}
+
+/// True when the row ends a shell prompt: a `$` at the end of any
+/// `│`-delimited segment (the framed prompt row closes with its border rule).
+pub fn line_ends_with_prompt(line: &str) -> bool {
+    line.split('│').any(|seg| seg.trim_end().ends_with('$'))
 }
 
 impl Drop for Scratch {
@@ -205,6 +225,55 @@ impl Drop for Scratch {
         }
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Replace the fixture graph through the mux crate's store client.
+pub fn seed_graph(graph: &Path, rows: &[serde_json::Value]) -> Result<(), String> {
+    if let Some(worker) = store_worker() {
+        std::env::set_var("FNO_AGENTS_WORKER", worker);
+    }
+    let snapshot = fno::store_client::call(graph, "begin", serde_json::json!({}))?;
+    let version = snapshot
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "the store returned no snapshot version".to_string())?;
+    fno::store_client::call(
+        graph,
+        "commit",
+        serde_json::json!({"version": version, "entries": rows}),
+    )?;
+    Ok(())
+}
+
+fn store_worker() -> Option<PathBuf> {
+    let worker = std::env::var_os("FNO_AGENTS_WORKER")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            std::env::var_os("FNO_AGENTS_FRONT").and_then(|front| {
+                let path = PathBuf::from(front).parent()?.join("fno-agents-worker");
+                path.is_file().then_some(path)
+            })
+        })
+        // Test executables live under target/debug/deps; the worker is their
+        // sibling, or under the separately rooted fno-agents crate target.
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent()?
+                        .parent()
+                        .map(|dir| dir.join("fno-agents-worker"))
+                })
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(|root| root.join("fno-agents/target/debug/fno-agents-worker"))
+                .filter(|path| path.is_file())
+        });
+    worker
 }
 
 /// The `fno` client running on a real PTY, plus a human-eye view of it.
@@ -360,7 +429,7 @@ impl ClientHarness {
                 if self
                     .screen()
                     .lines()
-                    .any(|line| strip_prompts(line) == "fno-input-ready")
+                    .any(|line| line_is_segment(line, "fno-input-ready"))
                 {
                     return;
                 }
@@ -487,8 +556,17 @@ impl ClientHarness {
             s.lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
-                .take(2)
-                .any(|l| l.trim_end().ends_with('$'))
+                // A framed pane keeps its bottom edge and the status row below
+                // the prompt, so the prompt is no longer one of the last two
+                // rendered lines.
+                .take(8)
+                .any(|l| {
+                    // A framed pane closes the prompt row with its border
+                    // rule, so strip one trailing rule before looking for `$`.
+                    let l = l.trim_end();
+                    let l = l.strip_suffix('│').unwrap_or(l).trim_end();
+                    l.ends_with('$')
+                })
         };
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {

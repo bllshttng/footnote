@@ -53,21 +53,12 @@ fn fixture_nodes() -> Vec<Node> {
     vec![one, two, three, four]
 }
 
-/// One arm of the both-backends run: JSON (no db named) or SQLite (the
-/// store names its own backend after the one-shot import).
-fn arm(dir: &TempDir, backend: crate::backlog::Backend) -> Store {
+/// Seed an independent store instance through graph.db.
+fn arm(dir: &TempDir) -> Store {
     let graph = dir.path().join("graph.json");
     let entries: Vec<Value> = fixture_nodes().iter().map(Node::to_json).collect();
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    crate::graph_store::seed_rows(&graph, &entries).unwrap();
     let store = Store::new(&graph);
-    if backend == crate::backlog::Backend::Sqlite {
-        crate::backlog::read_entries(&graph).unwrap();
-        crate::backlog::set_backend(&graph, backend).unwrap();
-    }
     store
 }
 
@@ -488,14 +479,10 @@ fn api_node_update_status_moves_through_the_patch_door() {
         "created_at": "2026-09-11T00:00:00+00:00",
         "superseded_by": "ab-one",
     }));
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
-    let before = version(&json_store).unwrap();
+    crate::graph_store::seed_rows(&graph, &entries).unwrap();
+    let before = version(&first_store).unwrap();
     let payload = node_update(
-        &json_store,
+        &first_store,
         "ab-five",
         NodeUpdateInput {
             status: Some("idea".into()),
@@ -504,7 +491,7 @@ fn api_node_update_status_moves_through_the_patch_door() {
     )
     .unwrap();
     assert!(!payload.success);
-    assert_eq!(version(&json_store).unwrap(), before);
+    assert_eq!(version(&first_store).unwrap(), before);
 }
 
 #[test]
@@ -765,7 +752,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
 // -- the cross-arm contract ---------------------------------------------------
 
 #[test]
-fn api_both_backends_agree_on_to_json() {
+fn api_runs_are_deterministic_across_store_instances() {
     // AC14-HP: the same scripted queries and mutations under each backend,
     // equal typed output (clock stamps scrubbed, everything else exact).
     fn script(store: &Store) -> Vec<Value> {
@@ -821,8 +808,8 @@ fn api_both_backends_agree_on_to_json() {
     }
     let (_claims, _d1, _d2, json_store, sqlite_store) = both_stores();
     assert_eq!(
-        serde_json::to_string(&script(&json_store)).unwrap(),
-        serde_json::to_string(&script(&sqlite_store)).unwrap(),
+        serde_json::to_string(&script(&first_store)).unwrap(),
+        serde_json::to_string(&script(&second_store)).unwrap(),
     );
 }
 

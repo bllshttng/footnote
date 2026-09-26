@@ -9,6 +9,7 @@ AC1-ERR, AC1-UI, AC1-EDGE, AC1-FR from
 internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import tempfile
@@ -83,7 +84,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         cwd=str(tmp_path),
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -576,7 +577,6 @@ def test_config_fallback_ceiling_applied(graph_env, tmp_path, monkeypatch):
         "schema_version: 1\nconfig:\n  blueprint:\n    max_prs_per_epic: 2\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-    from fno import config as config_mod
 
     before = read_entries()
     # 3 groups exceed the config ceiling of 2 -> rejected, nothing created.
@@ -595,7 +595,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
         "schema_version: 1\nconfig:\n  blueprint:\n    max_prs_per_epic: 0\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-    from fno import config as config_mod
 
     before = read_entries()
     # --max-prs omitted -> reads config, which is invalid -> structured error.
@@ -649,7 +648,7 @@ def graph_env_real_doc(
         priority="p1",
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -708,7 +707,7 @@ def _wire_graph(tmp_path, monkeypatch, epic):
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
     monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [epic]}) + "\n")
 
     def read_entries():
         return read_graph_strict(tmp_path / "graph.json")
@@ -1949,14 +1948,14 @@ def test_adopt_rerun_is_an_idempotent_noop(graph_env):
     assert _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
     ).exit_code == 0
-    settled = g.read_text()
+    settled = read_graph_strict(g)
 
     result = _invoke(
         ["--json", "backlog", "decompose", "ab-epic0001",
          "--groups", _groups_json(ADOPT_GROUP)]
     )
     assert result.exit_code == 0, result.output
-    assert g.read_text() == settled
+    assert read_graph_strict(g) == settled
 
     # Adoption itself is a no-op from run 2 on: nothing minted, nothing
     # deleted, no parent moved, and the receipt says so.
@@ -2195,20 +2194,20 @@ def test_adopt_backfills_contained_in_on_an_already_reparented_node(graph_env):
 
 
 def test_ac10_no_adopt_key_leaves_contained_in_off_the_wire_entirely(graph_env):
-    """AC10: a containment-free graph serializes exactly as it did pre-change.
+    """AC10: a containment-free graph keeps its rows unchanged.
 
     The field is listed in CANONICAL_FIELD_ORDER but deliberately never
     setdefault-ed. Defaulting it beside the other nullable scalars would stamp
     `"contained_in": null` onto every node in every graph in existence - which
-    reads as harmless and is precisely the byte-level change AC10 forbids.
-    Asserting on the raw bytes, not on read_entries(), because the read path is
-    what would paper over a setdefault.
+    reads as harmless and is precisely the row-level change AC10 forbids.
     """
     g, _read_entries = graph_env
     assert _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
     ).exit_code == 0
-    assert "contained_in" not in g.read_text()
+    from fno.graph.store import _client_for, _read_snapshot
+
+    assert all("contained_in" not in entry for entry in _read_snapshot(_client_for(g))[1])
 
 
 def test_adopt_rerun_leaves_contained_in_byte_stable(graph_env):
@@ -2633,13 +2632,13 @@ def test_every_refusal_leaves_the_graph_byte_identical(graph_env, spec, code):
     """
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001"))
-    raw_before = g.read_bytes()
+    before = read_entries()
 
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
     )
     assert result.exit_code == code, result.output
-    assert g.read_bytes() == raw_before
+    assert read_entries() == before
 
 
 def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
@@ -2656,7 +2655,7 @@ def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
 
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001"))
-    before = g.read_text()
+    before = read_entries()
     monkeypatch.setattr(gcli, "_live_worker",
                         lambda nid: "target-session:S1" if nid == "ab-kid00001" else None)
 
@@ -2669,7 +2668,7 @@ def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
     assert "being built right now" in result.output
     assert "target-session:S1" in result.output
     # Atomic: a refused decompose leaves the graph untouched.
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_adopt_proceeds_when_no_worker_holds_the_node(graph_env, monkeypatch):
@@ -2793,7 +2792,7 @@ def test_adopt_refuses_a_node_with_descendants(graph_env, monkeypatch):
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
     _seed_children(g, _epic_child("ab-kid00001"),
                    _node("ab-sub00001", parent="ab-kid00001", status="ready"))
-    before = g.read_text()
+    before = read_entries()
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
             {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
@@ -2802,7 +2801,7 @@ def test_adopt_refuses_a_node_with_descendants(graph_env, monkeypatch):
     assert result.exit_code == 2, result.output
     assert "one level" in result.output
     assert "ab-sub00001" in result.output
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_rehoming_between_groups_still_restamps_containment(graph_env, monkeypatch):
@@ -2923,7 +2922,7 @@ def test_adopt_refuses_an_unfinished_node_that_owns_a_pr(graph_env, monkeypatch)
     g, read_entries = graph_env
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
     _seed_children(g, _epic_child("ab-kid00001", pr_number=613, status="ready"))
-    before = g.read_text()
+    before = read_entries()
 
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
@@ -2933,7 +2932,7 @@ def test_adopt_refuses_an_unfinished_node_that_owns_a_pr(graph_env, monkeypatch)
     assert result.exit_code == 2, result.output
     assert "613" in result.output
     assert "has not landed" in result.output
-    assert g.read_text() == before
+    assert read_entries() == before
 
 
 def test_adopt_still_permits_a_landed_pr_bearing_node(graph_env, monkeypatch):
@@ -3133,12 +3132,10 @@ def test_a_refused_decompose_leaves_the_graph_byte_identical(graph_env):
     """
     g, read_entries = graph_env
     _deferred_unit(g, read_entries)
-    before = g.read_text()
-    baks_before = sorted(p.name for p in g.parent.glob("graph.json.bak.*"))
+    before = read_entries()
 
     assert _decompose(ADOPT_ONE).exit_code == 2
-    assert g.read_text() == before
-    assert sorted(p.name for p in g.parent.glob("graph.json.bak.*")) == baks_before
+    assert read_entries() == before
 
 
 def test_defer_keeps_an_existing_adoptee_folded(graph_env):
@@ -3375,7 +3372,7 @@ def test_scaffold_without_an_epic_strategy_names_why():
     assert "## Execution Strategy" not in text
     assert "no parsable execution strategy section" in text
     # The pre-change section list survives untouched.
-    assert [l for l in text.splitlines() if l.startswith("## ")] == [
+    assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Why (from epic)",
         "## Context",
         "## Changes",

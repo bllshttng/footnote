@@ -87,8 +87,7 @@ def test_merge_killed_mid_reconcile_stays_open_until_the_bare_sweep(
 
     config = tmp_path / "config.toml"
     config.write_text(textwrap.dedent(f"""
-        [paths]
-        graph_json = "{graph_path}"
+        state_dir = "{graph_path.parent}"
     """).lstrip())
     tmp_repo = tmp_path / "repo"
     tmp_repo.mkdir()

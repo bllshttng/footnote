@@ -12,6 +12,7 @@ under it, in the envelope
 exist for the node named in `claims:`.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -29,7 +30,6 @@ def _run(plan: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
     settings = state_dir.parent / "settings.yaml"
     settings.write_text(
         f"config:\n  state_dir: {state_dir}\n"
-        f"  paths:\n    graph_json: {state_dir / 'graph.json'}\n"
     )
     env = dict(os.environ)
     env["FNO_CONFIG"] = str(settings)
@@ -356,8 +356,7 @@ def test_validator_recomputes_unknown_lifecycle_from_readable_graph(tmp_path):
         authority_source="agent",
         lifecycle="unknown",
     )
-    (state_dir / "graph.json").write_text(
-        json.dumps(
+    seed_graph(state_dir / "graph.json", json.dumps(
             {
                 "entries": [
                     {
@@ -367,9 +366,7 @@ def test_validator_recomputes_unknown_lifecycle_from_readable_graph(tmp_path):
                     }
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
 
     plan = tmp_path / "readable-graph.md"
     plan.write_text(

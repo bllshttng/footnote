@@ -1,5 +1,6 @@
 """`session add --ended-at` self-close: honest receipt, foreign-row guard."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ OWNER = "sess-owner"
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
     return g
 
 

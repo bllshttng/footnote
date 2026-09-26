@@ -1,10 +1,7 @@
-//! The backlog store: graph.db lifecycle (schema, import, sync, export),
-//! the backend naming, and (wave 5) parity. Each aggregate's tables live in
+//! The backlog store: graph.db lifecycle (schema, import and sync). Each aggregate's tables live in
 //! its owning module and no other file writes them (ruling 4);
 //! `TABLE_OWNERS` names the owners and the table_ownership test enforces
-//! it. JSON stays authoritative through this group: graph.db is the
-//! relational shadow, and every mutation writes only the changed nodes'
-//! rows in one transaction.
+//! Every mutation writes only the changed nodes' rows in one transaction.
 
 pub mod api;
 pub mod commands;
@@ -109,7 +106,7 @@ pub(crate) fn ensure_triggers(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis())
@@ -131,56 +128,21 @@ pub fn database_path(graph: &Path) -> PathBuf {
     graph.with_extension("db")
 }
 
-/// The backend the store names in `graph_meta.backend`. Unset reads as json:
-/// the rollback default, so a pre-name db or a reverted binary keeps serving
-/// the JSON leg.
+/// The sole graph store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    Json,
     Sqlite,
 }
 
 impl Backend {
     pub fn name(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Sqlite => "sqlite",
-        }
+        "sqlite"
     }
 }
 
-/// The backend named RIGHT NOW: every keeper request and every settle call
-/// re-reads it, so a backend change by another process lands on the next
-/// request without a restart. Read-only: never creates graph.db, and an
-/// absent or unopenable db reads as json.
-pub fn backend(graph: &Path) -> Backend {
-    let connection = match Connection::open_with_flags(
-        database_path(graph),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(connection) => connection,
-        Err(_) => return Backend::Json,
-    };
-    match meta(&connection, "backend") {
-        // The rollback door is the EXPLICIT json name. An unnamed store is
-        // the sqlite product from birth: reads and writes serve graph.db
-        // and the seed folds on first open, so a name written by an older
-        // binary is the only shape that still serves the json leg.
-        Ok(Some(value)) if value == Backend::Json.name() => Backend::Json,
-        _ => Backend::Sqlite,
-    }
-}
-
-pub fn set_backend(graph: &Path, backend: Backend) -> Result<(), String> {
-    let connection = open(graph)?;
-    connection
-        .execute(
-            "INSERT INTO graph_meta(key, value) VALUES('backend', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![backend.name()],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
+/// The graph store implementation.
+pub fn backend(_graph: &Path) -> Backend {
+    Backend::Sqlite
 }
 
 /// A connection for a WRITE path: identical to [`open`], kept as a distinct
@@ -222,6 +184,21 @@ pub(crate) fn open_holding_lock(graph: &Path) -> Result<Connection, String> {
 
 fn open_connection(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
+    let size = match path.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.to_string()),
+    };
+    if size > 0 {
+        let mut header = [0; 16];
+        let mut file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+        use std::io::Read;
+        file.read_exact(&mut header)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if &header != b"SQLite format 3\0" {
+            return Err(format!("{}: file is not a database", path.display()));
+        }
+    }
     let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -256,7 +233,8 @@ fn open_connection(graph: &Path) -> Result<Connection, String> {
     decisions::ensure_table(&connection)?;
     ensure_triggers(&connection)?;
     search::ensure_table(&connection)?;
-    import_if_needed(&mut connection, graph)?;
+    import_if_needed(&mut connection)?;
+    retire_graph_json(&connection, graph)?;
     decisions::import_if_needed(&mut connection, graph)?;
     archive_import_if_needed(&mut connection, graph)?;
     Ok(connection)
@@ -387,12 +365,8 @@ fn archive_import_if_needed(connection: &mut Connection, graph: &Path) -> Result
     transaction.commit().map_err(|error| error.to_string())
 }
 
-/// The one-shot import: a db holding the blob `entries` table and no
-/// `nodes` imports its rows into the owned tables, drops `entries`, and
-/// stamps the current schema_version. A path with graph.json and no
-/// graph.db imports on first open, which keeps the hundreds of test files
-/// that seed graph.json fixtures working. A populated store re-imports
-/// never; it may rebuild once (see [`rebuild_if_schema_v2`]).
+/// The one-shot import of a legacy SQLite blob table. Schema upgrades are
+/// handled by the owned migrations.
 fn materialized_rows(connection: &Connection) -> Result<i64, String> {
     // Raw-carried rows count as materialized: a store holding only them is
     // NOT fresh, or every open would re-fold the seed over the carry.
@@ -405,9 +379,9 @@ fn materialized_rows(connection: &Connection) -> Result<i64, String> {
         .map_err(|error| error.to_string())
 }
 
-fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
+fn import_if_needed(connection: &mut Connection) -> Result<(), String> {
     if materialized_rows(connection)? > 0 {
-        return rebuild_if_schema_v2(connection, graph);
+        return Ok(());
     }
     let has_entries: bool = connection
         .query_row(
@@ -431,15 +405,6 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
                 serde_json::from_str(&body)
                     .map_err(|error| format!("entries row is invalid JSON: {error}"))?,
             );
-        }
-    } else if graph.exists() {
-        let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
-        if !text.trim().is_empty() {
-            let doc: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-            if let Some(entries) = doc.get("entries").and_then(Value::as_array) {
-                rows = entries.clone();
-            }
         }
     }
     if rows.is_empty() && !has_entries {
@@ -511,6 +476,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
             obj.insert("locked_at".to_string(), Value::String(s.to_string()));
         }
     }
+    crate::graph_store::normalize_legacy_deferred(&mut rows);
     // IMMEDIATE, not deferred: a writer committing between this fold's first
     // read and its write trips SQLITE_BUSY_SNAPSHOT, which busy_timeout never
     // retries - the fold dies as "import: database is locked" under exactly
@@ -556,108 +522,56 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     Ok(())
 }
 
-const CLEAR_SOAK_METADATA_SQL: &str = "DELETE FROM graph_meta WHERE key IN (
-    'soak_clean_since_ms', 'soak_clean_days', 'soak_last_sample_ms', 'soak_last_divergent')";
-
-/// Schema 3: a populated schema-2 store under the json backend rebuilds
-/// its rows once from authoritative graph.json. The raw-baseline shadow
-/// diff and the child-extras columns stop NEW drift; this rebuild visits
-/// the rows that already drifted while normalization-only changes were
-/// being skipped. It is also the soak restart: the rebuild deletes the
-/// graph_meta soak keys, so the next clean sample starts a fresh 7-day
-/// clock. The sqlite path also clears soak metadata without rewriting rows.
-fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
-    // Pinned at 3: the schema-4 rebuild is schema_v4's, and it never needs
-    // graph.json. A schema-2 store still rebuilds here once, into v4 tables.
-    let target: i64 = 3;
-    let current: i64 = meta(connection, "schema_version")?
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .unwrap_or(2);
-    if current >= target {
+fn retire_graph_json(connection: &Connection, graph: &Path) -> Result<(), String> {
+    if !graph.exists() {
         return Ok(());
     }
-    if backend(graph) == Backend::Sqlite {
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
-        let raced: i64 = meta(&transaction, "schema_version")?
-            .and_then(|raw| raw.parse::<i64>().ok())
-            .unwrap_or(2);
-        if raced >= target {
-            return Ok(());
-        }
-        transaction
-            .execute(CLEAR_SOAK_METADATA_SQL, [])
-            .map_err(|error| error.to_string())?;
-        stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
-        transaction.commit().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    // The rebuild reads graph.json; a file that does not parse, or that
-    // carries no entries ARRAY, is left for the next open, and parity
-    // surfaces the gap loudly meanwhile. An entries-less json is refused
-    // by parity too: it is malformed for this store, never an empty
-    // authority, so it must not read as "delete every db row".
-    let doc = std::fs::read_to_string(graph)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let has_entries_array = doc
-        .as_ref()
-        .map(|doc| doc.get("entries").map(Value::is_array).unwrap_or(false))
-        .unwrap_or(false);
-    if !has_entries_array {
-        return Ok(());
-    }
-    let rows: Vec<Value> = doc
-        .expect("checked above")
-        .get("entries")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let transaction = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    // Re-read under the write lock: a concurrent opener may have rebuilt
-    // already, and two rebuilds must not interleave.
-    let raced: i64 = meta(&transaction, "schema_version")?
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .unwrap_or(2);
-    if raced >= target {
-        return Ok(());
-    }
-    let ids: Vec<String> = {
-        let mut statement = transaction
-            .prepare("SELECT id FROM nodes")
-            .map_err(|error| error.to_string())?;
-        let mapped = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
-        mapped.collect::<Result<Vec<_>, _>>()
-    }
-    .map_err(|error: rusqlite::Error| error.to_string())?;
-    for id in &ids {
-        delete_aggregate(&transaction, id)?;
-    }
-    for (ordinal, row) in rows.iter().enumerate() {
-        // Same best-effort rule as the import: a row the model cannot
-        // represent is skipped so the JSON publish never inherits a
-        // rebuild failure.
-        let Ok(mut node) = Node::from_json(row) else {
-            continue;
-        };
-        node.ordinal = ordinal as i64;
-        save_aggregate(&transaction, &node).map_err(|error| format!("rebuild: {error}"))?;
-    }
-    transaction
-        .execute(
-            "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms', 'soak_clean_days',
-             'soak_last_sample_ms', 'soak_last_divergent')",
+    let stored_rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM nodes) + (SELECT COUNT(*) FROM nodes_raw)",
             [],
+            |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    stamp_version_fields(&transaction, &content_version(&rows))?;
-    stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
-    transaction.commit().map_err(|error| error.to_string())
+    if stored_rows == 0 {
+        let rows =
+            match crate::graph_store::read_archive_raw(graph).map_err(|error| error.to_string())? {
+                crate::graph_store::RawRead::Empty => Vec::new(),
+                crate::graph_store::RawRead::Entries(rows) => rows,
+                crate::graph_store::RawRead::MalformedRoot => {
+                    return Err(format!(
+                        "{} has no entries array and was never imported; refusing to retire it",
+                        graph.display()
+                    ));
+                }
+                crate::graph_store::RawRead::Corrupt(reason) => {
+                    return Err(format!(
+                    "{} was never imported and cannot be read ({reason}); refusing to retire it",
+                    graph.display()
+                ));
+                }
+            };
+        if !rows.is_empty() {
+            return Err(format!(
+                "{} contains rows that were never imported; refusing to retire it",
+                graph.display()
+            ));
+        }
+    }
+    let backup_dir = graph
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", graph.display()))?
+        .join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+    let retired = backup_dir.join(format!(
+        "graph.json.retired.{}",
+        crate::graph_store::backup_stamp()
+    ));
+    match std::fs::rename(graph, retired) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot retire {}: {error}", graph.display())),
+    }
 }
 
 fn stamp_version_fields(connection: &Connection, version: &str) -> Result<(), String> {
@@ -705,9 +619,8 @@ fn bump_api_version(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// The counter `backlog::api::version` serves. It lives in graph_meta of the
-/// relational shadow, which both backends write, so the counter survives the
-/// flip. Read-only probe: an absent db or key reads 0, never creates.
+/// The counter `backlog::api::version` serves. Read-only probe: an absent db
+/// or key reads 0, never creates.
 pub fn api_version(graph: &Path) -> Result<i64, String> {
     if !database_path(graph).exists() {
         return Ok(0);
@@ -742,8 +655,7 @@ pub(crate) fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Res
     Ok(())
 }
 
-/// The last store version the canonical view pass rendered (graph_meta of
-/// the shadow db, which both backends maintain). `None` = nothing rendered
+/// The last store version the canonical view pass rendered. `None` = nothing rendered
 /// since the counter was born, so the next settled trigger owes a render.
 pub fn rendered_version(graph: &Path) -> Result<Option<String>, String> {
     if !database_path(graph).exists() {
@@ -753,44 +665,20 @@ pub fn rendered_version(graph: &Path) -> Result<Option<String>, String> {
     meta(&connection, "rendered_version")
 }
 
-/// Stamp the rendered marker. The render trigger's own bookkeeping: it runs
-/// on the keeper's render thread, outside any mutation, so this writes meta
-/// directly, the same lane `export_now`'s stamp uses.
+/// Stamp the rendered marker. The render trigger runs outside any mutation,
+/// so this writes graph metadata directly.
 pub fn set_rendered_version(graph: &Path, value: &str) -> Result<(), String> {
     let connection = open(graph)?;
     stamp_meta(&connection, "rendered_version", value)
 }
 
-/// The relational shadow write: only the ids whose canonical JSON differs
-/// between `before` and `after` are written, each through its owning
-/// module, in one transaction. A node absent from `after` is deleted with
-/// its child rows. The db holds no version counters beyond graph_meta.
-pub fn shadow_sync(
-    graph: &Path,
-    before: &[Value],
-    after: &[Value],
-    json_version: &str,
-) -> Result<PathBuf, String> {
-    // The caller holds the store lock (the locked_mutate publication seam),
-    // so the creation lock here would block behind it and burn the timeout.
-    let mut connection = open_holding_lock(graph)?;
-    let transaction = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    let _report = write_changed(&transaction, before, after, false)?;
-    stamp_version(&transaction, json_version)?;
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(database_path(graph))
-}
-
-/// The backend-owned write: same rows, but graph_meta.version is the
-/// store's own content digest, and the digest is returned.
+/// Publish rows to the sole graph store and return its content digest.
 pub fn authoritative_sync(
     graph: &Path,
     before: &[Value],
     after: &[Value],
 ) -> Result<String, String> {
-    // Same seam contract as shadow_sync: the caller holds the store lock.
+    // Same seam contract as authoritative_sync: the caller holds the store lock.
     let mut connection = open_holding_lock(graph)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -874,8 +762,8 @@ fn confirm_ids_landed(connection: &Connection, after: &[Value]) -> Result<(), St
     ))
 }
 
-/// The single-row mutation path: under the sqlite backend,
-/// one `BEGIN IMMEDIATE` transaction reads the CURRENT authoritative rows,
+/// The single-row mutation path: one `BEGIN IMMEDIATE` transaction reads
+/// the CURRENT authoritative rows,
 /// applies the mutation, writes only the changed nodes' aggregates, runs the
 /// single-row status recompute, and stamps a fresh content version. The
 /// immediate transaction takes the write lock up front, so the read is never
@@ -1378,245 +1266,17 @@ pub fn version(graph: &Path) -> Result<String, String> {
     meta(&connection, "version")?.ok_or_else(|| "SQLite graph has no version".into())
 }
 
-pub fn export_status(graph: &Path) -> Result<(String, Option<String>), String> {
-    let connection = open(graph)?;
-    let current =
-        meta(&connection, "version")?.ok_or_else(|| "SQLite graph has no version".to_string())?;
-    Ok((current, meta(&connection, "exported_version")?))
-}
-
-pub fn export_now(graph: &Path) -> Result<String, String> {
-    let entries = read_entries(graph)?;
-    let version = content_version(&entries);
-    crate::graph_store::write_atomic(graph, &crate::graph_store::serialize_graph_file(&entries))
-        .map_err(|error| error.to_string())?;
-    // Best-effort: the JSON write is the deliverable (AC21's exit code reads
-    // it); a failed snapshot still leaves graph.db itself (WAL) in place.
-    let _ = snapshot_db(graph, now_ms());
-    let connection = open(graph)?;
-    let stamped = now_ms().to_string();
-    connection
-        .execute(
-            "INSERT INTO graph_meta(key, value) VALUES('exported_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![version],
-        )
-        .map_err(|error| error.to_string())?;
-    connection
-        .execute(
-            "INSERT INTO graph_meta(key, value) VALUES('last_export_ms', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![stamped],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(version)
-}
-
-/// Flip `graph_meta.backend` and stamp `backend_since_ms` on an actual
-/// change. The read, the write, and the stamp run in one IMMEDIATE
-/// transaction, so two concurrent flips serialize: the second sees the
-/// first's backend and keeps its since stamp. A re-run of the same backend
-/// keeps the original stamp: the clock the `--status` days count reads
-/// must not reset under an idempotent verb.
-pub fn flip_backend(graph: &Path, target: Backend) -> Result<(Backend, Option<u128>), String> {
-    let mut connection = open(graph)?;
-    let transaction = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    let previous = match meta(&transaction, "backend")? {
-        Some(value) if value == Backend::Sqlite.name() => Backend::Sqlite,
-        _ => Backend::Json,
-    };
-    stamp_meta(&transaction, "backend", target.name())?;
-    let since = if previous != target {
-        let stamp = now_ms();
-        stamp_meta(&transaction, "backend_since_ms", &stamp.to_string())?;
-        Some(stamp)
-    } else {
-        meta(&transaction, "backend_since_ms")?.and_then(|value| value.parse::<u128>().ok())
-    };
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok((previous, since))
-}
-
-/// When the current backend took over, in unix ms. A read-only probe: an
-/// absent db or key reads None, never creates.
-pub fn backend_since(graph: &Path) -> Result<Option<u128>, String> {
-    if !database_path(graph).exists() {
-        return Ok(None);
-    }
-    let connection = Connection::open_with_flags(
-        database_path(graph),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| error.to_string())?;
-    match meta(&connection, "backend_since_ms") {
-        Ok(Some(value)) => value
-            .parse::<u128>()
-            .map(Some)
-            .map_err(|error| format!("backend_since_ms is not an integer: {error}")),
-        Ok(None) => Ok(None),
-        Err(error) if error.contains("no such table") => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Record one parity sample into graph_meta, the soak evidence the flip
-/// gate reads. One transaction per sample: a clean sample extends the
-/// current run (start the clock when absent, add today's UTC date), a
-/// divergent sample ends it (drop the clock, name the ids).
-pub fn record_parity_sample(
-    graph: &Path,
-    report: &ParityReport,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), String> {
-    let mut connection = open(graph)?;
-    let transaction = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    stamp_meta(
-        &transaction,
-        "soak_last_sample_ms",
-        &now.timestamp_millis().to_string(),
-    )?;
-    if report.divergent > 0 {
-        let divergent = serde_json::json!({
-            "ts": now.to_rfc3339(),
-            "divergent": report.divergent,
-            "ids": report.divergent_ids,
-        });
-        stamp_meta(&transaction, "soak_last_divergent", &divergent.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms', 'soak_clean_days')",
-                [],
-            )
-            .map_err(|error| error.to_string())?;
-    } else {
-        if meta(&transaction, "soak_clean_since_ms")?.is_none() {
-            stamp_meta(
-                &transaction,
-                "soak_clean_since_ms",
-                &now.timestamp_millis().to_string(),
-            )?;
-        }
-        let mut days: Vec<String> = meta(&transaction, "soak_clean_days")?
-            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-            .unwrap_or_default();
-        let today = now.date_naive().to_string();
-        if !days.contains(&today) {
-            days.push(today);
-            let days = serde_json::to_string(&days).map_err(|error| error.to_string())?;
-            stamp_meta(&transaction, "soak_clean_days", &days)?;
-        }
-    }
-    transaction.commit().map_err(|error| error.to_string())
-}
-
-/// Whether a parity sample was already recorded on today's UTC date: the
-/// sampler's once-per-day floor, so a quiet store still accrues clean days.
-pub fn soak_sampled_today(graph: &Path) -> bool {
-    let Ok(connection) = open(graph) else {
-        return false;
-    };
-    let Some(ms) = meta(&connection, "soak_last_sample_ms")
-        .ok()
-        .flatten()
-        .and_then(|raw| raw.parse::<i64>().ok())
-    else {
-        return false;
-    };
-    match chrono::DateTime::from_timestamp_millis(ms) {
-        Some(ts) => ts.date_naive() == chrono::Utc::now().date_naive(),
-        None => false,
-    }
-}
-
-/// The soak evidence the flip needs, read from the graph_meta keys
-/// `record_parity_sample` maintains: one gap line per failed requirement,
-/// empty when the soak is clean. Old samples cannot block a later clean
-/// run, because a divergent sample deletes the run it ended.
-pub fn soak_gaps(graph: &Path, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
-    let connection = match open(graph) {
-        Ok(connection) => connection,
-        Err(_) => return vec!["no clean parity sample recorded yet".into()],
-    };
-    let since_ms = meta(&connection, "soak_clean_since_ms")
-        .ok()
-        .flatten()
-        .and_then(|raw| raw.parse::<i64>().ok());
-    let since = since_ms.and_then(chrono::DateTime::from_timestamp_millis);
-    let Some(since) = since else {
-        // No live run. A recorded divergent sample names itself; with no
-        // evidence at all the soak has simply never run.
-        let last_divergent = meta(&connection, "soak_last_divergent")
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        if let Some(value) = last_divergent {
-            let ts = value
-                .get("ts")
-                .and_then(Value::as_str)
-                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-                .map(chrono::DateTime::<chrono::Utc>::from);
-            let divergent = value.get("divergent").and_then(Value::as_i64).unwrap_or(0);
-            let ids = value
-                .get("ids")
-                .and_then(Value::as_array)
-                .map(|ids| {
-                    ids.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            if let Some(ts) = ts {
-                return vec![format!(
-                    "last sample {} had {divergent} divergent row(s): {ids}; the soak restarts at the next clean sample",
-                    ts.format("%Y-%m-%dT%H:%M:%SZ")
-                )];
-            }
-        }
-        return vec!["no clean parity sample recorded yet".into()];
-    };
-    let mut gaps = Vec::new();
-    let covered: std::collections::HashSet<String> = meta(&connection, "soak_clean_days")
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .map(|list| list.into_iter().collect())
-        .unwrap_or_default();
-    let mut missing = Vec::new();
-    let mut day = since.date_naive();
-    while day <= now.date_naive() {
-        let text = day.to_string();
-        if !covered.contains(&text) {
-            missing.push(text);
-        }
-        day = day.succ_opt().unwrap_or(day);
-        if missing.len() > 64 {
-            break;
-        }
-    }
-    if !missing.is_empty() {
-        gaps.push(format!(
-            "no sample on {} day(s): {}",
-            missing.len(),
-            missing.join(", ")
-        ));
-    }
-    gaps
+pub fn export_status(graph: &Path) -> Result<String, String> {
+    version(graph)
 }
 
 /// At most one `graph.db.<stamp>` snapshot per hour in `backups/`, keeping
-/// the newest [`crate::graph_store::GRAPH_BACKUP_KEEP`]. Replaces the
-/// per-export graph.json copy (task 10.1): after the flip graph.json is an
-/// on-demand artifact and copying 14.6 MB per export recreates the write
-/// volume the flip deletes. VACUUM INTO also compacts; its target must not
+/// the newest [`crate::graph_store::GRAPH_BACKUP_KEEP`]. VACUUM INTO also
+/// compacts; its target must not
 /// exist, so the microsecond stamp names it. The hour gate lives in
 /// `graph_meta.last_snapshot_ms`, not file mtimes, so a moved or inspected
 /// snapshot cannot skew the clock.
-fn snapshot_db(graph: &Path, now: u128) -> Result<(), String> {
+pub(crate) fn snapshot_db(graph: &Path, now: u128) -> Result<(), String> {
     let connection = open(graph)?;
     if let Some(last) = meta(&connection, "last_snapshot_ms")? {
         let last: u128 = last
@@ -1706,39 +1366,17 @@ fn sorted_value(value: &Value) -> Value {
         Value::Object(map) => {
             let sorted: std::collections::BTreeMap<String, Value> = map
                 .iter()
-                .map(|(k, v)| (k.clone(), sorted_value(v)))
+                .map(|(key, value)| (key.clone(), sorted_value(value)))
                 .collect();
-            serde_json::to_value(&sorted).unwrap_or(Value::Null)
+            serde_json::to_value(sorted).unwrap_or(Value::Null)
         }
-        Value::Array(items) => Value::Array(items.iter().map(sorted_value).collect()),
+        Value::Array(rows) => Value::Array(rows.iter().map(sorted_value).collect()),
         _ => value.clone(),
     }
 }
 
-/// One row's canonical JSON: null-stripped, key-sorted, Python-spaced. The
-/// parity equality rule both `canonical_rows` and `write_changed` share.
 fn canonical_row(row: &Value) -> String {
-    crate::graph_store::to_python_json(&sorted_value(&crate::backlog::model::strip_nulls_value(
-        row,
-    )))
-}
-
-/// id -> canonical JSON for a row list, refusing duplicate ids loudly.
-fn canonical_rows(
-    rows: &[Value],
-    label: &str,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let mut out = std::collections::BTreeMap::new();
-    for row in rows {
-        let Some(id) = crate::graph_store::entry_id(row) else {
-            return Err(format!("{label} holds a row without an id"));
-        };
-        if out.contains_key(id) {
-            return Err(format!("duplicate id in {label}: {id}"));
-        }
-        out.insert(id.to_string(), canonical_row(row));
-    }
-    Ok(out)
+    crate::graph_store::to_python_json(&sorted_value(&model::strip_nulls_value(row)))
 }
 
 #[cfg(test)]
@@ -1749,7 +1387,6 @@ mod tests {
     fn fixture(name: &str) -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join(name);
-        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
         (dir, graph)
     }
 
@@ -2043,8 +1680,7 @@ mod tests {
 
     fn two_node_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
+        let rows: Value = serde_json::from_str(
             r#"{"entries": [
                 {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
                  "status": "idea", "priority": "p2", "domain": "code",
@@ -2062,6 +1698,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
+        crate::graph_store::seed_rows(&graph, rows["entries"].as_array().unwrap()).unwrap();
         graph
     }
 
@@ -2095,7 +1732,6 @@ mod tests {
         // A wave-1 db: blob entries table, no nodes. Open imports and drops.
         let dir = TempDir::new().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
         let connection = open(&graph).unwrap();
         connection
             .execute_batch(
@@ -2123,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn backlog_schema_shadow_write_touches_only_changed_nodes() {
+    fn backlog_schema_write_touches_only_changed_nodes() {
         // AC10-HP: a mutation lands, only the changed node's rows move.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
@@ -2133,7 +1769,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("title".to_string(), Value::String("One changed".into()));
-        shadow_sync(&graph, &before, &after, "sha256:test").unwrap();
+        authoritative_sync(&graph, &before, &after).unwrap();
 
         let connection = open(&graph).unwrap();
         let reloaded = export_rows(&connection).unwrap();
@@ -2208,7 +1844,7 @@ mod tests {
         let graph = two_node_graph(&dir);
         let before = read_entries(&graph).unwrap();
         let after: Vec<Value> = before[1..].to_vec();
-        shadow_sync(&graph, &before, &after, "sha256:test").unwrap();
+        authoritative_sync(&graph, &before, &after).unwrap();
         let connection = open(&graph).unwrap();
         let nodes_left: i64 = connection
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
@@ -2231,15 +1867,11 @@ mod tests {
     }
 
     fn raw_rows(graph: &Path) -> Vec<Value> {
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(graph).unwrap()).unwrap();
-        doc.get("entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
+        read_entries(graph).unwrap()
     }
 
     #[test]
-    fn flipgate_shadow_normalization_only_change_reaches_the_store() {
+    fn flipgate_store_normalization_only_change_reaches_the_store() {
         // AC1-HP: the seeded row lacks the default lists; a mutation on a
         // DIFFERENT node publishes the defaulted form. The diff must see
         // that change against the raw baseline and save the row.
@@ -2256,10 +1888,9 @@ mod tests {
         ] {
             one.remove(key);
         }
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         // Keep the raw row un-defaulted and unlocked so owner normalization
         // cannot change its status while this test isolates missing tags.
-        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        crate::graph_store::seed_rows(&graph, &raw).unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
         crate::graph_store::apply_defaults(&mut after, false);
@@ -2286,7 +1917,7 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        // graph.db is the only store; graph.json is frozen under it.
+        // graph.db is the only store; graph.json is not written.
         let stored = read_entries(&graph).unwrap();
         let one = stored
             .iter()
@@ -2305,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn flipgate_shadow_superseded_settle_reaches_the_store() {
+    fn flipgate_store_superseded_settle_reaches_the_store() {
         // AC2-HP: the raw row is blocked with superseded_by set; the
         // mutation pipeline settles it to superseded. The settle must reach
         // the store, not only the published rows.
@@ -2325,8 +1956,7 @@ mod tests {
             "blocked_reason".to_string(),
             Value::String("pending supersession".into()),
         );
-        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
-        set_backend(&graph, Backend::Json).unwrap();
+        crate::graph_store::seed_rows(&graph, &raw).unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw.clone();
         after[0]
@@ -2364,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn flipgate_shadow_write_changed_counts_only_canonical_changes() {
+    fn flipgate_store_write_changed_counts_only_canonical_changes() {
         // AC3-EDGE: rows that differ only by explicit nulls write nothing.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
@@ -2402,7 +2032,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
         let mut after = before.clone();
         after[0]["status"] = Value::String("not-a-status".into());
 
@@ -2418,34 +2047,6 @@ mod tests {
             carried["status"], "not-a-status",
             "the raw row rides verbatim"
         );
-    }
-
-    #[test]
-    fn shadow_sync_skips_an_unrepresentable_row_without_refusing_the_publish() {
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
-        let mut after = before.clone();
-        after[0]["status"] = Value::String("not-a-status".into());
-
-        shadow_sync(&graph, &before, &after, "sha256:next").unwrap();
-
-        let connection = open(&graph).unwrap();
-        let version: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, "sha256:next");
-        let status: String = connection
-            .query_row("SELECT status FROM nodes WHERE id = 'ab-one'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(status, "idea");
     }
 
     #[test]
@@ -2467,7 +2068,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
         let mut after = before.clone();
         after.push(serde_json::json!({"title": "missing id"}));
 
@@ -2482,7 +2082,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
         let mut after = before.clone();
         after.push(after[0].clone());
 
@@ -2497,7 +2096,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
         let mut after = before.clone();
         after[0]["title"] = Value::String("One renamed".into());
 
@@ -2525,7 +2123,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let before = raw_rows(&graph);
-        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
         let connection = open(&graph).unwrap();
         delete_aggregate(&connection, "ab-two").unwrap();
         drop(connection);
@@ -2708,8 +2305,7 @@ mod tests {
 
     fn seeded_sqlite_fixture() -> (TempDir, PathBuf) {
         let (dir, graph) = fixture("graph.json");
-        std::fs::write(
-            &graph,
+        let rows: Value = serde_json::from_str(
             r#"{"entries": [
                 {"id": "ab-one", "slug": "ab-one", "title": "One", "type": "feature",
                  "status": "idea", "priority": "p2", "domain": "code"},
@@ -2718,8 +2314,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        open(&graph).unwrap();
-        set_backend(&graph, Backend::Sqlite).unwrap();
+        crate::graph_store::seed_rows(&graph, rows["entries"].as_array().unwrap()).unwrap();
         (dir, graph)
     }
 
@@ -2870,13 +2465,12 @@ mod tests {
     }
 
     #[test]
-    fn single_row_write_uses_current_db_state_not_stale_json() {
+    fn single_row_write_uses_current_store_state() {
         let _env_lock = crate::claims::test_env_lock().lock().unwrap();
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
-        // A post-flip node lands in the db only; the stale JSON never learns
-        // of it. The single-row path must still see and mutate it.
+        // The single-row path sees and mutates a node already in the store.
         mutate_single_row(&graph, "node_create", |rows| {
             rows.push(serde_json::json!({
                 "id": "ab-flip", "slug": "ab-flip", "title": "Flip", "type": "feature",
@@ -2885,8 +2479,7 @@ mod tests {
             Ok(true)
         })
         .unwrap();
-        let stale = std::fs::read_to_string(&graph).unwrap();
-        assert!(!stale.contains("ab-flip"), "json leg moved under sqlite");
+        assert!(!graph.exists(), "writes do not create a graph.json mirror");
         let ok = mutate_single_row(&graph, "comment_create", |rows| {
             assert!(
                 rows.iter().any(|row| entry_id_from(row) == Some("ab-flip")),

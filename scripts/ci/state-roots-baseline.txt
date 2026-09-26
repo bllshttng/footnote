@@ -95,7 +95,6 @@ A	crates/fno-agents/src/loop_target.rs	target-state.md	unowned	target-state.md h
 A	crates/fno-agents/src/loopcheck.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/loopcheck/authorship.rs	target-state.md	unowned	the manifest author read moved here from loopcheck.rs with the authorship wiring; the Rust side cannot call the Python resolver (fno.paths.target_state_path), so the hand-built fallback stays a declared root until a Rust resolver exists.
 A	crates/fno-agents/src/gc_sweep.rs	ledger.json	unowned	best-effort ledger enrichment for the reap receipt (moved from daemon.rs with the sweep); the receipt stands on the row when the path is overridden.
-A	crates/fno-agents/src/graph_get.rs	graph.json	unowned	same class as crates/fno/src/backlog_view.rs below; no Rust resolver exists yet for graph.json.
 A	crates/fno-agents/src/manifest_lookup.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/worktree_reapable.rs	target-state.md	unowned	the done-node arm reads ANOTHER worktree's manifest by name (same class as manifest_lookup.rs beside this line); target-state.md has NO resolver today, so this site drains when that resolver lands.
 A	crates/fno-agents/src/state_path.rs	target-state.md	unowned	this module IS the hook-facing resolver; the hand-built line is the one-release legacy checkout fallback and drains when it retires.
@@ -103,9 +102,9 @@ A	crates/fno-agents/src/paths.rs	ledger.json	unowned	paths.rs IS the resolver mo
 A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.
-A	crates/fno/src/backlog_view.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/review_invocation.rs	events.jsonl	unowned	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs ; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/question_intake.rs	events.jsonl	ask-port	Fallback when the request carries no journal_path; the shim always passes paths.project_log("events.jsonl"). Drains with the ask-port PR: the fallback moves to state_path::resolve when a Rust caller appears.
 A	crates/fno-agents/src/backlog/api/tests.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/spawn_gate_territory_tests.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/spawn_gate_territory_tests.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
+A	crates/fno-agents/src/law_match.rs	events.jsonl	unowned	crate journal site of the law record door; mirrors resolve_carveout_root precedence, fix is a crate resolver mirroring fno.paths.project_events_json.

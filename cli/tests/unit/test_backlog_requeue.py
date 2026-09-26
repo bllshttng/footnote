@@ -7,6 +7,7 @@ settles the row, and reports where the derivation landed; `unclaim` now
 refuses to print success over a wedge it did not clear.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -24,7 +25,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json; monkeypatches fno.graph constants to use it."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -50,7 +51,7 @@ DEAD_SESSION = "5d67aad9-dead-beef"
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:

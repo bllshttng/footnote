@@ -10,6 +10,7 @@ Covers:
 - Legacy graph.json rows migrate to idea status on next recompute
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -27,7 +28,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh empty graph.json routed to tmp_path."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -295,7 +296,7 @@ def test_mission_drain_enumerates_plan_less_idea_child(tmp_graph, tmp_path):
          "parent": "ab-epic", "plan_path": str(stub),
          "created_at": "2026-07-28"},                                  # linked -> Rung.IDEA
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     r = _invoke("backlog", "ready", "--parent", "ab-epic", "--all")
     assert r.exit_code == 0, r.output

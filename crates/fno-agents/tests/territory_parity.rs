@@ -46,11 +46,18 @@ fn build_fixture(active_backlog_extra: &str, graph: Value, registry_rows: Value)
     let fno_dir = tmp.path().join(".fno");
     std::fs::create_dir_all(&fno_dir).unwrap();
     std::fs::write(fno_dir.join("config.toml"), &config).unwrap();
-    std::fs::write(
-        tmp.path().join("graph.json"),
-        serde_json::to_string(&graph).unwrap(),
-    )
-    .unwrap();
+    let mut entries = graph
+        .get("entries")
+        .and_then(Value::as_array)
+        .unwrap()
+        .clone();
+    for entry in &mut entries {
+        let row = entry.as_object_mut().unwrap();
+        let id = row.get("id").and_then(Value::as_str).unwrap().to_owned();
+        row.entry("slug").or_insert_with(|| json!(id));
+        row.entry("title").or_insert_with(|| json!("fixture node"));
+    }
+    fno_agents::graph_store::seed_rows(&tmp.path().join("graph.json"), &entries).unwrap();
     let registry_dir = tmp.path().join("agents");
     std::fs::create_dir_all(&registry_dir).unwrap();
     let registry = registry_dir.join("registry.json");

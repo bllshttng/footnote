@@ -135,7 +135,7 @@ fn king_drain_reply(spec: &str) -> String {
 fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     let fno_dir = cwd.join(".fno");
     fs::create_dir_all(&fno_dir).unwrap();
-    let graph = cwd.join("graph.json");
+    let graph = home.join("graph.json");
     let spec = fs::read_to_string(board_spec).unwrap_or_default();
     let ids = king_spec_rows(&spec);
     if ids.is_none() {
@@ -162,25 +162,31 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
             .chain(ids.into_iter().map(|id| {
                 // parent: the manifest scope compiles to the epic plus its
                 // descendants, so a workable row is a child of `drain`.
-                serde_json::json!({"id": id, "type": "feature", "status": "ready",
+                serde_json::json!({"id": id.clone(), "slug": id.clone(), "title": id.clone(), "type": "feature", "status": "ready",
                                    "priority": "p0", "plan_path": "/plans/p.md",
                                    "parent": "drain"})
             }))
             .collect();
-        fs::write(
-            &graph,
-            serde_json::to_string(&serde_json::json!({ "entries": nodes })).unwrap(),
-        )
-        .unwrap();
+        let mut rows = nodes;
+        for row in &mut rows {
+            let obj = row.as_object_mut().unwrap();
+            obj.entry("slug")
+                .or_insert_with(|| serde_json::json!("drain"));
+            obj.entry("title")
+                .or_insert_with(|| serde_json::json!("drain"));
+            obj.entry("priority")
+                .or_insert_with(|| serde_json::json!("p1"));
+        }
+        fno_agents::graph_store::seed_rows(&graph, &rows).unwrap();
     }
     fs::write(
         fno_dir.join("config.toml"),
         format!(
-            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n\
+            "state_dir = \"{}\"\n[paths]\noperator_lane = \"{}\"\n\n\
              # The scope queue's project map reads work.workspaces; a machine \
              # with no global config.toml must see the fixture as complete.\n\
              [work.workspaces]\n",
-            graph.display(),
+            home.display(),
             home.join("lane.md").display()
         ),
     )
@@ -1247,7 +1253,8 @@ fn every_king_noprogress_terminal_escalates() {
     let blind_log = blind_cwd.join("escalations.log");
     let blind_state = king_manifest(blind_cwd, "k-blind");
     let blind_events = blind_cwd.join("events.jsonl");
-    let blind_bin = king_escalate_bin(bin_dir.path(), "not json at all", &blind_log);
+    let blind_bin_dir = TempDir::new().unwrap();
+    let blind_bin = king_escalate_bin(blind_bin_dir.path(), "not json at all", &blind_log);
 
     let mut blind = (0, serde_json::Value::Null);
     for _ in 0..3 {
@@ -1289,7 +1296,6 @@ fn every_king_noprogress_terminal_escalates() {
 fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
     let events = cwd.join("events.jsonl");
 
     // A manifest with a ceiling of 3 rather than the default 40.
@@ -1308,7 +1314,8 @@ fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
     let boards = [BOARD_TWO_ACTIONABLE, BOARD_ONE_CLEARED, BOARD_REFILLED];
     let mut last = (0, serde_json::Value::Null);
     for (i, payload) in boards.iter().enumerate() {
-        let fno = king_board_bin(bin_dir.path(), payload, 0);
+        let board_home = TempDir::new().unwrap();
+        let fno = king_board_bin(board_home.path(), payload, 0);
         last = king_fire(&state, cwd, &events, &fno);
         if i < boards.len() - 1 {
             assert_eq!(

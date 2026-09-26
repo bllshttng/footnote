@@ -3466,15 +3466,13 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     (dir, home)
 }
 
-/// Stage a real graph file at the state root.
+/// Seed graph.db for tests that address the stable graph path anchor.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
-    let graph = dir.join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
+    crate::graph_store::seed_rows(
+        &dir.join("graph.json"),
+        entries.as_array().expect("entry rows"),
     )
     .unwrap();
-    crate::backlog::set_backend(&graph, crate::backlog::Backend::Json).unwrap();
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
@@ -3682,9 +3680,8 @@ fn a_done_but_unmerged_node_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-b".to_string(), "N2".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let row = &raw["entries"][0]["sessions"][0];
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let row = &rows[0]["sessions"][0];
     assert!(row.get("ended_at").is_none(), "{row}");
     let rendered = crate::reap_render::render_reap(&summary, false, false);
     assert!(
@@ -3729,9 +3726,8 @@ fn an_open_additional_pr_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-c".to_string(), "N3".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert!(rows[0]["sessions"][0].get("ended_at").is_none());
 }
 
 /// The measured live split, staged: of the reaper's kept rows, 15 nodes (17
@@ -3836,7 +3832,7 @@ fn the_live_eighteen_split_fifteen_and_three() {
 }
 
 /// AC4-EDGE: the rehearsal names the settle and touches nothing - the graph
-/// file is byte-identical, the row still open on disk, and the row pass
+/// store version is unchanged, the row still open, and the row pass
 /// reads it as would-retire.
 #[test]
 fn a_dry_run_settles_nothing_on_disk() {
@@ -3857,7 +3853,7 @@ fn a_dry_run_settles_nothing_on_disk() {
         spawn_row(r, "row-d", "sess-d");
     })
     .unwrap();
-    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let before = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
 
     let summary = settle_then_run(
         &home,
@@ -3874,10 +3870,10 @@ fn a_dry_run_settles_nothing_on_disk() {
         vec![("N4".into(), "claude".into(), "sess-d".into())]
     );
     assert!(summary.kept_open_do_row.is_empty());
-    let after = std::fs::read(dir.path().join("graph.json")).unwrap();
-    assert_eq!(before, after, "a dry run wrote the graph");
-    let raw: Value = serde_json::from_slice(&after).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let after = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
+    assert_eq!(before, after, "a dry run changed the store");
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert!(rows[0]["sessions"][0].get("ended_at").is_none());
     assert!(
         !summary.dry_run_unverified.is_empty(),
         "the row stays on the retirement path, its remaining gate named: {summary:?}"
@@ -3918,16 +3914,7 @@ fn an_unidentified_do_row_is_not_open() {
 #[test]
 fn a_settle_that_cannot_read_is_named_and_changes_nothing() {
     let (dir, home) = staged_graph_home();
-    stage_graph(
-        dir.path(),
-        json!([done_node(
-            "N6",
-            json!("merged"),
-            json!([]),
-            vec![open_do_row("claude", "sess-f")],
-        )]),
-    );
-    // Corrupt the file: a failed read is a refusal, never a write.
+    // An unimported malformed anchor makes the read refuse, never write.
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
 
     let (settled, refused) = gc_sweep::settle_stale_do_rows(&home);
@@ -3951,7 +3938,7 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
             vec![open_do_row("claude", "sess-g")],
         )]),
     );
-    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let before = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
 
     let summary = crate::gc::gc_sweep_dry_run(&home, 0);
 
@@ -3961,7 +3948,7 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
     );
     assert_eq!(
         before,
-        std::fs::read(dir.path().join("graph.json")).unwrap()
+        crate::backlog::version(&dir.path().join("graph.json")).unwrap()
     );
 }
 

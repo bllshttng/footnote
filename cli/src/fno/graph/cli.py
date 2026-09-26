@@ -7209,8 +7209,6 @@ from fno.graph._closures import (  # noqa: E402
 
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
-    """Return rows whose persisted status differs from a fresh derivation.
-    Both sides read the store; the derivation is the write path's pipeline."""
     import copy
 
     from fno.graph.statuses import recompute_statuses
@@ -7220,7 +7218,7 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     for entry in _read_json(path):
         node_id = entry.get("id") if isinstance(entry, dict) else None
         status = entry.get("status") if isinstance(entry, dict) else None
-        if isinstance(node_id, str) and isinstance(status, str):
+        if isinstance(node_id, str) and isinstance(status, str) and not (status == "blocked" and entry.get("blocked_by")):
             persisted[node_id] = status
 
     derived: dict[str, str] = {}

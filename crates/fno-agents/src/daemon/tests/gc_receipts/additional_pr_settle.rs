@@ -357,10 +357,9 @@ fn ac1_err_an_open_or_unreadable_primary_stamps_nothing() {
         let (settled, refused) = gc_sweep::settle_stale_do_rows_with(&home, &mut read);
         assert!(settled.is_empty());
         assert!(refused.is_empty(), "{:?}", refused);
-        let raw: Value =
-            serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-        assert_eq!(raw["entries"][0]["merge_status"], json!(null));
-        assert!(raw["entries"][0]["sessions"][0]
+        let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+        assert_eq!(rows[0]["merge_status"], json!(null));
+        assert!(rows[0]["sessions"][0]
             .as_object()
             .unwrap()
             .get("ended_at")
@@ -405,10 +404,9 @@ fn ac1_edge_a_recorded_failure_or_a_rowless_node_pays_no_read() {
         &mut read,
     );
 
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    assert_eq!(raw["entries"][0]["merge_status"], json!("failed"));
-    assert_eq!(raw["entries"][1]["merge_status"], json!(null));
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert_eq!(rows[0]["merge_status"], json!("failed"));
+    assert_eq!(rows[1]["merge_status"], json!(null));
     assert!(summary.settled_do_rows.is_empty());
     let hold = summary
         .holds
@@ -462,7 +460,7 @@ fn ac3_hp_the_dry_run_rehearses_the_primary_stamp() {
     let (dir, home, emitter, transcripts) = primary_home(vec![held_primary_node("x-prim")]);
     primary_registry_row(&home);
     let quiet = quiet_transcript(transcripts.path(), "p2.jsonl", 2 * 3600);
-    let raw_before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let version_before = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
     let mut read = |path: &str, _cwd: &str| {
         assert_eq!(path, "repos/o/r/pulls/2180");
         Some(gc_sweep::PrState::Merged)
@@ -488,8 +486,8 @@ fn ac3_hp_the_dry_run_rehearses_the_primary_stamp() {
         .holds
         .iter()
         .any(|hold| hold.id == "row-prim" && hold.reason == "open do row on done node"));
-    let raw_after = std::fs::read(dir.path().join("graph.json")).unwrap();
-    assert_eq!(raw_before, raw_after);
+    let version_after = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
+    assert_eq!(version_before, version_after);
 }
 
 #[test]

@@ -5,6 +5,7 @@ expired row must ride evidence that survives the defer: a gh-verified merged
 PR or files recorded in the node's text that still exist.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.discovery import (
     Assessment,
@@ -88,7 +89,7 @@ def _invoke_discover(monkeypatch, tmp_path, control_matches):
     from fno.graph.cli import cli
 
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text('{"entries": []}')
+    seed_graph(graph_file, '{"entries": []}')
     monkeypatch.setattr(constants, "GRAPH_JSON", graph_file)
     monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: [_node()])
     monkeypatch.setattr(discovery, "candidates", lambda *a, **k: CandidateResults())

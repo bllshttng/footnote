@@ -210,7 +210,7 @@ fn ac3_colon_id_is_skipped_and_named_in_errors() {
 
 fn graph_fixture(dir: &std::path::Path, entries: Value) -> std::path::PathBuf {
     let path = dir.join("graph.json");
-    std::fs::write(&path, json!({"entries": entries}).to_string()).unwrap();
+    crate::graph_store::seed_rows(&path, entries.as_array().expect("rows array")).unwrap();
     path
 }
 

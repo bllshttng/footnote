@@ -43,7 +43,8 @@ fn graph_file(dir: &std::path::Path, entries: Value) -> PathBuf {
     // A distinct file from seams_with's default graph, so an override here is
     // the one the preflight reads.
     let path = dir.join("graph-fixture.json");
-    std::fs::write(&path, json!({"entries": entries}).to_string()).expect("graph fixture writes");
+    crate::graph_store::seed_rows(&path, entries.as_array().expect("rows array"))
+        .expect("graph fixture writes");
     path
 }
 
@@ -73,14 +74,13 @@ fn seams_with(
     run: impl FnMut(&[String], u64, Option<&str>) -> Result<Output, TransportFailure> + 'static,
 ) -> LiveSeams {
     let graph_path = dir.path().join("graph.json");
-    std::fs::write(
+    crate::graph_store::seed_rows(
         &graph_path,
-        json!({"entries": [{
+        &[json!({
             "id": "x-source",
             "pr_number": Value::Null,
             "sessions": [{"harness": row.harness, "session_id": row.harness_session_id}],
-        }]})
-        .to_string(),
+        })],
     )
     .expect("default graph fixture writes");
     LiveSeams {

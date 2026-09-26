@@ -1190,7 +1190,7 @@ def test_state_roots_rule_a_fires_on_a_multi_line_join(tmp_path: Path) -> None:
     source = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
     source.parent.mkdir(parents=True)
     source.write_text(
-        "graph = (\n    root\n    / \".fno\"\n    / \"graph.json\"\n)\n", encoding="utf-8"
+        "graph = (\n    root\n    / \".fno\"\n    / \"ledger.json\"\n)\n", encoding="utf-8"
     )
 
     from fno.lint_cli import _state_root_path_violations
@@ -1198,7 +1198,7 @@ def test_state_roots_rule_a_fires_on_a_multi_line_join(tmp_path: Path) -> None:
     violations = _state_root_path_violations(tmp_path)
 
     assert [(rel, key) for rel, key, _ in violations] == [
-        ("cli/src/fno/new_writer.py", "graph.json")
+        ("cli/src/fno/new_writer.py", "ledger.json")
     ]
 
 
@@ -1213,7 +1213,7 @@ def test_state_roots_rule_a_fires_on_the_combined_literal(tmp_path: Path) -> Non
     """
     py = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
     py.parent.mkdir(parents=True)
-    py.write_text('p = root / ".fno/graph.json"\n', encoding="utf-8")
+    py.write_text('p = root / ".fno/ledger.json"\n', encoding="utf-8")
     rs = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
     rs.parent.mkdir(parents=True)
     rs.write_text('let p = root.join(".fno/claims");\n', encoding="utf-8")
@@ -1222,7 +1222,7 @@ def test_state_roots_rule_a_fires_on_the_combined_literal(tmp_path: Path) -> Non
 
     hit = {(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)}
 
-    assert ("cli/src/fno/new_writer.py", "graph.json") in hit
+    assert ("cli/src/fno/new_writer.py", "ledger.json") in hit
     assert ("crates/fno-agents/src/new_writer.rs", "claims") in hit
 
 
@@ -1241,14 +1241,14 @@ def test_state_roots_rule_a_only_skips_a_cfg_test_MOD(tmp_path: Path) -> None:
         "    static X: u8 = 0;\n"
         "}\n"
         '// a comment mentioning #[cfg(test)] must not open a region\n'
-        'let p = root.join(".fno").join("graph.json");\n',
+        'let p = root.join(".fno").join("ledger.json");\n',
         encoding="utf-8",
     )
 
     from fno.lint_cli import _state_root_path_violations
 
     assert [(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)] == [
-        ("crates/fno-agents/src/new_writer.rs", "graph.json")
+        ("crates/fno-agents/src/new_writer.rs", "ledger.json")
     ]
 
 
@@ -1355,7 +1355,7 @@ def test_state_roots_rule_b_fires_on_a_zero_arg_cache_over_a_resolver(
         "\n"
         "@lru_cache(maxsize=1)\n"
         "def _cached_graph():\n"
-        "    return graph_json()\n",
+        "    return state_dir()\n",
         encoding="utf-8",
     )
 
