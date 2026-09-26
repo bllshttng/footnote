@@ -488,9 +488,7 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
         names = hit[1]
     else:
-        names, _paths_reason = fetch_pr_file_paths_rest(
-            str(pr_number), repo=repo, runner=run
-        )
+        names, _paths_reason = fetch_pr_file_paths_rest(str(pr_number), repo=repo, runner=run)
         if names is None or any(not _is_documentation_path(p) for p in names):
             # Only a CODE answer (or a failed read, which fails closed to
             # code) memoizes: the cached key is (repo, pr), not the head, so

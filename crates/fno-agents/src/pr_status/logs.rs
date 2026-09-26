@@ -306,8 +306,8 @@ pub(crate) fn run_logs_door(payload: &Value) -> (i32, String, String) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     fn fixture_raw(name: &str) -> Value {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
