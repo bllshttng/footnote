@@ -2093,8 +2093,10 @@ class DispatchBlock(BaseModel):
     # is high, its size is L, or an open premise question blocks it (the
     # `premise-question` tag). Every other plan-less node goes straight to
     # /target, which states its own scope. "medium" restores the pre-lean
-    # table (blueprint for medium and up). Read by the lifecycle verb table
-    # (fno-agents effective_verb) through the dispatch doors.
+    # table (blueprint for medium and up). "low" blueprints every plan-less
+    # node; "never" targets everything. Read by the lifecycle verb table
+    # (fno-agents effective_verb) through the dispatch doors, and by the
+    # reign check-in's blueprint reading.
     blueprint_floor: str = "high"
 
     @field_validator("auto_merge", mode="before")
@@ -2126,10 +2128,14 @@ class DispatchBlock(BaseModel):
     @field_validator("blueprint_floor", mode="before")
     @classmethod
     def _coerce_blueprint_floor(cls, v: object) -> object:
-        """Only the two literals are honored; anything else degrades to "high",
-        the lean default. Same stance as the validators above: a typo can never
-        widen blueprint ceremony past the lean-dispatch ruling."""
-        return v if v in ("high", "medium") else "high"
+        """Only the four literals are honored; anything else degrades to "high",
+        the lean default. Case and surrounding space are normalized like the
+        Rust reader lowercases them, so both surfaces answer one value. Same
+        stance as the validators above: a typo can never widen blueprint
+        ceremony past the lean-dispatch ruling."""
+        if isinstance(v, str) and v.strip().lower() in ("high", "medium", "low", "never"):
+            return v.strip().lower()
+        return "high"
 
 
 def _positive_int(v: object) -> bool:
