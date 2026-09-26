@@ -13536,7 +13536,6 @@ fn apply_mine_action_result_success_requests_refold() {
 // directly against apply_question_action_result, mirroring the MINE
 // pair above.
 
-
 // Enter on a question row opens the full-context detail overlay; the
 // answer gestures (free text included) live there now.
 
