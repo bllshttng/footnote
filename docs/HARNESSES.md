@@ -61,7 +61,7 @@ One scannable table per harness: `symptom | cause | fix`. Every row names the ca
 |---|---|---|
 | `--resume <id>` from the wrong directory finds nothing | The session directory is per-cwd: the identity is the `(cwd, id)` pair (the `session_binding` field, strategy `caller-assigned-cwd-scoped`) | Resume from the same cwd the id was minted in; a fresh process with the id recalls a prior turn across a kill (measured 2026-09-02 on 1.0.13) |
 | A default-flag one-shot wrote outside its cwd | The default sandbox is off | `--always-approve` is the bypass axis, and the effort flag is `--reasoning-effort` |
-| A looping dispatch is refused despite grok's real `session_start`/`user_prompt_submit` hook surface | No loop extension ships for it | None: the refusal stands |
+| A looping dispatch is refused despite grok's real `session_start`/`user_prompt_submit` hook surface | grok runs a plugin's hooks only from a trusted location, and footnote's stage reached grok only through the untrusted Claude-compat scan (`grok inspect` exposes no trust field, so trust is read from the path) | `fno config plugin install grok` links the stage into `$GROK_HOME/plugins`, the trusted location; the looping dispatch itself stays refused until the capability row changes |
 
 ### pi
 
