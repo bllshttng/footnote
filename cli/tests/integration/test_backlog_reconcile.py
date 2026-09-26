@@ -1466,6 +1466,36 @@ def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monk
     assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
 
 
+def test_reconcile_pr_number_leaves_node_released_from_claimant_open(cli_env, monkeypatch):
+    """The owner's PR body was written while the child was contained, so the
+    trailer still names it after a release. The release recorded released_from,
+    so the bind skips the child and the forward scan closes the owner only."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-500001"),
+        _node("ab-500002", released_from="ab-500001"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Fixes ab-500001 ab-500002\n", number=810,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-500001"}
+
+    entries = _read_entries(graph_path)
+    released = next(e for e in entries if e["id"] == "ab-500002")
+    assert released["completed_at"] is None
+
+
 def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypatch, tmp_path):
     """x-2f24: ``~/.fno/graph.json`` is a single store shared across every
     project on the machine. A --pr-number call must not reverse-map another

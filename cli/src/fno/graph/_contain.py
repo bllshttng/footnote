@@ -133,10 +133,8 @@ def contain_into(
 
 
 def release_contained(entries: list[dict], node: dict) -> None:
-    """Un-contain ``node`` (which must carry ``contained_in``) and drop the PR
-    refs inherited from its owner, so the owner's merge cannot close a node
-    that no longer ships inside it. Own PRs stay; ``released_from`` feeds the
-    closure-bind skip."""
+    """Un-contain ``node`` (must carry ``contained_in``), dropping the PR refs
+    inherited from its owner so the owner's merge cannot close it."""
     from fno.graph._reconcile import node_pr_refs  # local: breaks the import cycle
     owner_id = node.pop("contained_in")
     owner = next((e for e in entries if isinstance(e, dict) and e.get("id") == owner_id), None)

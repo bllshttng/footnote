@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Optional
 
 from fno.graph._contain import release_contained
-
 # Deeper than any real epic nesting; mirrors _MAX_ANCESTOR_WALK in advance.py.
 _MAX_ANCESTOR_WALK = 64
 
