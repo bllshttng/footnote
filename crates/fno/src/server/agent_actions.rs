@@ -439,19 +439,7 @@ pub(super) async fn run_reentry_plan(
         Err(_) => Err(format!("re-entry plan for {name}: timed out")),
         Ok(Err(_)) => Err(format!("re-entry plan for {name}: fno-agents unavailable")),
         Ok(Ok(o)) if o.status.success() => {
-            let verdict =
-                ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))?;
-            // A pane cannot host a bg launcher: the launcher backgrounds the
-            // session and exits at once, so the pane would hold a dead shell
-            // while the row's real transport is a thread. Refuse and name the
-            // door that runs the same plan off-pane.
-            if verdict.mechanism.as_deref() == Some("bg-resume") {
-                return Err(format!(
-                    "{name}: re-enters as a background thread (bg-resume), not a pane; \
-                     run `fno agents resume {name}` for it"
-                ));
-            }
-            Ok(verdict)
+            ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))
         }
         Ok(Ok(o)) => Err(first_line_or(
             &String::from_utf8_lossy(&o.stderr),
@@ -554,13 +542,13 @@ pub(super) async fn resolve_restore_plans(
     let mut set = tokio::task::JoinSet::new();
     for name in claude_names {
         set.spawn(async move {
-            let verdict = run_reentry_plan(&name, "resume").await;
+            let verdict = run_reentry_plan(&name, "revive").await;
             (name, verdict)
         });
     }
     for name in portal_names {
         set.spawn(async move {
-            let verdict = run_reentry_plan(&name, "attach").await;
+            let verdict = run_reentry_plan(&name, "revive").await;
             (format!("portal:{name}"), verdict)
         });
     }

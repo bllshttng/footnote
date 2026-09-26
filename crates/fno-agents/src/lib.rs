@@ -69,6 +69,7 @@ pub mod bash_census;
 #[path = "birth_guard_tests.rs"]
 mod birth_guard_tests;
 pub mod blueprint_judge;
+mod boot_revival;
 mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;
