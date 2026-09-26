@@ -1,4 +1,4 @@
-"""`fno backlog get`, several ids: forward to `fno-agents graph-get`. Split out of graph/cli.py (over-budget)."""
+"""`fno backlog get`, several ids: forward to `fno-agents backlog get`. Split out of graph/cli.py (over-budget)."""
 from __future__ import annotations
 
 import subprocess

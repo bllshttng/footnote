@@ -19,20 +19,13 @@
 
 use super::commands::{self, GROUPS};
 
-/// The engine argv markers a public `fno backlog` invocation can never
-/// carry. Each one exists only on a native engine's contract (the folded
-/// actions' doors); seeing one in the tail means the caller is an internal
-/// bridge speaking the engine shape, not a user invoking the full command.
-const ENGINE_MARKERS_NOTE: &[&str] = &[
-    "--stdin",
-    "--graph",
-    "--blocking",
-    "--resolve",
-    "--node",
-    "--reads",
-    "--self-session",
-];
-const ENGINE_MARKERS_UPDATE: &[&str] = &["--graph"];
+/// The engine doors' argv shape: every native-engine caller (the Python
+/// bridges, the note passthrough, the status fanout) passes `--graph` as
+/// the FIRST tail token, and the public full-command surface never leads
+/// with it - `note`'s extra-tolerant parser would otherwise swallow a stray
+/// engine spelling as an ignored extra, so the first token is the one
+/// discriminator that cannot collide with a user invocation.
+const ENGINE_DOOR_HEAD: &str = "--graph";
 
 /// One resolved invocation: the legacy command the catalog maps it to (a
 /// `'static` catalog name), and the untouched tail after the command word.
@@ -132,25 +125,26 @@ pub fn run(args: &[String]) -> i32 {
         // The folded corpus/history reader: fully native, engine owns the
         // whole surface (inventory, migrate, history, stale, findings).
         "notes" => super::note_migrate::run_notes(resolved.tail),
-        // The folded note action. Engine markers mean an internal bridge
-        // speaking the native write/passthrough door; the plain public
+        // The folded note action. A leading `--graph` is the engine door's
+        // shape (bridge, passthrough, status fanout); the plain public
         // shape still carries Python-owned legs (evidence, identity,
         // reader walk, delivery) and rides the forward until its port.
-        "note" if carries(resolved.tail, ENGINE_MARKERS_NOTE) => {
-            super::note_cli::run_note(resolved.tail)
-        }
-        // The folded patch door: `--graph` marks the engine contract the
+        "note" if leads_with_engine_door(resolved.tail) => super::note_cli::run_note(resolved.tail),
+        // The folded patch door: the same leading-`--graph` contract the
         // lifecycle door speaks. The full public flag surface stays
         // Python-owned until its port.
-        "update" if carries(resolved.tail, ENGINE_MARKERS_UPDATE) => {
+        "update" if leads_with_engine_door(resolved.tail) => {
             super::patch::run_update(resolved.tail)
         }
-        // The folded batch read: the engine contract is `--graph`, several
-        // ids without the single-id render flags, or the stdin tracker door
-        // (zero positionals: the engine's own stdin arm decides). Everything
-        // else keeps the Python tiers, renderer, and archive walk.
+        // The folded batch read: the engine contract is a leading or
+        // trailing `--graph`, several ids without the single-id render
+        // flags, or the stdin tracker door (zero positionals: the engine's
+        // own stdin arm decides). Everything else keeps the Python tiers,
+        // renderer, and archive walk. `get`'s typer surface refuses
+        // unknown flags, so a `--graph` here is always the engine door.
         "get"
-            if carries(resolved.tail, &["--graph"])
+            if leads_with_engine_door(resolved.tail)
+                || carries(resolved.tail, &["--graph"])
                 || positional_count(resolved.tail) == 0
                 || (positional_count(resolved.tail) > 1
                     && !carries(resolved.tail, &["--field", "--grouped", "--strict"])) =>
@@ -159,6 +153,11 @@ pub fn run(args: &[String]) -> i32 {
         }
         _ => forward_python(&resolved),
     }
+}
+
+/// Whether the tail opens with the engine door's `--graph` token.
+fn leads_with_engine_door(tail: &[String]) -> bool {
+    tail.first().map(String::as_str) == Some(ENGINE_DOOR_HEAD)
 }
 
 fn positional_count(tail: &[String]) -> usize {
@@ -255,20 +254,31 @@ mod tests {
 
     #[test]
     fn the_note_route_splits_engine_markers_from_the_public_shape() {
-        let engine: Vec<String> = ["note", "--stdin", "--json", "--node", "x"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let r = resolve_head(&engine).unwrap();
-        assert_eq!(r.legacy, "note");
-        assert!(carries(r.tail, ENGINE_MARKERS_NOTE));
+        // The engine door opens with --graph: the bridges, the passthrough
+        // branch, and the status fanout all lead with it.
+        let engine: Vec<String> = [
+            "note", "--graph", "/tmp/g", "--stdin", "--json", "--node", "x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(leads_with_engine_door(resolve_head(&engine).unwrap().tail));
         let public: Vec<String> = ["note", "x-abc", "text"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let r = resolve_head(&public).unwrap();
-        assert_eq!(r.legacy, "note");
-        assert!(!carries(r.tail, ENGINE_MARKERS_NOTE));
+        let public_tail = resolve_head(&public).unwrap().tail;
+        assert!(!leads_with_engine_door(public_tail));
+        // The over-match this test pins shut: a stray engine spelling
+        // anywhere else in a public tail keeps the Python path, whose
+        // parser ignores unknown extras - the shape today's behavior has.
+        let stray: Vec<String> = ["note", "x-abc", "text", "--stdin"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let stray_tail = resolve_head(&stray).unwrap().tail;
+        assert!(!leads_with_engine_door(stray_tail));
+        assert!(!carries(stray_tail, &["--graph"]));
     }
 
     #[test]

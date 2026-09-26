@@ -27,7 +27,7 @@ Both sides carry `id` as the join key, never as a synced value.
 ## The interface
 
 The interface lives in Rust, on `TrackerNode` and `Candidate` in `crates/fno-agents/src/tracker/mod.rs`.
-The Python `fno.tracker` package is the exec client: it shells `fno-agents graph-get` and parses the pydantic models in `cli/src/fno/tracker/types.py`.
+The Python `fno.tracker` package is the exec client: it shells `fno-agents backlog get` and parses the pydantic models in `cli/src/fno/tracker/types.py`.
 
 Read from the tracker, five fields plus the display-only reads.
 
@@ -57,7 +57,7 @@ A backend supplies open or closed.
 
 ## The door and the cache
 
-Backends answer through `fno-agents graph-get`'s stdin door, the same stdin-JSON shape `gh-budget` uses on `fleet-incident`.
+Backends answer through `fno-agents backlog get`'s stdin door, the same stdin-JSON shape `gh-budget` uses on `fleet-incident`.
 The payload is `{"tracker": "read" | "list-open" | "snapshot" | "close", "backend": <name or null>, "id": <id or null>, "stale_ok": <bool>}`.
 The door prints one JSON object and exits 0 whenever the op ran; refusals ride in the payload as `{"not_found": true}` or `{"error": "..."}`.
 

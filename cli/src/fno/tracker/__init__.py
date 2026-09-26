@@ -9,7 +9,7 @@ must work offline.
 Backend selection is env-driven so it works with no config-schema machinery:
 ``FNO_TRACKER_BACKEND=github`` opts into GitHub Issues, and
 ``FNO_TRACKER_GITHUB_REPO=owner/repo`` scopes its ``list_open``. Default is
-``graph``. Every backend answers in Rust through ``fno-agents graph-get``'s stdin door.
+``graph``. Every backend answers in Rust through ``fno-agents backlog get``'s stdin door.
 """
 from __future__ import annotations
 

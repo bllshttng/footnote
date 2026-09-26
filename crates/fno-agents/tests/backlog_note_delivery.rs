@@ -31,14 +31,34 @@ fn read_graph(path: &PathBuf) -> serde_json::Value {
     json!({ "entries": fno_agents::graph_store::read_rows(path).unwrap() })
 }
 
+/// Move the `--graph <path>` pair to the front: the grouped door's engine
+/// contract opens with it (every real bridge speaks this shape), while the
+/// engine parser itself accepts the pair anywhere.
+fn door_first(args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--graph" && i + 1 < args.len() {
+            out.insert(0, args[i + 1].to_string());
+            out.insert(0, args[i].to_string());
+            i += 2;
+        } else {
+            out.push(args[i].to_string());
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Run the binary entry point with the body on stdin.
 fn note(_graph: &std::path::Path, args: &[&str], body: &str) -> i32 {
     use std::io::Write;
+    let argv = door_first(args);
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(
             std::iter::once("backlog")
                 .chain(std::iter::once("note"))
-                .chain(args.iter().copied()),
+                .chain(argv.iter().map(String::as_str)),
         )
         // The client lazy-starts a daemon that inherits this env, so the
         // daemon dies with this test run instead of idling an hour (x-5533).
@@ -66,11 +86,12 @@ fn graph_arg(graph: &std::path::Path) -> [String; 2] {
 /// asserted on stderr, so it must not inherit the test's stderr.
 fn note_captured(args: &[&str], body: &str) -> (i32, String, String) {
     use std::io::Write;
+    let argv = door_first(args);
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(
             std::iter::once("backlog")
                 .chain(std::iter::once("note"))
-                .chain(args.iter().copied()),
+                .chain(argv.iter().map(String::as_str)),
         )
         .envs(fno_agents::test_run::self_owner_env())
         .stdin(Stdio::piped())
@@ -100,7 +121,10 @@ fn corrupt_graph_names_the_read_failure_never_absence() {
     let graph = dir.path().join("graph.json");
     std::fs::write(&graph, "{").unwrap();
     let g = graph_arg(&graph);
-    let (code, stdout, stderr) = note_captured(&["t-1", "body", "--quiet", &g[0], &g[1]], "");
+    let (code, stdout, stderr) = note_captured(
+        &[g[0].as_str(), g[1].as_str(), "t-1", "body", "--quiet"],
+        "",
+    );
     assert_eq!(code, 5, "stdout: {stdout} stderr: {stderr}");
     assert!(stderr.contains("graph read failed"), "{stderr}");
     assert!(
@@ -118,7 +142,10 @@ fn absent_node_still_reports_absence_at_the_unchanged_code() {
     let graph = dir.path().join("graph.json");
     write_graph(&graph, &[fixture("t-1", "ready")]);
     let g = graph_arg(&graph);
-    let (code, stdout, stderr) = note_captured(&["t-nope", "body", "--quiet", &g[0], &g[1]], "");
+    let (code, stdout, stderr) = note_captured(
+        &[g[0].as_str(), g[1].as_str(), "t-nope", "body", "--quiet"],
+        "",
+    );
     assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
     assert!(stderr.contains("no node resolves to 't-nope'"), "{stderr}");
     assert!(!stderr.contains("graph read failed"), "{stderr}");
@@ -390,10 +417,29 @@ fn a_multibyte_head_is_cut_by_characters() {
     write_graph(&graph, &[fixture("t-1", "ready")]);
     let g = graph_arg(&graph);
     let prior = "\u{1f30a}".repeat(100);
-    let (code, _, stderr) = note_captured(&["t-1", &prior, "--json", "--quiet", &g[0], &g[1]], "");
+    let (code, _, stderr) = note_captured(
+        &[
+            g[0].as_str(),
+            g[1].as_str(),
+            "t-1",
+            prior.as_str(),
+            "--json",
+            "--quiet",
+        ],
+        "",
+    );
     assert_eq!(code, 0, "stderr: {stderr}");
-    let (code, stdout, stderr) =
-        note_captured(&["t-1", "probe", "--json", "--quiet", &g[0], &g[1]], "");
+    let (code, stdout, stderr) = note_captured(
+        &[
+            g[0].as_str(),
+            g[1].as_str(),
+            "t-1",
+            "probe",
+            "--json",
+            "--quiet",
+        ],
+        "",
+    );
     assert_eq!(code, 0, "stderr: {stderr}");
     let second: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     let expected = format!("{}...", "\u{1f30a}".repeat(80));
