@@ -180,43 +180,6 @@ def status(
 
 
 @pr_app.command(
-    "status",
-    hidden=True,
-    help=(
-        "The PR's CI verdict, failure detail and merge readiness. N pollers "
-        "of one PR cost one network read per cache TTL; `--refresh` bypasses "
-        "the coalescing cache (manual use only - it defeats the coalescing "
-        "that keeps a watcher fleet under the REST secondary limit)."
-    ),
-)
-def status(
-    pr_number: int = typer.Argument(..., help="GitHub PR number"),
-    refresh: bool = typer.Option(
-        False,
-        "--refresh",
-        "--no-cache",
-        help=(
-            "Bypass the coalescing cache and read GitHub live. Manual use "
-            "only - it defeats the coalescing that keeps a watcher fleet "
-            "under the REST secondary limit, so never put it in a poll loop."
-        ),
-    ),
-) -> None:
-    # The coalescing cache lives in the Rust owner: the watcher recipe polls
-    # this verb every 60s per session, and N sessions polling one PR must
-    # collapse to one network read per TTL or they trip the REST secondary
-    # limit (which counts request rate, not budget).
-    _run_status_door(
-        {
-            "op": "status-read",
-            "cwd": os.getcwd(),
-            "pr": pr_number,
-            "refresh": refresh,
-        }
-    )
-
-
-@pr_app.command(
     "wait",
     hidden=True,
     help=(
