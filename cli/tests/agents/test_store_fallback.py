@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -1116,3 +1117,66 @@ def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch, 
     entry = store_fallback.heal_from_harness_store("c655c326", scope_cwd=str(tmp_path))
     assert entry is not None
     assert entry.harness_session_id == CLAUDE_UUID
+
+
+# --- rm tombstone: a just-removed session is not re-adopted (x-976b) --------
+
+
+def _write_tombstone(root, harness, session_id, *, age_s=0):
+    """Stage the tombstone file `fno agents rm` writes beside the registry."""
+    removed_at = int(time.time()) - age_s
+    (root / "agents" / "rm_tombstones.json").write_text(
+        json.dumps(
+            [{"harness": harness, "session_id": session_id, "removed_at": removed_at}]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_recently_removed_codex_session_is_not_readopted(tmp_path):
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(tmp_path, "codex", CODEX_UUID, age_s=60)
+
+    with pytest.raises(AgentResolutionError) as err:
+        store_fallback.heal_from_harness_store(CODEX_UUID)
+
+    assert "removed" in str(err.value)
+    assert err.value.ambiguous
+    # The refusal left no row behind: no adopted duplicate blocks a later
+    # resume of the session the operator removed.
+    assert load_registry() == []
+
+
+def test_tombstone_for_another_session_does_not_block_adoption(tmp_path):
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(tmp_path, "codex", "d655c326-aaaa-bbbb-cccc-ddddeeeeffff")
+
+    entry = store_fallback.heal_from_harness_store(CODEX_UUID)
+
+    assert entry is not None
+    assert entry.origin == "adopted"
+
+
+def test_expired_tombstone_no_longer_blocks_adoption(tmp_path):
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(
+        tmp_path, "codex", CODEX_UUID, age_s=store_fallback.RM_TOMBSTONE_GRACE_SECS + 1
+    )
+
+    entry = store_fallback.heal_from_harness_store(CODEX_UUID)
+
+    assert entry is not None
+    assert entry.origin == "adopted"
+
+
+def test_tombstoned_hit_yields_to_a_live_alternative(tmp_path):
+    _write_claude_session(tmp_path, CLAUDE_UUID)
+    _write_codex_session(tmp_path, CODEX_UUID)
+    # Same 8-hex prefix -> both stores match the short token; the codex hit
+    # is tombstoned, so the claude hit is the one remaining match.
+    _write_tombstone(tmp_path, "codex", CODEX_UUID)
+
+    entry = store_fallback.heal_from_harness_store(CLAUDE_UUID[:8])
+
+    assert entry is not None
+    assert entry.harness == "claude"
