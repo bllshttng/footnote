@@ -154,7 +154,9 @@ fn restore_prunes_the_old_stand_in_shapes() {
     core.panes.get_mut(&pn).unwrap().name = Some("portal7".into());
     core.panes.get_mut(&candor).unwrap().name = Some("candor".into());
     core.panes.get_mut(&working).unwrap().name = Some("portal2".into());
-    core.agents = vec![bg_row("candor", "/tmp/seen", None)];
+    // The name arm reads the registry the restore walk reads: pin it.
+    let _rows = crate::restore_gate::RestoreRegistryRowsGuard;
+    crate::restore_gate::set_restore_registry_rows(vec![bg_row("candor", "/tmp/seen", None)]);
     // The fixture's subchild is forked asynchronously: wait until the
     // process table can see it, so the prune's never-prune guard reads
     // the fact, not the race.

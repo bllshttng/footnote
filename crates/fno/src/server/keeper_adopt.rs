@@ -406,17 +406,19 @@ impl Core {
                 .is_some();
             let orphan_hold = entry.portal_hold.is_some();
             let transient = entry.transient_view;
-            // The name arm needs a real registry snapshot: at startup the
-            // off-loop reader has not populated `agents`, and an empty
-            // snapshot must read "unknown", never "gone" (it would eat
-            // every held worker's placeholder).
-            let named_row_gone = !self.agents.is_empty()
-                && entry.name.as_deref().is_some_and(|n| {
-                    self.agents
-                        .iter()
+            // The name arm reads the registry the restore walk reads, fresh
+            // from the file: the off-loop snapshot is empty at startup, and
+            // an empty read must mean "unknown", never "gone" (it would eat
+            // every held worker's placeholder). `None` (unreadable) is
+            // unknown too.
+            let registry = crate::restore_gate::restore_registry_rows();
+            let named_row_gone = entry.name.as_deref().is_some_and(|n| {
+                registry.as_deref().is_some_and(|rows| {
+                    rows.iter()
                         .find(|a| a.name == n)
                         .is_none_or(|row| row.mux.is_none())
-                });
+                })
+            });
             if !(portal_number || orphan_hold || transient || named_row_gone) {
                 continue;
             }
