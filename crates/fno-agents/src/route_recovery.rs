@@ -120,6 +120,7 @@ pub fn persist(
         let Some(entry) = reg.entries.iter_mut().find(|e| {
             e.harness_session_id.as_deref() == Some(session_id)
                 || e.claude_session_uuid.as_deref() == Some(session_id)
+                || e.related_session_id.as_deref() == Some(session_id)
         }) else {
             return false;
         };

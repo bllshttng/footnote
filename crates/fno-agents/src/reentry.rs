@@ -822,10 +822,11 @@ pub fn resolve_reentry(
     )?;
     if let Some(r) = &recovered {
         match crate::route_recovery::persist(registry_path, &plan.session_id, r) {
-            Ok(_) => eprintln!(
+            Ok(true) => eprintln!(
                 "fno agents: restored route {} ({}) from the transcript's birth identity; recorded on the row",
                 r.provider, r.model
             ),
+            Ok(false) => {}
             Err(e) => eprintln!(
                 "fno agents: restored route {} ({}); row not updated: {e}",
                 r.provider, r.model

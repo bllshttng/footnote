@@ -555,10 +555,6 @@ pub fn decide(payload: &Value) -> Value {
     Value::Object(out)
 }
 
-/// The verb entry: JSON payload on stdin, decision JSON on stdout (the
-/// spawn-overlay shape). Exit 0 even for a "no axes" answer; exit 2 only for
-/// transport-level faults (unreadable payload), which the caller reports as
-/// the owner being unavailable.
 /// The `reentry_mechanism` field's answer: which relaunch a Resume resolves
 /// to for the named row, or the refusal naming why the wake may not respawn.
 pub fn reentry_mechanism_decide(ask: &Value) -> Value {
@@ -575,6 +571,10 @@ pub fn reentry_mechanism_decide(ask: &Value) -> Value {
     }
 }
 
+/// The verb entry: JSON payload on stdin, decision JSON on stdout (the
+/// spawn-overlay shape). Exit 0 even for a "no axes" answer; exit 2 only for
+/// transport-level faults (unreadable payload), which the caller reports as
+/// the owner being unavailable.
 pub fn run_spawn_axes(args: &[String]) -> i32 {
     use std::io::Read;
 
