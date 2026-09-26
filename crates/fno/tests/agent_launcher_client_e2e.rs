@@ -71,12 +71,18 @@ fn open_composer(h: &mut ClientHarness) {
 /// it, then step one tab right to the Model body. This follows the tabbed
 /// modal's grammar - the body is always visible, there is nothing to open.
 fn pick_claude_and_open_model_tab(h: &mut ClientHarness) {
-    // The body lists rows once the catalog read lands; the current harness
-    // (agy) wears the check glyph, the others the bullet.
-    h.wait_screen(10, |s| s.contains("\u{2713} agy"));
-    type_and_settle(h, b"claude");
+    // The body lists the catalog's selectable (installed) harnesses once
+    // the read lands. A clean CI home has only the fake bins, so the draft
+    // default (agy) may have no row at all: wait for installed rows, never
+    // for the check glyph.
     h.wait_screen(10, |s| {
-        !s.contains("\u{2713} agy") && s.contains("\u{2022} claude")
+        s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
+    });
+    type_and_settle(h, b"claude");
+    // codex vanishing proves the query narrowed the body; claude alone
+    // stays. Neither side of this test leans on the draft default.
+    h.wait_screen(10, |s| {
+        !s.contains("\u{2022} codex") && s.contains("\u{2022} claude")
     });
     type_and_settle(h, b"\r");
     h.wait_screen(10, |s| s.contains("claude · default"));
