@@ -218,6 +218,7 @@ pub mod loops_pause;
 pub mod machine_mail;
 pub mod machine_sample;
 pub mod machine_watch;
+pub mod mail_envelope;
 pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
