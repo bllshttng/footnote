@@ -2487,6 +2487,45 @@ def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
 
 
 @requires_rust
+def test_payload_named_node_walks_the_profile_lanes(monkeypatch):
+    """AC5-HP: a spawn that names its node only in the payload reads
+    the node's difficulty for the grid: lane A at
+    agents.profiles.target.lanes[0], never the high band, no difficulty
+    missing note. The transport is pass-through; the resolver's answer itself
+    is Rust-pinned."""
+    _pin_capacity(monkeypatch)
+    import fno.rust_binary as rb
+
+    _real_verb_call = rb.verb_call
+
+    def _pass_through(verb, payload, unavailable_cls, **kw):
+        if "spawn_node" in payload:
+            return {"node": "x-1", "source": "payload"}
+        return _real_verb_call(verb, payload, unavailable_cls, **kw)
+
+    monkeypatch.setattr(rb, "verb_call", _pass_through)
+    monkeypatch.setattr(
+        "fno.tracker.metadata.read_entries", lambda _tag: [dict(_LOW_NODE)]
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x", "sonnet-x"],
+                        "by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+    msg = err.getvalue()
+    assert "agents.profiles.target.lanes[0]" in msg
+    assert "difficulty missing" not in msg
+    assert "by_difficulty" not in msg
+
+
+@requires_rust
 def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
     """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
     lanes; the policy is live on them."""

@@ -749,32 +749,58 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
-    """Project the seam's facts to the node-seed verb and apply the answer pre-route."""
+    """Project the seam's facts to the node-seed verb and apply the answer pre-route.
+
+    A payload-named node (the seed names it, no ``--node``) resolves first
+    through the ``spawn_node`` answer; a payload answer splices ``--node``
+    right after the verb so every downstream reader sees one node, and the
+    row gate then refuses naming the payload when the id has no backlog row.
+    """
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    node_source = None
     if not node:
         from fno.rust_binary import VerbUnavailable, verb_call
-        try:
-            answer = verb_call("spawn-axes", {"node_seed": {
-                "family": list(_TARGET_FAMILY_VERBS),
-                "crown": _is_crown_bearing_spawn("spawn", args),
-                "resume": _is_resume_bearing_spawn("spawn", args),
-                "argv": list(args),
-            }}, VerbUnavailable)
-        except VerbUnavailable as exc:
-            print(f"fno agents spawn: {exc}; seed-node derivation skipped", file=sys.stderr)
-        else:
-            if answer.get("action") == "compose":
-                args = [str(tok) for tok in answer.get("argv") or list(args)]
-                node = (_spawn_flag_value(args, "--node") or "").strip()
-                if not node and (reason := _spawn_flag_value(args, "--node-reason")):
-                    os.environ["FNO_NODE_REASON"] = reason
-                    del args[args.index("--node-reason") : args.index("--node-reason") + 2]
-            elif answer.get("action") == "refuse":
-                print("fno agents spawn: binary predates seed-node derivation; spawning nodeless", file=sys.stderr)
+
+        slot = _seed_slot(list(args[1:]))
+        if slot:
+            try:
+                answer = verb_call("spawn-axes", {"spawn_node": {
+                    "argv": list(args),
+                    "seed_index": slot[0] + 1,
+                    "seed_form": slot[1],
+                    "flag_node": None,
+                    "env_node": None,
+                }}, VerbUnavailable)
+            except VerbUnavailable as exc:
+                print(f"fno agents spawn: {exc}; payload-node resolution skipped", file=sys.stderr)
+            else:
+                if answer.get("source") == "payload" and answer.get("node"):
+                    node = str(answer["node"])
+                    node_source = "payload"
+                    args = [args[0], "--node", node, *args[1:]]
+        if not node:
+            try:
+                answer = verb_call("spawn-axes", {"node_seed": {
+                    "family": list(_TARGET_FAMILY_VERBS),
+                    "crown": _is_crown_bearing_spawn("spawn", args),
+                    "resume": _is_resume_bearing_spawn("spawn", args),
+                    "argv": list(args),
+                }}, VerbUnavailable)
+            except VerbUnavailable as exc:
+                print(f"fno agents spawn: {exc}; seed-node derivation skipped", file=sys.stderr)
+            else:
+                if answer.get("action") == "compose":
+                    args = [str(tok) for tok in answer.get("argv") or list(args)]
+                    node = (_spawn_flag_value(args, "--node") or "").strip()
+                    if not node and (reason := _spawn_flag_value(args, "--node-reason")):
+                        os.environ["FNO_NODE_REASON"] = reason
+                        del args[args.index("--node-reason") : args.index("--node-reason") + 2]
+                elif answer.get("action") == "refuse":
+                    print("fno agents spawn: binary predates seed-node derivation; spawning nodeless", file=sys.stderr)
     if not node:
         return list(args), None
 
@@ -801,6 +827,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         "effective_verb": effective_verb,
         "stored_verb": stored or None,
         "derive_error": derive_error,
+        "node_source": node_source,
         "family": list(_TARGET_FAMILY_VERBS),
         "crown": _is_crown_bearing_spawn("spawn", args),
         "resume": _is_resume_bearing_spawn("spawn", args),
