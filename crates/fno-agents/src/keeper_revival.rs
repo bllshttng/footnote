@@ -2,8 +2,7 @@
 //!
 //! After the resume door proves the row's contract carries a same-id revival
 //! (`[harness.<h>.keeper]` lists `resume_session_id`), this module composes
-//! the pieces that already exist: the spawn gate's revival admission
-//! (`resume_gate::admit_revival`), the keeper socket probe
+//! the pieces that already exist: the keeper socket probe
 //! (`daemon::probe_keeper_socket`), the worker binary
 //! (`daemon::resolve_worker_bin`), the thread socket path and row flip
 //! (`convert::keeper_rebind`), and the keeper mail lane. It starts
@@ -116,7 +115,6 @@ pub(crate) fn revive(
         base_argv,
         message,
         &sock,
-        || crate::resume_gate::admit_revival(home, "resume", row_name, Path::new(cwd)),
         |sock| crate::daemon::probe_keeper_socket(sock, Duration::from_secs(2)),
         launch_keeper,
         terminate_keeper,
@@ -127,7 +125,7 @@ pub(crate) fn revive(
 /// so the ordering and the guards here are provable without a gate daemon or
 /// a real keeper.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn revive_with<A, P, L, K>(
+pub(crate) fn revive_with<P, L, K>(
     home: &crate::paths::AgentsHome,
     row: &RegistryEntry,
     harness: &str,
@@ -136,27 +134,16 @@ pub(crate) fn revive_with<A, P, L, K>(
     base_argv: &[String],
     message: Option<&str>,
     sock: &Path,
-    admit: A,
     probe: P,
     mut launch: L,
     kill: K,
 ) -> i32
 where
-    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
     P: Fn(&Path) -> crate::daemon::KeeperProbe,
     L: FnMut(&LaunchSpec) -> Result<u32, String>,
     K: Fn(u32),
 {
     let row_name = &row.name;
-    // Held to the end: this is the machine-wide spawn-gate mutex on the bg
-    // substrate, so it also serializes two concurrent revivals of one row.
-    let _admission = match admit() {
-        Ok(guard) => guard,
-        Err(code) => {
-            crate::resume_gate::release_revival_claims(session_id);
-            return code;
-        }
-    };
     let contract = match HarnessContract::packaged() {
         Ok(contract) => contract,
         Err(error) => {
@@ -613,10 +600,6 @@ mod tests {
         }
     }
 
-    fn no_admit() -> Result<crate::spawn_gate::GateGuard, i32> {
-        Ok(crate::spawn_gate::GateGuard::default())
-    }
-
     struct Harness {
         launched: Mutex<Vec<Vec<String>>>,
         killed: Mutex<Vec<u32>>,
@@ -650,10 +633,6 @@ mod tests {
         std::fs::read_to_string(crate::client_verbs::trace_events_path(home)).unwrap_or_default()
     }
 
-    fn registry_bytes(home: &crate::paths::AgentsHome) -> Vec<u8> {
-        std::fs::read(home.registry_json()).unwrap()
-    }
-
     fn read_row(home: &crate::paths::AgentsHome) -> RegistryEntry {
         crate::state::load_registry(&home.registry_json())
             .unwrap()
@@ -683,7 +662,6 @@ mod tests {
             &base_argv(),
             None,
             Path::new("/state/mux/threads/t-revive.sock"),
-            no_admit,
             probe,
             |spec| calls.launch(spec),
             |pid| calls.kill(pid),
@@ -754,36 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_refusal_returns_its_code_and_touches_nothing() {
-        // AC3-ERR
-        let (_dir, home) = home();
-        let row = agy_row();
-        let calls = Harness::new();
-        let before = registry_bytes(&home);
-        let code = revive_with(
-            &home,
-            &row,
-            "agy",
-            SID,
-            "/tmp",
-            &base_argv(),
-            None,
-            Path::new("/state/mux/threads/t-revive.sock"),
-            || Err(83),
-            probe_steps(vec![]),
-            |spec| calls.launch(spec),
-            |pid| calls.kill(pid),
-        );
-        assert_eq!(code, 83);
-        assert!(calls.launched.lock().unwrap().is_empty());
-        assert_eq!(
-            registry_bytes(&home),
-            before,
-            "the registry is byte-identical"
-        );
-    }
-
-    #[test]
     fn an_already_live_keeper_and_a_silent_one_never_launch() {
         // AC4-EDGE
         let (_dir, home) = home();
@@ -799,7 +747,6 @@ mod tests {
             &base_argv(),
             None,
             sock,
-            no_admit,
             probe_steps(vec![crate::daemon::KeeperProbe::Answered(identify(
                 900, 901,
             ))]),
@@ -819,7 +766,6 @@ mod tests {
             &base_argv(),
             None,
             sock,
-            no_admit,
             probe_steps(vec![crate::daemon::KeeperProbe::Silent]),
             |spec| calls.launch(spec),
             |pid| calls.kill(pid),
@@ -843,7 +789,6 @@ mod tests {
             &base_argv(),
             None,
             Path::new("/state/mux/threads/t-revive.sock"),
-            no_admit,
             probe_steps(vec![
                 crate::daemon::KeeperProbe::NoListener,
                 crate::daemon::KeeperProbe::Answered(identify(4242, 4243)),
@@ -886,7 +831,6 @@ mod tests {
             &base_argv(),
             None,
             Path::new("/state/mux/threads/t-revive.sock"),
-            no_admit,
             probe_steps(vec![
                 crate::daemon::KeeperProbe::NoListener,
                 crate::daemon::KeeperProbe::Answered(identify_for(
