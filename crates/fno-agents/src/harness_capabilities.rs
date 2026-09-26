@@ -1634,6 +1634,7 @@ mod tests {
         assert_eq!(value("claude"), "native");
         assert_eq!(value("codex"), "native");
         assert_eq!(value("agy"), "native");
+        assert_eq!(value("grok"), "native");
         assert_eq!(value("gemini"), "none");
         assert_eq!(value("opencode"), "extension");
         assert_eq!(value("pi"), "extension");
@@ -1661,6 +1662,11 @@ mod tests {
             .is_empty());
         assert!(contract
             .capabilities("claude")
+            .unwrap()
+            .loop_extension
+            .is_empty());
+        assert!(contract
+            .capabilities("grok")
             .unwrap()
             .loop_extension
             .is_empty());
