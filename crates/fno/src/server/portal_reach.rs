@@ -1242,6 +1242,31 @@ impl Core {
         (named == 1).then_some(idx)
     }
 
+    /// The portal index a ROW wears: the seat hosting its pane, else the one
+    /// open seat whose key this row alone answers. A row whose viewer a held
+    /// portal stands in for keeps its mark without hosting the seat's pane,
+    /// so the sideline marks the row a portal shows and never the seat
+    /// itself (rows are not per-portal).
+    pub(super) fn row_portal_marker(&self, a: &RegistryAgent) -> Option<u8> {
+        self.portal_marker(a.mux.as_ref().map(|(_, pane)| *pane))
+            .or_else(|| {
+                self.portals.iter().find_map(|(idx, portal)| {
+                    // A CLOSED portal's stale slot shows nothing: only a seat
+                    // whose pane still lives can be showing a row, so it alone
+                    // hands its key's mark out.
+                    if !self.panes.contains_key(&portal.seat) {
+                        return None;
+                    }
+                    let mut hits = self
+                        .agents
+                        .iter()
+                        .filter(|x| row_answers_key(x, &portal.row_key));
+                    let first = hits.next()?;
+                    (hits.next().is_none() && std::ptr::eq(first, a)).then_some(*idx)
+                })
+            })
+    }
+
     /// The lowest portal index nothing LIVE holds.
     ///
     /// Server-side on purpose. A client computing this from the rows it last

@@ -3017,6 +3017,66 @@ fn a_vanishing_portal_says_so_and_names_its_row() {
     );
 }
 
+// ---- portal seats are never rows of their own -----------------------------
+
+#[test]
+fn a_held_portal_seat_renders_no_row_of_its_own() {
+    // A portal seat whose row is gone is a held idle shell: it mints no
+    // bare "?" row, exactly as a seat whose viewer died must not read as
+    // live work (rows are not per-portal).
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    core.agents.clear();
+    let rows = core.agent_rows();
+
+    assert!(
+        rows.iter().all(|r| r.pane_id != Some(seat)),
+        "the seat pane never renders as a row: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r.name != "portal0"),
+        "no phantom portal row: {rows:?}"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn the_row_a_held_portal_shows_wears_its_mark_not_the_seat() {
+    // AC: the mark rides the ROW the portal shows. A row whose viewer
+    // mapping is gone renders paneless, wears the seat's mark, and the
+    // seat itself mints no second row beside it.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    // The viewer mapping is gone: the row is paneless, the seat is held.
+    core.attached.clear();
+    let rows = core.agent_rows();
+
+    let a = rows
+        .iter()
+        .find(|r| r.name == "target-a")
+        .expect("the row still renders");
+    assert_eq!(
+        a.pane_id, None,
+        "no pane binds the row: it renders watch-only"
+    );
+    assert_eq!(
+        a.portal,
+        Some(0),
+        "the row the portal shows wears the marker"
+    );
+    assert!(
+        rows.iter().all(|r| r.pane_id != Some(seat)),
+        "the seat itself mints no row: {rows:?}"
+    );
+    core.reap_pane(seat);
+}
+
 // ---- (x-3349) closing a portal is its own gesture -------------------------
 
 #[test]

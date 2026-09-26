@@ -1434,6 +1434,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // silently emptied roster (the false "0 registered agents" outage: a stale
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
+    let _ = state::heal_full_uuid_short_ids(&home.registry_json());
 
     // State: cold_start.
     // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
@@ -4494,15 +4495,14 @@ where
         "status": filter_status,
         "progress": filter_progress,
     });
-    Response::ok(
-        req.id,
-        json!({
-            "agents": entries,
-            "filters_applied": filters_applied,
-            "fields_omitted": LIST_PROJECTION_OMISSIONS,
-            "truth_probe_asked": truth_probe_asked,
-            "truth_probe_answered": truth_probe_answered,
-        }),
+    list_rows::list_response(
+        req,
+        entries,
+        filters_applied,
+        truth_probe_asked,
+        truth_probe_answered,
+        all,
+        &ctx.home,
     )
 }
 
@@ -5445,16 +5445,8 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Err(interrupt_report) = rm_teardown::end_codex_thread(ctx, &name).await {
-            return Response::err(
-                req.id,
-                ErrorCode::Busy,
-                format!(
-                    "agent {name}: the codex thread's turn did not settle \
-                     ({interrupt_report}); the registry row and the codex index \
-                     entry are kept"
-                ),
-            );
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+            return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
