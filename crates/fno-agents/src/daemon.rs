@@ -31,6 +31,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 mod blocking_bound;
 mod claude_stop;
 mod fleet_arms;
+mod lifecycle;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
@@ -41,6 +42,7 @@ pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
+use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
@@ -4594,51 +4596,6 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
             "channels": { "registered": channels_registered },
         }),
     )
-}
-
-/// Resolve lifecycle tokens through the all-source client resolver. Return the
-/// resolved row itself because the helper may have just adopted a store-only
-/// session that is absent from the caller's pre-heal registry snapshot.
-async fn entry_for_lifecycle(
-    registry: &state::Registry,
-    token: &str,
-    registry_path: &std::path::Path,
-    cross_project: bool,
-) -> Result<Option<RegistryEntry>, String> {
-    let Value::Array(rows) = serde_json::to_value(&registry.entries)
-        .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
-    else {
-        return Err("could not inspect registry identities".to_string());
-    };
-    let worker_token = token.to_string();
-    let path = registry_path.to_path_buf();
-    let resolved = tokio::task::spawn_blocking(move || {
-        crate::client_verbs::resolve_entry_with_heal_scoped(
-            &rows,
-            &worker_token,
-            &path,
-            cross_project,
-            None,
-        )
-    })
-    .await
-    .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
-    match resolved {
-        Ok(entry) => {
-            let mut entry: RegistryEntry = serde_json::from_value(entry)
-                .map_err(|exc| format!("resolved identity row is unreadable: {exc}"))?;
-            entry.backfill_harness_aliases();
-            if let Some(legacy) = entry.backfill_short_id() {
-                return Err(format!(
-                    "resolved identity row {:?} has conflicting transport ids (legacy={legacy:?})",
-                    entry.name
-                ));
-            }
-            Ok(Some(entry))
-        }
-        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(None),
-        Err(err) => Err(err.message()),
-    }
 }
 
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
