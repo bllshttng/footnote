@@ -622,7 +622,7 @@ Two rules follow. Which one applies depends on whether the launch has an argv ca
 
 **Seal what must forward.** `_codex_thread_spawn` has no argv carrier, because the env is its only channel to the app-server child. It calls `fno.agents.account_env.seal_state_root`. That pins `FNO_AGENTS_HOME`, `FNO_CLAIMS_ROOT` and `FNO_STATE_DIR` to the roots the current process resolves, whenever a mapping moves `HOME`. The registry row, the claim, the locks and the graph stay findable. `FNO_STATE_DIR` is the carrier that `state_dir` and `locks_dir` honor ahead of their config/`$HOME` defaults. The Rust default graph path reads it ahead of `FNO_HOME`, so a sealed Rust child reads the graph its parent wrote.
 
-The remaining limit: a root with no env carrier still follows the moved `HOME`. The three pins cover the registry, the claims tree, the locks dir and the config state root. Anything added later needs its own carrier or an argv path. Prefer the argv carrier over the seal wherever a launch has one.
+The remaining limit: a root the seal does not pin still follows the moved `HOME`. That includes the `FNO_HOME`-anchored sidecars (push-stamps, the corrections log, the decision index), whose carrier the seal leaves free. Prefer the argv carrier over the seal wherever a launch has one.
 
 A lane that can carry neither refuses. The codex one-shot path threads no overlay, so a pinned account there raises rather than launching on the ambient account.
 
