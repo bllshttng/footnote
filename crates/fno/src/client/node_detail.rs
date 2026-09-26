@@ -13,6 +13,8 @@ use super::backlog_board::{rule, trunc, BoardView};
 use super::backlog_style::{BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model::{session_action, SessionAction};
+#[path = "backlog_md.rs"]
+pub(crate) mod backlog_md;
 /// One selectable row of the drill-down: a link to another node, or a
 /// session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,20 +23,24 @@ pub(crate) enum Sel {
     Session(usize),
 }
 
-/// The overlay's open state, held in `BoardView.detail`. `sel` indexes
-/// ONE list: link rows first, then session rows. `trail` is the pushed
-/// ids behind the current node; an empty trail's Esc returns to the board.
+/// The detail pane's open state, held in `BoardView.detail`. `sel`
+/// indexes ONE list: link rows first, then session rows. `trail` is the
+/// pushed ids behind the current node; an empty trail's Esc returns focus
+/// to the board. `scroll` is the pane's document scroll offset.
 pub(crate) struct NodeDetailOverlay {
     pub(crate) node_id: String,
     pub(crate) trail: Vec<String>,
     pub(crate) sel: usize,
-    pub(crate) details_open: bool,
+    pub(crate) scroll: usize,
 }
 
 /// The selectable rows in render order: the five link groups, then the
 /// session rows. `sel` indexes THIS list.
 fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
     let mut v: Vec<Sel> = Vec::new();
+    for l in view.parent.iter() {
+        v.push(Sel::Link(l.id.clone()));
+    }
     for l in view.children.iter() {
         v.push(Sel::Link(l.id.clone()));
     }
@@ -60,28 +66,30 @@ fn sel_list(view: &crate::backlog_model::NodeView) -> Vec<Sel> {
 /// status/priority pill), dim fields, and every section (body, links,
 /// sessions, notes) under a bold header with a thin rule. `w` truncates
 /// every line.
-pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usize>) {
+/// The detail pane's body for an explicit node: the pane shows the
+/// cursor card's node when it lacks focus, and marks no link row then
+/// (`sel` is `None`).
+pub(crate) fn pane_lines(
+    b: &BoardView,
+    node_id: &str,
+    sel_arg: Option<usize>,
+    w: usize,
+) -> (Vec<BLine>, Option<usize>) {
     let mut lines: Vec<BLine> = Vec::new();
-    let Some(o) = &b.detail else {
-        return (lines, None);
-    };
     let Some(inputs) = b.inputs.as_ref() else {
         return (vec![BLine::meta("reading board...")], None);
     };
-    let Some(view) = crate::backlog_model::node(inputs, &o.node_id) else {
+    let Some(view) = crate::backlog_model::node(inputs, node_id) else {
         return (
-            vec![BLine::meta(format!(
-                "no node {} in the board read",
-                o.node_id
-            ))],
+            vec![BLine::meta(format!("no node {node_id} in the board read"))],
             None,
         );
     };
     let sels = sel_list(&view);
-    let sel = if sels.is_empty() {
-        usize::MAX
-    } else {
-        o.sel.min(sels.len() - 1)
+    let sel = match sel_arg {
+        None => usize::MAX,
+        Some(_) if sels.is_empty() => usize::MAX,
+        Some(s) => s.min(sels.len() - 1),
     };
     let mut k: usize = 0;
     let mut follow: Option<usize> = None;
@@ -161,35 +169,11 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usiz
         lines.push(BLine::meta(t(&format!("{}: {}", f.feature, f.reason))));
     }
     lines.push(BLine::plain(String::new()));
-    // Body section: bold header + thin rule, then the details text.
-    lines.push(BLine::head(t("body")));
-    lines.push(BLine::meta(rule(w)));
-    if let Some(details) = view.details.as_ref().and_then(|d| d.as_str()) {
-        let mut wrapped: Vec<String> = Vec::new();
-        for para in details.split('\n') {
-            wrap_line(para, w, &mut wrapped);
-        }
-        if o.details_open || wrapped.len() <= 12 {
-            for l in &wrapped {
-                lines.push(BLine::plain(t(l)));
-            }
-        } else {
-            let shown = wrapped.iter().take(12);
-            for l in shown {
-                lines.push(BLine::plain(t(l)));
-            }
-            lines.push(BLine::meta(t(&format!(
-                "\u{2026} {} more lines (d opens)",
-                wrapped.len() - 12
-            ))));
-        }
-    } else {
-        lines.push(BLine::meta(t("details: none")));
-    }
-    lines.push(BLine::plain(String::new()));
 
-    // Links section: one row per id under each bold heading, selectable.
-    let groups: [(&str, &Vec<crate::backlog_model::Link>); 5] = [
+    // Links section: the parent first, then one row per id under each bold
+    // heading, selectable.
+    let groups: [(&str, &Vec<crate::backlog_model::Link>); 6] = [
+        ("parent", &view.parent),
         ("children", &view.children),
         ("contained", &view.contained),
         ("blocked by", &view.blocked_by),
@@ -305,15 +289,53 @@ pub(crate) fn overlay_lines(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usiz
     for note in view.notes.iter().take(3) {
         lines.push(BLine::plain(t(&format!("   {}", note.text))));
     }
-    lines.push(BLine::meta(t(&format!(
-        "e/p/s/S edit - D append - N note - E description in $EDITOR - esc back"
-    ))));
+    lines.push(BLine::plain(String::new()));
+    // Document section: the node's markdown plan when readable, else its
+    // details text.
+    lines.push(BLine::head(t("document")));
+    lines.push(BLine::meta(rule(w)));
+    let doc = b.doc.as_ref().filter(|d| d.node_id == node_id);
+    match (&view.plan_path, doc) {
+        (Some(path), Some(d)) if d.error.is_empty() => {
+            lines.extend(backlog_md::md_lines(&d.lines_src, w, DOC_LINE_CAP));
+        }
+        (Some(path), _) => {
+            let reason = doc
+                .map(|d| d.error.clone())
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| "still loading".into());
+            lines.push(BLine::meta(t(&format!(
+                "plan: {path} (unreadable: {reason})"
+            ))));
+            render_details(&view, w, &mut lines);
+        }
+        (None, _) => render_details(&view, w, &mut lines),
+    }
     (lines, follow)
+}
+
+/// The pane's document line cap before the renderer's ellipsis line.
+const DOC_LINE_CAP: usize = 400;
+
+/// The details text wrapped as plain lines, or `details: none`.
+fn render_details(view: &crate::backlog_model::NodeView, w: usize, out: &mut Vec<BLine>) {
+    let text = view.details.as_ref().and_then(|d| d.as_str()).unwrap_or("");
+    if text.trim().is_empty() {
+        out.push(BLine::meta(trunc("details: none", w)));
+        return;
+    }
+    let mut wrapped: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        wrap_line(para, w, &mut wrapped);
+    }
+    for l in wrapped {
+        out.push(BLine::plain(trunc(&l, w)));
+    }
 }
 
 /// Word-wrap one paragraph into lines of at most `w` chars on whitespace
 /// boundaries; a single word longer than `w` is hard-cut.
-fn wrap_line(para: &str, w: usize, out: &mut Vec<String>) {
+pub(crate) fn wrap_line(para: &str, w: usize, out: &mut Vec<String>) {
     if para.is_empty() {
         out.push(String::new());
         return;
@@ -348,10 +370,10 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// The overlay's keys. j/k (and arrows) move the selection, Enter runs
-/// the selected row (a link drills in, a session launches through the hit
-/// cascade, a dim row answers with its reason), `d` toggles the whole
-/// details text, `b` plans, `t` launches the node as a target through the
+/// The detail pane's keys. j/k (and arrows) move the selection, Enter
+/// runs the selected row (a link drills in, a session launches through
+/// the hit cascade, a dim row answers with its reason), PgUp/PgDn scroll
+/// the document, `b` plans, `t` launches the node as a target through the
 /// prefilled launcher, and `A` asks the king (the board's own sends).
 pub(crate) async fn detail_keys(
     view: &mut View,
@@ -399,11 +421,8 @@ pub(crate) async fn detail_keys(
             ModalKey::Up | ModalKey::Byte(b'k') => move_sel(view, false),
             ModalKey::Down | ModalKey::Byte(b'j') => move_sel(view, true),
             ModalKey::Enter => activate(view, sock_w).await?,
-            ModalKey::Byte(b'd') => {
-                if let Some(o) = view.backlog_board.as_mut().and_then(|b| b.detail.as_mut()) {
-                    o.details_open = !o.details_open;
-                }
-            }
+            ModalKey::PageUp => scroll_detail(view, false),
+            ModalKey::PageDown => scroll_detail(view, true),
             ModalKey::Byte(b'b') => backlog_board::dispatch_plan(view, sock_w).await?,
             ModalKey::Byte(b't') => backlog_board::launch_target(view, sock_w).await?,
             ModalKey::Byte(b'A') => backlog_board::ask_the_king(view, sock_w).await?,
@@ -421,6 +440,9 @@ pub(crate) async fn detail_keys(
             }
             _ => {}
         }
+    }
+    if let Some(b) = view.backlog_board.as_mut() {
+        backlog_board::backlog_panes::sync_doc(b);
     }
     Ok(StdinFlow::Continue)
 }
@@ -458,6 +480,21 @@ fn move_sel(view: &mut View, down: bool) {
         (o.sel + 1).min(count - 1)
     } else {
         o.sel.saturating_sub(1)
+    };
+}
+
+/// PgUp/PgDn: scroll the pane's document, in steps of eight lines.
+fn scroll_detail(view: &mut View, down: bool) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    let Some(o) = b.detail.as_mut() else {
+        return;
+    };
+    o.scroll = if down {
+        o.scroll.saturating_add(8)
+    } else {
+        o.scroll.saturating_sub(8)
     };
 }
 
