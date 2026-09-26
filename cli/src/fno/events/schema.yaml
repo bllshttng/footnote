@@ -3631,7 +3631,7 @@ event_types:
     consumers: [operator, scratch]
 
   - name: scratch_shape_filed
-    description: "The scratch-shape sweep filed, folded, or seeded a backlog node for a recurring scratch shape. One row per file or fold; the newest row per shape is the sweep's filed-node index (a live node folds new evidence onto itself, a node done outside the window refiles with caused_by, a node done inside the window suppresses)."
+    description: "The scratch-shape sweep filed, folded, or seeded a backlog node for a recurring scratch shape. One row per file or fold, as a receipt for the report. The filing index is the graph node's origin_evidence key scratch-shape:<shape>, not this row (a live keyed node folds new evidence onto itself, a keyed node done outside the window refiles with caused_by, a keyed node done inside the window suppresses)."
     sources: [daemon, agents, test]
     data:
       required: [shape, node_id, outcome]
