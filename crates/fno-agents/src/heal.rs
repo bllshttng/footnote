@@ -41,6 +41,72 @@ fn gh_api(a: &Args, path: &str, extra: &[&str]) -> Result<String, String> {
     crate::pr_push::gh_api(&a.gh_bin, &a.cwd, path, extra)
 }
 
+/// The `GhProbe` seam over heal's own resolved gh binary, so heal's job-log
+/// reads ride the pr_status cache every caller shares.
+struct HealProbe<'a> {
+    gh_bin: &'a str,
+}
+
+impl crate::pr_status_facts::GhProbe for HealProbe<'_> {
+    fn run_gh(
+        &self,
+        cwd: &std::path::Path,
+        args: &[String],
+    ) -> Result<(bool, String, String), String> {
+        let owned: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = crate::pr_push::run_labeled("pr-heal", self.gh_bin, &owned, cwd, READ_TIMEOUT)?;
+        Ok(out)
+    }
+}
+
+/// heal's job-log read through the shared cache: same `{owner}/{repo}`
+/// placeholder path, but a log one status read already fetched costs no
+/// second download. `slug_key` keys the row; the repo's origin slug. An
+/// unresolvable slug falls back to the placeholder read, so the log and
+/// the remedy it drives survive a missing origin exactly as before.
+fn cached_job_log(a: &Args, slug_key: &str, job_id: &str) -> String {
+    let (owner, repo) = match repo_slug_parts(slug_key) {
+        Some(parts) => parts,
+        None => {
+            return gh_api(
+                a,
+                &format!("repos/{{owner}}/{{repo}}/actions/jobs/{job_id}/logs"),
+                &[],
+            )
+            .unwrap_or_else(|e| format!("log unavailable: {e}"));
+        }
+    };
+    let probe = HealProbe { gh_bin: &a.gh_bin };
+    crate::pr_status::job_log(&probe, &a.cwd, slug_key, &owner, &repo, job_id)
+        .unwrap_or_else(|e| format!("log unavailable: {e}"))
+}
+
+fn repo_slug_parts(slug_key: &str) -> Option<(String, String)> {
+    if slug_key.is_empty() {
+        return None;
+    }
+    let mut split = slug_key.splitn(2, "--");
+    let owner = split.next()?.to_string();
+    let repo = split.next()?.to_string();
+    Some((owner, repo))
+}
+
+/// The repo's origin slug key (`owner--repo`), read once per invocation.
+fn origin_slug_key(a: &Args) -> Option<String> {
+    let url = crate::pr_push::run_labeled(
+        "pr-heal",
+        &a.git_bin,
+        &["remote", "get-url", "origin"],
+        &a.cwd,
+        READ_TIMEOUT,
+    )
+    .ok()?
+    .1
+    .trim()
+    .to_string();
+    crate::merge_gates::repo_slug_from_origin(&url).map(|slug| slug.replace('/', "--"))
+}
+
 fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
     crate::pr_push::read_checks(&a.gh_bin, &a.cwd, head)
 }
@@ -926,21 +992,17 @@ fn findings_for(
         }
     };
     let mut out = Vec::new();
+    let slug_key = origin_slug_key(a).unwrap_or_default();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
         let log = if let Some(timeout) = row.get("timeout").and_then(|v| v.as_str()) {
             timeout.to_string()
         } else {
             match job_id(row["link"].as_str().unwrap_or("")) {
-                Some(id) => gh_api(
-                    a,
-                    &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
-                    &[],
-                )
-                // A log the API cannot serve (expired retention, a commit status
-                // with no job) is REPORTED as unreadable, never dropped: a check
-                // heal cannot read is still red.
-                .unwrap_or_else(|e| format!("log unavailable: {e}")),
+                // A log the API cannot serve (expired retention, a commit
+                // status with no job) is REPORTED as unreadable, never
+                // dropped: a check heal cannot read is still red.
+                Some(id) => cached_job_log(a, &slug_key, &id),
                 None => "log unavailable: not an Actions job".to_string(),
             }
         };
@@ -1868,6 +1930,7 @@ fn detect_flakes(
     let Ok(rows) = crate::pr_push::read_checks_rows(&a.gh_bin, &a.cwd, head) else {
         return;
     };
+    let slug_key = origin_slug_key(a).unwrap_or_default();
     for run in run_ids {
         let run_rows: Vec<&Value> = rows
             .iter()
@@ -1893,13 +1956,7 @@ fn detect_flakes(
             // the key is the check name. One best-effort log read, once per
             // (sha, run id, check) -- the guard above keeps it rare.
             let log = match crate::pr_push::job_id(row["link"].as_str().unwrap_or("")) {
-                Some(id) => gh_api(
-                    a,
-                    &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
-                    &[],
-                )
-                .map(|raw| strip_timestamps(&raw))
-                .unwrap_or_default(),
+                Some(id) => strip_timestamps(&cached_job_log(a, &slug_key, &id)),
                 None => String::new(),
             };
             let test = [

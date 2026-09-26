@@ -685,7 +685,7 @@ fn diff_paths(output: &str) -> Vec<String> {
 /// (`git@host:owner/repo.git`), https (`https://host/owner/repo.git`), and
 /// trailing-slash spellings, so the ledger scoping test reads the same
 /// repository whatever form the checkout's origin takes.
-fn repo_slug_from_origin(url: &str) -> Option<String> {
+pub(crate) fn repo_slug_from_origin(url: &str) -> Option<String> {
     let trimmed = url.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let mut parts: Vec<&str> = trimmed

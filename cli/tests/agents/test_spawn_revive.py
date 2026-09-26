@@ -215,14 +215,14 @@ def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> No
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-pinned", "-H", "claude", "--resume", DEAD_UUID,
-         "--node", "x-other", "--substrate", "bg", "/fix hi"],
+         "--node", "x-256d", "--substrate", "bg", "/fix hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
 
     row = next((e for e in load_registry() if e.name == "wake-pinned"), None)
     assert row is not None
-    assert row.node == "x-other"
+    assert row.node == "x-256d"
 
 
 def test_spawn_resume_fork_carries_provider_and_model_axes(

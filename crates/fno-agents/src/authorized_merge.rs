@@ -1515,16 +1515,15 @@ impl Probes for RealProbes {
     }
 
     fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
-        match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
-            Ok((_code, stdout, _stderr)) => parse_checks_read(&stdout),
-            Err(_) => ChecksRead {
-                verdict: "unknown".to_string(),
-                github_block: None,
-                optional_unresolved: None,
-                rerun_recovered: None,
-                rerun_failures: None,
-            },
-        }
+        // One owner: the CI verdict answers in process through the status
+        // door. A preview ask never re-enters here (supplied facts win), so
+        // the decision reads the same payload it would have spawned for.
+        let payload = serde_json::json!({
+            "cwd": cwd.display().to_string(),
+            "pr": pr,
+        });
+        let (_code, stdout, _stderr) = crate::pr_status::cache::run_door("status-read", &payload);
+        parse_checks_read(stdout.as_bytes())
     }
 
     fn fno_shell(
@@ -2112,10 +2111,16 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         .and_then(Value::as_str)
         .is_some_and(|op| op.starts_with("status-"))
     {
-        let out = crate::pr_status_facts::run_op(
-            payload.get("op").and_then(Value::as_str).unwrap_or(""),
-            &payload,
-        );
+        let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+        // The verb-shaped door ops answer with the verb's own streams and
+        // exit; the fact ops keep their JSON-receipt contract.
+        if matches!(
+            op,
+            "status-read" | "status-wait" | "status-logs" | "status-ci"
+        ) {
+            return crate::pr_status::cache::run_door(op, &payload);
+        }
+        let out = crate::pr_status_facts::run_op(op, &payload);
         return (0, out, String::new());
     }
     let request = match parse_request(&payload) {
@@ -2135,39 +2140,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // receipt's `blockers` being empty, so the verb prints the list itself
     // instead of the joined-prose Outcome form the effect arms render.
     if request.effect == Effect::Preview {
-        let cwd = request.cwd.as_path();
-        let receipt = match RealProbes.pr_facts(cwd, request.pr) {
-            Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
-            Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
-                PreviewVerdict::Go { waiver } => {
-                    let mut receipt = serde_json::json!({
-                        "outcome": "authorized",
-                        "head": facts.head_sha,
-                        "blockers": [],
-                    });
-                    if let Some(note) = waiver {
-                        receipt["coverage_waiver"] = Value::String(note);
-                    }
-                    receipt
-                }
-                PreviewVerdict::Blocked(rows) => serde_json::json!({
-                    "outcome": "held",
-                    "head": facts.head_sha,
-                    "blockers": rows
-                        .iter()
-                        .map(|b| serde_json::json!({
-                            "code": b.code,
-                            "class": match b.class {
-                                BlockerClass::Held => "held",
-                                BlockerClass::Refused => "refused",
-                                BlockerClass::Unknown => "unknown",
-                            },
-                            "detail": b.detail,
-                        }))
-                        .collect::<Vec<_>>(),
-                }),
-            },
-        };
+        let receipt = preview_receipt(&request);
         return (0, format!("{}\n", receipt), String::new());
     }
     // The receipt is the verdict, so the exit code answers only whether the verb
@@ -2178,8 +2151,61 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     (0, format!("{}\n", outcome.to_json()), String::new())
 }
 
+/// The preview receipt for one request, in process. The status composer and
+/// the verb share this one arm, so a status read pays no subprocess to its
+/// own owner, and both surfaces can never render two different ready
+/// verdicts.
+pub(crate) fn preview_receipt(request: &Request) -> Value {
+    let cwd = request.cwd.as_path();
+    match RealProbes.pr_facts(cwd, request.pr) {
+        Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
+        Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
+            PreviewVerdict::Go { waiver } => {
+                let mut receipt = serde_json::json!({
+                    "outcome": "authorized",
+                    "head": facts.head_sha,
+                    "blockers": [],
+                });
+                if let Some(note) = waiver {
+                    receipt["coverage_waiver"] = Value::String(note);
+                }
+                receipt
+            }
+            PreviewVerdict::Blocked(rows) => serde_json::json!({
+                "outcome": "held",
+                "head": facts.head_sha,
+                "blockers": rows
+                    .iter()
+                    .map(|b| serde_json::json!({
+                        "code": b.code,
+                        "class": match b.class {
+                            BlockerClass::Held => "held",
+                            BlockerClass::Refused => "refused",
+                            BlockerClass::Unknown => "unknown",
+                        },
+                        "detail": b.detail,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        },
+    }
+}
+
+/// The preview receipt for a raw payload: parse, then the same in-process
+/// receipt the verb answers. An unusable payload reads `unknown` with the
+/// parse error named, never a guessed verdict.
+pub(crate) fn preview_receipt_payload(payload: &Value) -> Value {
+    match parse_request(payload) {
+        Ok(request) => preview_receipt(&request),
+        Err(message) => serde_json::json!({ "outcome": "unknown", "detail": message }),
+    }
+}
+
 fn read_payload(args: &[String]) -> Result<Value, String> {
     let text = match args.first() {
+        // An inline JSON payload is the thin-forwarder form: a CLI verb with
+        // no temp file. A path that names a payload file still works.
+        Some(path) if path.trim_start().starts_with('{') => path.clone(),
         Some(path) => std::fs::read_to_string(path)
             .map_err(|e| format!("authorized-merge: cannot read payload {path}: {e}\n"))?,
         None => {

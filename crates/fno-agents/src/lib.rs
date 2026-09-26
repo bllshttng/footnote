@@ -272,6 +272,7 @@ pub mod pr_nudge;
 pub mod pr_park;
 pub mod pr_push;
 pub mod pr_rebase;
+pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
 pub mod protocol;
