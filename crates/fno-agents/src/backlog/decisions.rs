@@ -401,7 +401,10 @@ mod tests {
         let graph = temp.path().join("graph.json");
         let mut connection = crate::backlog::open(&graph).unwrap();
         connection
-            .execute("DELETE FROM graph_meta WHERE key = 'decisions_imported'", [])
+            .execute(
+                "DELETE FROM graph_meta WHERE key = 'decisions_imported'",
+                [],
+            )
             .unwrap();
         let node = crate::backlog::model::Node::from_json(&serde_json::json!({
             "id": "x-node",
