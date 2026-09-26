@@ -90,7 +90,7 @@ These five move or remove state around sessions. None stops or removes a session
 5. open do row on an all-done session: `kept {id} (open do row on done node: {node})`. The settle pass and a `--release` ruling work through this gate
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
-8. policy `gc_decide`, open node: planning lane, then open-PR keep `kept {id} (open pr: {node} {detail})`, then the four releases, then the open-work window
+8. policy `gc_decide`, open node: planning lane, then the open-PR and dead-worker keeps, then the four releases, then the open-work window
 9. the grace gate: an unresolved transcript keeps, a fresh transcript keeps unless terminal or the pid is gone
 10. live descendant: `kept {id} (live descendant: {child})`, skipped for a terminal row
 11. apply freshness re-check: `kept {id} (active: ...)` or `kept {id} (probe unread: ...)`
@@ -165,9 +165,17 @@ The keep outranks every release above it. A terminal roster state, a parked node
 
 The remedy is merge, not reap. If another node must merge first, record a merge order (the next section shows the form). Otherwise drive the PR to merge. Run `fno do pr status <N>` to see what blocks it. A done node whose merge outcome nothing records reads GitHub once for the row's own PR. An unreadable read keeps the row too.
 
+### dead open work
+
+The full line reads `kept {id} (dead open work: {node})`. The node reads `in_progress`, and the row is a claude spawn row. Its roster row is a stale pre-death row: a non-terminal state with no pid in a listing that carries pids. The worker's process is gone and its state never went terminal, so the state alone reads live and lies. The keep holds the row so the handle survives. The remedy is resume, not reap: a dead worker on an in_progress node is always resumed, never left stranded.
+
+A `done` or `stopped` roster state never reaches this keep - those take the terminal paths whatever the pid says. A live newer registry row on the same node releases the row as before. A row whose process answers still keeps under `open work` with no ladder. A `failed` state DOES reach this keep. The death of the worker does not finish the node's work, and the ladder's Resume rung is the owner.
+
+The nudge ladder takes the row on its Resume rung only. It runs `fno agents resume <full-session-id> --message "continue: node <node> is in_progress and its session died with uncommitted work in <cwd>. Commit what is there and drive the node to a PR."` No `fno do pr status` read happens - the row carries no PR yet. After 3 resumes that never landed, one operator question files on the marker `pr-nudge: dead worker on <node>` and the ladder waits for activity.
+
 ### the nudge ladder
 
-A kept open-PR row is a session that is not driving. The daemon's retire arm runs a nudge ladder over every such row (`pr_nudge.rs` `run_ladder`). The rules, in order:
+A kept open-PR row is a session that is not driving, and so is a kept dead-worker row. The daemon's retire arm runs a nudge ladder over the concatenation of both (`pr_nudge.rs` `run_ladder`). An open-PR row takes every rung. A dead-worker row takes the Resume rung only. It carries no PR, so it never reads `fno do pr status`. Its events carry `pr: null`. Its escalation files on `pr-nudge: dead worker on <node>`. The rules, in order:
 
 1. **Reset.** Transcript activity newer than the last nudge clears the budget: the session answered.
 2. **Red head.** A settled red at a new head leaves exactly one nudge in the budget. The same head never re-arms it.
@@ -347,6 +355,7 @@ Every top-level key of `fno agents reap --json`, one row each. The dry run rende
 | `hold_escalate_after_s` | projection, no line: the threshold behind the escalation suffix `; past ...: fno agents reap --release` | [planning assignment not finished by this session](#planning-assignment-not-finished-by-this-session) |
 | `release_refused` | the refusal lines a `--release` pass prints verbatim | [Rows no sweep can take](#rows-no-sweep-can-take) |
 | `open_pr_rows` | projection, no line: one entry per kept open-PR row; the nudge ladder reads it | [the nudge ladder](#the-nudge-ladder) |
+| `dead_work_rows` | projection, no line: one entry per dead-worker row kept on an in_progress node; the ladder's Resume rung owns it | [dead open work](#dead-open-work) |
 | `open_pr_nudge` | `would nudge {id} ({action})` | [the nudge ladder](#the-nudge-ladder) |
 | `crowns` | `vacated crown {scope} (holder {session} dead: {evidence}; inherits: {inheritor})` and `kept crown {scope} ({reason})`; `null` when no crown sweep ran | [Manifest-only crowns and the dead-crown reaper](architecture/reign.md#manifest-only-crowns-and-the-dead-crown-reaper) |
 | `schema_skew` | `registry schema v{on_disk} is ahead of the v{understood} this fno understands: ...` | [Read the answer](#read-the-answer) |
@@ -360,6 +369,7 @@ Every keep and hold reason from the sections above, one row each.
 
 | Report line | Act or wait | The check that confirms it |
 |---|---|---|
+| `kept {id} (dead open work: {node})` | Resume: `fno agents resume <id>`. The ladder's Resume rung does this automatically. | `fno agents list` shows the row's process gone while the node reads `in_progress`. |
 | `kept {id} (operator row)` | Wait. This one is permanent. | The line itself names the reason. |
 | `kept {id} (crowned)` | Wait. This one is permanent. | The line itself names the reason. |
 | `kept {id} (not a spawn row: {why})` | Wait. This one is permanent. | The line prints `origin adopted` or `no origin recorded`. |
