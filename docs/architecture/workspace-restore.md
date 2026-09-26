@@ -36,7 +36,7 @@ The resume argv is not hardcoded. Each harness declares an `interactive_resume` 
 
 The resume lane is stricter than the attach lane, because the resume builder honors less. It fills exactly `{session_id}`. A `{short_id}` form is attach-only. A form promising a `pre_exec` daemon start is refused, never silently ignored. A harness the table gives no form is refused by name ("codex has no resume form; session ... is not resumable"). That is the honest dead row: a button that fails is worse than no button.
 
-Claude is the one special case, and not here. A live claude bg session is owned by its daemon and attaches through the existing path. A dead claude session resumes like everything else, through its declared `claude --resume <session_id>` form. Because a bare `claude --resume` on the main thread is unsafe, claude members first resolve a re-entry plan off the core loop. A member whose plan fails or is absent is refused, never resumed bare.
+Claude is the one special case. A claude member never resumes as a foreground `claude --resume` pane. It resolves a `revive` re-entry plan off the core loop (`fno-agents reentry-plan <name> --transition revive`), and the plan reads `claude agents --json --all`, never the files under `~/.claude/jobs/`. A running job attaches: `claude attach <job id>`. A listed job that is not running is respawned, then attached: `claude respawn <job id>`. An unlisted job comes back under its own id, then is attached: `claude --bg --resume <full session id>`. The seat runs that one argv, so it shows the session it just brought back. A member whose plan fails or is absent is refused, never resumed bare. The mux tap on a sideline row and the focus of a held pane take the same plan.
 
 ## Startup policy and the on-demand verb
 
@@ -73,13 +73,19 @@ Restore printed `never bound`. Is that session gone?
 
 Not necessarily. The label means fno holds no session id for the member. The spawn journal positively records the registry row's removal with an empty session field (`crates/fno/src/restore_liveness.rs:73`, `crates/fno/src/spawn_journal.rs:334`). It describes fno's reach, not the harness transcript's existence. fno cannot resume a session it holds no id for. The harness itself can, given the session id.
 
-## At the worker cap
+## No spawn gate
 
-Before its apply half, a real restore asks the spawn gate once, in `probe` mode. It resumes members in stored order up to the headroom (`max_live - slots`) and refuses the rest by name: `spawn gate: <slots> of max_live <cap> live; rerun fno mux workspace restore when a worker finishes`. A rerun is safe: members already back read `focused`, so only the tail is retried. A probe refusal on another axis (a RAM floor breach) refuses the whole restore with the gate's own message. A dry run never probes.
+A revival re-seats a row that already held a seat, so it never asks the spawn gate and never needs `FNO_SPAWN_GATE=0`. That holds for the restore verb, the sideline tap, the held-pane focus and `fno agents resume`. Every restore member that can spawn resolves to a registry row, so no member is new, and the restore asks no headroom probe.
+
+## After a reboot, without a tap
+
+The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. A worker counts when it was live at the boot: a live-ish status, or an exit stamped after the boot began. It revives when `claude agents --json --all` lists its job as stopped or failed and its node is not done, merged or superseded. Kings go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. A row the pass never reached still revives on one tap.
 
 ## Files
 
-- `crates/fno/src/server/workspace_restore.rs` - the bulk driver (`workspace_restore_start` / `workspace_restore_apply`) and the headroom spend; `crates/fno/src/server/revival_gate.rs` owns the gate ask itself
+- `crates/fno/src/server/workspace_restore.rs` - the bulk driver (`workspace_restore_start` / `workspace_restore_apply`)
+- `crates/fno-agents/src/reentry.rs` - the claude re-entry plan, including the `revive` transition
+- `crates/fno-agents/src/boot_revival.rs` - the once-per-boot revival pass
 - `crates/fno/src/server.rs` - `declared_resume_form` (the thin view), `resume_one` (the shared gate walk), `restore_candidates`
 - `crates/fno/src/agents_view.rs` - `declared_form` (the one reader), `FormLane`, `resume_form`, `attach_form`
 - `crates/fno/src/mux_cli.rs` - `workspace` / `workspace_restore` CLI parsing and output
