@@ -418,6 +418,15 @@ impl ClaudeHome {
         self.home.join(".claude").join("projects")
     }
 
+    /// Every projects dir a transcript could land in: the primary root's,
+    /// then each extra (account) config root's. An extra root IS a config
+    /// dir, so its `projects/` sits directly beneath it.
+    pub fn project_dirs(&self) -> Vec<PathBuf> {
+        let mut out = vec![self.projects_dir()];
+        out.extend(self.extra_roots.iter().map(|r| r.join("projects")));
+        out
+    }
+
     /// `jobs/<short_id>` under the first root where it is a dir, else under
     /// `<home>/.claude`: a worker on an account writes its job there.
     pub fn jobs_dir_for(&self, short_id: &str) -> PathBuf {

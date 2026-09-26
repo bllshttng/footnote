@@ -411,3 +411,30 @@ def read_timeline_tail(jobs_dir: Path, offset: int) -> str:
             chunks.append(piece)
 
     return "".join(chunks)
+
+
+def revive_proof_or_refuse(name: str, short_id: str) -> None:
+    """Block until a revival fork proves it came up; the poll, and the stop
+    it applies to a fork that never came up, run in the fno-agents binary
+    (``revive-proof``, lock-free - the caller holds the per-agent flock)."""
+    if not (verdict := _revive_proof_verdict(short_id)).get("ok"):
+        from fno.agents.dispatch import DispatchAskError
+        raise DispatchAskError(
+            f"revival fork {short_id} never came up: {verdict.get('reason')}. "
+            f"Spawn a fresh worker instead of resuming.",
+            exit_code=1,
+        )
+
+
+def _revive_proof_verdict(short_id: str) -> dict:
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:  # a degraded install stands the gate down
+        return {"ok": True}
+    import subprocess
+
+    cmd = [str(binary), "claude-birth-exec", "revive-proof", "--short-id", short_id]
+    return json.loads(
+        subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=90).stdout
+    )

@@ -128,6 +128,21 @@ fn test_tier_mismatch_builds_mechanism_neutral_switch_pending_payload() {
 }
 
 #[test]
+fn test_unrouted_lane_model_never_inherits_the_blueprint_row_tier() {
+    let bare_target = RetaskTarget {
+        model: None,
+        ..codex_target()
+    };
+    assert_eq!(
+        detect_retask(&row(), &bare_target, None),
+        DetectOutcome {
+            outcome: "spawn_required",
+            reason: Some("model_unrouted".into())
+        }
+    );
+}
+
+#[test]
 fn test_default_target_vendor_preserves_the_registry_vendor_axis() {
     let mut target = codex_target();
     target.provider = Some("codex".to_string());
@@ -668,6 +683,21 @@ fn test_execute_retask_uses_verified_tier_when_target_axes_are_omitted() {
 
     assert_eq!(receipt["status"], json!("retasked"));
     assert_eq!(receipt["switch"], json!("skipped_same_tier"));
+}
+
+#[test]
+fn test_execute_retask_refuses_unrouted_lane_model_before_any_clear() {
+    let bare_target = RetaskTarget {
+        model: None,
+        ..codex_target()
+    };
+    let mut seams = Fake::default();
+    let receipt = run(&row(), &bare_target, &mut seams);
+
+    assert_eq!(receipt["status"], json!("refused"));
+    assert_eq!(receipt["reason"], json!("model_unrouted"));
+    assert_eq!(receipt["cleared"], json!(false));
+    assert!(seams.sends.is_empty());
 }
 
 #[test]

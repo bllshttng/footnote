@@ -1,11 +1,10 @@
 use super::*;
-use crate::proto::AgentRow;
+use crate::proto::{AgentRow, TemplateName};
 use crate::pty::ChildGuard;
 use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
 #[path = "server/server_thread_viewer_tests.rs"]
 mod thread_viewer_tests;
-use crate::proto::TemplateName;
 // The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;
@@ -8671,6 +8670,7 @@ pub(super) fn empty_core() -> Core {
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),

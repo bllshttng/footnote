@@ -146,7 +146,15 @@ pub(crate) fn heal_token(
     // The healer adopts best-effort: a failed registry write still returns the
     // row, with the reason on stderr. Swallowing that would make the degradation
     // invisible -- the verb works, the roster silently does not.
-    let parsed = parse_heal_token_output(token, &out);
+    let mut parsed = parse_heal_token_output(token, &out);
+    if let Ok(Some(mut row)) = parsed {
+        recover_onto_healed_row(
+            &mut row,
+            registry_path,
+            &crate::claude_ask::ClaudeHome::from_env().projects_dir(),
+        );
+        parsed = Ok(Some(row));
+    }
     if matches!(&parsed, Ok(Some(_))) {
         let warn = String::from_utf8_lossy(&out.stderr);
         if !warn.trim().is_empty() {
@@ -241,6 +249,43 @@ fn parse_heal_token_output(
             "cannot safely resolve token {} because the all-source identity helper returned malformed JSON. Use the full session id.",
             py_repr_str(token)
         )),
+    }
+}
+
+/// Fill a freshly healed bare claude row with the route its transcript's
+/// birth identity proves, so `fno agents adopt` records the route at the
+/// heal door instead of at the first relaunch. Acts only on a claude row
+/// that records no route and no launch account; every miss (no transcript,
+/// an Anthropic birth, no usable route file, a failed write) leaves the row
+/// exactly as the healer wrote it - a refusal here belongs to the relaunch,
+/// not to adopt.
+fn recover_onto_healed_row(row: &mut Value, registry_path: &Path, projects: &Path) {
+    if row.get("harness").and_then(Value::as_str) != Some("claude") {
+        return;
+    }
+    let non_empty = |k: &str| {
+        row.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
+    if non_empty("route_settings_path") || non_empty("launch_account") {
+        return;
+    }
+    let Some(sid) = ["claude_session_uuid", "harness_session_id"]
+        .iter()
+        .find_map(|k| non_empty(k).then(|| row[k].as_str().unwrap_or_default().to_string()))
+    else {
+        return;
+    };
+    let pins = crate::resume_pin::RowPins::from_json(row);
+    let Ok(Some(r)) = crate::route_recovery::recover(pins, &sid, projects) else {
+        return;
+    };
+    if crate::route_recovery::persist(registry_path, &sid, &r).is_ok() {
+        row["route_settings_path"] = Value::String(r.route_settings_path.clone());
+        row["provider"] = Value::String(r.provider.clone());
+        row["requested_model"] = Value::String(r.model.clone());
+        row["launch_account"] = Value::String("default".into());
     }
 }
 
@@ -459,5 +504,101 @@ mod tests {
             Path::new(std::fs::read_to_string(registry_marker).unwrap().trim()),
             registry
         );
+    }
+
+    #[test]
+    fn healed_bare_glm_row_gets_recovered_route() {
+        // AC4-EDGE: a heal of a glm-born bare row carries the recovered
+        // provider, requested_model and route onto the returned row AND the
+        // registry; an Anthropic-born heal writes nothing new.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let routes = dir.path().join("routes");
+        std::fs::create_dir_all(&routes).unwrap();
+        std::fs::write(
+            routes.join("zai.json"),
+            serde_json::json!({"env": {
+                "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_BASE_URL": "https://repro.invalid/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                "FNO_ROUTE_PROVIDER": "zai",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &routes);
+        let projects = dir.path().join("projects");
+        let slug = projects.join("staged-project");
+        std::fs::create_dir_all(&slug).unwrap();
+        let sid = "77770014-2222-3333-4444-555555555555";
+        std::fs::write(
+            slug.join(format!("{sid}.jsonl")),
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"glm-5.3-flash[1m]","marketingName":null}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        let reg = dir.path().join("registry.json");
+        crate::state::update_registry(&reg, |r| {
+            r.entries.push(crate::state::RegistryEntry {
+                name: "wk-heal".into(),
+                harness: Some("claude".into()),
+                harness_session_id: Some(sid.into()),
+                claude_session_uuid: Some(sid.into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let mut row = serde_json::json!({
+            "name": "wk-heal",
+            "cwd": dir.path().to_string_lossy(),
+            "log_path": dir.path().join("log").to_string_lossy(),
+            "harness": "claude",
+            "claude_session_uuid": sid,
+            "harness_session_id": sid,
+        });
+        recover_onto_healed_row(&mut row, &reg, &projects);
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(row["provider"], "zai");
+        assert_eq!(row["requested_model"], "glm-5.3-flash[1m]");
+        assert_eq!(row["launch_account"], "default");
+        let stored = crate::state::load_registry(&reg).unwrap();
+        let e = stored
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some(sid))
+            .unwrap();
+        assert_eq!(e.provider.as_deref(), Some("zai"));
+        assert_eq!(e.requested_model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(
+            e.route_settings_path.as_deref().map(str::len) > Some(0),
+            true
+        );
+
+        // An Anthropic-born transcript writes nothing new onto a bare row.
+        let sid2 = "77770015-2222-3333-4444-555555555555";
+        std::fs::write(
+            slug.join(format!("{sid2}.jsonl")),
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-opus-5","marketingName":"Opus 5"}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        let reg2 = dir.path().join("registry2.json");
+        crate::state::update_registry(&reg2, |r| {
+            r.entries.push(crate::state::RegistryEntry {
+                name: "wk-heal2".into(),
+                harness: Some("claude".into()),
+                harness_session_id: Some(sid2.into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let mut row2 = serde_json::json!({
+            "name": "wk-heal2",
+            "cwd": dir.path().to_string_lossy(),
+            "log_path": dir.path().join("log2").to_string_lossy(),
+            "harness": "claude",
+            "harness_session_id": sid2,
+        });
+        recover_onto_healed_row(&mut row2, &reg2, &projects);
+        assert!(row2.get("provider").is_none());
+        assert!(row2.get("route_settings_path").is_none());
     }
 }

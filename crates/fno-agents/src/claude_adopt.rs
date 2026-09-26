@@ -149,6 +149,36 @@ pub fn transcript_title_in(base: &Path, session_id: &str) -> Option<String> {
 /// `FNO_ROUTE_SETTINGS_DIR` overrides the directory for tests.
 pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
     let model = model.filter(|m| !m.is_empty())?;
+    let mut providers: Vec<String> = Vec::new();
+    for (_path, v) in route_settings_files() {
+        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+            continue;
+        };
+        let file_model = env.get("ANTHROPIC_MODEL").and_then(|m| m.as_str());
+        if file_model == Some(model) {
+            if let Some(p) = env
+                .get("FNO_ROUTE_PROVIDER")
+                .and_then(|p| p.as_str())
+                .filter(|p| !p.is_empty())
+            {
+                if !providers.iter().any(|x| x == p) {
+                    providers.push(p.to_string());
+                }
+            }
+        }
+    }
+    if providers.len() == 1 {
+        providers.pop()
+    } else {
+        None
+    }
+}
+
+/// Every parseable `.json` file under the recorded route-settings dir
+/// (`FNO_ROUTE_SETTINGS_DIR`, else `$HOME/.fno/route-settings`), as
+/// (path, parsed JSON) pairs. Unreadable or malformed files drop out; a
+/// missing dir answers empty.
+pub(crate) fn route_settings_files() -> Vec<(PathBuf, serde_json::Value)> {
     let dir = std::env::var_os("FNO_ROUTE_SETTINGS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -158,8 +188,10 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
                 .join(".fno")
                 .join("route-settings")
         });
-    let entries = std::fs::read_dir(dir).ok()?;
-    let mut providers: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, serde_json::Value)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -171,28 +203,9 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
-            continue;
-        };
-        let file_model = env.get("ANTHROPIC_MODEL").and_then(|m| m.as_str());
-        if file_model != Some(model) {
-            continue;
-        }
-        let provider = env
-            .get("FNO_ROUTE_PROVIDER")
-            .and_then(|p| p.as_str())
-            .filter(|p| !p.is_empty());
-        if let Some(p) = provider {
-            if !providers.iter().any(|x| x == p) {
-                providers.push(p.to_string());
-            }
-        }
+        out.push((path, v));
     }
-    if providers.len() == 1 {
-        providers.pop()
-    } else {
-        None
-    }
+    out
 }
 
 /// One frontmatter scalar from a king manifest: `key: value`, quotes stripped,
