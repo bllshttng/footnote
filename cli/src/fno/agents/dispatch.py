@@ -1615,9 +1615,8 @@ def _claude_create_path(
         )
     except claude_mod.ProviderSubprocessError as exc:
         # Only a never-executed claude proves no supervisor exists. A timeout or
-        # a non-zero exit may have left one running, and there is no short_id to
-        # resolve its pid from - so the claim gets a TTL, which is the only thing
-        # that keeps guarding it once this process exits.
+        # non-zero exit may have left one running, and with no short_id to resolve
+        # its pid from the claim gets a TTL, the only guard once this process exits.
         if exc.exit_code == _NO_CHILD_POSSIBLE_EXIT:
             _release_writer_claim()
         else:
@@ -1631,9 +1630,8 @@ def _claude_create_path(
         )
         raise DispatchAskError(exc.stderr, exit_code=1) from exc
     except claude_mod.ProviderParseError as exc:
-        # claude exited 0 and only its receipt was unreadable, so a supervisor is
-        # very likely running - and without a parsed short_id we cannot find its
-        # pid. Same TTL anchor as the timeout case.
+        # claude exited 0 with an unreadable receipt, so a supervisor is very
+        # likely running and its pid is unresolvable; same TTL anchor as above.
         _anchor_claim_for_unknown_orphan()
         events.emit(
             "agent_ask_failed",
@@ -1654,10 +1652,9 @@ def _claude_create_path(
     # supervisor, so the claim lives and dies with the writer it guards.
     pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
 
-    # Best-effort full session-UUID capture (AC1-HP): persisted for
-    # the stream-json adopt lane; a miss leaves None and never gates the launch.
-    # A revival records the SOURCE conversation's id - the `spawn --resume` door
-    # forks by construction (claude mints a fresh uuid), announced below.
+    # Best-effort full session-UUID capture (AC1-HP); a miss leaves None and
+    # never gates the launch. A revival records the SOURCE conversation's id -
+    # the `spawn --resume` door forks by construction (claude mints a fresh uuid).
     session_uuid = (
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
@@ -1697,10 +1694,9 @@ def _claude_create_path(
             # requested_* stamps above keep the verbatim request.
             verified_model = observed_token
 
-    # A revival continues one conversation under a NEW session id -- the fork
-    # is never silent, same rule as the mail-revive rung that taught it. The
-    # source id and the new row's handle are named together so an operator
-    # watching the old handle hears that identity moved.
+    # A revival continues one conversation under a NEW session id -- the fork is
+    # never silent. The source id and the new row's handle are named together so
+    # an operator watching the old handle hears that identity moved.
     if revive and resume_session_id:
         print(
             f"fno agents spawn: forked {canonical_handle(resume_session_id)} into a "
@@ -1962,10 +1958,14 @@ def _claude_create_path(
             exit_code=12,
         ) from exc
 
-    # degrade: the supervisor pid was never resolved (sidecar race), so
-    # the claim is still pinned to this exiting process and would go dead-pid on
-    # exit anyway. Fall back to the pre-change lifetime - release and warn -
-    # rather than leave a claim whose pid lies about who is writing.
+    # x-eb64: a revival fork that never started must not read as success.
+    if revive and resume_session_id:
+        from fno.agents.harnesses._claude_session_registry import revive_proof_or_refuse
+        revive_proof_or_refuse(name, short_id, account_env=account_env)
+
+    # degrade: the supervisor pid was never resolved (sidecar race), so the claim
+    # still pins to this exiting process; release and warn rather than leave a
+    # claim whose pid lies about who is writing.
     if writer_claim_holder is not None and resume_session_id and not pinned_to_supervisor:
         _release_writer_claim()
         print(

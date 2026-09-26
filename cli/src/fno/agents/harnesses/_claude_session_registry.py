@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -411,3 +412,79 @@ def read_timeline_tail(jobs_dir: Path, offset: int) -> str:
             chunks.append(piece)
 
     return "".join(chunks)
+
+
+# x-eb64: a `spawn --resume` fork of a claude thread worker can return a
+# session id while the new session never writes a transcript line and its job
+# state reads `blocked` - a revival that reads as success while the slot is
+# spent and mail queues to nothing. Read at call time so a test can retime
+# the window (the `_SPAWN_UUID_RETRY_*` pattern in harnesses.claude).
+FORK_LIVENESS_WINDOW_S = 60.0
+FORK_LIVENESS_POLL_S = 1.0
+WEDGED_JOB_STATES = frozenset({"blocked", "stopped"})
+
+
+def _fork_transcript(uuid: str) -> Optional[Path]:
+    """Non-empty ``<root>/projects/*/<uuid>.jsonl`` under any claude root; the
+    one-level scan mirrors crates/fno-agents/src/announce.rs::transcript_path."""
+    for root in _claude_roots():
+        try:
+            for entry in (root / "projects").iterdir():
+                candidate = entry / f"{uuid}.jsonl"
+                if candidate.is_file() and candidate.stat().st_size > 0:
+                    return candidate
+        except OSError:
+            continue
+    return None
+
+
+def revive_proof_or_refuse(
+    name: str, short_id: str, *, account_env: Optional[Mapping[str, str]] = None
+) -> None:
+    """Block until a revival fork proves it came up; stop it and refuse if not.
+
+    Proof is a non-empty transcript for the fork's own session id and a job
+    state outside the wedged pair. Success prints the verified transcript
+    path, so the spawn receipt names a file that exists. Past the window the
+    fork is stopped and its claims released (the cleanup a manual stop
+    performs), then DispatchAskError raises naming the observed state, so a
+    fork that never started reads as the refusal it is and frees the slot.
+    """
+    deadline = time.monotonic() + FORK_LIVENESS_WINDOW_S
+    transcript: Optional[Path] = None
+    state: Optional[str] = None
+    while True:
+        uuid = resolve_session_uuid(short_id)
+        if uuid and transcript is None:
+            transcript = _fork_transcript(uuid)
+        try:
+            cfg = (account_env or {}).get("CLAUDE_CONFIG_DIR")
+            jobs = Path(cfg) / "jobs" / short_id if cfg else _jobs_dir_for(short_id)
+            state = read_state_json(jobs).state or None
+        except (OSError, json.JSONDecodeError):
+            pass
+        if transcript is not None and state not in WEDGED_JOB_STATES:
+            print(
+                f"spawn: revival liveness verified for {short_id}; transcript {transcript}",
+                file=sys.stderr,
+            )
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(FORK_LIVENESS_POLL_S)
+    from fno.agents.stop_release import stop_agent
+
+    try:
+        stop_agent(name)
+        stopped = "stopped the fork and released its claims"
+    except Exception as exc:  # noqa: BLE001 - the refusal must still name the state
+        stopped = f"stop failed ({exc}); the fork still holds its slot"
+    from fno.agents.dispatch import DispatchAskError
+
+    raise DispatchAskError(
+        f"revival fork {short_id} never came up: transcript "
+        f"{'present' if transcript else 'absent'}, job state {state!r} after "
+        f"{FORK_LIVENESS_WINDOW_S:g}s. {stopped}; spawn a fresh worker instead "
+        f"of resuming.",
+        exit_code=1,
+    )
