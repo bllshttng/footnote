@@ -134,16 +134,17 @@ def test_cursor_agent_registry_session_id_mapping_is_explicit():
     assert HARNESS_SESSION_ID_FIELDS["cursor-agent"] == "harness_session_id"
 
 
-def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
+def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch):
     """The thread bit reads true behind the live keeper journey
     (cli/scripts/smoke/cursor-agent-keeper-journey.py), so a one-shot
     dispatch resolves onto the keeper lane and the row's lane answer is
-    keeper. The autonomous /target template still refuses at the loop gate:
-    loop_participation stays extension until a stop-hook firing marker is
-    proven, so a looping command cannot resolve."""
+    keeper. The loop decision itself lives behind the binary's
+    target-family leaf (capability_leaves.rs), which asks the machine's
+    extension install; the Python leg relays that answer, so both relay
+    sides are pinned here against a stubbed leaf instead of the machine's
+    install state."""
     from fno.agents.harness_map import (
         DispatchResolveError,
-        capabilities,
         check_loop_participation,
         resolve_dispatch,
         thread_lane,
@@ -160,7 +161,22 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     )
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
-    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
+
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(
+        harness_map,
+        "_loop_gate_answer",
+        lambda harness, command: {"family": True, "refusal": None},
+    )
+    check_loop_participation("cursor-agent", "/target")
+
+    monkeypatch.setattr(
+        harness_map,
+        "_loop_gate_answer",
+        lambda harness, command: {"family": True, "refusal": "refused: no."},
+    )
+    with pytest.raises(DispatchResolveError, match="refused: no."):
         check_loop_participation("cursor-agent", "/target")
 
 
