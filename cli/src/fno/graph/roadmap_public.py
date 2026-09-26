@@ -428,6 +428,7 @@ def render_configured_targets(
     """
     from fno.graph.render_html import (
         _board_flow,
+        alert_render_refused,
         atomic_write_documents,
         leak_offender_lines,
         public_title_leaks,
@@ -505,6 +506,7 @@ def render_configured_targets(
                 )
                 for line in leak_offender_lines(offenders):
                     print(line, file=sys.stderr)
+                alert_render_refused(f"{out} ({scope})", offenders)
                 continue
             atomic_write_documents({out: html})
         except Exception as exc:

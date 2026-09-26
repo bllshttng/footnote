@@ -110,6 +110,27 @@ def leak_offender_lines(offenders: list[tuple[str, str, tuple[str, ...]]]) -> li
     ]
 
 
+def alert_render_refused(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
+    """Best-effort OS alert when a public render refuses. A refusal's stderr
+    dies with the calling process under launchd, so the live page can sit
+    stale with no reader - the outage behind the write-time gate. Fire the
+    same `fno inbox notify` lane the push script uses, so every refused
+    render is audible, never silent."""
+    try:
+        from fno.notify._impl import send_notification
+
+        detail = "; ".join(
+            f"{node_id} {'+'.join(classes)}" for node_id, _, classes in offenders[:3]
+        )
+        send_notification(
+            "roadmap render refused",
+            f"{subject}: leak gate refused ({detail})",
+            "fno backlog roadmap",
+        )
+    except Exception:  # noqa: BLE001 - an alert must never mask the refusal
+        pass
+
+
 def atomic_write_documents(documents: dict[Path, str]) -> None:
     """Stage every document before replacing any destination."""
     staged: list[tuple[Path, str]] = []
