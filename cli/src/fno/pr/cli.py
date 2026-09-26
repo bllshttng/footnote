@@ -370,17 +370,10 @@ def logs(
     lines: int = typer.Option(40, "--lines", help="Tail length."),
     full: bool = typer.Option(False, "--full", help="Print the whole log, not a tail."),
 ) -> None:
-    if pr_number is None:
-        from fno.pr import _rest
-
-        resolved, reason = _rest.resolve_current_pr_number_rest(cwd=os.getcwd())
-        if resolved is None:
-            typer.echo(f"fno do pr logs: cannot read CI state: {reason}", err=True)
-            raise typer.Exit(code=4)
-        pr_number = resolved
+    # pr 0 asks the door to resolve the current branch's PR.
     _forward_to_binary(
         "authorized-merge",
-        [json.dumps({"op": "status-logs", "cwd": os.getcwd(), "pr": pr_number, "job": job, "lines": lines, "full": full})],
+        [json.dumps({"op": "status-logs", "cwd": os.getcwd(), "pr": pr_number or 0, "job": job, "lines": lines, "full": full})],
     )
 
 
