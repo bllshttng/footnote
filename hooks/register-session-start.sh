@@ -85,6 +85,17 @@ if [[ -n "${FNO_AGENT_SELF:-}" ]]; then
     # attached) must read /dev/null instead of hanging on the terminal.
     STDIN_SRC="/dev/null"; [[ ! -t 0 ]] && STDIN_SRC="/dev/stdin"
     with_timeout 2 "$BIN" "${ARGS[@]}" >/dev/null 2>&1 <"$STDIN_SRC" || true
+    # Pane substrate ALSO keeps the bounded Python restamp: the daemon ingest
+    # holds the id, but only that path heals the row's mux ref to this pane
+    # and opens a parked pending graph row. Panes are the rare substrate;
+    # every other lane stays on the thin verb alone.
+    if [[ "${FNO_AGENT_ROW_PENDING:-}" == "${FNO_AGENT_SELF:-}" ]]; then
+        PY_ARGS=(--harness "$HARNESS" --agent-self "$FNO_AGENT_SELF" --cwd "$REPO_ROOT")
+        [[ -n "$SESSION_ID" ]] && PY_ARGS+=(--session-id "$SESSION_ID")
+        cd "$REPO_ROOT" 2>/dev/null || true
+        with_timeout 12 uv run --project "$CLI_DIR" \
+            python3 -m fno.agents.register_session "${PY_ARGS[@]}" >/dev/null 2>&1 </dev/null || true
+    fi
     exit 0
 fi
 
