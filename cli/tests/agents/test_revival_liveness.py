@@ -176,6 +176,9 @@ def _seed_row(name: str, short_id: str, uuid) -> None:
                 log_path="/tmp/rev.log",
                 short_id=short_id,
                 harness_session_id=uuid,
+                # The hermetic spawn-axes seam refuses a rowless unpinned
+                # resume, so the row carries the model the revival would ride.
+                requested_model="claude-opus-5",
             )
         ]
     )
@@ -203,5 +206,5 @@ def test_spawn_resume_exits_non_zero_when_the_fork_never_comes_up(
          "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 1, result.output
     assert "never came up" in result.output
