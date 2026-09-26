@@ -135,15 +135,16 @@ def contain_into(
 def release_contained(entries: list[dict], node: dict) -> None:
     """Un-contain ``node`` (must carry ``contained_in``), dropping the PR refs
     inherited from its owner so the owner's merge cannot close it."""
-    from fno.graph._reconcile import node_pr_refs  # local: breaks the import cycle
+    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url as slug  # local: cycle
     owner_id = node.pop("contained_in")
     owner = next((e for e in entries if isinstance(e, dict) and e.get("id") == owner_id), None)
-    owner_prs = {n for n, _ in node_pr_refs(owner)} if owner else set()
-    if isinstance(node.get("pr_number"), int) and node["pr_number"] in owner_prs:
+    keys = {(n, (slug(u) or "").lower()) for n, u in node_pr_refs(owner)} if owner else set()
+    own = (node.get("pr_number"), (slug(node.get("pr_url")) or "").lower())
+    if isinstance(node.get("pr_number"), int) and own in keys:
         node["pr_number"] = node["pr_url"] = node["merge_status"] = None
-    if owner_prs:
+    if keys:
         node["additional_prs"] = [
-            ref for ref in (node.get("additional_prs") or [])
-            if not (isinstance(ref, dict) and ref.get("number") in owner_prs)
+            ref for ref in (node.get("additional_prs") or []) if isinstance(ref, dict)
+            and (ref.get("number"), (slug(ref.get("url")) or "").lower()) not in keys
         ]
     node["released_from"] = owner_id

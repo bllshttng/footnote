@@ -495,3 +495,28 @@ def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
     c2 = _by_id(tmp_graph)[child]
     assert c2["contained_in"] == owner
     assert "released_from" not in c2
+
+
+def test_release_keeps_same_number_pr_from_another_repo(tmp_graph):
+    """PR numbers are repository-local: a child PR numbered #900 in another
+    repo is independent delivery, not the owner's inherited ref, so the
+    release keeps it and drops only the same-repo #900."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] == owner:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+            if e["id"] == child:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/other/repo/pull/900"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    assert _invoke("backlog", "update", child, "--parent", "null").exit_code == 0
+    c = _by_id(tmp_graph)[child]
+    assert c["pr_number"] == 900
+    assert c["pr_url"] == "https://github.com/other/repo/pull/900"
