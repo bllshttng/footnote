@@ -636,7 +636,6 @@ pub fn run(tail: &[String]) -> i32 {
                 None => format!("lane {}", lane_label(&rows[node_idx])),
             },
         });
-        let _ = &tid;
         Ok(true)
     });
 
