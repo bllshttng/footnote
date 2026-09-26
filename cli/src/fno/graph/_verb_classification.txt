@@ -28,8 +28,7 @@ migrate-updated-at
 reopen
 supersede
 unsupersede
-# board/rank/queue state
-rank
+# board and queue state
 reprioritize
 defer
 undefer

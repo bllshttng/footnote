@@ -47,11 +47,11 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();
     let cwd = root.join("proj");
-    // PYTHONPATH root for the in-package stubs: finalize now runs the cost +
-    // stamp helpers as `python3 -m fno.cost._session_cost`,
-    // `fno.cost._register`, and `fno.plan._stamp`, so we shadow the real
-    // package with fake `fno/cost/*` + `fno/plan/_stamp.py` modules resolved
-    // off this dir (set in run_finalize's env).
+    // PYTHONPATH root for the in-package stubs: finalize runs the cost helpers
+    // as `python3 -m fno.cost._session_cost` and `fno.cost._register`, so we
+    // shadow the real package with fake `fno/cost/*` modules resolved off this
+    // dir (set in run_finalize's env). The plan stamp is in-process Rust, so
+    // no plan-module stub exists.
     let pypath = root.join("pypath");
     let handoffs = root.join("handoffs");
     let postmortems = root.join("postmortems");
@@ -179,16 +179,6 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          open('calls.log','a').write('register-task reason=%s costjson=%s\\n' % (tr, cj))\n"
     };
     fs::write(pypath.join("fno/cost/_register.py"), reg).unwrap();
-    // fno.plan._stamp stub: records the subcommand (stamp|graduate) to
-    // calls.log, mirroring the prior stub's `stamp-plan %s` line so the
-    // call-shape assertions stay equivalent.
-    fs::write(
-        pypath.join("fno/plan/_stamp.py"),
-        "import sys\n\
-         sub = sys.argv[1] if len(sys.argv) > 1 else '?'\n\
-         open('calls.log','a').write('stamp-plan %s\\n' % sub)\n",
-    )
-    .unwrap();
     // fno.verify_advise stub (W6): record the full argv so the ship tests can
     // assert the flag shape finalize passes (a rename on either side of the
     // Rust->Python boundary fails here, not silently in production).
@@ -258,8 +248,8 @@ fn run_finalize_in(env: &Env, cwd: &Path, reason: &str) -> std::process::Output 
         .arg("--postmortems-dir")
         .arg(&env.postmortems)
         // Shadow the real `fno` package with the PYTHONPATH stub so finalize's
-        // `python3 -m fno.cost._session_cost`, `fno.cost._register`, and
-        // `fno.plan._stamp` children resolve the test stubs. Set to the bare
+        // `python3 -m fno.cost._session_cost` and `fno.cost._register` children
+        // resolve the test stubs. Set to the bare
         // pypath (PYTHONPATH entries prepend to sys.path) so the stubs win over
         // any site-packages/editable install of the real package.
         .env("FNO_SPACES_DIR", &env.spaces)
@@ -326,17 +316,8 @@ fn run_finalize_with_transcript(
 }
 
 fn prepare_real_plan_stamp(env: &Env, expected_url_count: Option<u32>) {
-    fs::remove_file(env.pypath.join("fno/plan/_stamp.py")).unwrap();
-    fs::write(
-        env.pypath.join("fno/__init__.py"),
-        "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n",
-    )
-    .unwrap();
-    fs::write(
-        env.pypath.join("fno/plan/__init__.py"),
-        "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n",
-    )
-    .unwrap();
+    // The stamp is in-process Rust now; "real stamp" only enriches the fixture
+    // doc the way the old real-module path needed it.
     let expected = expected_url_count
         .map(|count| format!("expected_url_count: {count}\n"))
         .unwrap_or_default();
@@ -350,47 +331,8 @@ fn prepare_real_plan_stamp(env: &Env, expected_url_count: Option<u32>) {
 }
 
 fn run_finalize_real_stamp(env: &Env, reason: &str) -> std::process::Output {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let pythonpath = format!(
-        "{}:{}",
-        env.pypath.display(),
-        repo.join("cli/src").display()
-    );
-    Command::new(BIN)
-        .envs(fno_agents::test_run::self_owner_env())
-        .arg("finalize")
-        .arg("--state")
-        .arg(&env.state)
-        .arg("--cwd")
-        .arg(&env.cwd)
-        .arg("--reason")
-        .arg(reason)
-        .arg("--events")
-        .arg(&env.events)
-        .arg("--global-events")
-        .arg(&env.global_events)
-        .arg("--handoffs-dir")
-        .arg(&env.handoffs)
-        .arg("--postmortems-dir")
-        .arg(&env.postmortems)
-        .env("FNO_SPACES_DIR", &env.spaces)
-        .env("PYTHONPATH", pythonpath)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                env.bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("GH_CALLS_LOG", &env.gh_calls)
-        .current_dir(&env.cwd)
-        .output()
-        .expect("run finalize with real plan stamp")
+    // Same execution path as every other fire: the stamp is in-process.
+    run_finalize(env, reason)
 }
 
 fn write_delivery_verdict(env: &Env, session_id: &str, complete: bool) {
@@ -506,6 +448,11 @@ fn postmortem_files(env: &Env) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The fixture plan doc after finalize ran: the stamp's durable evidence.
+fn plan_body(env: &Env) -> String {
+    fs::read_to_string(env.cwd.join("plan.md")).unwrap()
+}
+
 /// Every terminal reason writes the ledger record; a NON-ship reason runs
 /// neither stamp/graduate nor the handoff artifact. (AC7-HP always-branch.)
 #[test]
@@ -518,9 +465,10 @@ fn finalize_ledger_every_exit() {
         c.contains("register-task reason=Budget"),
         "ledger record must fire: {c}"
     );
-    assert!(
-        !c.contains("stamp-plan"),
-        "non-ship reason must NOT stamp: {c}"
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-budget"),
+        0,
+        "non-ship reason must NOT stamp"
     );
     assert!(
         !c.contains("verify-advise"),
@@ -703,14 +651,20 @@ fn finalize_ship_gated() {
         c.contains("register-task reason=DonePRGreen"),
         "ledger: {c}"
     );
-    assert!(c.contains("stamp-plan stamp"), "stamp must fire: {c}");
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-ship"),
+        1,
+        "stamp must fire: {}",
+        calls(&env)
+    );
     assert!(
         c.contains("plan-validate"),
         "canonical do plan validation must run after stamp: {c}"
     );
     assert!(
-        !c.contains("stamp-plan graduate"),
-        "graduate must NOT fire at ship (done = merged): {c}"
+        !plan_body(&env).contains("status: done"),
+        "graduate must NOT fire at ship (done = merged): {}",
+        plan_body(&env)
     );
     // W6 verifier advisory rides the ship branch with the manifest's fields;
     // this line is the Rust->Python flag-shape contract (a flag rename on
@@ -751,10 +705,15 @@ fn finalize_advisory_ship_graduates() {
     let out = run_finalize(&env, "DoneAdvisory");
     assert!(out.status.success());
     let c = calls(&env);
-    assert!(c.contains("stamp-plan stamp"), "advisory ship stamps: {c}");
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-adv"),
+        1,
+        "advisory ship stamps: {c}"
+    );
     assert!(
-        c.contains("stamp-plan graduate"),
-        "advisory ship graduates to done (no merge event to flip it): {c}"
+        plan_body(&env).contains("status: done"),
+        "advisory ship graduates to done (no merge event to flip it): {}",
+        plan_body(&env)
     );
 }
 
@@ -801,8 +760,16 @@ fn generic_completion_finalize_consumes_selected_verdict_without_pr_paths() {
     assert!(out.status.success());
     let c = calls(&env);
     assert!(c.contains("register-task reason=DoneDelivery"));
-    assert!(c.contains("stamp-plan stamp"));
-    assert!(c.contains("stamp-plan graduate"));
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-delivery"),
+        1,
+        "delivery ship stamps: {c}"
+    );
+    assert!(
+        plan_body(&env).contains("status: done"),
+        "delivery ship graduates: {}",
+        plan_body(&env)
+    );
     assert!(!c.contains("verify-advise"));
     let handoff = fs::read_to_string(&handoff_files(&env)[0]).unwrap();
     assert!(handoff.contains("fno-delivery://ab-testnode/attempt-1/sha256:abc"));
@@ -846,7 +813,11 @@ fn generic_completion_finalize_rejects_incomplete_selected_verdict() {
     let out = run_finalize(&env, "DoneDelivery");
 
     assert!(!out.status.success());
-    assert!(!calls(&env).contains("stamp-plan"));
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-delivery-incomplete"),
+        0,
+        "incomplete verdict must not stamp"
+    );
     assert!(handoff_files(&env).is_empty());
     assert!(store_text(&env.events).contains("delivery_receipt"));
     assert_eq!(
@@ -871,7 +842,11 @@ fn generic_completion_finalize_does_not_revive_an_older_passing_verdict() {
     let out = run_finalize(&env, "DoneDelivery");
 
     assert!(!out.status.success());
-    assert!(!calls(&env).contains("stamp-plan"));
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-delivery-newest"),
+        0,
+        "stale-verdict refire must not stamp"
+    );
     assert!(handoff_files(&env).is_empty());
     assert!(store_text(&env.events).contains("delivery_receipt"));
     assert_eq!(
@@ -896,7 +871,11 @@ fn generic_completion_finalize_rejects_a_newest_unbound_verdict() {
     let out = run_finalize(&env, "DoneDelivery");
 
     assert!(!out.status.success());
-    assert!(!calls(&env).contains("stamp-plan"));
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-delivery-unbound"),
+        0,
+        "unbound verdict must not stamp"
+    );
     assert!(handoff_files(&env).is_empty());
     assert_eq!(
         count_event(&env.events, "termination", "S-delivery-unbound"),
@@ -962,7 +941,11 @@ fn generic_completion_finalize_missing_selected_event_fails_closed() {
     let out = run_finalize(&env, "DoneDelivery");
 
     assert!(!out.status.success());
-    assert!(!calls(&env).contains("stamp-plan"));
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-delivery-missing"),
+        0,
+        "missing selected event must not stamp"
+    );
     assert!(handoff_files(&env).is_empty());
     assert_eq!(
         count_event(&env.events, "session_finalize_failed", "S-delivery-missing"),
@@ -991,9 +974,9 @@ fn finalize_idempotent_across_refires() {
         "exactly one ledger call: {c}"
     );
     assert_eq!(
-        c.matches("stamp-plan stamp").count(),
+        count_event(&env.events, "plan_stamped", "S-idem"),
         1,
-        "exactly one stamp: {c}"
+        "exactly one stamp across refires: {c}"
     );
     assert_eq!(handoff_files(&env).len(), 1, "exactly one handoff");
     assert_eq!(count_event(&env.events, "session_finalized", "S-idem"), 1);
@@ -1016,8 +999,9 @@ fn finalize_nonfatal_partial_failure() {
         c.contains("register-task FAIL"),
         "ledger was attempted: {c}"
     );
-    assert!(
-        c.contains("stamp-plan stamp"),
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-fail"),
+        1,
         "stamp still runs after ledger failure: {c}"
     );
     assert_eq!(
@@ -1100,9 +1084,17 @@ fn finalize_three_sessions_one_node() {
         );
         // Only the shipped session runs the completion side-effects.
         if reason == "DonePRGreen" {
-            assert!(c.contains("stamp-plan stamp"), "shipped session stamps");
+            assert_eq!(
+                count_event(&env.events, "plan_stamped", sid),
+                1,
+                "shipped session stamps"
+            );
         } else {
-            assert!(!c.contains("stamp-plan"), "{sid} ({reason}) must not stamp");
+            assert_eq!(
+                count_event(&env.events, "plan_stamped", sid),
+                0,
+                "{sid} ({reason}) must not stamp"
+            );
         }
     }
 }
@@ -1120,9 +1112,10 @@ fn finalize_delegated_is_ledger_only() {
         c.contains("register-task reason=delegated"),
         "ledger row: {c}"
     );
-    assert!(
-        !c.contains("stamp-plan"),
-        "delegated must not stamp/graduate: {c}"
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-deleg"),
+        0,
+        "delegated must not stamp/graduate"
     );
     assert!(
         handoff_files(&env).is_empty(),
@@ -1157,13 +1150,15 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         c.contains("register-task reason=DonePRGreen"),
         "delivered terminal: {c}"
     );
-    assert!(
-        c.contains("stamp-plan stamp"),
-        "ship fire must stamp after a non-ship terminal: {c}"
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-recover"),
+        1,
+        "ship fire must stamp after a non-ship terminal"
     );
     assert!(
-        !c.contains("stamp-plan graduate"),
-        "ship fire stamps only; done = merged, no graduate (x-f34f): {c}"
+        !plan_body(&env).contains("status: done"),
+        "ship fire stamps only; done = merged, no graduate: {}",
+        plan_body(&env)
     );
     assert_eq!(handoff_files(&env).len(), 1, "ship fire writes the handoff");
     assert_eq!(
@@ -1174,7 +1169,7 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
     // Fire 3: now the ship is recorded -> early-return, no extra stamp.
     assert!(run_finalize(&env, "DonePRGreen").status.success());
     assert_eq!(
-        calls(&env).matches("stamp-plan stamp").count(),
+        count_event(&env.events, "plan_stamped", "S-recover"),
         1,
         "stamp ran exactly once across all fires"
     );
@@ -1224,9 +1219,10 @@ fn finalize_doneadvisory_ships() {
         c.contains("register-task reason=DoneAdvisory"),
         "ledger: {c}"
     );
-    assert!(
-        c.contains("stamp-plan stamp"),
-        "DoneAdvisory is a ship reason: {c}"
+    assert_eq!(
+        count_event(&env.events, "plan_stamped", "S-adv"),
+        1,
+        "DoneAdvisory is a ship reason"
     );
     assert_eq!(handoff_files(&env).len(), 1);
 }

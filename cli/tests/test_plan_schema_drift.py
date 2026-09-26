@@ -17,9 +17,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import fno.plan._stamp as _stamp_mod
 from fno.plan._status import STATUS_PROGRESSION, TERMINAL_STATUSES
 from fno.plan.schema import PlanFrontmatter, PlanStatus
+
+_STAMP_RS = (
+    Path(__file__).resolve().parents[2]
+    / "crates" / "fno-agents" / "src" / "plan_doc" / "stamp.rs"
+)
 
 
 def test_plan_status_axis_matches_status_module() -> None:
@@ -45,14 +49,15 @@ def test_plan_status_axis_matches_status_module() -> None:
 
 
 def test_stamp_written_fields_are_modeled() -> None:
-    """Every frontmatter key ``_stamp.py`` writes has a PlanFrontmatter field.
+    """Every frontmatter key the plan writer stamps has a PlanFrontmatter field.
 
     Catches the drift class where the ship-time writer starts emitting a key
     the schema doesn't know about, so ``fno do plan validate`` would silently pass
-    a plan carrying an unmodeled ship field.
+    a plan carrying an unmodeled ship field. The writer is the Rust
+    plan_doc/stamp.rs port; the regex reads its `fields.insert` calls.
     """
-    src = Path(_stamp_mod.__file__).read_text(encoding="utf-8")
-    written = set(re.findall(r'fields\["(\w+)"\]\s*=', src))
+    src = _STAMP_RS.read_text(encoding="utf-8")
+    written = set(re.findall(r'fields\.insert\("(\w+)"', src))
 
     # Guard against the regex going inert (a refactor renaming `fields`): the
     # load-bearing ship keys must always be found.
@@ -64,7 +69,7 @@ def test_stamp_written_fields_are_modeled() -> None:
     modeled = set(PlanFrontmatter.model_fields)
     missing = written - modeled
     assert not missing, (
-        f"_stamp.py writes frontmatter keys with no PlanFrontmatter field: {sorted(missing)}"
+        f"the plan writer stamps frontmatter keys with no PlanFrontmatter field: {sorted(missing)}"
     )
 
 
