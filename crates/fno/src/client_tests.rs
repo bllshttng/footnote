@@ -6580,9 +6580,9 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // do not. The in-app help must name all three triggers and the caveat,
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
-    // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections; a short window scrolls them).
-    view.term = (64, 100);
+    // 65 rows: the V chord made the table 49 chords, one taller than the
+    // old 64-row pin, and the caveat rides below the sections.
+    view.term = (65, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
