@@ -97,48 +97,6 @@ def test_unreachable_resolver_reads_unknown(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The status projection names the observer when a receipt exists
-# ---------------------------------------------------------------------------
-
-
-def test_projection_carries_observer_health_when_receipt_exists(tmp_path, monkeypatch):
-    """AC12-ERR shape: a recorded grant plus a dead watcher reads
-    observer_unavailable with a repair, never a working merge lane."""
-    from fno.pr import _status
-
-    _verdict(monkeypatch, GRANTED)
-    monkeypatch.setattr(
-        "fno.pr_watch._install.liveness_report_live",
-        lambda **kw: {"verdict": "dead", "detail": "no tick recorded",
-                      "fix": "fno do pr watch install"},
-    )
-
-    projection = _status._merge_execution_projection(str(tmp_path), str(PR))
-
-    assert projection["state"] == GRANTED
-    assert projection["observer"]["state"] == "observer_unavailable"
-    assert "fno do pr watch install" in projection["observer"]["repair"]
-
-
-def test_projection_without_receipt_skips_the_observer_probe(tmp_path, monkeypatch):
-    """No receipt, no executor question: absent stays absent and no launchd
-    probe is spent on a PR the watcher would never touch."""
-    from fno.pr import _status
-
-    _verdict(monkeypatch, ABSENT)
-    probed = []
-    monkeypatch.setattr(
-        "fno.pr_watch._install.liveness_report_live",
-        lambda **kw: probed.append(1) or {},
-    )
-
-    projection = _status._merge_execution_projection(str(tmp_path), str(PR))
-
-    assert projection["state"] == ABSENT
-    assert "observer" not in projection
-    assert not probed
-
-
 # ---------------------------------------------------------------------------
 # The merge gate's durable-grant authority arm
 # ---------------------------------------------------------------------------
@@ -170,10 +128,14 @@ def _stub_merge_world(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
-    monkeypatch.setattr(
-        "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
-    )
+    from fno.rust_binary import VerbUnavailable
+
+    def _fake(verb, payload, **kw):
+        if payload.get("op") == "status-rerun":
+            return {"recovered": False, "failed": []}
+        raise VerbUnavailable("door op unavailable in tests")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", _fake)
 
 
 def test_merge_durable_grant_absent_skips_without_gh(tmp_path, monkeypatch, capsys):

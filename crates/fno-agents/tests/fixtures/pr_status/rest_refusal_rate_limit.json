@@ -1,0 +1,105 @@
+{
+  "expected": {
+    "exit": 4,
+    "stderr_lines": [
+      "42 UNKNOWN error unsettled mergeable-unavailable(no-answer) NOT-ready @ unknown - 1 blockers: error: gh api pull request read: secondary rate limit"
+    ],
+    "stdout": "{\"pr\": \"42\", \"verdict\": \"error\", \"settled\": false, \"green\": false, \"reason\": \"gh api pull request read: secondary rate limit\", \"rate_limit_class\": \"secondary\"}\n"
+  },
+  "inputs": {
+    "branch_history": null,
+    "cache": null,
+    "coverage_row": {
+      "coverage": "not_asked",
+      "reviewed_count": null
+    },
+    "fetch_fail": true,
+    "fetch_stderr": "gh api pull request read: secondary rate limit",
+    "github_merge_blockers": null,
+    "hold_reason": null,
+    "merge_authority": {
+      "config_auto_merge_enabled": true,
+      "grant": "dispatch"
+    },
+    "merge_execution": null,
+    "optional_reviews": {
+      "optional_reviews": [],
+      "optional_reviews_resolved_unchanged": 0,
+      "optional_reviews_unresolved": 0
+    },
+    "rate_limit_class": "secondary",
+    "raw": {
+      "check_runs_pages": [
+        {
+          "check_runs": [
+            {
+              "conclusion": "success",
+              "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/1001",
+              "name": "ci",
+              "started_at": "2026-09-25T00:00:00Z",
+              "status": "completed"
+            },
+            {
+              "conclusion": "success",
+              "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/1002",
+              "name": "lint",
+              "started_at": "2026-09-25T00:00:00Z",
+              "status": "completed"
+            }
+          ],
+          "total_count": 2
+        }
+      ],
+      "failed_job_logs": {},
+      "job_logs": {
+        "1001": "2026-09-25T00:00:01Z ##[group]Run smoke\n2026-09-25T00:00:02Z ##[endgroup]\n2026-09-25T00:00:03Z Current runner version: 2.311.0\n2026-09-25T00:00:04Z ##[error]Process completed with exit code 1.\n2026-09-25T00:00:05Z Cleaning up orphan processes\n",
+        "1002": "2026-09-25T00:00:01Z step one ok\n2026-09-25T00:00:02Z assert_eq failed: expected 200, got 401\n2026-09-25T00:00:03Z ##[error]Process completed with exit code 1.\n"
+      },
+      "job_steps": {},
+      "pulls": {
+        "base": {
+          "ref": "main"
+        },
+        "head": {
+          "ref": "feature/x-8ab0",
+          "sha": "b41ac4bfeedface0123456789abcdef012345678"
+        },
+        "merge_state_status": "clean",
+        "mergeable": true,
+        "merged": false,
+        "state": "open"
+      },
+      "runs_listing": {
+        "total_count": 0,
+        "workflow_runs": []
+      },
+      "statuses": {
+        "state": "success",
+        "statuses": []
+      },
+      "zero_rows": []
+    },
+    "receipt": {},
+    "rerun_recovery": {
+      "failed": [],
+      "recovered": false
+    },
+    "review_activity": {
+      "blocker": "",
+      "detail": "",
+      "hold": null,
+      "worktree": {
+        "dirty": null,
+        "head": null,
+        "note": "not asked: PR is terminal",
+        "path": null,
+        "probed": false
+      }
+    },
+    "review_lane": true
+  },
+  "name": "rest_refusal_rate_limit",
+  "now": 1790409600,
+  "refresh": false,
+  "use_cache": false
+}

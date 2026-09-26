@@ -1460,8 +1460,6 @@ def run_coverage_check(
     elif state == UNANSWERED:
         sys.stderr.write(f"{note}\n")
     elif state == COVERED and note.startswith(OVERRIDE_NOTE_PREFIX):
-        # The waived-covered receipt: the coverage gate (merge_gates.rs) reads
-        # it off stdout and rides it on the preview receipt, so a waived ready
-        # never reads as a reviewed one.
+        # Waived-covered receipt: merge_gates.rs parses it off stdout, so a waived ready never reads as reviewed.
         sys.stdout.write(f"{note}\n")
     return state

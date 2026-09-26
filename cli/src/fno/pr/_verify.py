@@ -36,8 +36,8 @@ from typing import Any, List, Optional, Sequence
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.pr._proc import ToolMissing, run
 
-# Check classification lives in fno.pr._status (_classify + _latest_per_name),
-# shared with the merge verb so the two surfaces never disagree (round 12).
+# Check classification is the Rust reader's (pr_status verdict + supersession
+# rows), shared with the merge verb so the two surfaces never disagree.
 
 
 # ---------------------------------------------------------------------------
@@ -380,11 +380,9 @@ def run_verify_merged(
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge(repo).require_checks_pass:
-        from fno.pr._status import without_coverage_statuses
-
-        failing = _failing_required(
-            without_coverage_statuses(pr_json.get("statusCheckRollup") or [])
-        )
+        failing = _failing_required(int(pr_number), repo)
+        if failing is None:
+            return 1
         if failing:
             failing_csv = ",".join(failing)
             _emit_audit(
@@ -437,26 +435,22 @@ def run_verify_merged(
     )
 
 
-def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks, classified by the SAME truth table the merge verb uses -
-    a second hand-built state table is how verify ends up refusing what
-    `fno do pr merge` merges (round 12). Callers pass the rollup through
-    `without_coverage_statuses`, so the coverage projections the merge verb's
-    covered path ignores are ignored here too; a stale coverage FAILURE beside
-    a flipped-covered row must not read as required_checks_failing.
-    _latest_per_name drops superseded runs; _classify reads pass/fail/pending
-    with the shared semantics (a REQUESTED or empty-conclusion check is
-    pending, not failing). No isRequired filter - `gh pr view` never emits
-    that key (see the checks arm of authorized_merge.rs), so with
-    require_checks_pass every
-    check counts."""
-    from fno.pr._status import _classify, _latest_per_name
+def _failing_required(pr_number: int, cwd: str) -> List[str] | None:
+    """Failing checks from the Rust owner's status-ci op (coverage rows
+    dropped): the SAME truth table the merge verb uses, never a second one.
+    None = unreadable read; the caller refuses rather than pass blind."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    failing: List[str] = []
-    for c in _latest_per_name(rollup):
-        if _classify(c) == "fail":
-            failing.append(str(_alt(c.get("name"), c.get("context"), "unnamed")))
-    return failing
+    try:
+        rows = verb_call(
+            "authorized-merge",
+            {"op": "status-ci", "cwd": cwd, "pr": int(pr_number), "drop_coverage": True},
+            timeout=120,
+        )
+    except VerbUnavailable:
+        sys.stderr.write("verify-pr-merged: required checks unreadable\n")
+        return None
+    return [str(r.get("name") or "unnamed") for r in rows if r.get("bucket") == "fail"]
 
 
 def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:

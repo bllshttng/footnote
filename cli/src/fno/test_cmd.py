@@ -2031,10 +2031,10 @@ def _planned_step_lines(
 ) -> list[str]:
     """The one-line-per-step plan the full-mode prologue prints.
 
-    `fno.pr._failures.unreached_runner_steps` parses this exact prefix
-    (`smoke: planned: <name>`), so a red log names the steps fail-fast never
-    reached without re-deriving the registry. Emitter and parser share the
-    format through this function's docstring; change both together.
+    `pr_status::unreached_runner_steps` (crates/fno-agents) parses this exact
+    prefix (`smoke: planned: <name>`), so a red log names the steps fail-fast
+    never reached without re-deriving the registry. Emitter and parser share
+    the format through this function's docstring; change both together.
     """
     return [f"smoke: planned: {steps[i][0]}" for i in selected]
 
