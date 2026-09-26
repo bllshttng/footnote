@@ -1,6 +1,6 @@
 # Task to verified PR: the demonstration protocol
 
-One measured demonstration of the delivery journey on a real, non-Footnote feature. It is the evidence leg behind the operator-effort claim in [product-qualification.md](product-qualification.md); until it is measured, that claim stays "not measured".
+One measured demonstration of the delivery journey on a real, non-Footnote feature. It is the evidence leg behind the operator-effort claim in [product-qualification.md](product-qualification.md). Until it is measured, that claim stays not measured.
 
 The demonstration uses a scratch repository that is not this checkout, a fresh isolated state root, and no existing session state. The operator performs it once, records the numbers, and files them in the qualification manifest's `measurements` block with unit and source.
 
