@@ -239,7 +239,7 @@ pub(crate) use self_review_floor::is_documentation_path;
 use self_review_floor::{
     classify_payload_for_floor, floor_self_review, reviewer_invocation_for, REVIEW_ORDER,
 };
-pub(crate) use self_review_floor::{payload_is_code, self_review_floor_applies};
+pub(crate) use self_review_floor::self_review_floor_applies;
 use settings::{
     fail_closed_settings, normalize_reviewer, parse_manifest, parse_settings_result,
     session_cost_from_ledger, Manifest, PeerEntry,

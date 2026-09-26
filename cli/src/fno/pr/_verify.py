@@ -380,7 +380,7 @@ def run_verify_merged(
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge(repo).require_checks_pass:
-        failing = _failing_required(pr_number, repo)
+        failing = _failing_required(int(pr_number), repo)
         if failing is None:
             return 1
         if failing:

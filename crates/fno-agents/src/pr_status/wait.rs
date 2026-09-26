@@ -5,7 +5,6 @@
 
 use crate::pr_status_facts::{GhProbe, RealGhProbe};
 use serde_json::Value;
-use std::cell::Cell;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -264,6 +263,7 @@ fn review_count<P: GhProbe>(probe: &P, cwd: &Path, slug: &str, pr: u64) -> Optio
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::cell::Cell;
 
     #[test]
     fn durations_parse_like_the_python_leg() {

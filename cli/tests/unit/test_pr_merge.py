@@ -168,11 +168,21 @@ class FakeRun:
                 )
             if cmd[1] == "api":
                 endpoint = cmd[-1]
-                if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
-                    # The overlap probe's PR-side read (paginated REST, jq
-                    # emits one filename per line); None serves an empty
-                    # diff, which proves no overlap rather than a miss.
-                    return Result(0, "\n".join(self.pr_files or []) + "\n", "")
+                if any(
+                    a.startswith("repos/")
+                    and a.split("?", 1)[0].endswith("/files")
+                    for a in cmd
+                ):
+                    # The PR-side changed-path read (paginated REST, one page
+                    # of file objects); None serves an empty diff, which
+                    # proves no overlap rather than a miss.
+                    return Result(
+                        0,
+                        json.dumps(
+                            [{"filename": name} for name in (self.pr_files or [])]
+                        ),
+                        "",
+                    )
                 if (
                     "/pulls/" in endpoint
                     and "/comments" not in endpoint
@@ -355,6 +365,16 @@ def _door_stub(answer):
         return real(verb, payload, unavailable=unavailable, **kw)
 
     return _fake
+
+
+_real_lane_configured = _merge._review_lane_configured
+
+
+@pytest.fixture(autouse=True)
+def _real_review_lane(monkeypatch):
+    """These tests exercise the lane predicate itself; restore it over the
+    conftest hermetic default (which suites that merely traverse a merge need)."""
+    monkeypatch.setattr(_merge, "_review_lane_configured", _real_lane_configured)
 
 
 @pytest.fixture(autouse=True)
@@ -2019,6 +2039,11 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     # Fresh coverage: the live PR head IS the covered head, so the gate passes
     # and the covered head reaches the merge command.
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
+    # The gate's chain read scopes by the PR's refs; an unstubbed probe here
+    # answered UNANSWERED off the real transport and wiped the pin.
+    monkeypatch.setattr(
+        _merge, "_pr_base_head_refs", lambda pr, repo: ("main", "feature/x")
+    )
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
     )

@@ -437,7 +437,7 @@ fn shape_review_coverage(data: &Value, head: Option<&str>, approval_satisfies: b
 /// Latest `review_coverage` data for a PR across both journals: the project
 /// log unscoped, the global log scoped by the repo slug. Newest ts wins; a
 /// same-ts tie takes the SAFER word (the uncovered one).
-fn latest_coverage_row(cwd: &Path, inputs: &ReviewInputs, pr: u64) -> (Option<Value>, String) {
+fn latest_coverage_row(_cwd: &Path, inputs: &ReviewInputs, pr: u64) -> (Option<Value>, String) {
     let scan = |journal: &Path, repo_scope: Option<&str>| -> (Option<Value>, String) {
         let text = crate::event_store::journal_text(journal, &["review_coverage"]);
         let mut latest: Option<Value> = None;
@@ -1122,71 +1122,4 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         }
     }
     inner(pattern.as_bytes(), name.as_bytes())
-}
-
-/// The owner-guidance fact: a counted local review authored by another
-/// session, with the authority note the manifest state yields.
-pub(crate) fn owner_guidance(coverage: &Value, worktree: &Value) -> Option<Value> {
-    let verdicts = coverage.get("verdicts").and_then(Value::as_array)?;
-    let counted_other_session = verdicts.iter().any(|v| {
-        v.get("producer").and_then(Value::as_str) == Some("local_attestation")
-            && v.get("name").and_then(Value::as_str) == Some("code-review")
-            && v.get("verdict").and_then(Value::as_str) == Some("reviewed")
-            && counted_freshness(v.get("freshness").unwrap_or(&Value::Null))
-            && v.get("attestation_origin").and_then(Value::as_str) == Some("other_session")
-    });
-    if !counted_other_session {
-        return None;
-    }
-    let raw_owner = coverage.get("author_session_id").and_then(Value::as_str);
-    let event_owner = raw_owner.filter(|o| !o.is_empty());
-    let live_owner = worktree.get("harness_session_id").and_then(Value::as_str);
-    let authority_note = if event_owner.is_some() && live_owner == event_owner {
-        format!(
-            "{}; matches coverage event author",
-            worktree
-                .get("authority_note")
-                .and_then(Value::as_str)
-                .unwrap_or("target manifest")
-        )
-    } else if event_owner.is_some() {
-        "coverage event author; current worktree manifest owner differs".to_string()
-    } else {
-        "coverage event lacks author_session_id; current manifest is not historical evidence"
-            .to_string()
-    };
-    Some(json!({
-        "attestation_origin": "other_session",
-        "counts": true,
-        "harness_session_id": event_owner,
-        "worktree_path": worktree.get("path").cloned().unwrap_or(Value::Null),
-        "manifest_path": worktree.get("manifest_path").cloned().unwrap_or(Value::Null),
-        "authority_note": authority_note,
-    }))
-}
-
-/// The coverage-status repost: published through the hidden
-/// `coverage-publish` verb, so the POSTed verdict stays the gate's own
-/// answer, never a re-derivation.
-pub(crate) fn republish_coverage_status(cwd: &Path, pr: u64, head: &str) -> (bool, String) {
-    let mut cmd = std::process::Command::new("fno");
-    cmd.args(["do", "pr", "coverage-publish", &pr.to_string()]);
-    if !head.is_empty() {
-        cmd.args(["--head", head]);
-    }
-    cmd.current_dir(cwd);
-    let Ok(out) = cmd.output() else {
-        return (false, "coverage-publish could not run".into());
-    };
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    match serde_json::from_str::<Value>(text.trim()) {
-        Ok(v) => (
-            v.get("posted").and_then(Value::as_bool).unwrap_or(false),
-            v.get("note")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        ),
-        Err(_) => (out.status.success(), String::new()),
-    }
 }

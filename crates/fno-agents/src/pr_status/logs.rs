@@ -5,7 +5,7 @@
 use super::cache::CountingProbe;
 use crate::king_board::prs::classify_check;
 use crate::pr_status_facts::{GhProbe, RealGhProbe};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 
@@ -306,6 +306,7 @@ pub(crate) fn run_logs_door(payload: &Value) -> (i32, String, String) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use super::*;
 
     fn fixture_raw(name: &str) -> Value {

@@ -17,7 +17,6 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The gh probe seam, shaped like `authorized_merge::Probes::run_gh` but
 /// returning the streams SEPARATE: this module parses stdout as JSON, and a

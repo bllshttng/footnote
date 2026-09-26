@@ -156,29 +156,6 @@ fn serve(row: &Value, stale: bool) -> Option<(i32, String, String)> {
     Some((code, stdout, stderr.join("\n")))
 }
 
-/// The gh probe wrapper this module's live reads ride: `&GhProbe` objects.
-pub(crate) struct ProbeRef<'a>(pub(crate) &'a dyn GhProbe);
-
-impl GhProbe for ProbeRef<'_> {
-    fn run_gh(&self, cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
-        self.0.run_gh(cwd, args)
-    }
-}
-
-/// The live read behind the cache: `run_status`'s whole flow, returning the
-/// exit code, the payload, and the stderr lines. `prior` is the same-head
-/// previous payload (detail and rerun facts reused within one head only).
-pub(crate) fn live_status<P: GhProbe>(
-    probe: &CountingProbe<P>,
-    cwd: &Path,
-    pr: u64,
-    prior: Option<&Value>,
-    slug: &str,
-) -> (i32, Value, Vec<String>, usize) {
-    let (code, payload, stderr) = super::status_payload(probe, cwd, pr, prior, slug);
-    (code, payload, stderr, probe.calls.load(Ordering::SeqCst))
-}
-
 // ---------------------------------------------------------------------------
 // The status door
 // ---------------------------------------------------------------------------

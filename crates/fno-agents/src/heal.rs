@@ -61,15 +61,22 @@ impl crate::pr_status_facts::GhProbe for HealProbe<'_> {
 
 /// heal's job-log read through the shared cache: same `{owner}/{repo}`
 /// placeholder path, but a log one status read already fetched costs no
-/// second download. `slug_key` keys the row; the repo's origin slug.
+/// second download. `slug_key` keys the row; the repo's origin slug. An
+/// unresolvable slug falls back to the placeholder read, so the log and
+/// the remedy it drives survive a missing origin exactly as before.
 fn cached_job_log(a: &Args, slug_key: &str, job_id: &str) -> String {
-    let probe = HealProbe { gh_bin: &a.gh_bin };
     let (owner, repo) = match repo_slug_parts(slug_key) {
         Some(parts) => parts,
         None => {
-            return "log unavailable: could not resolve owner/repo".to_string();
+            return gh_api(
+                a,
+                &format!("repos/{{owner}}/{{repo}}/actions/jobs/{job_id}/logs"),
+                &[],
+            )
+            .unwrap_or_else(|e| format!("log unavailable: {e}"));
         }
     };
+    let probe = HealProbe { gh_bin: &a.gh_bin };
     crate::pr_status::job_log(&probe, &a.cwd, slug_key, &owner, &repo, job_id)
         .unwrap_or_else(|e| format!("log unavailable: {e}"))
 }

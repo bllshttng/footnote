@@ -1202,7 +1202,7 @@ def _unbake_constants_facade():
 
 @pytest.fixture(autouse=True)
 def _no_status_ci_door(monkeypatch):
-    """Hermetic default for the status door transports (x-8ab0).
+    """Hermetic default for the status door transports.
 
     `_verify._failing_required`, `_internal_gh._checks` and the merge flake
     probe read their facts through `fno.rust_binary.verb_call` status ops.
@@ -1215,8 +1215,6 @@ def _no_status_ci_door(monkeypatch):
     """
     import fno.rust_binary as rust_binary
 
-    real_verb_call = rust_binary.verb_call
-
     def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
         op = payload.get("op") if isinstance(payload, dict) else None
         if op == "status-ci":
@@ -1226,3 +1224,18 @@ def _no_status_ci_door(monkeypatch):
         )
 
     monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
+
+
+@pytest.fixture(autouse=True)
+def _no_review_lane_by_default(monkeypatch):
+    """Hermetic default: no review lane is configured (a fresh install).
+
+    The coverage gate's lane probe reads the real claims store when left
+    alone, so a worker whose own branch carries live review:branch claims
+    leaks them into unit tests that never staged coverage rows. Tests
+    pinning a lane set `fno.pr._merge._review_lane_configured` themselves
+    (the merge-world stub does).
+    """
+    from fno.pr import _merge
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
