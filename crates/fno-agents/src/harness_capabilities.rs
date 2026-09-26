@@ -105,6 +105,20 @@ const FEATURE_KEYS: [&str; 11] = [
 /// routing boolean and name tuple this dimension replaced could not say
 /// that.
 const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
+/// The closed journey-key set: the ten classes the cross-harness audits name.
+/// Closed so a typo is a parse error rather than a silent new dimension.
+pub const JOURNEY_KEYS: [&str; 10] = [
+    "fresh-install",
+    "spawn-turn-resume",
+    "parent-children",
+    "send-during-active-work",
+    "wait-for-ci",
+    "compact-reopen",
+    "restart-viewport",
+    "review-ship",
+    "native-remote-view",
+    "cleanup",
+];
 /// How a live pane session becomes a persistent thread, one value per
 /// `[harness.<name>.conversion]` stanza. Closed so the classifier can branch
 /// on the strategy alone - never on a harness name - and a typo is a parse
@@ -135,6 +149,12 @@ pub struct HarnessContract {
     /// it as such instead of guessing an instrument.
     #[serde(default)]
     pub probe: BTreeMap<String, ProbeDecl>,
+    /// The ten journey classes, keyed by [`JOURNEY_KEYS`] name. Same
+    /// instrument contract as `probe`; the journeys dimension answers
+    /// whether a complete user journey can be run and observed, beside the
+    /// per-field instruments.
+    #[serde(default)]
+    pub journeys: BTreeMap<String, JourneyDecl>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -146,10 +166,41 @@ pub struct ProbeDecl {
     pub authority: String,
     #[serde(default)]
     pub pattern: String,
+    /// The text a correct reader must REJECT. `declared` needs it: a pattern
+    /// that matches its own control also matches a sentence denying the
+    /// capability, so the reader cannot report absence and the load refuses
+    /// it. The other kinds forbid it - a field the kind does not own is a
+    /// rejection, not a silent keep.
+    #[serde(default)]
+    pub control: String,
     #[serde(default)]
     pub marker: String,
     #[serde(default)]
     pub reason: String,
+}
+
+/// A journey-class declaration: one of the ten user-journey classes the
+/// cross-harness audits name, carrying the same instrument kinds as
+/// [`ProbeDecl`] plus an optional `reader` naming a reader owned by another
+/// surface this journey consumes instead of defining a second one.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JourneyDecl {
+    /// One of [`PROBE_KINDS`].
+    pub kind: String,
+    #[serde(default)]
+    pub authority: String,
+    #[serde(default)]
+    pub pattern: String,
+    /// Same contract as [`ProbeDecl::control`].
+    #[serde(default)]
+    pub control: String,
+    #[serde(default)]
+    pub marker: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reader: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -392,6 +443,27 @@ pub struct FeatureClaim {
     /// instead of implying one.
     #[serde(default)]
     pub verbs: Vec<String>,
+    /// What settled this claim: the reader that ran, the harness version it
+    /// ran against, and the date. A claim without one keeps its state and
+    /// its comment, and the matrix renders the cell unmeasured rather than
+    /// repeating a word nobody can point at a measurement for.
+    #[serde(default)]
+    pub measured_by: Option<MeasuredBy>,
+}
+
+/// The measurement receipt a feature claim carries inside `measured_by`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MeasuredBy {
+    /// The reader that ran (a journey name, a probe line, or a named
+    /// instrument owned by another surface).
+    pub reader: String,
+    /// ISO date (YYYY-MM-DD) the measurement settled.
+    pub date: String,
+    /// The harness version the reader ran against; empty when the row's
+    /// own comment cites no version.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -512,6 +584,9 @@ impl HarnessContract {
         }
         for (field, decl) in &self.probe {
             validate_probe_decl(field, decl)?;
+        }
+        for (key, decl) in &self.journeys {
+            validate_journey_decl(key, decl)?;
         }
         // A feature declaration may only name a key in the closed set, and a
         // feature USED on any row may only exist beside a declaration: the
@@ -921,43 +996,87 @@ fn validate_model_switch_strategy(
 /// The per-harness half of [`HarnessContract::validate`], extracted so an
 /// override reader can gate ONE merged candidate row through the same
 /// contract the bundled table ships under.
-/// A probe declaration may carry only the instrument its kind names, and a
-/// declared pattern must compile: the declaration IS an instrument spec, and
-/// a spec that cannot run is a guess with extra steps.
+/// A probe declaration may carry only the instrument its kind names, a
+/// declared pattern must compile, and a declared pattern must REJECT its own
+/// control: the declaration IS an instrument spec, and a spec that cannot run
+/// - or that cannot tell the capability from a sentence denying it - is a
+/// guess with extra steps.
 fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractError> {
-    if !PROBE_KINDS.contains(&decl.kind.as_str()) {
+    validate_instrument(
+        field,
+        &decl.kind,
+        decl.authority.as_str(),
+        decl.pattern.as_str(),
+        decl.control.as_str(),
+        decl.marker.as_str(),
+        decl.reason.as_str(),
+    )
+}
+
+fn validate_journey_decl(key: &str, decl: &JourneyDecl) -> Result<(), ContractError> {
+    if !JOURNEY_KEYS.contains(&key) {
         return Err(ContractError(format!(
-            "probe {field:?}: unknown kind {:?}",
-            decl.kind
+            "journey {key:?}: not one of the journey keys"
         )));
     }
-    let (need, forbid): (&[&str], &[&str]) = match decl.kind.as_str() {
-        "declared" => (&["authority", "pattern"], &["marker", "reason"]),
-        "behavioral" => (&["marker"], &["authority", "pattern", "reason"]),
-        _ => (&["reason"], &["authority", "pattern", "marker"]),
+    validate_instrument(
+        key,
+        &decl.kind,
+        decl.authority.as_str(),
+        decl.pattern.as_str(),
+        decl.control.as_str(),
+        decl.marker.as_str(),
+        decl.reason.as_str(),
+    )
+}
+
+fn validate_instrument(
+    field: &str,
+    kind: &str,
+    authority: &str,
+    pattern: &str,
+    control: &str,
+    marker: &str,
+    reason: &str,
+) -> Result<(), ContractError> {
+    if !PROBE_KINDS.contains(&kind) {
+        return Err(ContractError(format!(
+            "instrument {field:?}: unknown kind {kind:?}"
+        )));
+    }
+    let (need, forbid): (&[&str], &[&str]) = match kind {
+        "declared" => (&["authority", "pattern", "control"], &["marker", "reason"]),
+        "behavioral" => (&["marker"], &["authority", "pattern", "control", "reason"]),
+        _ => (&["reason"], &["authority", "pattern", "control", "marker"]),
     };
     let get = |name: &str| match name {
-        "authority" => decl.authority.as_str(),
-        "pattern" => decl.pattern.as_str(),
-        "marker" => decl.marker.as_str(),
-        _ => decl.reason.as_str(),
+        "authority" => authority,
+        "pattern" => pattern,
+        "control" => control,
+        "marker" => marker,
+        _ => reason,
     };
     if let Some(missing) = need.iter().find(|name| get(name).is_empty()) {
         return Err(ContractError(format!(
-            "probe {field:?}: kind {:?} needs {missing}",
-            decl.kind
+            "instrument {field:?}: kind {kind:?} needs {missing}"
         )));
     }
     if let Some(extra) = forbid.iter().find(|name| !get(name).is_empty()) {
         return Err(ContractError(format!(
-            "probe {field:?}: kind {:?} must not carry {extra}",
-            decl.kind
+            "instrument {field:?}: kind {kind:?} must not carry {extra}"
         )));
     }
-    if decl.kind == "declared" {
-        if let Err(error) = Regex::new(&decl.pattern) {
+    if kind == "declared" {
+        let regex = Regex::new(pattern).map_err(|error| {
+            ContractError(format!("instrument {field:?}: invalid pattern: {error}"))
+        })?;
+        if let Some(hit) = regex.find(control) {
             return Err(ContractError(format!(
-                "probe {field:?}: invalid pattern: {error}"
+                "instrument {field:?}: pattern {pattern:?} matches its own control text \
+                 {:?}; a reader that cannot reject its control cannot report absence. \
+                 Write a pattern that discriminates, or declare the field unprobeable \
+                 with the reason",
+                hit.as_str()
             )));
         }
     }
@@ -2044,8 +2163,14 @@ mod tests {
 
     #[test]
     fn a_row_without_a_features_table_loads_with_no_refusal() {
-        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\n";
+        // The stanza is stripped whole, receipt line included: an orphaned
+        // `measured_by` would land at the row level, where it is unknown.
+        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\nmeasured_by = { reader = \"agy spawn journey\", version = \"1.1.24\", date = \"2026-09-03\" }\n";
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
+        assert_ne!(
+            stripped, CAPABILITY_TOML,
+            "the agy spawn stanza moved; update the stripped text"
+        );
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
     }
@@ -2136,5 +2261,60 @@ mod tests {
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(err.contains("pi"), "{err}");
         assert!(err.contains("strategy"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_instrument_without_a_control_is_refused() {
+        let bad = CAPABILITY_TOML.replacen(
+            "control = \"no reasoning effort options are available in this build\"",
+            "control = \"\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("needs control"), "{err}");
+        assert!(err.contains("declared"), "{err}");
+    }
+
+    #[test]
+    fn a_control_on_a_kind_that_does_not_own_it_is_refused() {
+        let decl = ProbeDecl {
+            kind: "unprobeable".into(),
+            authority: String::new(),
+            pattern: String::new(),
+            control: "control text".into(),
+            marker: String::new(),
+            reason: "why".into(),
+        };
+        let err = validate_probe_decl("probe.test", &decl)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not carry control"), "{err}");
+    }
+
+    #[test]
+    fn a_pattern_matching_its_own_control_is_refused_as_blind() {
+        let decl = ProbeDecl {
+            kind: "declared".into(),
+            authority: "{bin} --help".into(),
+            pattern: r"(?i)\bhooks?\b".into(),
+            control: "no hook support in this build".into(),
+            marker: String::new(),
+            reason: String::new(),
+        };
+        let err = validate_probe_decl("probe.test", &decl)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("matches its own control"),
+            "the refusal names the blindness: {err}"
+        );
+        assert!(
+            err.contains("discriminates"),
+            "the refusal names remedy one: {err}"
+        );
+        assert!(
+            err.contains("unprobeable"),
+            "the refusal names remedy two: {err}"
+        );
     }
 }

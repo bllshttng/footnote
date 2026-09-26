@@ -309,6 +309,7 @@ crates/fno-agents/src/plans_dirs.rs
 crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs
+crates/fno-agents/src/reentry.rs
 crates/fno-agents/src/receipt.rs
 crates/fno-agents/src/roster_reap.rs
 crates/fno-agents/src/scratch.rs

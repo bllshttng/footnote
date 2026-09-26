@@ -169,23 +169,27 @@ fn main() {
             &args[1..],
         ));
     }
-    // PR-scoped callers resolve the local checkout from the head branch;
-    // transport-only, so this adds no client action to the curated menu.
+    // PR-scoped callers resolve the local checkout from the head branch; transport-only.
     if args.first().map(String::as_str) == Some("pr-worktree") {
         std::process::exit(fno_agents::pr_worktree::run());
     }
     // `launch-workdir`: the spawn door's launch-cwd resolution (see
-    // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
-    // no client action (the shrink law allows none); Python's
+    // launch_workdir.rs doc). Transport-only: registers no client action; Python's
     // ensure_launch_workdir reaches it through verb_call, and a `hold`
     // answer is a valid exit-0 answer the caller renders.
     if args.first().map(String::as_str) == Some("launch-workdir") {
         std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-only
-    // (no client action - shrink law); callers: worktree_gate.py, worktree-reapable.sh.
+    // `worktree-reapable`: the worktree-removal gate; callers: worktree_gate.py, worktree-reapable.sh.
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
+    }
+    // `harness-probe` / `harness-matrix`: capability reader + renderers, transport-only.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("harness-probe" | "harness-matrix")
+    ) {
+        std::process::exit(fno_agents::harness_reader::transport_doors(&args));
     }
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
@@ -197,6 +201,13 @@ fn main() {
     // A fire answers in microseconds; the runtime never builds for one.
     if args.first().map(String::as_str) == Some("hook") {
         std::process::exit(fno_agents::hook::dispatch(&args[1..]));
+    }
+    // `mail-hold`: transport-only (no client action - the shrink law allows
+    // none); the mux server's keystroke arm and `king cancel` are the
+    // callers. The arm runs detached-safe and answers in microseconds, so
+    // it dispatches before the runtime builds, with the other early arms.
+    if args.first().map(String::as_str) == Some("mail-hold") {
+        std::process::exit(fno_agents::mail_hold::run_mail_hold(&args[1..]));
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
