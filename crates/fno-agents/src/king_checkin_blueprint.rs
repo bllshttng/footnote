@@ -163,6 +163,13 @@ mod tests {
         slots: Result<usize, String>,
         floor: &str,
     ) -> Result<Value, String> {
+        // The FNO_CONFIG pin below is the SOLE config candidate for every
+        // concurrent reader, so it must not interleave with another test's
+        // config read (the spawn-gate reservation suite reads max_live under
+        // this same lock).
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(fnodir.join("config.toml"), config_toml).unwrap();

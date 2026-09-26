@@ -2028,6 +2028,9 @@ mod tests {
     /// caps only zai, and a non-positive or missing lanes is uncapped.
     #[test]
     fn lanes_cap_reads_config_with_builtin_fallback() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-lanes-cap-{}", std::process::id()));
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -2061,6 +2064,9 @@ mod tests {
     /// uncapped (the caller then reads its own default ceiling).
     #[test]
     fn subagents_cap_reads_config_with_builtin_fallback() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-subagents-cap-{}", std::process::id()));
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();

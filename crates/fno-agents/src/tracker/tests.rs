@@ -28,14 +28,25 @@ fn hermetic_env(tmp: &std::path::Path) -> EnvGuard {
     std::env::set_var("HOME", tmp);
     std::env::set_var("FNO_HOME", tmp);
     std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
-    EnvGuard(saved)
+    // The guard holds the shared env lock for the caller's whole body: the
+    // pins above are process-global, and a concurrent test's config read
+    // must not observe them mid-flight (the territory EnvGuard discipline).
+    EnvGuard(
+        crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        saved,
+    )
 }
 
-struct EnvGuard([(&'static str, Option<String>); 4]);
+struct EnvGuard(
+    std::sync::MutexGuard<'static, ()>,
+    [(&'static str, Option<String>); 4],
+);
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        for (key, value) in self.0.iter() {
+        for (key, value) in self.1.iter() {
             match value {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
@@ -134,11 +145,6 @@ fn cand(id: &str, title: &str, blocked_by: &[&str]) -> Candidate {
 #[test]
 fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
     let dir = tempfile::tempdir().unwrap();
-    // hermetic_env mutates process-global env; hold the crate's env lock so
-    // parallel env-holding tests (ac2, a_scope_switch) cannot interleave.
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     // Sidecar file for o/r#1 with plan_path, cwd and two sessions.
     let sidecar_dir = dir.path().join(".fno/sidecar");
@@ -274,9 +280,6 @@ fn a_gh_io_fault_surfaces_as_backend_naming_the_id() {
 #[test]
 fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
@@ -318,9 +321,6 @@ fn ac2_stale_cache_serves_the_last_good_read_on_failure() {
 #[test]
 fn a_scope_switch_never_serves_another_scope_cache() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _env = hermetic_env(dir.path());
     std::env::set_var("FNO_TRACKER_GITHUB_REPO", "owner/a");
     let good = FakeTracker {
