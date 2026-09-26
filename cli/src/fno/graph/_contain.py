@@ -125,7 +125,27 @@ def contain_into(
         warning = f"carries PR #{own_pr}" if own_pr else "carries cost"
     else:
         target["contained_in"] = owner["id"]
+        target.pop("released_from", None)
     if target.get("parent") == owner["id"]:
         return ContainOutcome(adopted=False, warning=warning)  # already adopted
     target["parent"] = owner["id"]
     return ContainOutcome(adopted=True, warning=warning)
+
+
+def release_contained(entries: list[dict], node: dict) -> None:
+    """Un-contain ``node`` (which must carry ``contained_in``) and drop the PR
+    refs inherited from its owner, so the owner's merge cannot close a node
+    that no longer ships inside it. Own PRs stay; ``released_from`` feeds the
+    closure-bind skip."""
+    from fno.graph._reconcile import node_pr_refs  # local: breaks the import cycle
+    owner_id = node.pop("contained_in")
+    owner = next((e for e in entries if isinstance(e, dict) and e.get("id") == owner_id), None)
+    owner_prs = {n for n, _ in node_pr_refs(owner)} if owner else set()
+    if isinstance(node.get("pr_number"), int) and node["pr_number"] in owner_prs:
+        node["pr_number"] = node["pr_url"] = node["merge_status"] = None
+    if owner_prs:
+        node["additional_prs"] = [
+            ref for ref in (node.get("additional_prs") or [])
+            if not (isinstance(ref, dict) and ref.get("number") in owner_prs)
+        ]
+    node["released_from"] = owner_id
