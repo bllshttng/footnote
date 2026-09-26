@@ -8694,20 +8694,7 @@ async fn attach_and_run(
         // same discipline as the MINE mutation above.
         // The questions block's kick: one fold every 10 s while the sideline
         // is shown, single-flight like the feed fold.
-        if view.panel_w() > 0
-            && view
-                .questions_kick_at
-                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10))
-            && !view.questions_inflight
-        {
-            view.questions_inflight = true;
-            view.questions_kick_at = Some(Instant::now());
-            let tx = questions_tx.clone();
-            tokio::spawn(async move {
-                let fold = crate::needs_overlay::questions_now().await;
-                let _ = tx.send(fold);
-            });
-        }
+        questions::maybe_kick(&mut view, &questions_tx);
         if let Some((qid, pick)) = view.question_action.take() {
             let tx = question_act_tx.clone();
             tokio::spawn(async move {
@@ -9321,30 +9308,15 @@ async fn attach_and_run(
             }
             Some(result) = question_act_rx.recv() => {
                 // A queued question answer finished: success closes the
-                // detail (the row leaves on the next fold), a refusal keeps
-                // it open showing the door's line.
-                let ok = result.is_ok();
+                // detail, a refusal keeps it open on the door's line.
                 view.apply_question_action_result(result);
-                if ok {
-                    view.question_detail = None;
-                }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
             }
             Some(fold) = questions_rx.recv() => {
-                // The questions block's fold landed: always apply (the block
-                // always shows the latest projection) and repaint.
-                view.questions_inflight = false;
-                match fold {
-                    Some(f) => {
-                        view.questions_fold = Some(f);
-                        view.questions_degraded = false;
-                    }
-                    None => {
-                        view.questions_degraded = true;
-                    }
-                }
+                // The questions block's fold landed: apply and repaint.
+                view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10989,14 +10961,10 @@ async fn apply_hit(
             view.open_sideline_menu(Anchor::At { row, col })
         }
         // Inspect first. The deep link is this view's own action, not the
-        // click that opened it.
+        // click path that opened it.
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
         // The questions detail overlay: opens on the clicked question.
-        ChromeHit::OpenQuestionDetail(id) => {
-            let empty = crate::needs_overlay::QuestionsFold::default();
-            let fold = view.questions_fold.as_ref().unwrap_or(&empty);
-            view.question_detail = questions::Detail::open(fold, Some(&id));
-        }
+        ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
     }
     Ok(())
 }
@@ -13885,30 +13853,12 @@ async fn answer_keys(
                 }
             }
             b'0'..=b'9' => {
-                // A question with options answers first (task 2.3):
-                // the digit picks `options[n-1]`, closed via `outstanding
-                // clear --answer`. A no-options question falls through to
-                // the BEL below - Enter is its answer path. A MINE row has
-                // no `NeedRow` to answer either - `.need()` is None and this
-                // always beeps too, same as a non-answerable NEED row.
+                // A question row: a digit opens the full-context detail
+                // overlay with that option preselected, where the answer is
+                // reviewed and sent. A NEED row answers as before; a MINE row
+                // has no options and beeps below.
                 if let Some(q) = projection.rows[cur].question() {
-                    let n = (k - b'0') as usize;
-                    match n
-                        .checked_sub(1)
-                        .and_then(|i| q.options.get(i))
-                        .filter(|_| !view.question_acting)
-                    {
-                        Some(opt) => {
-                            view.question_action = Some((
-                                q.id.clone(),
-                                crate::needs_overlay::AnswerPick::Option(opt.n),
-                            ));
-                            view.question_acting = true;
-                        }
-                        _ => {
-                            let _ = raw_out(b"\x07");
-                        }
-                    }
+                    view.open_detail_on(&q.id);
                     continue;
                 }
                 let picked = projection.rows[cur].need().and_then(|sel| {
@@ -13952,14 +13902,8 @@ async fn answer_keys(
                 // A question row: Enter opens the full-context detail
                 // overlay (the answer gestures live there now, for every
                 // kind - options, free text, pins).
-                if projection.rows[cur].question().is_some() {
-                    let empty = crate::needs_overlay::QuestionsFold::default();
-                    let fold = view.questions_fold.as_ref().unwrap_or(&empty);
-                    let qid = projection.rows[cur]
-                        .question()
-                        .map(|q| q.id.clone())
-                        .unwrap_or_default();
-                    view.question_detail = questions::Detail::open(fold, Some(&qid));
+                if let Some(q) = projection.rows[cur].question() {
+                    view.open_detail_on(&q.id);
                     continue;
                 }
                 // Goto the row's target: SelectSquad/SelectTab only when

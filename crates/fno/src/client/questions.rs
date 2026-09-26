@@ -384,6 +384,31 @@ pub(super) fn draw_detail(
     true
 }
 
+/// The 10 s refresh: at most one projection fold in flight while the
+/// sideline is shown. The read runs off the UI loop; the fold rides `tx`
+/// back to the run loop.
+pub(super) fn maybe_kick(
+    view: &mut View,
+    tx: &tokio::sync::mpsc::UnboundedSender<Option<crate::needs_overlay::QuestionsFold>>,
+) {
+    if view.panel_w() == 0 || view.questions_inflight {
+        return;
+    }
+    let due = view
+        .questions_kick_at
+        .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10));
+    if !due {
+        return;
+    }
+    view.questions_inflight = true;
+    view.questions_kick_at = Some(Instant::now());
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let fold = crate::needs_overlay::questions_now().await;
+        let _ = tx.send(fold);
+    });
+}
+
 /// The detail overlay's keys. Free text owns the keyboard while open; digits
 /// select an option; Enter sends through the door (a no-option question
 /// starts the free-text entry, a pin sends `done`); n/N move between open
@@ -472,15 +497,40 @@ pub(super) async fn detail_keys(
 }
 
 impl View {
+    /// Open the detail overlay on one question by id.
+    pub(super) fn open_detail_on(&mut self, id: &str) {
+        let empty = crate::needs_overlay::QuestionsFold::default();
+        let fold = self.questions_fold.as_ref().unwrap_or(&empty);
+        self.question_detail = Detail::open(fold, Some(id));
+    }
+
+    /// Apply a landed questions fold: the block always shows the latest
+    /// projection, so no generation guard here.
+    pub(super) fn apply_questions_fold(
+        &mut self,
+        fold: Option<crate::needs_overlay::QuestionsFold>,
+    ) {
+        self.questions_inflight = false;
+        match fold {
+            Some(f) => {
+                self.questions_fold = Some(f);
+                self.questions_degraded = false;
+            }
+            None => self.questions_degraded = true,
+        }
+    }
+
     /// Apply a finished question answer: success re-folds so the row leaves
-    /// the queue on the next fold, a failure shows the door's own line and
-    /// leaves the question open.
+    /// the queue on the next fold and closes the detail (the row leaves on
+    /// the refold); a failure shows the door's own line and keeps the detail
+    /// open on it.
     pub(super) fn apply_question_action_result(&mut self, result: Result<String, String>) {
         self.question_acting = false;
         match result {
             Ok(receipt) => {
                 self.needs_want = true;
                 self.set_notice(format!("needs: {receipt}"));
+                self.question_detail = None;
             }
             Err(msg) => self.set_notice(msg),
         }
@@ -616,84 +666,82 @@ mod tests {
         assert_eq!(d.sel, None, "the pick resets on advance");
     }
 
-#[tokio::test]
-async fn answer_keys_enter_on_question_opens_the_detail_overlay() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
-        items: vec![question_item("q-2", &[], None)],
-        ..Default::default()
-    });
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let detail = v.question_detail.expect("the detail opened");
-    assert_eq!(detail.item().id, "q-2");
-    assert_eq!(v.answers, Some(0), "the overlay stays open");
-    assert!(buf.is_empty());
-}
+    #[tokio::test]
+    async fn answer_keys_enter_on_question_opens_the_detail_overlay() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![question_item("q-2", &[], None)],
+            ..Default::default()
+        });
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let detail = v.question_detail.expect("the detail opened");
+        assert_eq!(detail.item().id, "q-2");
+        assert_eq!(v.answers, Some(0), "the overlay stays open");
+        assert!(buf.is_empty());
+    }
 
-#[tokio::test]
-async fn answer_keys_digit_on_question_with_options_queues_answer() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
-        items: vec![question_item("q-1", &["oauth", "apikey"], Some(true))],
-        ..Default::default()
-    });
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"2", &mut buf).await.unwrap();
-    assert_eq!(
-        v.question_action,
-        Some((
-            "q-1".to_string(),
-            crate::needs_overlay::AnswerPick::Option(2)
-        ))
-    );
-    assert!(v.question_acting);
-    assert!(
-        buf.is_empty(),
-        "a question answer never sends a pane keystroke"
-    );
-}
+    #[tokio::test]
+    async fn answer_keys_digit_on_a_question_row_opens_the_detail() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![question_item("q-1", &["oauth", "apikey"], Some(true))],
+            ..Default::default()
+        });
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"2", &mut buf).await.unwrap();
+        let detail = v.question_detail.expect("the detail opened");
+        assert_eq!(detail.item().id, "q-1");
+        assert!(
+            v.question_action.is_none(),
+            "nothing is sent from the digit"
+        );
+        assert!(
+            buf.is_empty(),
+            "a question digit never sends a pane keystroke"
+        );
+    }
 
-#[tokio::test]
-async fn answer_keys_digit_with_no_matching_question_option_bels() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
-        items: vec![question_item("q-3", &["oauth"], Some(true))],
-        ..Default::default()
-    });
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"9", &mut buf).await.unwrap();
-    assert_eq!(v.question_action, None);
-    assert!(!v.question_acting);
-    assert!(buf.is_empty());
-}
+    #[tokio::test]
+    async fn answer_keys_digit_with_no_matching_question_option_bels() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+            items: vec![question_item("q-3", &["oauth"], Some(true))],
+            ..Default::default()
+        });
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"9", &mut buf).await.unwrap();
+        assert_eq!(v.question_action, None);
+        assert!(!v.question_acting);
+        assert!(buf.is_empty());
+    }
 
-#[test]
-fn apply_question_action_result_success_requests_refold() {
-    let mut v = view_with_agents(vec![]);
-    v.needs_want = false;
-    v.apply_question_action_result(Ok("recorded, delivering".into()));
-    assert!(!v.question_acting);
-    assert!(v.needs_want, "success re-folds so the row leaves on refold");
-}
+    #[test]
+    fn apply_question_action_result_success_requests_refold() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_want = false;
+        v.apply_question_action_result(Ok("recorded, delivering".into()));
+        assert!(!v.question_acting);
+        assert!(v.needs_want, "success re-folds so the row leaves on refold");
+    }
 
-#[test]
-fn apply_question_action_result_failure_shows_notice_never_silent() {
-    let mut v = view_with_agents(vec![]);
-    v.needs_want = false;
-    v.apply_question_action_result(Err("failed to close q-1: locked".into()));
-    assert!(!v.question_acting);
-    assert!(!v.needs_want, "a failure never triggers a re-fold");
-    let notice = v.notice.as_ref().expect("failure surfaces a notice");
-    assert!(notice.0.contains("failed to close q-1: locked"));
-}
+    #[test]
+    fn apply_question_action_result_failure_shows_notice_never_silent() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_want = false;
+        v.apply_question_action_result(Err("failed to close q-1: locked".into()));
+        assert!(!v.question_acting);
+        assert!(!v.needs_want, "a failure never triggers a re-fold");
+        let notice = v.notice.as_ref().expect("failure surfaces a notice");
+        assert!(notice.0.contains("failed to close q-1: locked"));
+    }
 }
