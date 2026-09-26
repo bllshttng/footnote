@@ -2111,6 +2111,42 @@ def test_default_agent_path_ignores_the_caller_environment(tmp_home, monkeypatch
     assert "/opt/homebrew/bin" in codex_view and "/usr/bin" in codex_view
 
 
+@pytest.mark.parametrize("use_cargo_home", [False, True])
+def test_default_agent_path_carries_cargo_bin(tmp_home, monkeypatch, use_cargo_home):
+    """The launchd PATH carries the cargo bin dir holding fno-agents.
+
+    The watcher tick shells out to fno-agents/fno-agents-worker, which live in
+    the cargo bin dir; a PATH without it fails every tick at binary lookup.
+    """
+    m = _install()
+    root = tmp_home / ("cargo-home" if use_cargo_home else ".cargo")
+    (root / "bin").mkdir(parents=True)
+    if use_cargo_home:
+        monkeypatch.setenv("CARGO_HOME", str(root))
+    else:
+        monkeypatch.delenv("CARGO_HOME", raising=False)
+    entries = m.default_agent_path("/Users/x/.local/bin/fno-py").split(":")
+
+    assert str(root / "bin") in entries
+
+
+def test_rendered_watcher_path_contains_cargo_bin(tmp_home, tmp_launch_agents, monkeypatch):
+    """The rendered plist's PATH itself carries the cargo bin dir."""
+    import plistlib
+
+    m = _install()
+    cargo_bin = tmp_home / ".cargo" / "bin"
+    cargo_bin.mkdir(parents=True)
+    monkeypatch.delenv("CARGO_HOME", raising=False)
+    rendered = m.render_plist(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary=str(tmp_home / ".local" / "bin" / "fno-py"),
+    )
+    env = plistlib.loads(rendered.encode())["EnvironmentVariables"]
+
+    assert str(cargo_bin) in env["PATH"].split(":")
+
+
 def test_refresh_unchanged_skips_write_and_bounce(tmp_home, tmp_launch_agents, monkeypatch):
     m = _install()
     plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
