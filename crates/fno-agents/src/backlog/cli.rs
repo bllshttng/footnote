@@ -125,7 +125,7 @@ pub fn run(args: &[String]) -> i32 {
     // decompose ...`): the catalog resolves commands, never app flags, so
     // the whole argv rides the compat forward verbatim, exactly the shape
     // the Python app has always parsed.
-    if head.is_some_and(|h| h.starts_with('-')) {
+    if is_app_option_head(args) {
         return forward_verbatim(args);
     }
     let resolved = match resolve_head(args) {
@@ -163,6 +163,14 @@ pub fn run(args: &[String]) -> i32 {
         "find" => super::find_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
+}
+
+/// Whether the invocation opens with the backlog app's own option rather
+/// than a command (`fno backlog --json decompose ...`). Help was already
+/// answered by the caller; the predicate stays honest standalone.
+fn is_app_option_head(args: &[String]) -> bool {
+    args.first()
+        .is_some_and(|a| a.starts_with('-') && a != "-h" && a != "--help")
 }
 
 /// The engine door's get contract, help excluded: a leading or trailing
@@ -305,13 +313,18 @@ mod tests {
     #[test]
     fn a_leading_app_option_is_not_a_command() {
         // `fno backlog --json decompose x` is the Python app's group-option
-        // form; the catalog owns commands only, so an option-led argv never
-        // resolves to a legacy command here (run() forwards it verbatim).
-        let owned: Vec<String> = ["--json", "decompose", "x"]
+        // form: the predicate sends it to the verbatim forward, while every
+        // command-led argv (and the help arms, answered above it) does not.
+        let opt: Vec<String> = ["--json", "decompose", "x"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(owned.first().is_some_and(|a| a.starts_with('-')));
+        assert!(is_app_option_head(&opt));
+        let cmd: Vec<String> = vec!["get".to_string(), "x-abc".to_string()];
+        assert!(!is_app_option_head(&cmd));
+        let help: Vec<String> = vec!["--help".to_string()];
+        assert!(!is_app_option_head(&help));
+        assert!(!is_app_option_head(&[]));
     }
 
     #[test]
