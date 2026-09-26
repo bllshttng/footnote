@@ -157,6 +157,30 @@ def init_cmd(
     typer.echo(f"scope:  {fields['scope']}")
     _print_settled_children(scope)
     _warn_uncrowned_row(scope)
+    _reign_hold()
+
+
+def _reign_hold(argv: list[str] | None = None) -> None:
+    """Fire-and-forget the reign hold (the beat's `hold --off` drains it)."""
+    import re
+    import shutil
+    import subprocess
+
+    from fno.config import load_settings
+
+    if argv is None:
+        match = re.match(r"(\d+)([smhd])", str(load_settings().king.checkin_interval))
+        count, unit = match.groups() if match else ("55", "m")
+        minutes = max(1, int(count) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] // 60)
+        # The running binary first (cmd_hold's idiom): a PATH `fno` lags.
+        binary = sys.argv[0] if Path(sys.argv[0]).is_file() else shutil.which("fno")
+        argv = [binary or sys.argv[0], "agents", "mail", "hold", "--for", str(minutes)]
+    try:
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except (OSError, TypeError):
+        pass
 
 
 def _print_settled_children(scope: str) -> None:
@@ -486,7 +510,7 @@ def cancel_cmd(
     clear: bool = typer.Option(False, "--clear", help="Clear the king cancel signal."),
 ) -> None:
     """Set or clear the cancel signal beside a canonical crown manifest."""
-    from fno.king.state import king_manifest_path
+    from fno.king.state import king_manifest_path, parse_manifest
 
     manifest = king_manifest_path(scope)
     if not manifest.is_file():
@@ -505,6 +529,11 @@ def cancel_cmd(
             sentinel.touch()
             _emit_cancel_signal(sentinel, scope)
             typer.echo(f"king: cancel signal set: {sentinel}")
+            # The cancelled crown's hold lifts: clock and stamp both leave.
+            from fno.rust_binary import resolve_binary
+
+            session_id = parse_manifest(manifest).get("harness_session_id") or ""
+            _reign_hold([str(resolve_binary()), "mail-hold", "--session", session_id, "--off"])
     except OSError as exc:
         typer.echo(f"king: could not update cancel signal {sentinel}: {exc}", err=True)
         raise typer.Exit(1) from exc
