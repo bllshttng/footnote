@@ -7,7 +7,7 @@
 //! degrade, and an external backend selection refuses with the guarded
 //! metadata reader's exact message; everything else is byte-faithful.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// The parsed find invocation. `None` is the usage-error shape (an unknown
 /// flag, a second positional, or no query).
@@ -244,7 +244,10 @@ pub fn run(tail: &[String]) -> i32 {
         );
     }
     let graph_path = super::settings::graph_path();
-    let mut entries = match crate::graph_store::read_rows_strict(&graph_path) {
+    // The store's own rows, verbatim the way the keeper serves them; the
+    // `--json` render re-orders into the model dump shape, the TSV rows read
+    // the live fields off the raw row.
+    let mut entries = match crate::backlog::read_entries(&graph_path) {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!(
@@ -254,19 +257,26 @@ pub fn run(tail: &[String]) -> i32 {
             return super::get_cli::GRAPH_UNREADABLE_EXIT;
         }
     };
-    // The search pool carries the read-time derived status and blocked
-    // reason, the same overlay the keeper's served rows answer with.
+    // The search pool carries the defaults tail and the read-time derived
+    // status and blocked reason, the same overlay the keeper's served rows
+    // answer with. The live pool excludes archived residents; they surface
+    // only through the read-through on a live miss (the `archived_at`
+    // partition python's include-archived read answered with).
+    crate::graph_store::apply_defaults(&mut entries, false);
     crate::graph_store::apply_readiness_overlay(&mut entries);
-    let mut matched = resolve_against(&entries, &args);
+    let live: Vec<Value> = entries
+        .iter()
+        .filter(|r| r.get("archived_at").is_none())
+        .cloned()
+        .collect();
+    let mut matched = resolve_against(&live, &args);
     matched.retain(|e| passes_filters(e, &args));
     if matched.is_empty() {
-        let mut archived: Vec<Value> = match crate::graph_store::read_raw(&graph_path) {
-            Ok(crate::graph_store::RawRead::Entries(rows)) => rows
-                .into_iter()
-                .filter(|r| r.get("archived_at").is_some())
-                .collect(),
-            _ => Vec::new(),
-        };
+        let archived: Vec<Value> = entries
+            .iter()
+            .filter(|r| r.get("archived_at").is_some())
+            .cloned()
+            .collect();
         let mut hits = resolve_against(&archived, &args);
         hits.retain(|e| passes_filters(e, &args));
         for h in hits {
@@ -521,7 +531,12 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(&keys[..4], &["id", "parent", "status", "extra"]);
+        // id and parent lead, the typed children default follows at its model
+        // position, status sits where the model carries it, and the unknown
+        // key lands last.
+        assert_eq!(&keys[..3], &["id", "parent", "children"]);
+        assert!(keys.contains(&"status"), "{keys:?}");
+        assert_eq!(keys.last(), Some(&"extra"));
     }
 
     #[test]
@@ -533,17 +548,17 @@ mod tests {
         let hits = search_entries(&pool, "node");
         assert_eq!(hits[0]["id"], json!("x-2"));
         assert_eq!(hits.len(), 2);
-        assert!(search_entries(&pool, "alpha live").is_empty().not());
+        assert!(!search_entries(&pool, "alpha live").is_empty());
         let no = search_entries(&pool, "");
         assert!(no.is_empty());
     }
 
     #[test]
     fn the_ab_prefix_tier_matches_partial_hex_never_full_or_malformed() {
-        let pool = vec![json!({"id": "x-bbbb2222", "title": "Beta"})];
-        assert_eq!(ab_prefix_hits(&pool, "x-bbbb").len(), 1);
-        assert!(ab_prefix_hits(&pool, "x-bbbb2222").is_empty());
-        assert!(ab_prefix_hits(&pool, "x-nothex").is_empty());
+        let pool = vec![json!({"id": "ab-bbbb2222", "title": "Beta"})];
+        assert_eq!(ab_prefix_hits(&pool, "ab-bbbb").len(), 1);
+        assert!(ab_prefix_hits(&pool, "ab-bbbb2222").is_empty());
+        assert!(ab_prefix_hits(&pool, "ab-nothex").is_empty());
     }
 
     #[test]
@@ -560,6 +575,7 @@ mod tests {
             project: None,
             status: None,
             source_kind: Some("operator_request"),
+            fts: false,
             json_out: false,
         };
         let organic = json!({"id": "x-1"});

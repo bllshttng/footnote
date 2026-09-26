@@ -24,6 +24,15 @@ fn candidates() -> Vec<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         push_dir(cwd.join(".fno"));
     }
+    // The project config the FNO_CONFIG redirect names (python's
+    // `config_file()` candidate), then the global file.
+    if let Some(cfg) = std::env::var_os("FNO_CONFIG").filter(|v| !v.is_empty()) {
+        let cfg = PathBuf::from(cfg);
+        if let Some(parent) = cfg.parent() {
+            push_dir(parent.to_path_buf());
+        }
+        out.push(cfg);
+    }
     match std::env::var_os("FNO_GLOBAL_SETTINGS_PATH") {
         Some(v) if !v.is_empty() => out.push(PathBuf::from(v)),
         _ => {

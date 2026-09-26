@@ -76,20 +76,24 @@ def test_query_syntax_is_neutralized_end_to_end(tmp_graph):
     assert fts.search('"unbalanced quote AND (', tmp_graph) == []
 
 
-def test_find_fts_flag_ranks_and_falls_back(tmp_graph, monkeypatch):
-    r = runner.invoke(cli, ["find", "--fts", "resume handle", "-J"])
-    assert r.exit_code == 0, r.output
-    ids = [e["id"] for e in json.loads(r.output)]
-    assert ids == ["x-aaaa"]
+def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path, monkeypatch):
+    """`find --fts` is the native binary's now: it has no FTS cache, so the
+    flag rides the documented substring degrade, warning on stderr."""
+    import os as _os
+    import subprocess as _sp
 
-    # an fts failure degrades to the substring lane with a warning, not an exit
-    def _boom(*a, **k):
-        raise fts.SearchUnavailableError("no keeper here")
+    from fno.rust_binary import find_dev_binary, resolve_binary
 
-    monkeypatch.setattr(fts, "search", _boom)
-    r2 = runner.invoke(cli, ["find", "--fts", "resume handle", "-J"])
-    assert r2.exit_code == 0, r2.output
-    assert "warning: fts unavailable" in r2.output
-    # stderr warning and stdout JSON share one captured stream here
-    body = r2.output[r2.output.index("[") :]
-    assert [e["id"] for e in json.loads(body)] == ["x-aaaa"]
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
+
+    proc = _sp.run(
+        [str(binary), "backlog", "find", "--fts", "resume handle", "-J"],
+        capture_output=True, text=True, env=dict(_os.environ),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "warning: fts unavailable" in proc.stderr
+    assert [e["id"] for e in json.loads(proc.stdout)] == ["x-aaaa"]

@@ -1,10 +1,4 @@
-"""`fno backlog get`'s native exec shim. Split out of graph/cli.py (over-budget).
-
-The graph-mode ladder (resolution tiers, archive read-through, the three
-renders) is the native binary's; the Python surface execs it so the bytes stay
-the binary's. What remains here: several ids fan out to the native batch read,
-one id is returned for the caller to serve (external backend) or exec (graph).
-"""
+"""`fno backlog get`, several ids and the native exec shim. Split out of graph/cli.py (over-budget)."""
 from __future__ import annotations
 
 import subprocess
@@ -14,15 +8,12 @@ import typer
 
 
 def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict: bool) -> str:
-    """Several ids: dispatch the native batch read, never return. One: return
-    it for the caller to serve (external) or exec (graph)."""
     if len(ids) > 1:
         _dispatch(ids, field=field, grouped=grouped, strict=strict)
     return ids[0]
 
 
 def exec_graph(ids: List[str]) -> None:
-    """Run the native binary's get for these ids and exit with its code."""
     _exec(["backlog", "get", *ids])
 
 

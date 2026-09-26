@@ -962,44 +962,6 @@ def test_resolve_node_id_falls_back_to_the_begin_snapshot(tmp_path, monkeypatch)
     assert store_mod._resolve_node_id(path, "zz-none") is None
 
 
-def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkeypatch, capsys):
-    """The get fast path: the row renders through the same renderer, the miss
-    falls back by returning the token unchanged."""
-    import typer
-
-    from fno.graph import get_batch
-
-    row = {"id": "ab-1", "slug": "first-one", "title": "One", "status": "idea"}
-    payload = {"entries": [dict(row)], "missing": []}
-
-    def fake_fast(path, tokens):
-        return dict(payload)
-
-    # get_batch imports the helper from store at call time; patch it there.
-    from fno.graph import store as store_mod
-
-    monkeypatch.setattr(store_mod, "read_nodes_by_ids", fake_fast)
-    monkeypatch.setattr(get_batch, "_graph_path", lambda: tmp_path / "graph.json")
-    # Exact id: served, rendered, never returns.
-    with pytest.raises(typer.Exit) as exc:
-        get_batch.resolve_or_dispatch(["ab-1"], field=None, grouped=False, strict=False)
-    assert exc.value.exit_code == 0
-    assert json.loads(capsys.readouterr().out)["id"] == "ab-1"
-
-    # A case-different id must NOT serve: resolve_node tier 1 is exact, so
-    # a fast path hit here would widen resolution.
-    payload["entries"] = [dict(row)]
-    payload["missing"] = []
-    returned = get_batch.resolve_or_dispatch(["AB-1"], field=None, grouped=False, strict=False)
-    assert returned == "AB-1"
-
-    # Miss: the token falls through to the caller's full path.
-    payload["entries"] = []
-    payload["missing"] = ["zz-none"]
-    returned = get_batch.resolve_or_dispatch(["zz-none"], field=None, grouped=False, strict=False)
-    assert returned == "zz-none"
-
-
 # -- the bounded retry --
 
 from fno.graph import store as store_mod  # noqa: E402 - the tx-loop section

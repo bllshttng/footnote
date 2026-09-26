@@ -168,7 +168,10 @@ pub fn run(tail: &[String]) -> i32 {
         return super::cli::forward_to_python("get", tail);
     }
     let graph_path = super::settings::graph_path();
-    let entries = match crate::graph_store::read_rows_strict(&graph_path) {
+    // The store's own rows, served verbatim the way the keeper's read_ids
+    // answers: no defaults pass, no re-ordering - the row is the binary's
+    // typed export, and the golden bytes pin that shape.
+    let mut entries = match crate::backlog::read_entries(&graph_path) {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!(
@@ -178,23 +181,15 @@ pub fn run(tail: &[String]) -> i32 {
             return GRAPH_UNREADABLE_EXIT;
         }
     };
-    // The served view: typed-model column order, the defaults tail, and the
-    // read-time readiness overlay (status + blocked_reason derive against
-    // the whole graph). Archived residents fall to the read-through.
-    let mut served: Vec<Value> = entries
-        .iter()
-        .map(|row| {
-            crate::backlog::model::Node::from_json(row)
-                .map(|n| n.to_json())
-                .unwrap_or_else(|_| row.clone())
-        })
-        .collect();
-    crate::graph_store::apply_defaults(&mut served, false);
-    crate::graph_store::apply_readiness_overlay(&mut served);
-    // The working pool excludes archived residents: an archived node falls
-    // to the read-through, which is where the read-only `_archived` stamp
-    // belongs.
-    let live: Vec<Value> = served
+    // The defaults tail every stored row serves with (missing columns read
+    // as their typed defaults, appended in place), then the read-time
+    // readiness overlay (status + blocked_reason derive against the whole
+    // graph). Archived residents fall to the read-through: they live in the
+    // SAME store now (the `archived_at` column), so the read-through
+    // partitions this read instead of opening a sidecar file.
+    crate::graph_store::apply_defaults(&mut entries, false);
+    crate::graph_store::apply_readiness_overlay(&mut entries);
+    let live: Vec<Value> = entries
         .iter()
         .filter(|r| r.get("archived_at").is_none())
         .cloned()
@@ -204,26 +199,12 @@ pub fn run(tail: &[String]) -> i32 {
         println!("{}", render_out(&row, &args.render));
         return 0;
     }
-    // Read-through: the archived residents, read RAW and served through the
-    // same typed shape.
-    let archived: Vec<Value> = match crate::graph_store::read_raw(&graph_path) {
-        Ok(crate::graph_store::RawRead::Entries(rows)) => rows
-            .into_iter()
-            .filter(|r| r.get("archived_at").is_some())
-            .collect(),
-        _ => Vec::new(),
-    };
-    let mut served_archived: Vec<Value> = archived
+    let archived: Vec<Value> = entries
         .iter()
-        .map(|row| {
-            crate::backlog::model::Node::from_json(row)
-                .map(|n| n.to_json())
-                .unwrap_or_else(|_| row.clone())
-        })
+        .filter(|r| r.get("archived_at").is_some())
+        .cloned()
         .collect();
-    crate::graph_store::apply_defaults(&mut served_archived, false);
-    crate::graph_store::apply_readiness_overlay(&mut served_archived);
-    if let Some(row) = archive_hit(&served_archived, args.id) {
+    if let Some(row) = archive_hit(&archived, args.id) {
         let out = stamped_annotated(&row, true);
         println!("{}", render_out(&out, &args.render));
         return 0;
@@ -285,19 +266,21 @@ mod tests {
 
     fn fixture_entries() -> Vec<Value> {
         vec![
-            json!({"id": "x-aaaa1111", "slug": "alpha-node", "title": "Alpha node"}),
-            json!({"id": "x-bbbb2222", "slug": "beta-node", "title": "Beta node"}),
+            json!({"id": "ab-aaaa1111", "slug": "alpha-node", "title": "Alpha node"}),
+            json!({"id": "ab-bbbb2222", "slug": "beta-node", "title": "Beta node"}),
         ]
     }
 
     #[test]
     fn tiers_exact_id_slug_and_bare_hex() {
+        // The `ab-` fixture keeps the bare-hex tier hermetic: the legacy
+        // prefix is always tried second, whatever the machine's config says.
         let entries = fixture_entries();
-        assert!(resolve_tiers(&entries, "x-bbbb2222").is_some());
+        assert!(resolve_tiers(&entries, "ab-bbbb2222").is_some());
         assert!(resolve_tiers(&entries, "ALPHA-NODE").is_some());
         assert!(resolve_tiers(&entries, "bbbb2222").is_some());
         assert!(resolve_tiers(&entries, "BBBB2222").is_none());
-        assert!(resolve_tiers(&entries, "x-zzzz9999").is_none());
+        assert!(resolve_tiers(&entries, "ab-zzzz9999").is_none());
     }
 
     #[test]

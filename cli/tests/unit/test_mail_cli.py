@@ -71,6 +71,10 @@ def ruling_graph(mailbox, monkeypatch):
     monkeypatch.setitem(vars(graph_constants), "GRAPH_JSON", graph_path)
     monkeypatch.setattr(graph_store, "GRAPH_JSON", graph_path)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+    # The native read-backs resolve the store through FNO_CONFIG's state_dir.
+    fno_dir = mailbox / ".fno"
+    (fno_dir / "config.toml").write_text(f'state_dir = "{fno_dir}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(fno_dir / "config.toml"))
     return graph_path
 
 
@@ -116,8 +120,19 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
     assert sent.exit_code == 0, sent.output
     assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
     assert len(calls) == 1
-    fresh = runner.invoke(app, ["backlog", "get", "x-511a"])
-    assert fresh.exit_code == 0, fresh.output
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    fresh = _sp.run(
+        [str(binary), "backlog", "get", "x-511a"],
+        capture_output=True, text=True, env=dict(_os.environ),
+    )
+    assert fresh.returncode == 0, fresh.stderr
     assert marker in fresh.stdout
     assert re.search(r"### Ruling \(\d{4}-\d{2}-\d{2}\)", fresh.stdout)
 

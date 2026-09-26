@@ -4943,13 +4943,14 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
     joined["_resolved_cwd"] = sc.cwd
 
     if field:
-        _echo_node_entry(joined, field, False)
+        _echo_node_entry(joined, field)
         return
     typer.echo(json.dumps(joined, indent=2))
 
 
-def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
-    """Render one resolved node: the field / grouped / JSON output ladder."""
+def _echo_node_entry(e: dict, field: Optional[str]) -> None:
+    """Render one resolved node under an external backend: the field arm or
+    the pretty JSON default (the grouped ladder is the native binary's)."""
     if field:
         value = e.get(field)
         if value is None:
@@ -4958,10 +4959,6 @@ def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
             typer.echo(json.dumps(value))
         else:
             typer.echo(value)
-    elif grouped:
-        from fno.graph.grouped import render_grouped
-
-        typer.echo(render_grouped(e))
     else:
         typer.echo(json.dumps(e, indent=2))
 
@@ -4998,8 +4995,6 @@ def cmd_get(
         _render_external_get(id, field)
         return
 
-    # The graph-mode ladder (resolution tiers, archive read-through, the three
-    # renders) is the native binary's now; exec it and exit with its code.
     exec_graph([id])
 
 

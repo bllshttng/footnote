@@ -54,6 +54,9 @@ fn write_json(v: &Value, pretty: bool, indent: usize, out: &mut String) {
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
+                    if !pretty {
+                        out.push(' ');
+                    }
                 }
                 if pretty {
                     out.push('\n');
@@ -76,6 +79,9 @@ fn write_json(v: &Value, pretty: bool, indent: usize, out: &mut String) {
             for (i, (k, val)) in map.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
+                    if !pretty {
+                        out.push(' ');
+                    }
                 }
                 if pretty {
                     out.push('\n');
@@ -334,7 +340,8 @@ mod tests {
 
     #[test]
     fn astral_chars_take_surrogate_pairs() {
-        let v = json!("test");
+        // U+1F423 (the turtle), escaped in source so no sanitizer touches it.
+        let v = json!("\u{1F423}");
         assert_eq!(py_json_compact(&v), "\"\\ud83d\\udc23\"");
     }
 

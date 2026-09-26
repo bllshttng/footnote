@@ -92,7 +92,6 @@ status
 # reads the store's mutation counter; writes nothing
 version
 view
-find
 next
 ready
 worked
