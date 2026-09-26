@@ -20,7 +20,7 @@
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
 pub(crate) use crate::agents_event::append_agents_event;
-use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
+use crate::claude_ask::{liveness_probe, ClaudeHome};
 use crate::claude_resume::claude_resume_argv;
 use crate::lifecycle_child::heal_token;
 #[cfg(test)]
