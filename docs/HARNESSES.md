@@ -119,7 +119,7 @@ pi is the first harness whose driving lane is neither a shellout nor a keystroke
 
 ## Antigravity plugin packaging
 
-`scripts/install/agy-plugin.sh` stages exactly `plugin.json`, `skills/`, and `agents/`, installs through a temp staging copy, and verifies success by grepping `agy plugin list`; the traps behind each of those choices are tabled under [Per-harness pitfall tables](#per-harness-pitfall-tables). `fno config setup` already registers the Stop and PreInvocation adapters in `~/.gemini/config/hooks.json` under a `footnote` key, so hooks are not bundled. `scripts/release/sync-version.sh` leaves the root `plugin.json` out of `JSON_MANIFESTS` while tracking every other release manifest, because the root manifest validates against a published schema with `additionalProperties: false` over `name` and `description` and permissions live only in `~/.gemini/antigravity-cli/settings.json`.
+`scripts/install/agy-plugin.sh` stages exactly `plugin.json`, `skills/`, and `agents/`, installs through a temp staging copy, and verifies success by grepping `agy plugin list`. The traps behind each of those choices are tabled under [Per-harness pitfall tables](#per-harness-pitfall-tables). `fno config setup` already registers the Stop and PreInvocation adapters in `~/.gemini/config/hooks.json` under a `footnote` key, so hooks are not bundled. `scripts/release/sync-version.sh` leaves the root `plugin.json` out of `JSON_MANIFESTS` while tracking every other release manifest, because the root manifest validates against a published schema with `additionalProperties: false` over `name` and `description` and permissions live only in `~/.gemini/antigravity-cli/settings.json`.
 
 ## Codex skill discovery
 
