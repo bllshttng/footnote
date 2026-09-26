@@ -1287,10 +1287,13 @@ resume = "native-session"
 # wk-x61bc journey and is not re-proven per harness.
 autonomous_pane = false
 route_on_pane = false
-# grok HAS a lifecycle hook surface - the live TUI fires `session_start` and
-# `user_prompt_submit` hooks it reads from config - but no fno loop extension
-# exists for it. "" keeps looping dispatch refused until that boundary is
-# proven, exactly as the cursor-agent row does.
+# grok's Stop CONTRACT is real (project hook, block-and-continue measured),
+# and the trusted link installs, but the live 2026-09-26 linked-stage run
+# recorded grok auto-disabling the discovered plugin: no stop event fired and
+# no loop-check decision exists, so a trusted location alone does not put
+# plugin hooks on the wire. "" keeps looping dispatch refused until plugin
+# hooks are proven end to end; the dispatch gate already carries the grok
+# plugin-status probe for the flip.
 loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"

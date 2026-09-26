@@ -196,9 +196,15 @@ def _merged_pr_for_head(base: str, slug: str, cwd: str) -> tuple:
 def _fetch_ref(ref: str, cwd: str) -> bool:
     """Fetch one branch with an explicit refspec. Reading a remote-tracking ref
     without fetching answers from whatever the last fetch left behind, and a
-    stale ref is exactly how a base that has since landed still looks alive."""
+    stale ref is exactly how a base that has since landed still looks alive.
+    --no-write-fetch-head: this probe reads remote-tracking refs, never
+    FETCH_HEAD, and a for-merge entry left behind is what a racing `git pull`
+    merged into canonical main."""
     fetch = _probe(
-        ["git", "fetch", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"],
+        [
+            "git", "fetch", "--no-write-fetch-head",
+            "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}",
+        ],
         cwd,
     )
     return fetch is not None and fetch.ok

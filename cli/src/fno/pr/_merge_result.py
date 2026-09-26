@@ -27,7 +27,10 @@ def _gh_pr_refs(pr_number: int, cwd: str) -> tuple[str, str] | None:
 
 def _fetch_pull_head(pr_number: int, cwd: str) -> str:
     ref = f"refs/pull/{pr_number}/head:refs/fno/merge-result/head"
-    fetch = _probe(["git", "fetch", "--no-tags", "origin", ref], cwd)
+    # --no-write-fetch-head: a for-merge PR entry left in FETCH_HEAD is what a
+    # racing `git pull` merged into canonical main. This probe never reads
+    # FETCH_HEAD, so it has no reason to seed it.
+    fetch = _probe(["git", "fetch", "--no-tags", "--no-write-fetch-head", "origin", ref], cwd)
     return _rev("refs/fno/merge-result/head", cwd) if fetch is not None and fetch.ok else ""
 
 

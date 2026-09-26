@@ -148,6 +148,32 @@ def test_mail_addresses_peers_by_full_session_id():
     assert "from_session" in text
 
 
+# ---- dnd: the operator door arms the wall clock ------------------------------
+
+
+def test_dnd_door_arms_the_wall_clock_and_mail_delegates():
+    from typer.testing import CliRunner
+
+    from fno.mail.cli import mail_app
+
+    result = CliRunner().invoke(mail_app, ["hold", "--help"])
+    assert result.exit_code == 0, result.output
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    output = re.sub(r"[│┃╭╮╰╯─━]+", " ", output)
+    output = " ".join(output.split())
+    assert "--for" in output
+    assert "The deadline never moves" in output
+
+    dnd = _skill("skills/dnd/SKILL.md")
+    assert "name: dnd" in dnd
+    assert "fno agents mail hold --for <N>" in dnd
+    assert "fno agents mail hold --for 20" in dnd
+
+    mail = _skill("skills/mail/SKILL.md")
+    assert "/fno:dnd" in mail
+    assert "hold --minutes <N>" not in mail
+
+
 # ---- setup: schema-owned questions; ask only missing consequential choices ---
 
 

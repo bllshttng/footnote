@@ -4845,18 +4845,19 @@ def cmd_hold(
     import subprocess
 
     from fno.mail import hold as hold_mod
+    from fno.harness_identity import session_identity_key
 
     handle, ident = _self_handle_or_exit()
+    # Clock key: the collision-free identity key (first-eight collides in one 65.536s window).
+    clock_key = session_identity_key(str(getattr(ident, "session_id", "") or ""))
 
     if minutes is not None and for_minutes is not None:
         sys.stderr.write("error: --minutes and --for are mutually exclusive\n")
         raise typer.Exit(code=2)
 
     if status:
-        # Ask the delivery gate, not the clock. A flag stamped by
-        # `fno agents register --delivery-policy bus-only` has no clock, and
-        # reading the clock alone reported "mail delivers normally" for a
-        # session whose mail was in fact being held indefinitely.
+        # Ask the delivery gate, not the clock: a hand-stamped bus-only row
+        # has no clock, and the clock alone reported deliverable for held mail.
         from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
 
         if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
@@ -4866,11 +4867,8 @@ def cmd_hold(
         if label == "held":
             print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
         elif label is None:
-            # The gate says held and the clock says otherwise. Unreachable while
-            # both derive from `lapsed`, and mypy is right that nothing across
-            # the module boundary enforces that. Report the disagreement rather
-            # than crash on it or pick a side: two readings differing is the
-            # thing worth telling the operator.
+            # Unreachable while both derive from `lapsed`, and nothing across
+            # the module boundary enforces it: report, never pick a side.
             print(
                 f"{handle}: holding mail, but the clock disagrees with the "
                 "delivery gate - run `fno agents mail hold --off` to clear it"
@@ -4884,11 +4882,9 @@ def cmd_hold(
         return
 
     if off:
-        result = hold_mod.release(handle, held_for_s=0)
-        # Report the FLAG first. Both lines below describe delivery, and an
-        # operator who asked for the hold to stop is asking about the flag. A
-        # registry this could not write leaves mail held while the receipt says
-        # "hold off", which is a lie about their own session.
+        result = hold_mod.release(clock_key, held_for_s=0)
+        # Report the FLAG first: a failed registry write leaves mail held
+        # while the receipt below says the hold is off.
         if not result["policy_cleared"]:
             sys.stderr.write(
                 f"hold NOT off: the registry write failed, so {handle} still "
@@ -4924,22 +4920,17 @@ def cmd_hold(
         cwd=os.getcwd(),
         delivery_policy="bus-only",
     )
-    clock = hold_mod.arm_wall(handle, window) if wall_clock else hold_mod.arm(handle, window)
+    clock = hold_mod.arm_wall(clock_key, window) if wall_clock else hold_mod.arm(clock_key, window)
 
-    # The third drain trigger. Detached on purpose: it must outlive this CLI
-    # invocation, because the whole contract is that the drain happens with no
-    # further input from the operator.
-    #
-    # Re-invoke THIS executable, not whatever `fno` is on PATH. A deployed
-    # binary can be several merges behind the code that just armed the hold,
-    # and one that predates this verb dies instantly on an unknown command -
-    # the timer never runs, and the only symptom is a hold that never lifts.
+    # The third drain trigger, detached: it must outlive this invocation, and
+    # it re-invokes THIS binary, not PATH `fno` - a stale deployed binary dies
+    # on an unknown command and the hold never lifts.
     binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
     armed = False
     if binary:
         try:
             subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                [binary, "agents", "mail", "hold-release", "--handle", handle],
+                [binary, "agents", "mail", "hold-release", "--handle", clock_key],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

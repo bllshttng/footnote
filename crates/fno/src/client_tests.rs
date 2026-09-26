@@ -13067,20 +13067,32 @@ fn mine_item(n: usize, text: &str, done: bool) -> crate::needs_overlay::MineItem
     }
 }
 
-fn question_item(
+pub(super) fn question_item(
     id: &str,
     options: &[&str],
     live: Option<bool>,
 ) -> crate::needs_overlay::QuestionItem {
     crate::needs_overlay::QuestionItem {
         id: id.into(),
-        question: format!("prose for {id}"),
-        ask: Some(format!("ask for {id}")),
-        asker: Some("fno-peer".into()),
-        node: None,
-        options: options.iter().map(|s| s.to_string()).collect(),
-        live,
-        rank: None,
+        kind: "question".into(),
+        title: format!("ask for {id}"),
+        body: Some(format!("prose for {id}")),
+        asker: Some(crate::needs_overlay::QuestionAsker {
+            handle: "fno-peer".into(),
+            live,
+            ..Default::default()
+        }),
+        state: "open".into(),
+        options: options
+            .iter()
+            .enumerate()
+            .map(|(i, s)| crate::needs_overlay::QuestionOption {
+                n: i as u32 + 1,
+                text: (*s).to_string(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
     }
 }
 
@@ -13519,92 +13531,17 @@ fn apply_mine_action_result_success_requests_refold() {
 // x-f730 task 2.3 AC1-HP: a digit on a question with options queues the
 // matching option text against the question id, single-flight set, no
 // stray keystroke to any pane.
-#[tokio::test]
-async fn answer_keys_digit_on_question_with_options_queues_answer() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-1", &["oauth", "apikey"], Some(true))]);
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"2", &mut buf).await.unwrap();
-    assert_eq!(
-        v.question_action,
-        Some(("q-1".to_string(), "apikey".to_string()))
-    );
-    assert!(v.question_acting);
-    assert!(
-        buf.is_empty(),
-        "a question answer never sends a pane keystroke"
-    );
-}
 
 // Refolding after the answer is what actually drops the row - proven
 // directly against apply_question_action_result, mirroring the MINE
 // pair above.
-#[test]
-fn apply_question_action_result_success_requests_refold() {
-    let mut v = view_with_agents(vec![]);
-    v.needs_want = false;
-    v.apply_question_action_result(Ok(()));
-    assert!(!v.question_acting);
-    assert!(v.needs_want, "success re-folds so the row leaves on refold");
-}
 
-#[test]
-fn apply_question_action_result_failure_shows_notice_never_silent() {
-    let mut v = view_with_agents(vec![]);
-    v.needs_want = false;
-    v.apply_question_action_result(Err("failed to close q-1: locked".into()));
-    assert!(!v.question_acting);
-    assert!(!v.needs_want, "a failure never triggers a re-fold");
-    let notice = v.notice.as_ref().expect("failure surfaces a notice");
-    assert!(notice.0.contains("failed to close q-1: locked"));
-}
-
-// x-f730 task 2.3 AC2-HP: Enter on a no-options question opens the
-// free-text entry; typing then Enter queues the typed answer.
-#[tokio::test]
-async fn answer_keys_enter_on_no_options_question_opens_free_text_then_sends_it() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-2", &[], None)]);
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        v.question_answering,
-        Some(("q-2".to_string(), String::new()))
-    );
-    assert_eq!(v.answers, Some(0), "the overlay stays open under the entry");
-    answer_keys(&mut v, b"go with oauth\r", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(
-        v.question_action,
-        Some(("q-2".to_string(), "go with oauth".to_string()))
-    );
-    assert!(v.question_answering.is_none());
-    assert!(buf.is_empty());
-}
+// Enter on a question row opens the full-context detail overlay; the
+// answer gestures (free text included) live there now.
 
 // x-f730 task 2.3 AC4-ERR: a digit with no matching option on a
 // with-options question is a local BEL, same invariant as a
 // non-answerable NEED row - never a stray keystroke, never queued.
-#[tokio::test]
-async fn answer_keys_digit_with_no_matching_question_option_bels() {
-    let mut v = view_with_agents(vec![]);
-    v.mine_fold = Some(Vec::new());
-    v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-3", &["oauth"], Some(true))]);
-    v.answers = Some(0);
-    let mut buf: Vec<u8> = Vec::new();
-    answer_keys(&mut v, b"9", &mut buf).await.unwrap();
-    assert_eq!(v.question_action, None);
-    assert!(!v.question_acting);
-    assert!(buf.is_empty());
-}
 
 // x-f730 task 2.3 AC3: a STALE question (asker no longer resolves) still
 // renders its options and the "recorded but reaches no session" note -
@@ -13615,7 +13552,10 @@ fn needs_overlay_lines_renders_stale_question_with_explanation() {
     let mut v = view_with_agents(vec![]);
     v.mine_fold = Some(Vec::new());
     v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-4", &["a", "b"], Some(false))]);
+    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+        items: vec![question_item("q-4", &["a", "b"], Some(false))],
+        ..Default::default()
+    });
     let projection = v.needs_projection();
     let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
     assert!(lines.iter().any(|l| l.contains("STALE")));
