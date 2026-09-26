@@ -122,13 +122,14 @@ fn single_pane_tab_paints_no_focus_outline() {
         focus_node: None,
     });
     let frame = view.compose();
-    // No divider glyphs exist on a single-pane tab, so no accented '│' seam
-    // can exist; the frame's own border is the accent.
+    // No divider glyphs exist on a single-pane tab, so no accented seam
+    // junction can exist; the frame's own accent borders ('─') are the
+    // signal, not a seam outline.
     let cols = frame.cols as usize;
     let accented_seam = (0..frame.rows as usize).any(|r| {
         (view.panel_w() as usize..cols).any(|c| {
             let cell = frame.cells[r * cols + c];
-            cell.fg == LATTICE_ACCENT && (cell.c == '┼' || cell.c == '─')
+            cell.fg == LATTICE_ACCENT && cell.c == '┼'
         })
     });
     assert!(

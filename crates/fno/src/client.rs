@@ -5808,11 +5808,15 @@ impl View {
         // narrow terminal the operator types a name they cannot see - the one
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
-        let body_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS).max(1);
+        // The frame hugs the chrome's own minimum (title + esc chip), and the
+        // body keeps one pad cell beside the text, so the window is that
+        // minimum minus the pad.
+        let body_w = chrome.min_inner_w().saturating_sub(1).max(1);
         let text = format!("{name}_");
         let text = if text.chars().count() > body_w {
-            let drop = text.chars().count() - body_w;
-            let kept: String = text.chars().skip(drop + 1).collect();
+            let keep = body_w.saturating_sub(1);
+            let drop = text.chars().count() - keep;
+            let kept: String = text.chars().skip(drop).collect();
             format!("…{kept}")
         } else {
             text

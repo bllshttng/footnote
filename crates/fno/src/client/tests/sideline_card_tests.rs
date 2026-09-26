@@ -461,7 +461,7 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
 
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0x71346fda85d3f813,
+        0x6af001c32c0e5dcb,
         "List frame-cell snapshot"
     );
 }
