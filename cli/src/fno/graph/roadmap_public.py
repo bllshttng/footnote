@@ -428,9 +428,8 @@ def render_configured_targets(
     """
     from fno.graph.render_html import (
         _board_flow,
-        alert_render_refused,
         atomic_write_documents,
-        leak_offender_lines,
+        leak_refusal_report,
         public_title_leaks,
     )
 
@@ -499,14 +498,7 @@ def render_configured_targets(
                 # Fail closed, before any write: the public file stays
                 # byte-unchanged while the already-written graph.json and the
                 # remaining targets are untouched by this refusal.
-                print(
-                    f"Warning: public title leak gate refused {out}: "
-                    f"{len(offenders)} offending title(s); target left unchanged",
-                    file=sys.stderr,
-                )
-                for line in leak_offender_lines(offenders):
-                    print(line, file=sys.stderr)
-                alert_render_refused(f"{out} ({scope})", offenders)
+                leak_refusal_report(f"{out} ({scope})", offenders)
                 continue
             atomic_write_documents({out: html})
         except Exception as exc:

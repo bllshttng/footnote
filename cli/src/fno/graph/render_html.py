@@ -18,6 +18,7 @@ import html
 import json
 import os
 import re
+import sys
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -129,6 +130,17 @@ def alert_render_refused(subject: str, offenders: list[tuple[str, str, tuple[str
         )
     except Exception:  # noqa: BLE001 - an alert must never mask the refusal
         pass
+
+
+def leak_refusal_report(subject: str, offenders: list[tuple[str, str, tuple[str, ...]]]) -> None:
+    """The audible refusal, shared by the manual roadmap verb and the
+    auto-render so the two leak-gate reports cannot drift apart: one stderr
+    line per offender, then the alert (a bare exit under launchd is
+    invisible)."""
+    print(f"Error: public title leak gate refused {subject}:", file=sys.stderr)
+    for line in leak_offender_lines(offenders):
+        print(line, file=sys.stderr)
+    alert_render_refused(subject, offenders)
 
 
 def atomic_write_documents(documents: dict[Path, str]) -> None:
