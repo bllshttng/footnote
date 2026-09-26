@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # check-pr-node-closure.sh - CI gate: a node-bearing branch must exact-claim
-# its own node in the PR's Backlog-Closure trailer.
+# its own node in the PR's closure line.
 #
-# x-aaaa: a PR naming several backlog nodes only ever closed the ONE node
+# A PR naming several backlog nodes only ever closed the ONE node
 # individually stamped at creation; every other named node stayed open
-# forever. The fix is an exact `Backlog-Closure: <id> [<id>...]` trailer,
-# bound atomically at merge - this gate is its CI backstop for the direct
-# `gh pr create` path, which never runs the `fno do pr closure-trailer`
-# generator. It never infers extra nodes from prose or diffs: it only checks
-# that a node id already present in the HEAD ref is also named in the exact
-# trailer line.
+# forever. The fix is an exact `Fixes <id> [<id>...]` line (the retired
+# `Backlog-Closure:` spelling still reads), bound atomically at merge - this
+# gate is its CI backstop for the direct `gh pr create` path, which never
+# runs the `fno do pr closure-trailer` generator. It never infers extra
+# nodes from prose or diffs: it only checks that a node id already present
+# in the HEAD ref is also named in the exact closure line.
 #
 # Run: PR_BODY="<body>" PR_HEAD_REF="<branch>" bash scripts/ci/check-pr-node-closure.sh
 # Env: PR_BODY (the PR body), PR_HEAD_REF (the PR's head branch name).
@@ -85,23 +85,23 @@ if [[ ${#candidates[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# The LAST exact Backlog-Closure line only (mirrors fno.pr.closure.parse_closure_trailer:
-# a stale earlier line, e.g. carried forward by a rebase, must not satisfy this).
-trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^Backlog-Closure:[[:space:]]*' | tail -1 || true)
+# The LAST closure line only, either spelling, colon optional (mirrors the
+# Rust parser behind fno.pr.closure.parse_closure_trailer: a stale earlier
+# line, e.g. carried forward by a rebase, must not satisfy this).
+trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^(fixes|backlog-closure):?[[:space:]]*' | tail -1 || true)
 
-# Strip the label itself (everything through its own colon + any immediate
-# spaces/tabs), mirroring `_TRAILER_LINE_RE`'s `^Backlog-Closure:[ \t]*(.*)$`
-# capture group - the runtime parser (parse_closure_trailer) only ever
-# tokenizes THAT captured remainder, on whitespace and "," alone, never a
-# bare ":". Matching against the raw trailer_line (label prefix still
-# attached) let ANY colon in the line - including a stray one BETWEEN two
-# ids, e.g. "Backlog-Closure:x-aaaa:x-1111" - read as a valid separator via
-# the leading-boundary group below, so the gate passed a trailer the real
-# parser tokenizes as one malformed run and binds zero ids from (round-10
-# review fix: reproduced live, gate passed / parser returned []).
+# Strip the keyword itself (plus its optional colon and any immediate
+# spaces/tabs), mirroring the Rust grammar. The line is lowercased before the
+# strip so a plain sed works on both GNU and BSD; node ids are lowercase by
+# grammar, so the comparison below loses nothing. Matching against the raw
+# line (keyword still attached) let ANY colon in the line - including a
+# stray one BETWEEN two ids, e.g. "Fixes: x-aaaa:x-1111" - read as a valid
+# separator via the leading-boundary group below, so the gate passed a line
+# the real parser tokenizes as one malformed run and binds zero ids from
+# (round-10 review fix, reproduced live: gate passed / parser returned []).
 trailer_body=""
-if [[ "$trailer_line" =~ ^[^:]*:[[:space:]]*(.*)$ ]]; then
-  trailer_body="${BASH_REMATCH[1]}"
+if [[ -n "$trailer_line" ]]; then
+  trailer_body="$(printf '%s' "$trailer_line" | tr '[:upper:]' '[:lower:]' | sed -E 's/^(fixes|backlog-closure):?[[:space:]]*//')"
 fi
 
 missing=()
@@ -138,13 +138,13 @@ if [[ $claimed -eq 0 ]]; then
   # How many exact trailer lines the body holds, and what the LAST one (the
   # only line this gate and parse_closure_trailer read) names - the shape a
   # two-line body needs to understand before it can be fixed.
-  trailer_count=$(printf '%s\n' "$PR_BODY" | grep -icE '^Backlog-Closure:[[:space:]]*' || true)
+  trailer_count=$(printf '%s\n' "$PR_BODY" | grep -icE '^(fixes|backlog-closure):?[[:space:]]*' || true)
   {
-    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact trailer claims none of them."
+    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact closure line claims none of them."
     if [[ "$trailer_count" -eq 1 ]]; then
-      echo "  The body holds 1 Backlog-Closure line; this gate reads only the LAST one."
+      echo "  The body holds 1 closure line; this gate reads only the LAST one."
     else
-      echo "  The body holds $trailer_count Backlog-Closure lines; this gate reads only the LAST one."
+      echo "  The body holds $trailer_count closure lines; this gate reads only the LAST one."
     fi
     if [[ -n "$trailer_body" ]]; then
       echo "  That last line names: $trailer_body"
@@ -153,7 +153,7 @@ if [[ $claimed -eq 0 ]]; then
     fi
     echo "  The gate wanted: ${candidates[*]}"
     echo "  Remedy: fno do pr closure-trailer <node-id> --extra <id> [--extra <id> ...]"
-    echo "  prints ONE line naming every id. Replace EVERY Backlog-Closure line in"
+    echo "  prints ONE Fixes line naming every id. Replace EVERY closure line in"
     echo "  the PR body with that one line. The verb checks the ids against the"
     echo "  graph and PRINTS the line; it does not edit the PR. Do NOT paste a"
     echo "  candidate from this message:"

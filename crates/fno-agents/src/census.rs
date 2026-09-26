@@ -1017,6 +1017,49 @@ fn shutdown_reply(sock: &Path) -> Option<Value> {
 mod process_table_tests {
     use super::{pid_is_zombie, process_table, ps_text};
 
+    /// A spinner child killed and reaped on drop. The guard exists because a
+    /// panic between spawn and a manual kill skips the kill, and the orphaned
+    /// `/bin/sh` then spins a core for hours.
+    struct Reaped(std::process::Child);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_spinner() -> Reaped {
+        Reaped(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("while :; do :; done")
+                .spawn()
+                .expect("spawn the spinner child"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_after_spawn_still_reaps_the_spinner() {
+        let pid_cell = std::sync::atomic::AtomicU32::new(0u32);
+        let panicked = std::panic::catch_unwind(|| {
+            let child = spawn_spinner();
+            pid_cell.store(child.0.id(), std::sync::atomic::Ordering::SeqCst);
+            panic!("an assertion after the spawn fails");
+        });
+        assert!(panicked.is_err(), "the closure panics");
+        let pid = pid_cell.load(std::sync::atomic::Ordering::SeqCst);
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // Fallback reap so the red run itself leaks nothing.
+        if alive {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+        }
+        assert!(!alive, "spinner pid {pid} outlived the panic");
+    }
+
     #[test]
     fn process_table_reads_its_own_row() {
         let (table, _unreadable) = process_table();
@@ -1044,24 +1087,20 @@ mod process_table_tests {
         // The CPU reading is a lifetime average, so the bar needs a process
         // whose lifetime IS the spin: a young busy-loop child. Read `ps %cpu`
         // for the same pid as the ground truth the table must agree with.
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("while :; do :; done")
-            .spawn()
-            .expect("spawn the spinner child");
+        let child = spawn_spinner();
+        let pid = child.0.id();
         std::thread::sleep(std::time::Duration::from_millis(2500));
         let (table, _unreadable) = process_table();
         let row = table
             .iter()
-            .find(|row| row.pid == child.id())
+            .find(|row| row.pid == pid)
             .expect("the spinning child reads a row");
         let ps_row = std::process::Command::new("ps")
-            .args(["-o", "%cpu=", "-p", &child.id().to_string()])
+            .args(["-o", "%cpu=", "-p", &pid.to_string()])
             .output()
             .ok()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
-        child.kill().ok();
-        child.wait().ok();
+        drop(child);
 
         assert!(
             row.cpu_pct >= 15.0,

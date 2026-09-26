@@ -165,7 +165,7 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 | Command | What it's for |
 |---------|---------------|
 | `/fno:review` | Review a diff before you push. Default is the owned lane: one inline reviewer that emits a head-pinned attestation; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
-| `/fno:pr create` | Open a PR from your commits (a routed pr-create worker writes the description). |
+| `/fno:pr create` | Open a PR from your commits inline in the invoking session. |
 | `/fno:pr check` | Poll for the external review bot, then implement its feedback. |
 | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |
 
@@ -176,8 +176,8 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 footnote can spawn a worker on another provider and coordinate with it over a message bus. Quickstart: [the agents guide](guides/agents-quickstart.md).
 
 ```bash
-fno agents spawn "review the diff on this branch" --name reviewer -H codex   # spawn a Codex peer
-fno agents ask reviewer "what did you find?"                          # message it; it works on its own
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
+fno agents ask helper "what did you find?"
 ```
 
 For a one-off question to another model without keeping a peer around, spawn an ephemeral worker:

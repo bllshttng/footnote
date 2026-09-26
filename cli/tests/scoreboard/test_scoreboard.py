@@ -8,6 +8,7 @@ AC5-FR  mid-append partial -> single retry recovers rather than crashing.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime
@@ -92,9 +93,9 @@ def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
     # W4 signals present: a human_touch event + a graph node carrying a causal
     # field. The ship is 20 days old, so it has completed the observation
     # window and survival may judge it.
-    rows = [{"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
+    rows = [{"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-00000001", "cost_usd": 5.0}]
     (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": _days_ago(1, hour=9)}) + "\n")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)}]}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-00000001", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)}]}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
     sb = json.loads(res.output)
@@ -413,7 +414,7 @@ def test_render_shipped_caveat_shows_and_hides(tmp_path, monkeypatch):
     ]
     graph = [{"id": "x-m", "merge_status": "merged", "completed_at": _RECENT}]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": graph}))
     res = runner.invoke(_app(), [])
     assert "Shipped" in res.output and "by session terminal alone: 0" in res.output
     assert "the merge is the count" in res.output  # 0 of 1 = >10% apart
@@ -496,7 +497,7 @@ def test_project_scope_counts_once_and_keeps_unattributed_out(tmp_path, monkeypa
         {"completed": _RECENT, "termination_reason": "DonePRGreen", "cost_usd": 5.0},
     ]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": graph}))
     res = runner.invoke(_app(), ["--project", "p1", "--json"])
     sb = json.loads(res.output)
     assert sb["shipped_nodes"] == 1

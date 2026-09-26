@@ -244,7 +244,7 @@ def derive_phases(state: dict) -> tuple[list[str], list[str]]:
     gates = state.get("_gates", {})
 
     phase_map = {
-        "do": ("quality_check_passed", None),  # if we got to gates, do ran
+        "execute": ("quality_check_passed", None),  # if we got to gates, execute ran
         "review": ("quality_check_passed", None),
         "validate": ("output_validated", None),
         "ship": ("artifact_shipped", None),

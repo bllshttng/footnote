@@ -83,5 +83,3 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
 
     assert misses == [], f"{len(misses)} false negative(s) for a present node: {misses[:5]}"
     assert read_failures == [], f"{len(read_failures)} spurious read failure(s)"
-
-

@@ -43,7 +43,9 @@ _DEPENDENCY_RE = re.compile(
 _FOLLOWUP_RE = re.compile(r"\b(follow[- ]?ups?|filed|filing)\b", re.IGNORECASE)
 _COLLISION_RE = re.compile(r"\b(collisions?|untouched|unmerged)\b", re.IGNORECASE)
 _CLOSE_VERB_RE = re.compile(r"\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b", re.IGNORECASE)
-_TRAILER_RE = re.compile(r"^Backlog-Closure:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE)
+_TRAILER_RE = re.compile(
+    r"^(?:fixes|backlog-closure):?[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE
+)
 
 CLASSIFICATIONS = ("close_claim", "dependency", "follow_up", "collision", "other")
 
@@ -102,9 +104,9 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
 
     "Secondary" = every well-formed, graph-real id after the FIRST named in
     body order - the same methodology the original sweep used, so a rerun
-    over the same corpus is directly comparable. An id on the exact
-    ``Backlog-Closure:`` trailer is always ``close_claim`` regardless of what
-    else the body's prose says about it.
+    over the same corpus is directly comparable. An id on the exact closure
+    line (``Fixes``, or the retired ``Backlog-Closure:`` spelling) is always
+    ``close_claim`` regardless of what else the body's prose says about it.
     """
     from fno.graph._constants import extract_node_ids
 
@@ -118,8 +120,8 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
 
     trailer_matches = _TRAILER_RE.findall(body)
     # `.replace(",", " ")` before splitting, mirroring the runtime parser
-    # (fno.pr.closure.parse_closure_trailer) - a comma-separated trailer with
-    # no space ("Backlog-Closure: x-bbbb,x-cccc") binds both ids at merge
+    # (the Rust leg behind parse_closure_trailer) - a comma-separated line
+    # with no space ("Fixes x-bbbb,x-cccc") binds both ids at merge
     # time, but a bare `.split()` here treated "x-bbbb,x-cccc" as one token
     # (not in node_ids) and undercounted the audit's own close_claim bucket
     # (round-10 review fix: reproduced live pre-fix).
@@ -135,7 +137,7 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
         if nid in trailer_ids:
             mentions.append(Mention(
                 pr_number, nid, "close_claim",
-                f"Backlog-Closure: {' '.join(sorted(trailer_ids))}",
+                f"Fixes {' '.join(sorted(trailer_ids))}",
             ))
             continue
         # Word-boundary match, not substring containment: "x-dddd" is a

@@ -98,8 +98,8 @@ fn short_branch(branch: &Option<String>) -> String {
 /// deadline, so three probes can never sum past the one whole-board budget;
 /// a budget kill propagates as over-budget (never a clean zero), any other
 /// git failure fails the tree.
-fn run_git(args: &[String], cwd: &Path, slice: Duration) -> Result<String, RunFailure> {
-    run_with_timeout(args, cwd, slice).map(|out| String::from_utf8_lossy(&out).into_owned())
+fn run_git(args: &[String], cwd: &Path, bound: Duration) -> Result<String, RunFailure> {
+    run_with_timeout(args, cwd, bound).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 fn probe_tree(
@@ -108,8 +108,8 @@ fn probe_tree(
     budget: &mut Budget,
 ) -> Result<Value, RunFailure> {
     let git = |args: Vec<&str>, budget: &mut Budget| -> Result<String, RunFailure> {
-        let slice = match budget.start("stranded tree probe") {
-            Some(s) => s,
+        let dl = match budget.start("stranded tree probe") {
+            Some(dl) => dl,
             None => return Err(RunFailure::KilledAtSlice(BUDGET_EXHAUSTED.to_string())),
         };
         let mut cmd: Vec<String> = vec![
@@ -118,7 +118,7 @@ fn probe_tree(
             tree.to_string_lossy().into_owned(),
         ];
         cmd.extend(args.into_iter().map(str::to_string));
-        run_git(&cmd, Path::new("."), slice)
+        run_git(&cmd, Path::new("."), Budget::spawn_bound(dl))
     };
     let dirty_text = git(vec!["status", "--porcelain"], budget)?;
     let dirty = dirty_text.lines().filter(|l| !l.trim().is_empty()).count() as i64;
@@ -181,7 +181,7 @@ pub(crate) fn read_stranded_trees(
 ) -> SourceRead {
     let mut rows: Vec<Value> = Vec::new();
     for repo in repos {
-        let Some(slice) = budget.start("stranded trees") else {
+        let Some(dl) = budget.start("stranded trees") else {
             return SourceRead::over_budget(budget.spent_error());
         };
         let cmd = vec![
@@ -192,7 +192,7 @@ pub(crate) fn read_stranded_trees(
             "list".to_string(),
             "--porcelain".to_string(),
         ];
-        let listing = match run_with_timeout(&cmd, Path::new("."), slice) {
+        let listing = match run_with_timeout(&cmd, Path::new("."), Budget::spawn_bound(dl)) {
             Ok(out) => String::from_utf8_lossy(&out).into_owned(),
             Err(e) if e.over_budget() => return SourceRead::over_budget(e.message().to_string()),
             Err(e) => return SourceRead::err(e.message().to_string()),

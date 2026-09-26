@@ -17,8 +17,8 @@ on:
   pull_request:
 
 concurrency:
-  group: internal-refs-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: internal-refs-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

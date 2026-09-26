@@ -24,7 +24,7 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|plans-dirs>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs>");
         return 2;
     };
     // `plans-dirs` is not a single-path accessor: it answers with one dir per
@@ -40,7 +40,7 @@ pub fn run(args: &[String]) -> i32 {
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = resolve(name, &cwd) else {
         eprintln!(
-            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, plans-dirs, run-log, scratchpad, status-sinks, target-state, worktree-log)"
+            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, plans-dirs, questions, run-log, scratchpad, status-sinks, target-state, worktree-log)"
         );
         return 2;
     };
@@ -83,6 +83,9 @@ pub(crate) fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
         // Rust-owned: the escalation notes directory (crate::escalation).
         // Nothing in Python reads it, so there is no Python accessor to mirror.
         "escalations" => Some(crate::escalation::dir(cwd)),
+        // Rust-owned like `escalations`: the attention arm writes question
+        // pages here and the king check-in reads them.
+        "questions" => Some(crate::escalation::questions_dir(cwd)),
         _ => None,
     }
 }

@@ -11,15 +11,20 @@
 use crate::pi::SessionLookup;
 use std::path::{Path, PathBuf};
 
-/// grok's sessions root: `$GROK_HOME/sessions` when GROK_HOME is set and
-/// non-empty, else `$HOME/.grok/sessions`. grok derives its base directory
-/// from GROK_HOME with `~/.grok` as the default.
-pub fn grok_sessions_root() -> PathBuf {
-    let home = std::env::var("GROK_HOME")
+/// grok's home directory: `$GROK_HOME` when set and non-empty, else
+/// `$HOME/.grok`. grok derives its base directory from GROK_HOME with
+/// `~/.grok` as the default.
+pub fn grok_home() -> PathBuf {
+    std::env::var("GROK_HOME")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}/.grok", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home).join("sessions")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".grok"))
+}
+
+/// grok's sessions root: `<grok_home>/sessions`.
+pub fn grok_sessions_root() -> PathBuf {
+    grok_home().join("sessions")
 }
 
 /// Resolve one grok session id to its `chat_history.jsonl`.

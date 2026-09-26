@@ -1,6 +1,6 @@
 # PR status verdict: the narrative behind `fno do pr status`
 
-The docstrings in `cli/src/fno/pr/_status.py` and `cli/src/fno/pr/_cache.py` carry one-line contracts and point here. This file holds the reasoning those docstrings used to restate. The move rides the file-budget gate's named remedy: long prose belongs in docs/. The tree number and the reasoning both survive.
+Ownership since the 2026-09-25 port: the reader, the verdict, the failure detail, the composer, the coalescing cache and the wait/logs verbs are Rust, in `crates/fno-agents/src/pr_status.rs` and `pr_status/{cache,compose,reviews,seams,wait,logs}.rs`. Python reaches them through the `authorized-merge` status door (`status-read`, `status-wait`, `status-logs`, `status-ci`, `status-rerun`); `cli/src/fno/pr/cli.py` forwards, and `_cache.py` keeps only the offline row readers `fno.graph.board` renders from. This file holds the reasoning the code used to restate. The tree number and the reasoning both survive.
 
 ## `verdict_for`: pure verdict computation
 
@@ -15,6 +15,8 @@ Returns `(verdict, exit_code, counts)`. Classifies only the latest run per check
 When NO entry is a real check-run (the `name` key, from GitHub Actions and Checks-API apps), a would-be-green tally is refused. A PR whose only entries are fno's own self-published StatusContexts has had no real CI run. That covers a head conflicting at push time: no `pull_request` workflow ever started on it. fno's own StatusContexts (review-coverage, stacked-base-guard) still post and can all pass. An all-`context` rollup can therefore read as green with no CI having run at all. A fail or pending StatusContext is still a real, actionable signal and stays red/pending.
 
 Known tradeoff, not footnote's own blast radius: a repo whose ONLY real CI still rides the legacy commit-status API (no GitHub Actions, no Checks-API app) would never clear this and would hold forever under `require_checks_pass` (unknown holds, never fails - see the checks arm of `crates/fno-agents/src/authorized_merge.rs`). footnote's own workflows (guards.yml et al.) are all Actions/CheckRuns, so this repo never hits it; a fork that genuinely needs status-only CI as its sole signal should route around this via `require_checks_pass=false`.
+
+Cancelled check runs whose failure annotations say they exceeded a `timeout-minutes` cap are relabeled `timed_out`; a missing or unreadable annotation keeps the run `cancelled`.
 
 ## `run_status`: the authoritative read
 

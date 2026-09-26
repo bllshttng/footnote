@@ -1436,7 +1436,45 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
             }
         };
-        ci_base_verdict(compare, &base_tip, &runs)
+        let verdict = ci_base_verdict(compare, &base_tip, &runs);
+        let ProbeOutcome::Refused(stale) = verdict else {
+            return verdict;
+        };
+        let pull_head = format!("pull/{}/head", facts.number);
+        let fetch = Command::new("git")
+            .args([
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                &facts.base_ref,
+                &pull_head,
+            ])
+            .current_dir(cwd)
+            .output();
+        let overlap = match fetch {
+            Ok(output) if output.status.success() => {
+                let Some((_, since)) = oldest_current_run(&runs) else {
+                    return stale_overlap_verdict(
+                        stale,
+                        facts.number,
+                        Err("no current workflow run".to_string()),
+                    );
+                };
+                crate::merge_gates::stale_overlap(
+                    cwd,
+                    &format!("origin/{}", facts.base_ref),
+                    &facts.head_sha,
+                    &since,
+                )
+            }
+            Ok(output) => Err(format!(
+                "fetch failed: {}",
+                first_line(&String::from_utf8_lossy(&output.stderr))
+            )),
+            Err(error) => Err(format!("fetch failed: {error}")),
+        };
+        stale_overlap_verdict(stale, facts.number, overlap)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
@@ -1477,16 +1515,15 @@ impl Probes for RealProbes {
     }
 
     fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
-        match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
-            Ok((_code, stdout, _stderr)) => parse_checks_read(&stdout),
-            Err(_) => ChecksRead {
-                verdict: "unknown".to_string(),
-                github_block: None,
-                optional_unresolved: None,
-                rerun_recovered: None,
-                rerun_failures: None,
-            },
-        }
+        // One owner: the CI verdict answers in process through the status
+        // door. A preview ask never re-enters here (supplied facts win), so
+        // the decision reads the same payload it would have spawned for.
+        let payload = serde_json::json!({
+            "cwd": cwd.display().to_string(),
+            "pr": pr,
+        });
+        let (_code, stdout, _stderr) = crate::pr_status::cache::run_door("status-read", &payload);
+        parse_checks_read(stdout.as_bytes())
     }
 
     fn fno_shell(
@@ -1863,6 +1900,62 @@ fn valid_github_timestamp(value: &str) -> bool {
         })
 }
 
+fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
+    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
+    for (name, created_at) in runs {
+        if let Some((_, newest)) = newest_by_workflow
+            .iter_mut()
+            .find(|(known, _)| known == name)
+        {
+            if created_at > newest {
+                *newest = created_at.clone();
+            }
+        } else {
+            newest_by_workflow.push((name.clone(), created_at.clone()));
+        }
+    }
+    newest_by_workflow
+        .into_iter()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+}
+
+pub(crate) fn stale_overlap_verdict(
+    stale: String,
+    pr: u64,
+    overlap: Result<crate::merge_gates::StaleOverlap, String>,
+) -> ProbeOutcome {
+    match overlap {
+        Ok(result) if result.shared.is_empty() => {
+            eprintln!(
+                "pr-merge: ci_base_stale waived: {} files landed since CI base {}, none shared with PR {pr}",
+                result.landed,
+                result.ci_base_sha.chars().take(8).collect::<String>()
+            );
+            ProbeOutcome::Clear
+        }
+        Ok(result) => {
+            let shown = result
+                .shared
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let extra = if result.shared.len() > 3 {
+                format!(" and {} more", result.shared.len() - 3)
+            } else {
+                String::new()
+            };
+            ProbeOutcome::Refused(format!(
+                "{stale}; shares {} files with main since CI base {}: {shown}{extra}",
+                result.shared.len(),
+                result.ci_base_sha.chars().take(8).collect::<String>()
+            ))
+        }
+        Err(error) => ProbeOutcome::Refused(format!("{stale}; file overlap unreadable ({error})")),
+    }
+}
+
 /// Did the green runs test a merge ref that already held the base tip?
 pub fn ci_base_verdict(
     behind_by: u64,
@@ -1882,23 +1975,7 @@ pub fn ci_base_verdict(
         );
     }
 
-    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
-    for (name, created_at) in runs {
-        if let Some((_, newest)) = newest_by_workflow
-            .iter_mut()
-            .find(|(known, _)| known == name)
-        {
-            if created_at > newest {
-                *newest = created_at.clone();
-            }
-        } else {
-            newest_by_workflow.push((name.clone(), created_at.clone()));
-        }
-    }
-    let Some((name, created_at)) = newest_by_workflow
-        .iter()
-        .min_by(|(_, left), (_, right)| left.cmp(right))
-    else {
+    let Some((name, created_at)) = oldest_current_run(runs) else {
         return ProbeOutcome::Clear;
     };
     if created_at.as_str() >= base_tip_at {
@@ -1969,6 +2046,29 @@ pub fn run_authorized_merge(args: &[String]) -> i32 {
     code
 }
 
+/// The merges hold, read the way the spawn gate reads its breaker: a stop
+/// holding merges (or an unreadable record, fail closed) refuses the merge
+/// primitive with the breaker generation and reason. `None` admits.
+fn merges_breaker_refusal() -> Option<(i32, String)> {
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => None,
+        crate::fleet_incident::Verdict::Stopped(r) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP,
+            format!(
+                "refused: fleet incident stop holds merges (generation {}, reason: {}); \
+                 reopen with `fno agents incident clear --reason <text>`\n",
+                r.generation, r.reason
+            ),
+        )),
+        crate::fleet_incident::Verdict::Unavailable(d) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP_UNAVAILABLE,
+            format!(
+                "refused: fleet incident state is unreadable ({d}); the merge primitive fails closed\n"
+            ),
+        )),
+    }
+}
+
 /// Test-friendly variant: returns (exit_code, stdout, stderr) without printing.
 pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     let payload: Value = match read_payload(args) {
@@ -2011,53 +2111,36 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         .and_then(Value::as_str)
         .is_some_and(|op| op.starts_with("status-"))
     {
-        let out = crate::pr_status_facts::run_op(
-            payload.get("op").and_then(Value::as_str).unwrap_or(""),
-            &payload,
-        );
+        let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+        // The verb-shaped door ops answer with the verb's own streams and
+        // exit; the fact ops keep their JSON-receipt contract.
+        if matches!(
+            op,
+            "status-read" | "status-wait" | "status-logs" | "status-ci"
+        ) {
+            return crate::pr_status::cache::run_door(op, &payload);
+        }
+        let out = crate::pr_status_facts::run_op(op, &payload);
         return (0, out, String::new());
     }
     let request = match parse_request(&payload) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
     };
+    // The merges hold: the one merge primitive refuses like the spawn gate
+    // does, naming the breaker generation and reason, before any probe or
+    // queue work. Reads stay reads: preview and decide-only asks answer
+    // normally, and the quota ops above never touch the breaker.
+    if !request.decide_only && matches!(request.effect, Effect::Merge | Effect::Arm) {
+        if let Some((code, message)) = merges_breaker_refusal() {
+            return (code, String::new(), message);
+        }
+    }
     // A preview ask answers with the structured receipt: `ready` is the
     // receipt's `blockers` being empty, so the verb prints the list itself
     // instead of the joined-prose Outcome form the effect arms render.
     if request.effect == Effect::Preview {
-        let cwd = request.cwd.as_path();
-        let receipt = match RealProbes.pr_facts(cwd, request.pr) {
-            Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
-            Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
-                PreviewVerdict::Go { waiver } => {
-                    let mut receipt = serde_json::json!({
-                        "outcome": "authorized",
-                        "head": facts.head_sha,
-                        "blockers": [],
-                    });
-                    if let Some(note) = waiver {
-                        receipt["coverage_waiver"] = Value::String(note);
-                    }
-                    receipt
-                }
-                PreviewVerdict::Blocked(rows) => serde_json::json!({
-                    "outcome": "held",
-                    "head": facts.head_sha,
-                    "blockers": rows
-                        .iter()
-                        .map(|b| serde_json::json!({
-                            "code": b.code,
-                            "class": match b.class {
-                                BlockerClass::Held => "held",
-                                BlockerClass::Refused => "refused",
-                                BlockerClass::Unknown => "unknown",
-                            },
-                            "detail": b.detail,
-                        }))
-                        .collect::<Vec<_>>(),
-                }),
-            },
-        };
+        let receipt = preview_receipt(&request);
         return (0, format!("{}\n", receipt), String::new());
     }
     // The receipt is the verdict, so the exit code answers only whether the verb
@@ -2068,8 +2151,61 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     (0, format!("{}\n", outcome.to_json()), String::new())
 }
 
+/// The preview receipt for one request, in process. The status composer and
+/// the verb share this one arm, so a status read pays no subprocess to its
+/// own owner, and both surfaces can never render two different ready
+/// verdicts.
+pub(crate) fn preview_receipt(request: &Request) -> Value {
+    let cwd = request.cwd.as_path();
+    match RealProbes.pr_facts(cwd, request.pr) {
+        Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
+        Ok(facts) => match preview_walk(&RealProbes, request, &facts) {
+            PreviewVerdict::Go { waiver } => {
+                let mut receipt = serde_json::json!({
+                    "outcome": "authorized",
+                    "head": facts.head_sha,
+                    "blockers": [],
+                });
+                if let Some(note) = waiver {
+                    receipt["coverage_waiver"] = Value::String(note);
+                }
+                receipt
+            }
+            PreviewVerdict::Blocked(rows) => serde_json::json!({
+                "outcome": "held",
+                "head": facts.head_sha,
+                "blockers": rows
+                    .iter()
+                    .map(|b| serde_json::json!({
+                        "code": b.code,
+                        "class": match b.class {
+                            BlockerClass::Held => "held",
+                            BlockerClass::Refused => "refused",
+                            BlockerClass::Unknown => "unknown",
+                        },
+                        "detail": b.detail,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        },
+    }
+}
+
+/// The preview receipt for a raw payload: parse, then the same in-process
+/// receipt the verb answers. An unusable payload reads `unknown` with the
+/// parse error named, never a guessed verdict.
+pub(crate) fn preview_receipt_payload(payload: &Value) -> Value {
+    match parse_request(payload) {
+        Ok(request) => preview_receipt(&request),
+        Err(message) => serde_json::json!({ "outcome": "unknown", "detail": message }),
+    }
+}
+
 fn read_payload(args: &[String]) -> Result<Value, String> {
     let text = match args.first() {
+        // An inline JSON payload is the thin-forwarder form: a CLI verb with
+        // no temp file. A path that names a payload file still works.
+        Some(path) if path.trim_start().starts_with('{') => path.clone(),
         Some(path) => std::fs::read_to_string(path)
             .map_err(|e| format!("authorized-merge: cannot read payload {path}: {e}\n"))?,
         None => {
@@ -2743,6 +2879,89 @@ mod tests {
     }
 
     #[test]
+    fn oldest_current_run_uses_each_workflows_newest_run_then_takes_the_oldest() {
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            oldest_current_run(&runs),
+            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn oldest_current_run_returns_none_without_workflow_runs() {
+        assert_eq!(oldest_current_run(&[]), None);
+    }
+
+    #[test]
+    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 4,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdefgé".to_string(),
+                landed: 1,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_stale_ci_base_refuses_with_shared_paths_and_a_bounded_list() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 5,
+                shared: vec![
+                    "docs/guide.md".to_string(),
+                    "hooks/a.json".to_string(),
+                    "hooks/b.json".to_string(),
+                    "hooks/c.json".to_string(),
+                ],
+            }),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("docs/guide.md")
+                && reason.contains("hooks/a.json")
+                && reason.contains("hooks/b.json")
+                && reason.contains("and 1 more")
+                && !reason.contains("hooks/c.json")));
+    }
+
+    #[test]
+    fn an_unreadable_stale_overlap_fails_closed() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Err("fetch failed".to_string()),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("file overlap unreadable (fetch failed)")));
+    }
+
+    #[test]
     fn a_stale_ci_base_holds_a_checked_merge_with_a_remedy() {
         let fake = Fake {
             ci_base: Some(ProbeOutcome::Refused(
@@ -2815,7 +3034,7 @@ mod tests {
             let fake = Fake {
                 node_binding: Some(ProbeOutcome::Refused(
                     "PR 7 is unbound: branch names no node; no node carries this PR; \
-                     body carries no Backlog-Closure trailer. A merge the graph cannot \
+                     body carries no closure line. A merge the graph cannot \
                      see is refused. Bind it: pick or file the node (fno backlog idea \
                      \"...\"), run fno do pr closure-trailer <id>, append the printed \
                      line to the PR body, then retry."

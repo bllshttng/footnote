@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::TAG_RESPONSE;
-use super::{read_graph_gated, remember_snapshot, GraphRead, StoreState};
+use super::{begin_versions, read_graph_gated, GraphRead, StoreState};
 
 /// The full-graph read replies spliced from the cache's serialized views.
 /// `read`, `begin` and api `rows` are the replies whose bodies are one
@@ -26,6 +26,8 @@ pub(super) enum SplicedReply {
         id: u64,
         version: String,
         entries: Arc<Vec<u8>>,
+        /// The serialized per-row version map, on the sqlite backend.
+        base_digests: Option<Vec<u8>>,
     },
     Rows {
         id: u64,
@@ -81,15 +83,24 @@ impl SplicedReply {
                 id,
                 version,
                 entries,
-            } => (
-                format!(r#"{{"id":{id},"ok":true,"result":{{"version":"#).into_bytes(),
-                vec![
+                base_digests,
+            } => {
+                let mut pieces = vec![
                     SplicePiece::Inline(serde_json::to_vec(version).unwrap_or_default()),
                     SplicePiece::Inline(br#","entries":"#.to_vec()),
                     SplicePiece::Shared(Arc::clone(entries)),
-                ],
-                Cow::Borrowed(&b"}}"[..]),
-            ),
+                ];
+                if let Some(map) = base_digests {
+                    pieces.push(SplicePiece::Inline(
+                        [&br#","base_digests":"#[..], map].concat(),
+                    ));
+                }
+                (
+                    format!(r#"{{"id":{id},"ok":true,"result":{{"version":"#).into_bytes(),
+                    pieces,
+                    Cow::Borrowed(&b"}}"[..]),
+                )
+            }
             SplicedReply::Rows { id, rows, version } => (
                 format!(r#"{{"id":{id},"ok":true,"result":{{"rows":"#).into_bytes(),
                 vec![
@@ -139,8 +150,8 @@ impl SplicedReply {
 /// `begin`, and the api `rows` op. Anything else - another method, a
 /// request that is not JSON, an uncached (Fresh) read, a store error -
 /// returns None and the caller falls through to handle_request, so error
-/// shapes and odd methods keep their exact reply. A spliced `begin` still
-/// remembers its snapshot for the commit_rows conflict path.
+/// shapes and odd methods keep their exact reply. A spliced `begin` carries
+/// the same per-row version map as handle_begin, read before the entries.
 pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<SplicedReply> {
     let req: Value = serde_json::from_slice(payload).ok()?;
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
@@ -176,6 +187,13 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
         }
         _ => return None,
     }
+    let base_digests = if method == "begin" {
+        begin_versions(state)
+            .ok()?
+            .map(|versions| serde_json::to_vec(&versions).unwrap_or_default())
+    } else {
+        None
+    };
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     match read_graph_gated(state, false).ok()? {
         GraphRead::Fresh(..) => None,
@@ -200,12 +218,11 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
             if method == "read" {
                 return Some(SplicedReply::Read { id, entries });
             }
-            let version = graph.version.clone();
-            remember_snapshot(state, &version, &graph.entries);
             Some(SplicedReply::Begin {
                 id,
-                version,
+                version: graph.version.clone(),
                 entries,
+                base_digests,
             })
         }
     }

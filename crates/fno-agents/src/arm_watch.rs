@@ -312,6 +312,10 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         let threshold = crate::agents_config::notify_arm_failing_after_s(&config_cwd);
         let store = crate::operator_notice::notify_signals_path();
         let install_off_main = crate::arm_repair::RepairFacts::live(&[]).install_off_main;
+        // The court read runs ONCE and feeds both readers: the crown alarm's
+        // judge and the settle pass. A second read doubles the seconds the
+        // beat already spends.
+        let court = crate::crown_alarm::read_court_payload(&config_cwd);
         let outcome = tick_with_heal(
             &mut rows,
             install_off_main,
@@ -320,7 +324,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             &store,
             now_unix,
             || crate::stuck_work::collect(&config_cwd),
-            || crate::crown_alarm::collect(&config_cwd),
+            || crate::crown_alarm::collect_from(&court, &store, now_unix),
             &mut |action| crate::arm_repair::run_repair(action, &config_cwd),
             |title, body| {
                 crate::operator_notice::notify_operator_confirmed(
@@ -341,6 +345,47 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             outcome.acted,
             outcome.skip_reason.as_deref(),
             Some(&outcome.detail),
+            interval.as_secs(),
+        );
+        // The settle pass rides the court read this beat already paid for.
+        // One king_settle row per beat: the detail names what was mailed, so
+        // no per-PR event kind is needed.
+        let (settle_acted, settle_skip, settle_detail) = match &court {
+            Err(reason) => (0, Some("error"), short(&format!("crown unread: {reason}"))),
+            Ok(payload) => {
+                let outcome = crate::king_settle::run(payload, &config_cwd, now_unix);
+                let crowns = payload
+                    .get("crowns")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|list| list.len())
+                    .unwrap_or(0);
+                let skip = if outcome.mailed > 0 {
+                    None
+                } else {
+                    Some("clear")
+                };
+                let extra = if outcome.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", outcome.note)
+                };
+                (
+                    outcome.mailed,
+                    skip,
+                    short(&format!(
+                        "crowns={crowns} reads={} mailed={}{}",
+                        outcome.reads, outcome.mailed, extra
+                    )),
+                )
+            }
+        };
+        crate::tick_ledger::emit_tick(
+            &journal,
+            "king_settle",
+            crate::tick_ledger::SCHED_DAEMON,
+            settle_acted,
+            settle_skip,
+            Some(&settle_detail),
             interval.as_secs(),
         );
     });

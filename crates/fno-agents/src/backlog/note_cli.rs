@@ -4,11 +4,12 @@
 //! wave, terminal), and the combined-prose budget; the bridge keeps the
 //! shipped recipient walk (`note_notify`, its test contract), evidence
 //! checks, identity, archived refusal, and the mail transport.
+use crate::backlog::model::Node;
 use crate::backlog::node_state::{self, StateError, StateWriteInput};
 use crate::backlog::note_history;
 use crate::graph_store::{self};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::graph_get::default_graph_path;
 
@@ -29,6 +30,11 @@ struct NoteArgs {
     graph: Option<PathBuf>,
     self_session: Option<String>,
     reads: Option<String>,
+    import_record: Option<String>,
+    blocking: bool,
+    resolve: Option<String>,
+    block_cmd: Option<String>,
+    block_excerpt_file: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
@@ -48,6 +54,11 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         graph: None,
         self_session: None,
         reads: None,
+        import_record: None,
+        blocking: false,
+        resolve: None,
+        block_cmd: None,
+        block_excerpt_file: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -104,6 +115,39 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
                     .clone()
                     .into();
             }
+            "--blocking" => out.blocking = true,
+            "--import-record" => {
+                i += 1;
+                out.import_record = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--import-record needs a path or -".to_string())?
+                        .clone(),
+                );
+            }
+            "--resolve" => {
+                i += 1;
+                out.resolve = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--resolve needs a finding id".to_string())?
+                        .clone(),
+                );
+            }
+            "--block-cmd" => {
+                i += 1;
+                out.block_cmd = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--block-cmd needs text".to_string())?
+                        .clone(),
+                );
+            }
+            "--block-excerpt-file" => {
+                i += 1;
+                out.block_excerpt_file = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--block-excerpt-file needs a path or -".to_string())?
+                        .clone(),
+                );
+            }
             "--self-session" => {
                 i += 1;
                 out.self_session = Some(
@@ -140,6 +184,16 @@ pub fn run_note(args: &[String]) -> i32 {
         }
     };
     let graph = parsed.graph.clone().unwrap_or_else(default_graph_path);
+    // Finding routes. `--resolve` needs no node and no body; `--blocking`
+    // is routed after entry resolution below. Neither touches current state.
+    if let Some(finding_id) = parsed.resolve.clone() {
+        return run_finding_resolve(&parsed, &graph, &finding_id);
+    }
+    // The import route: restore one captured node record. Like `--resolve`
+    // it needs no node argument and reads no body.
+    if let Some(source) = parsed.import_record.clone() {
+        return run_import_record(&parsed, &graph, &source);
+    }
     let body = match read_body(&parsed) {
         Ok(b) => b,
         Err(e) => {
@@ -169,6 +223,15 @@ pub fn run_note(args: &[String]) -> i32 {
         .to_string();
 
     // Machine and wave producers: history-only, no recipients, no state.
+    if parsed.blocking {
+        let Some(body) = body else {
+            eprintln!(
+                "fno-agents backlog-note: a blocking finding needs a body (positional, --body-file, or --stdin)"
+            );
+            return 2;
+        };
+        return run_finding_create(&parsed, &graph, &node_id, body);
+    }
     if parsed.machine.is_some() || parsed.wave {
         return run_machine(&parsed, &graph, &node_id, body);
     }
@@ -250,6 +313,173 @@ fn run_machine(
         crate::backlog::receipt::emit_line(&format!("recorded {node_id}: history"));
     }
     0
+}
+
+/// The --resolve route: stamp resolved_at through the findings API and emit
+/// the telemetry event after commit. Exit 0 resolved, 1 unknown id or store
+/// error, 2 usage.
+fn run_finding_resolve(parsed: &NoteArgs, graph: &std::path::Path, finding_id: &str) -> i32 {
+    if parsed.blocking {
+        eprintln!("fno-agents backlog-note: --blocking and --resolve are separate routes");
+        return 2;
+    }
+    let receipt = crate::backlog::api::finding_resolve(
+        &crate::backlog::api::Store::new(graph),
+        finding_id,
+        parsed.self_session.as_deref(),
+    );
+    match receipt {
+        Ok(r) => {
+            emit_finding_event(
+                "review_finding_resolved",
+                json!({ "finding_id": r.finding_id, "status": r.status }),
+            );
+            let out = json!({
+                "status": "ok", "routed": "resolve", "finding_id": r.finding_id,
+                "resolve_status": r.status, "resolved_at": r.resolved_at, "version": r.version,
+                "line": format!("resolved {}: {} (at {})", r.finding_id, r.status, r.resolved_at),
+            });
+            emit_human(parsed.json_out, &out);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {}", e.0);
+            1
+        }
+    }
+}
+
+/// The --blocking route: create the finding through the findings API, emit
+/// the telemetry event after commit, print the receipt. Exit 0 written,
+/// 1 refused or failed, 2 usage.
+fn run_finding_create(
+    parsed: &NoteArgs,
+    graph: &std::path::Path,
+    node_id: &str,
+    body: String,
+) -> i32 {
+    let excerpt = read_excerpt(&parsed.block_excerpt_file);
+    let excerpt = match excerpt {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            return 1;
+        }
+    };
+    let receipt = crate::backlog::api::finding_create(
+        &crate::backlog::api::Store::new(graph),
+        node_id,
+        crate::backlog::api::FindingInput {
+            body,
+            block_cmd: parsed.block_cmd.clone(),
+            block_excerpt: excerpt,
+            source_session_id: parsed.self_session.clone(),
+            source_harness: None,
+        },
+    );
+    match receipt {
+        Ok(r) => {
+            emit_finding_event(
+                "review_finding",
+                json!({ "finding_id": r.finding_id, "node_id": r.node_id }),
+            );
+            let pointer = finding_pointer_line(&r.node_id, &r.finding_id);
+            let delivery = notice_holder(&r.node_id, &pointer);
+            let line = match &delivery {
+                Some(note) => format!("recorded {} on {}; {note}", r.finding_id, r.node_id),
+                None => format!(
+                    "recorded {} on {}; no live reader, it gates the next worker",
+                    r.finding_id, r.node_id
+                ),
+            };
+            let out = json!({
+                "status": "ok", "routed": "finding", "finding_id": r.finding_id,
+                "node_id": r.node_id, "version": r.version,
+                "delivery": delivery, "pointer": pointer, "line": line,
+            });
+            emit_human(parsed.json_out, &out);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {}", e.0);
+            1
+        }
+    }
+}
+
+/// The finding pointer: node, id, read and resolve commands - the whole
+/// delivered body, never the finding text.
+fn finding_pointer_line(node_id: &str, finding_id: &str) -> String {
+    format!(
+        "finding {finding_id} on {node_id}: blocking. \
+         Read: fno backlog notes findings {node_id}. \
+         Clear: fno backlog note --resolve {finding_id}"
+    )
+}
+
+/// Best-effort holder notice after a finding lands: one pointer line to the
+/// live claim holder, injected detached through this binary's own
+/// mail-inject lane. A miss only degrades the receipt line; the durable
+/// record gates regardless.
+fn notice_holder(node_id: &str, pointer: &str) -> Option<String> {
+    let (state, record) = crate::claims::status(&format!("node:{node_id}"), None);
+    if !matches!(
+        state,
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+    ) {
+        return None;
+    }
+    let record = record?;
+    let sid = record.holder.rsplit(':').next()?.to_string();
+    let harness = record.harness.clone().unwrap_or_else(|| "claude".into());
+    let mut child = std::process::Command::new(std::env::current_exe().ok()?)
+        .args([
+            "mail-inject",
+            "--session",
+            &sid,
+            "--harness",
+            &harness,
+            "--sender",
+            "note",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    use std::io::Write;
+    let _ = child
+        .stdin
+        .take()
+        .and_then(|mut stdin| stdin.write_all(pointer.as_bytes()).ok());
+    Some(format!("pointer sent to {}", record.holder))
+}
+
+/// The excerpt source: `-` reads stdin, a path reads the file, absent is None.
+fn read_excerpt(source: &Option<String>) -> Result<Option<String>, String> {
+    match source.as_deref() {
+        None => Ok(None),
+        Some("-") => {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("excerpt stdin read failed: {e}"))?;
+            Ok(Some(s))
+        }
+        Some(path) => Ok(Some(
+            std::fs::read_to_string(path).map_err(|e| format!("excerpt file read failed: {e}"))?,
+        )),
+    }
+}
+
+/// Telemetry after commit, best-effort: both journals, pointer payload only
+/// (the store holds the body).
+fn emit_finding_event(event_type: &str, data: Value) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = crate::paths::events_path(&cwd);
+    let global = crate::loopcheck::default_global_events_path();
+    crate::loopcheck::emit_to_both(&project, &global, event_type, data);
 }
 
 /// Set the bounded `state_needs_refresh` marker in the row extras. Runs the
@@ -380,11 +610,28 @@ fn write_human(
         }
     };
     let (replaced, replaced_line) = replaced_parts(&receipt.node_id, receipt.replaced.as_ref());
+    let mut line = format!(
+        "noted {}: revision {}, {chars} chars\n{replaced_line}",
+        receipt.node_id, receipt.revision
+    );
+    // The encounters snapshot rides the receipt from inside the publication
+    // lock, so the hint can never fire on an encounter the write could not
+    // see.
+    let hint = encounter_hint(
+        &receipt.node_id,
+        &receipt.encounters,
+        parsed.self_session.as_deref(),
+        receipt.replaced.as_ref(),
+    );
+    if let Some(h) = hint {
+        line.push('\n');
+        line.push_str(&h);
+    }
     let out = json!({
         "status": "ok", "routed": "state", "node_id": receipt.node_id, "id": receipt.node_id,
         "text": text, "revision": receipt.revision, "journaled": receipt.journaled,
         "total_prose": receipt.total_prose, "replaced": replaced,
-        "line": format!("noted {}: revision {}, {chars} chars\n{replaced_line}", receipt.node_id, receipt.revision),
+        "line": line,
     });
     emit_human(parsed.json_out, &out);
     0
@@ -422,6 +669,38 @@ fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -
     (json, line)
 }
 
+/// The repeat-note nudge: when the session writing this note also wrote the
+/// state it replaces, and that session has no encounter on the node yet, name
+/// the verb that feeds `fno backlog demand`. Teaching at the point of use,
+/// never a gate.
+fn encounter_hint(
+    node_id: &str,
+    encounters: &Value,
+    self_session: Option<&str>,
+    prior: Option<&node_state::CurrentStateView>,
+) -> Option<String> {
+    let s = self_session.filter(|s| !s.is_empty())?;
+    let p = prior?;
+    if p.source_session_id.as_deref() != Some(s) {
+        return None;
+    }
+    let already = encounters
+        .as_array()
+        .map(|items| {
+            items.iter().any(|e| {
+                e.get("session_id").and_then(Value::as_str) == Some(s)
+                    || e.get("voter_key").and_then(Value::as_str) == Some(s)
+            })
+        })
+        .unwrap_or(false);
+    if already {
+        return None;
+    }
+    Some(format!(
+        "this session noted {node_id} before and has no encounter on it. If it cost you, record that: fno backlog encounter {node_id} --evidence \"<what it cost>\""
+    ))
+}
+
 /// Print one human receipt: the object under --json, else its `line`.
 fn emit_human(json_out: bool, receipt: &Value) {
     let line = if json_out {
@@ -430,6 +709,105 @@ fn emit_human(json_out: bool, receipt: &Value) {
         receipt["line"].as_str().unwrap_or("").to_string()
     };
     crate::backlog::receipt::emit_line(&line);
+}
+
+/// The --import-record route: read, validate, refuse-or-write, emit the
+/// receipt. Exit 0 written, 1 refused or failed (nothing written), 2 usage
+/// (handled at the parse layer).
+fn run_import_record(parsed: &NoteArgs, graph: &Path, source: &str) -> i32 {
+    let record = match read_record_source(source) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            return 1;
+        }
+    };
+    match import_record(graph, &record) {
+        Ok(receipt) => {
+            emit_human(parsed.json_out, &receipt);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            1
+        }
+    }
+}
+
+/// The record source: `-` reads stdin, a path reads the file.
+fn read_record_source(source: &str) -> Result<Value, String> {
+    let text = if source == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| format!("record stdin read failed: {e}"))?;
+        s
+    } else {
+        std::fs::read_to_string(source).map_err(|e| format!("record file read failed: {e}"))?
+    };
+    serde_json::from_str(&text).map_err(|e| format!("record is not valid JSON: {e}"))
+}
+
+/// Validate and import one captured record under its original id and slug.
+/// The receipt carries the restored identity and the store's mutation
+/// counter; a refusal is the self-teaching message and the guarantee that
+/// nothing was written.
+fn import_record(graph: &Path, record: &Value) -> Result<Value, String> {
+    let db = crate::backlog::database_path(graph);
+    if !db.exists() {
+        return Err(format!(
+            "no store at {}; nothing was written. An import repairs an \
+             existing store, it never creates one",
+            db.display()
+        ));
+    }
+    let node = Node::from_json(record).map_err(|e| {
+        format!(
+            "record does not validate: {e}. Nothing was written. A captured \
+             record is the `fno backlog get` output"
+        )
+    })?;
+    let id = node.id.clone();
+    let slug = node.slug.clone();
+    let mut refusal: Option<String> = None;
+    let ok = crate::backlog::mutate_single_row(graph, "node_import", |rows| {
+        if rows
+            .iter()
+            .any(|r| graph_store::entry_id(r) == Some(id.as_str()))
+        {
+            refusal = Some(format!(
+                "refusing: node {id} is already live in the store; nothing was \
+                 written. Read it: fno backlog get {id}. An import restores a \
+                 lost record, it never overwrites"
+            ));
+            return Ok(false);
+        }
+        if rows.iter().any(|r| {
+            graph_store::entry_id(r) != Some(id.as_str())
+                && r.get("slug").and_then(Value::as_str) == Some(slug.as_str())
+        }) {
+            refusal = Some(format!(
+                "refusing: slug {slug} is already held by another node; nothing \
+                 was written. Slugs are unique in the store"
+            ));
+            return Ok(false);
+        }
+        rows.push(record.clone());
+        Ok(true)
+    })?;
+    if !ok {
+        return Err(refusal.unwrap_or_else(|| "import refused".to_string()));
+    }
+    let version = crate::backlog::api_version(graph)?;
+    Ok(json!({
+        "status": "ok",
+        "routed": "import",
+        "id": id,
+        "slug": slug,
+        "version": version,
+        "line": format!("imported {id} (slug {slug})"),
+    }))
 }
 
 /// Map a state-write error to the verb's exit code.
@@ -463,5 +841,175 @@ mod tests {
     fn an_unknown_flag_still_refuses() {
         assert!(parse_args(&args(&["x-1", "-j"])).is_err());
         assert!(parse_args(&args(&["x-1", "--JSON"])).is_err());
+    }
+
+    fn view(rev: u64, session: Option<&str>) -> node_state::CurrentStateView {
+        node_state::CurrentStateView {
+            revision: rev,
+            body: "prior state".into(),
+            updated_at: Some("2026-09-22T00:00:00+00:00".into()),
+            source_session_id: session.map(|s| s.to_string()),
+            source_harness: None,
+        }
+    }
+
+    #[test]
+    fn same_author_and_no_encounter_hints_encounter() {
+        let hint = encounter_hint(
+            "t-1",
+            &json!(null),
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a"))),
+        );
+        let hint = hint.expect("same author, no encounter: hint fires");
+        assert!(hint.contains("fno backlog encounter t-1 --evidence"));
+    }
+
+    #[test]
+    fn a_matching_encounter_silences_the_hint() {
+        let by_session = json!([
+            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "session_id": "sess-a"}
+        ]);
+        assert!(encounter_hint(
+            "t-1",
+            &by_session,
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+        let by_voter = json!([
+            {"ts": "2026-09-22T00:00:00+00:00", "evidence": "x", "voter_key": "sess-a"}
+        ]);
+        assert!(encounter_hint(
+            "t-1",
+            &by_voter,
+            Some("sess-a"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_different_prior_author_gets_no_hint() {
+        assert!(encounter_hint(
+            "t-1",
+            &json!(null),
+            Some("sess-b"),
+            Some(&view(3, Some("sess-a")))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn no_self_session_gets_no_hint() {
+        assert!(
+            encounter_hint("t-1", &json!(null), None, Some(&view(3, Some("sess-a")))).is_none()
+        );
+    }
+
+    // -- import route -----------------------------------------------------
+
+    fn fixture(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let graph = dir.path().join(name);
+        (dir, graph)
+    }
+
+    /// The captured-record shape: what `fno backlog get` emits, sessions and
+    /// provenance included.
+    fn captured_record(id: &str, slug: &str) -> Value {
+        serde_json::json!({
+            "id": id, "slug": slug, "title": "Lost", "type": "feature",
+            "status": "in_progress", "priority": "p1", "project": "fno",
+            "domain": "code", "difficulty": "medium",
+            "details": "restored from a captured record",
+            "created_at": "2026-09-16T04:38:39.696103+00:00",
+            "source_kind": "operator_request",
+            "sessions": [
+                {"phase": "do", "harness": "claude", "session_id": "s-1"}
+            ],
+        })
+    }
+
+    fn seed_one_node(graph: &std::path::Path) {
+        let rows = serde_json::json!({"entries": [
+            {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
+             "status": "idea", "priority": "p2", "domain": "code",
+             "created_at": "2026-09-11T00:00:00+00:00"}
+        ]});
+        graph_store::seed_rows(graph, rows["entries"].as_array().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_import_lands_the_record_under_its_original_id_and_slug() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let receipt = import_record(&graph, &captured_record("ab-lost", "lost")).unwrap();
+        assert_eq!(receipt["id"], "ab-lost");
+        assert_eq!(receipt["slug"], "lost");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        let restored = rows
+            .iter()
+            .find(|r| graph_store::entry_id(r) == Some("ab-lost"))
+            .expect("the imported node is live");
+        assert_eq!(restored["slug"], "lost");
+        assert_eq!(restored["title"], "Lost");
+        assert_eq!(
+            restored["sessions"][0]["session_id"], "s-1",
+            "the aggregate's child rows ride the import"
+        );
+    }
+
+    #[test]
+    fn an_import_refuses_when_the_id_is_already_live() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let error = import_record(&graph, &captured_record("ab-one", "renamed")).unwrap_err();
+        assert!(error.contains("ab-one is already live"), "{error}");
+        assert!(error.contains("fno backlog get ab-one"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_when_the_slug_is_held_elsewhere() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let error = import_record(&graph, &captured_record("ab-other", "one")).unwrap_err();
+        assert!(error.contains("slug one is already held"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_a_record_that_fails_the_schema() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let mut record = captured_record("ab-bad", "bad");
+        record.as_object_mut().unwrap().remove("title");
+        let error = import_record(&graph, &record).unwrap_err();
+        assert!(error.contains("record does not validate"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_a_missing_store() {
+        let (_dir, graph) = fixture("graph.json");
+        let error = import_record(&graph, &captured_record("ab-lost", "lost")).unwrap_err();
+        assert!(error.contains("no store at"), "{error}");
+        assert!(
+            !crate::backlog::database_path(&graph).exists(),
+            "created nothing"
+        );
+    }
+
+    #[test]
+    fn usage_refuses_an_unknown_flag() {
+        let args: Vec<String> = ["record.json", "--dry-run"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_args(&args).is_err());
     }
 }

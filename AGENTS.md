@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-****footnote** is a Claude Code plugin: idea -> shipped PR (think -> plan -> do -> review -> ship). Setup: `fno config setup wizard` or `/fno:setup`.
+****footnote** is a Claude Code plugin: idea -> shipped PR. Setup: `fno config setup wizard` or `/fno:setup`.
 
 ## Precedence and output style
 
@@ -32,14 +32,6 @@ Traps a fresh agent re-hits because no lint, guard or refusal catches them yet. 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove an entry in the PR where its guard lands.
 
 AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test): `kdc-delivery-sentinel-1932`.
-
-### A capability probe delivered over the mail bus can only ever return yes
-
-`fno agents mail send` injects as user-shaped text, indistinguishable from superuser typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
-
-- specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe separating user-shaped injection from an autonomous tool call, or a lint demanding evidence beyond a mail probe.
-- added: 2026-08-05
 
 ### Codex RPC
 
@@ -71,6 +63,7 @@ footnote/
 - **Prose style:** a paragraph is ONE physical line. A newline starts the next block. House style, and the gate: [docs/style-rules.md](docs/style-rules.md).
 - **File budget:** a file over 5,000 lines is shrink-only. `cli/src/fno` bars new Python (use `crates/`); an edit is a port, deletion or king-approved blocking-bug fix, no new surface, enforced by `scripts/ci/check-file-budget.sh` at push.
 - **Large files:** a source file over 1,000 lines gets read the exact range, edit, re-read, and a test count proved with `rg -c '#\[test\]'` (or `def test_`) before and after.
+- **Test value:** new tests answer the authoring gate in [test-audit](skills/test-audit/SKILL.md) before they land.
 - **Multi-CLI:** skills are portable. Orchestration needs per-CLI hook config. See `docs/HARNESSES.md`, `docs/architecture/multi-cli-hooks.md`, `docs/SKILL-COMPAT-MATRIX.md`.
 
 ## Commands
@@ -79,14 +72,14 @@ Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. F
 
 | Command (claude/opencode `/fno:`, codex `$fno:`) | Purpose |
 |---|---|
-| `target "feature"` | End-to-end: think -> blueprint -> do -> review -> ship |
+| `target "feature"` | End-to-end: think -> blueprint -> execute -> review -> ship |
 | `target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
 | `target L "feature"` | Large size: full ceremony including adversarial |
 | `target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
 | `blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `execute` | Execute a plan: `flat` (default) or `waves` |
 | `think` \| `review` \| `fix` \| `tdd` \| `triage` \| `setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
-| `pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
+| `pr create` \| `check` \| `merged` | Open PR inline / poll+implement external review / post-merge ritual |
 | `growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
 Surface evolution: `blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)). An approved native Plan-Mode plan is picked up by the next bare `target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
@@ -124,7 +117,7 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
-| `paths.graph_db()` | `~/.fno/graph.db` (+ `.md` Kanban) | Feature dependency graph | backlog |
+| `paths.graph_json()` | `~/.fno/graph.db` | SQLite; stable `graph.json` path anchor | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |
@@ -162,7 +155,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno agents claim`** - the one work-claim primitive with atomic lockfiles. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
-- **`fno agents mail` - native review.** The native review runs via Skill. Raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review. `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
+- **`fno agents mail` - coordination.** Review inline via `/fno:review` or Codex `$fno:review`. Never use mail or spawn a reviewer. The merge gate enforces review. `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disables auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno agents feed`** - one ordered projection of questions.jsonl + the graph store. Rows carry the node id + session id the mux `prefix+e` overlay deep-links through. [activity-feed](docs/architecture/activity-feed.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
@@ -177,7 +170,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **[Stage table](docs/architecture/role-based-model-routing.md)** (per-stage axis) - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch. `dispatch.harness` is deprecated. `route`=vendor/model (`--route`) beside `provider`=harness.
 - **Curated CLI menu** - `fno --help` shows ~8 verbs (mux, version included). Most are hidden but invocable via `fno help --all` and per-group `help <group> --all`. `fno doctor lint menu-caps` gates root namespace (cap 12) and advertised surface (10 top-level/12 per sub-app). Group actions are arguments not leaves.
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
-- **Target self-handoff** - `/target` can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
+- **Target self-handoff** - `/target` can hand the execute phase to a fresh-context successor, generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review), two memory-pass checkpoints, stuck terminals write postmortems. See [memory-system](docs/architecture/memory-system.md) and [self-improvement-loops](docs/architecture/self-improvement-loops.md) (the loop map: triggers, config keys, where output lands).
 
 ## Skill / agent development
@@ -201,6 +194,6 @@ Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md), [t
 
 Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md), [attention](docs/architecture/attention-items.md)
 
-Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [slot cutover](docs/architecture/managed-claude-slot-cutover.md), [cross-model review](docs/architecture/cross-model-review.md)
 
 Platform & ops: [processes](docs/architecture/background-processes.md), [fleet-FAQ](docs/fleet-faq.md), [reaping-FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path-config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md), [vocabulary](docs/architecture/vocabulary-user-and-operator.md), [graph](docs/graph-search.md)

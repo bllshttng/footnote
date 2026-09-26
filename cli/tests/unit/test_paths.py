@@ -722,21 +722,22 @@ def test_unknown_template_variable_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_graph_json_override(
+def test_graph_json_uses_state_dir_even_if_the_removed_override_is_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1-HP: paths.graph_json explicit value overrides state_dir derivation."""
+    """The retired paths.graph_json key cannot move the store anchor."""
+    custom_dir = str(tmp_path / "state")
     custom_json = str(tmp_path / "custom" / "g.json")
     _set_settings(
         monkeypatch,
         tmp_path,
-        f"schema_version: 1\nconfig:\n  paths:\n    graph_json: '{custom_json}'\n",
+        f"schema_version: 1\nconfig:\n  state_dir: '{custom_dir}'\n  paths:\n    graph_json: '{custom_json}'\n",
     )
 
     from fno.paths import graph_json
 
     result = graph_json()
-    assert result == Path(custom_json).resolve()
+    assert result == Path(custom_dir).resolve() / "graph.json"
 
 
 def test_explicit_briefs_dir_override(

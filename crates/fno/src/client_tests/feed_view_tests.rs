@@ -100,6 +100,7 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,

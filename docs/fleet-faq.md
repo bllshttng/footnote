@@ -100,7 +100,7 @@ A subagent fails the same way and gives you less to read. One finished at 23:13 
 
 Two channels, and they answer different questions.
 
-`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the text reached the pane, not that the agent read it. A `queued` result also prints hosted (`cli/src/fno/mail/cli.py:3139`). The message can sit until the agent looks up, or until a human presses ESC. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
+`fno agents mail send <name> "<text>"` can reach a **live** worker. Read its receipt. `delivered (hosted)` and `delivered (woken)` mean the inject was accepted. Neither proves the agent read it. A `queued` message waits until the agent looks up or a human presses ESC. Any other receipt means the worker still has its old instructions. A failed injection falls back to the durable queue, where the message can remain unread.
 
 `fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 

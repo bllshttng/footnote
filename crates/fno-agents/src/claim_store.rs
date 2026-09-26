@@ -59,6 +59,7 @@ fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
 }
 
 fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {
+    crate::live_store_fence::refuse_worktree_build_on_operator_store(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }

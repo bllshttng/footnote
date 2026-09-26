@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import pytest
@@ -83,6 +84,71 @@ def test_install_backs_up_an_unrelated_existing_wrapper(tmp_path):
     assert result.backup.read_text() == "#!/bin/sh\necho existing\n"
     assert "fno-gh-proxy" in proxy.read_text()
     assert os.access(proxy, os.X_OK)
+
+
+def _helper(monkeypatch, tmp_path, body="#!/bin/sh\nexit 0\n"):
+    helper = tmp_path / "tools" / "fno-gh-proxy"
+    helper.parent.mkdir()
+    helper.write_text(body)
+    helper.chmod(0o755)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.shutil.which",
+        lambda name: str(helper) if name == "fno-gh-proxy" else None,
+    )
+    return helper
+
+
+def test_ensure_proxy_links_helper_idempotently(monkeypatch, tmp_path):
+    helper = _helper(monkeypatch, tmp_path)
+    real = tmp_path / "real-gh"
+    real.write_text("real")
+    directory = tmp_path / "proxy"
+
+    ensure_proxy(directory=directory, real_gh=real)
+    link = directory / "fno-gh-proxy"
+    stamp = link.lstat().st_mtime_ns
+    ensure_proxy(directory=directory, real_gh=real)
+
+    assert link.is_symlink()
+    assert link.resolve() == helper.resolve()
+    assert link.lstat().st_mtime_ns == stamp
+
+
+def test_ensure_proxy_repairs_a_dangling_helper_link(monkeypatch, tmp_path):
+    helper = _helper(monkeypatch, tmp_path)
+    real = tmp_path / "real-gh"
+    real.write_text("real")
+    directory = tmp_path / "proxy"
+    directory.mkdir()
+    (directory / "fno-gh-proxy").symlink_to(tmp_path / "missing-helper")
+
+    ensure_proxy(directory=directory, real_gh=real)
+
+    assert (directory / "fno-gh-proxy").resolve() == helper.resolve()
+
+
+def test_proxy_shim_finds_helper_with_only_its_directory_on_path(monkeypatch, tmp_path):
+    _helper(monkeypatch, tmp_path, '#!/bin/sh\nexec "$FNO_REAL_GH" "$@"\n')
+    real = tmp_path / "real-bin" / "gh"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\nprintf 'gh version test\\n'\n")
+    real.chmod(0o755)
+    directory = tmp_path / "proxy"
+    ensure_proxy(directory=directory, real_gh=real)
+
+    result = subprocess.run(
+        [str(directory / "gh"), "--version"],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.pathsep.join([str(directory), str(real.parent)]),
+            "FNO_REAL_GH": str(real),
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "gh version test" in result.stdout
 
 
 def test_missing_gh_fails_before_loading_configured_proxy_path(monkeypatch):

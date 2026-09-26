@@ -1,6 +1,7 @@
 """Context-to-outcome trace contracts for x-2e3c Task 1.2."""
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -1237,8 +1238,7 @@ def test_scoreboard_cli_joins_canonical_project_context_journal(
     (state_dir / "ledger.json").write_text(
         json.dumps({"entries": rows}), encoding="utf-8"
     )
-    (state_dir / "graph.json").write_text(
-        json.dumps(
+    seed_graph(state_dir / "graph.json", json.dumps(
             {
                 "entries": [
                     {
@@ -1249,9 +1249,7 @@ def test_scoreboard_cli_joins_canonical_project_context_journal(
                     }
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     event_at = (now - timedelta(minutes=90)).astimezone().isoformat()
     event = _snapshot_event("harness-session", 100, event_at)
     (repo / ".fno" / "events.jsonl").write_text(
@@ -1370,8 +1368,7 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
     (state_dir / "ledger.json").write_text(
         json.dumps({"entries": rows}), encoding="utf-8"
     )
-    (state_dir / "graph.json").write_text(
-        json.dumps(
+    seed_graph(state_dir / "graph.json", json.dumps(
             {
                 "entries": [
                     {
@@ -1388,9 +1385,7 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
                     },
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
 
     duplicate_snapshot = _snapshot_event("run-1", 110, "2026-07-03T11:00:00Z")
     duplicate_review = {

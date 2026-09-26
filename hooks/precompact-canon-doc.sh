@@ -410,6 +410,45 @@ _session_block() {
   fi
 }
 
+_unowned_session_blocks() {
+  # Every fno:session-marked section whose heading is NOT one of the four the
+  # writer regenerates below, captured verbatim (heading + markers + body).
+  # The assembly re-emits only the four known sections, so without this pass a
+  # refresh deletes a king's hand-written "## HANDOFF (session)" whole. Only
+  # content below the hook's own title line is ours to keep: above it, PRIOR
+  # already preserves the body verbatim, and both passes would duplicate it.
+  awk -v k1="Merge order and why" -v k2="Open decisions awaiting the operator" \
+      -v k3="Gaps and open thinking" -v k4="Workarounds in force" '
+    /^# Canon doc: / { started = 1; heading = ""; next }
+    !started { next }
+    /^## / { heading = $0; next }
+    {
+      if (index($0, "<!-- fno:session -->") > 0) {
+        known = index(heading, k1) > 0 || index(heading, k2) > 0 \
+             || index(heading, k3) > 0 || index(heading, k4) > 0
+        keep = !known
+        bhead = heading
+        if (keep && heading != "") buf = buf heading "\n"
+        heading = ""
+      }
+      if (keep) {
+        buf = buf $0 "\n"
+        if (index($0, "<!-- /fno:session -->") > 0) {
+          # One copy per heading, ever: if the writer ever regenerates a
+          # section this pass also captures (a label list drift), the copy
+          # already on disk must not compound into a second one per fire.
+          if (bhead == "" || !(bhead in seen)) {
+            if (bhead != "") seen[bhead] = 1
+            printf "%s", buf
+          }
+          buf = ""; keep = 0
+        }
+      }
+    }
+    END { printf "%s", buf }
+  ' "$DOC_PATH" 2>/dev/null
+}
+
 DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
 DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
 DEFAULT_GAPS="_Gaps and open thinking only this crown holds. Nothing external knows this. The session fills it at full context._"
@@ -434,6 +473,15 @@ fi
 PRIOR=""
 if [[ -f "$DOC_PATH" ]]; then
   PRIOR="$(awk '/^# Canon doc: /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
+fi
+
+# Unowned session sections (any marked "## X (session)" heading beyond the
+# four regenerated above, e.g. a king's "## HANDOFF (session)") captured
+# before the truncate like the blocks above and re-emitted verbatim, so a
+# refresh keeps session-owned content instead of deleting it silently.
+EXTRA_SESSIONS=""
+if [[ -f "$DOC_PATH" ]]; then
+  EXTRA_SESSIONS="$(_unowned_session_blocks)"
 fi
 
 # The fno:user block is the one section the machine NEVER writes and ALWAYS
@@ -559,6 +607,10 @@ if [[ -n "$_TMP_OUT" ]]; then
     echo "<!-- fno:session -->"
     printf '%s\n' "$SB4"
     echo "<!-- /fno:session -->"
+    echo ""
+  fi
+  if [[ -n "$(printf '%s' "$EXTRA_SESSIONS" | tr -d '[:space:]')" ]]; then
+    printf '%s\n' "$EXTRA_SESSIONS"
     echo ""
   fi
   echo "## User notes (you write here; the machine only ever reads this)"

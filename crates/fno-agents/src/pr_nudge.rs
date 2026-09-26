@@ -24,6 +24,9 @@ use std::time::Duration;
 /// activity.
 pub const MAX_ATTEMPTS: u32 = 3;
 
+const NUDGE_SENDER: &str = "pr-nudge";
+const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your crown or the operator outranks it.";
+
 /// The bounded subprocess budget, shared by the PR-status read and every
 /// mail/resume/ask effect.
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -242,6 +245,20 @@ fn production_run(argv: &[String], cwd: &str) -> (i32, String, String) {
     }
 }
 
+/// The ladder's production runner: a status argv answers in process through
+/// the status door (one owner, no CLI cold start); every other argv still
+/// spawns. Tests stage their own runner, so the seam stays theirs.
+fn ladder_run(argv: &[String], cwd: &str) -> (i32, String, String) {
+    if argv.len() > 4 && argv[2] == "pr" && argv[3] == "status" {
+        let payload = serde_json::json!({
+            "cwd": cwd,
+            "pr": argv[4].parse::<u64>().unwrap_or(0),
+        });
+        return crate::pr_status::cache::run_door("status-read", &payload);
+    }
+    production_run(argv, cwd)
+}
+
 /// The daemon arm: run the ladder over every open-PR row this sweep kept,
 /// then drop the state files of sessions that no longer carry one.
 pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow], grace_secs: i64) {
@@ -260,7 +277,7 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
             held,
             grace_secs,
             now,
-            &mut production_run,
+            &mut ladder_run,
         );
     }
     cleanup_state_files(home, rows);
@@ -294,7 +311,7 @@ pub fn apply(
         if let Err(e) = crate::fleet_task::close(
             &crate::provider_cap::questions_path(home),
             "pr-nudge",
-            &format!("PR #{} on {}", row.pr, row.node),
+            &task_key(row),
             &row.cwd,
             "activity",
             "pr-nudge",
@@ -331,7 +348,7 @@ pub fn apply(
             }
         }
         NudgeAction::Escalate => {
-            let key = format!("PR #{} on {}", row.pr, row.node);
+            let key = task_key(row);
             let marker = format!("pr-nudge: {key}");
             let text = escalation_text(&marker, &row.session_id, state.undelivered);
             if let Err(e) = crate::fleet_task::file_once(
@@ -359,10 +376,23 @@ pub fn apply(
         }
         NudgeAction::Mail | NudgeAction::Resume => {
             // Mail and resume are only reachable past `due`, which is where
-            // the one status read happened.
-            let status = status.expect("mail and resume rungs imply a due row");
-            let text = nudge_text(row, &status);
-            let resume_argv = vec![
+            // the one status read happened - for a PR row. A dead-worker
+            // row carries no PR, so there is no status to read and no
+            // actionable gate: the node's open work is the whole message.
+            let text = match row.pr {
+                Some(_) => {
+                    let status = status.expect("mail and resume rungs imply a due row");
+                    if !actionable_nudge_status(&status) {
+                        if &state != state_param {
+                            save_state(home, &row.session_id, &state);
+                        }
+                        return;
+                    }
+                    nudge_text(row, &status)
+                }
+                None => dead_work_text(row),
+            };
+            let mut resume_argv = vec![
                 "fno".to_string(),
                 "agents".to_string(),
                 "resume".to_string(),
@@ -381,11 +411,15 @@ pub fn apply(
                     "agents".to_string(),
                     "mail".to_string(),
                     "send".to_string(),
+                    "--from-name".to_string(),
+                    NUDGE_SENDER.to_string(),
+                    "--origin".to_string(),
+                    "scheduler".to_string(),
                     row.session_id.clone(),
                     text,
                 ];
                 let (code, stdout, _) = runner(&argv, "");
-                let mut landed = crate::mail_inject::mail_send_landed(code, &stdout);
+                let mut landed = crate::mail_inject::mail_send_accepted(code, &stdout);
                 let mut fallback = false;
                 // Exit 0 is only a queue acceptance. When the receipt says
                 // the lane cannot reach the session (the verb prints both
@@ -405,6 +439,11 @@ pub fn apply(
                     } else {
                         if durable_receipt {
                             state.mail_durable = true;
+                            if row.harness == "claude" {
+                                // The Working resume leg must not enqueue the
+                                // same durable message a second time.
+                                resume_argv.insert(4, "--message-already-queued".to_string());
+                            }
                         }
                         let (resume_code, _, rstderr) = runner(&resume_argv, "");
                         resumed_exit = Some(resume_code);
@@ -486,6 +525,26 @@ fn stderr_reason(stderr: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The fleet-task key for this row: PR rows key on the PR; a dead-worker
+/// row carries no PR, so the key names the node and its open work.
+fn task_key(row: &OpenPrRow) -> String {
+    match row.pr {
+        Some(pr) => format!("PR #{pr} on {}", row.node),
+        None => format!("dead worker on {}", row.node),
+    }
+}
+
+/// The nudge body for a dead-worker row (pr: None): the node's open work
+/// IS the message. No PR, no status read, no verdict to relay.
+fn dead_work_text(row: &OpenPrRow) -> String {
+    format!(
+        "{NUDGE_SENDER_LINE} continue: node {node} is in_progress and its session died \
+         with uncommitted work in {cwd}. Commit what is there and drive the node to a PR.",
+        node = row.node,
+        cwd = row.cwd,
+    )
+}
+
 /// The operator-ask text. Nudges that never landed are named as such, so
 /// "3 nudges drew no activity" cannot stand in for nudges the session never
 /// saw.
@@ -507,12 +566,15 @@ fn escalation_text(marker: &str, sid: &str, undelivered: u32) -> String {
 /// keeps the last non-empty stdout line that parses as a JSON object and
 /// reports the exit code only when no line parses.
 fn read_status(row: &OpenPrRow, runner: Runner) -> Result<Value, i32> {
+    // The caller gates on `row.pr.is_some()` (decide_with_read); this
+    // function is never reached for a dead-worker row.
+    let pr = row.pr.expect("read_status is only reached for a pr row");
     let argv = vec![
         "fno".to_string(),
         "do".to_string(),
         "pr".to_string(),
         "status".to_string(),
-        row.pr.to_string(),
+        pr.to_string(),
     ];
     let (code, stdout, _) = runner(&argv, &row.cwd);
     // Reverse scan: the payload is the last JSON object line on stdout.
@@ -550,13 +612,27 @@ fn settled_red_head(payload: &Value) -> Option<String> {
     }
 }
 
+fn actionable_nudge_status(status: &Result<Value, i32>) -> bool {
+    let Ok(payload) = status else {
+        return false;
+    };
+    let settled = payload.get("settled").and_then(Value::as_bool) == Some(true);
+    let actionable_verdict = matches!(
+        payload.get("verdict").and_then(Value::as_str),
+        Some("red" | "green")
+    );
+    let open = payload.get("pr_state").and_then(Value::as_str) == Some("OPEN");
+    settled && actionable_verdict && open
+}
+
 /// The nudge body: the order to drive, plus the PR's own verdict, head and
 /// failing checks so the session starts the fix round without a round
 /// trip.
 fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
-    let pr = row.pr;
+    // Same gate as read_status: this renders a PR row's body only.
+    let pr = row.pr.expect("nudge_text is only reached for a pr row");
     let node = &row.node;
-    match status {
+    let body = match status {
         Err(code) => format!(
             "continue: PR #{pr} on node {node} is open and not merged. Drive it to merge. \
              fno do pr status {pr}: pr status unread (exit {code})"
@@ -594,7 +670,8 @@ fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
                 text
             }
         }
-    }
+    };
+    format!("{NUDGE_SENDER_LINE} {body}")
 }
 
 /// The failing checks as one ` | `-joined string. A settled red with no
@@ -822,8 +899,9 @@ fn decide_with_read(
     let mut status = None;
     // ponytail: one status read per due row per retire pass (300 s), and an
     // escalated row is due every pass. Read escalated rows once per grace if the
-    // gh budget runs hot.
-    if due(&input) {
+    // gh budget runs hot. A dead-worker row carries no PR: no read, no red
+    // head - the node's open work is the whole reason for the nudge.
+    if due(&input) && row.pr.is_some() {
         let s = read_status(row, runner);
         input.red_head = s.as_ref().ok().and_then(settled_red_head);
         status = Some(s);
@@ -855,7 +933,7 @@ pub fn plan_with(
 
 /// The dry run with the production runner.
 pub fn plan(home: &AgentsHome, rows: &[OpenPrRow], grace_secs: i64) -> Vec<(String, String)> {
-    plan_with(home, rows, grace_secs, &mut production_run)
+    plan_with(home, rows, grace_secs, &mut ladder_run)
 }
 
 #[cfg(test)]
@@ -868,11 +946,19 @@ mod tests {
             session_id: "11111111-2222-3333-4444-555555555555".into(),
             harness: "claude".into(),
             node: "x-node".into(),
-            pr: 1943,
+            pr: Some(1943),
             cwd: "/tmp/wt".into(),
             transcript_age_s: Some(1000),
             live,
             busy: false,
+        }
+    }
+
+    fn dead_row() -> OpenPrRow {
+        OpenPrRow {
+            pr: None,
+            live: false,
+            ..row(false)
         }
     }
 
@@ -926,7 +1012,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -953,8 +1039,19 @@ mod tests {
         let mail = &text_runner_calls[1];
         assert_eq!(mail[1], "agents");
         assert_eq!(mail[3], "send");
-        assert!(mail[5].contains("PR #1943"));
-        assert!(mail[5].contains("pending unsettled @ 0123456789ab"));
+        assert_eq!(
+            mail.get(4..8).unwrap_or(&[]),
+            &[
+                "--from-name".to_string(),
+                "pr-nudge".to_string(),
+                "--origin".to_string(),
+                "scheduler".to_string(),
+            ][..]
+        );
+        let mail_text = mail.get(9).map(String::as_str).unwrap_or("");
+        assert!(mail_text.starts_with("Automatic retry from the fno daemon pr-nudge arm"));
+        assert!(mail_text.contains("PR #1943"));
+        assert!(mail_text.contains("green settled @ 0123456789ab"));
         let saved = load_state(&home, &row(true).session_id);
         assert_eq!(saved.attempts, 1);
         assert_eq!(saved.undelivered, 0);
@@ -969,12 +1066,17 @@ mod tests {
     #[test]
     fn stopped_row_gets_resume() {
         let r = row(false);
-        let mut saw_resume = false;
+        let settled = status_payload("green", true, "0123456789abcdef");
+        let mut resume_argv = None;
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
-                saw_resume = true;
+            if argv.contains(&"do".to_string()) {
+                (0, settled.clone(), String::new())
+            } else if argv.contains(&"resume".to_string()) {
+                resume_argv = Some(argv.to_vec());
+                (0, String::new(), String::new())
+            } else {
+                (0, String::new(), String::new())
             }
-            (0, String::new(), String::new())
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-resume"));
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
@@ -988,8 +1090,87 @@ mod tests {
             1900,
             &mut runner,
         );
-        assert!(saw_resume);
+        let resume = resume_argv.expect("settled status should resume a stopped row");
+        assert!(resume[5].starts_with("Automatic retry from the fno daemon pr-nudge arm"));
+        assert!(!resume[5].contains("<fno_mail"));
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-resume"));
+    }
+
+    #[test]
+    fn dead_worker_row_gets_one_resume_and_never_reads_pr_status() {
+        // AC3-HP: a pr: None row due for a nudge runs exactly one
+        // `fno agents resume <sid> --message continue: node ...` and
+        // never runs `fno do pr status`. The event carries pr: null.
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            calls.push(argv.to_vec());
+            (0, String::new(), String::new())
+        };
+        let r = dead_row();
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dead"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert_eq!(calls.len(), 1, "one resume, no status read: {calls:?}");
+        assert_eq!(calls[0][1], "agents");
+        assert_eq!(calls[0][2], "resume");
+        assert_eq!(calls[0][3], r.session_id);
+        assert_eq!(calls[0][4], "--message");
+        let text = &calls[0][5];
+        assert!(text.contains("node x-node is in_progress"));
+        assert!(text.contains("uncommitted work in /tmp/wt"));
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.attempts, 1);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["pr"], serde_json::json!(null));
+        assert_eq!(ev["data"]["action"], serde_json::json!("resume"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn dead_worker_row_escalates_on_the_node_marker() {
+        // AC3-ERR: 3 undelivered resumes later, one operator question
+        // files under `pr-nudge: dead worker on <node>`, pr: null.
+        let r = dead_row();
+        let spent = LadderState {
+            attempts: MAX_ATTEMPTS,
+            ..Default::default()
+        };
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) || argv.contains(&"resume".to_string()) {
+                panic!("a spent dead-worker row reads nothing and resumes nothing");
+            }
+            (0, String::new(), String::new())
+        };
+        // questions_path sits at home.root()'s PARENT, so the home nests one
+        // level down: a home directly under temp_dir() would share the one
+        // temp_dir()/questions store with every concurrent test in the binary.
+        let esc_root = std::env::temp_dir().join("fno-pn-dead-esc");
+        let _ = std::fs::remove_dir_all(&esc_root);
+        let home = AgentsHome::at(esc_root.join("agents"));
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
+        let ev = last_event(&home, "pr_nudge_escalated");
+        assert_eq!(ev["data"]["pr"], serde_json::json!(null));
+        assert_eq!(ev["data"]["node"], serde_json::json!("x-node"));
+        let store = crate::provider_cap::questions_path(&home);
+        let open = crate::fleet_task::open_tasks(&store).unwrap();
+        assert_eq!(open.len(), 1, "one open fleet task: {open:?}");
+        assert!(
+            open[0].text.contains("pr-nudge: dead worker on x-node"),
+            "the escalation marker must name the node: {}",
+            open[0].text
+        );
+        let _ = std::fs::remove_dir_all(&esc_root);
     }
 
     #[test]
@@ -999,7 +1180,13 @@ mod tests {
         // no undelivered, no operator question.
         let r = row(false);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (17, String::new(), String::new())
             } else {
                 (0, String::new(), String::new())
@@ -1053,12 +1240,12 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
             if argv.contains(&"send".to_string()) {
-                mail_text = Some(argv[5].clone());
+                mail_text = argv.last().cloned();
                 return (
                     0,
                     "msg-1 queued (durable) [live-miss]\n".into(),
@@ -1101,12 +1288,61 @@ mod tests {
     }
 
     #[test]
+    fn durable_mail_resume_fallback_marks_the_body_as_already_queued() {
+        let saw_marker = std::cell::Cell::new(false);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"send".to_string()) {
+                (
+                    0,
+                    "msg-1 queued (durable) [live-miss]\n".into(),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
+                saw_marker.set(argv.iter().any(|a| a == "--message-already-queued"));
+                (16, String::new(), String::new())
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-already-queued"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(
+            saw_marker.get(),
+            "durable fallback must carry its receipt state"
+        );
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
     fn a_failed_resume_names_its_stderr_reason() {
         let r = row(false);
         let stderr_line = "fno agents resume: t-x (9a879b3b) is 'Working'; \
                            it was not woken and the message was NOT delivered.";
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (16, String::new(), format!("{stderr_line}\n"))
             } else {
                 (0, String::new(), String::new())
@@ -1138,7 +1374,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -1184,7 +1420,13 @@ mod tests {
     fn a_landed_resume_carries_no_reason() {
         let r = row(false);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
                 (0, String::new(), "some noise line\n".into())
             } else {
                 (0, String::new(), String::new())
@@ -1221,7 +1463,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -1294,7 +1536,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1334,7 +1576,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1374,7 +1616,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1418,7 +1660,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 return (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 );
             }
@@ -1673,7 +1915,7 @@ mod tests {
         crate::fleet_task::file_once(
             &store,
             "pr-nudge",
-            &format!("PR #{} on {}", r.pr, r.node),
+            &task_key(&r),
             &r.cwd,
             "text",
             Some("run"),
@@ -1697,7 +1939,9 @@ mod tests {
             1900,
             &mut runner,
         );
-        let raw = std::fs::read_to_string(&store).unwrap();
+        // The close commits to the event store; read committed rows plus
+        // the live tail.
+        let raw = crate::event_store::journal_text(&store, &["fleet_task", "fleet_task_closed"]);
         assert!(
             raw.contains(r#""type":"fleet_task_closed""#) && raw.contains(r#""reason":"activity""#),
             "{raw}"
@@ -1783,9 +2027,115 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_status_read_keeps_the_unread_line() {
-        // AC4-ERR: empty stdout with exit 1. The old line stands, and no
-        // red head is read.
+    fn unread_pr_status_sends_nothing_and_next_pass_retries() {
+        let r = row(true);
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unread-retry"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let mut first_calls = Vec::new();
+        let mut first_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            first_calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (1, String::new(), String::new())
+            } else {
+                (0, "msg-1 delivered (hosted)\n".into(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut first_runner,
+        );
+        drop(first_runner);
+
+        assert_eq!(first_calls.len(), 1, "an unread status must not send mail");
+        assert!(first_calls[0].contains(&"do".to_string()));
+        let state = load_state(&home, &r.session_id);
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.undelivered, 0);
+        assert_eq!(state.last_nudge_at, None);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(!events.contains("pr_nudge_sent"));
+
+        let settled = status_payload("green", true, "0123456789abcdef");
+        let mut next_calls = Vec::new();
+        let mut next_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            next_calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (0, settled.clone(), String::new())
+            } else {
+                (0, "msg-2 delivered (hosted)\n".into(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &state,
+            false,
+            900,
+            1901,
+            &mut next_runner,
+        );
+        drop(next_runner);
+        assert_eq!(
+            next_calls.len(),
+            2,
+            "the next pass retries status, then mails"
+        );
+        assert!(next_calls[1].contains(&"send".to_string()));
+        assert_eq!(load_state(&home, &r.session_id).attempts, 1);
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn unsettled_pr_status_sends_no_resume_or_attempt() {
+        let r = row(false);
+        let pending = status_payload("pending", false, "0123456789abcdef");
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unsettled"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let mut calls = Vec::new();
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (2, pending.clone(), String::new())
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        drop(runner);
+
+        assert_eq!(calls.len(), 1, "an unsettled status must not resume");
+        assert!(calls[0].contains(&"do".to_string()));
+        let state = load_state(&home, &r.session_id);
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.undelivered, 0);
+        assert_eq!(state.last_nudge_at, None);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(!events.contains("pr_nudge_sent"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn an_unparseable_status_read_remains_unreadable() {
+        // Empty stdout with exit 1 remains a read error; apply must keep it
+        // silent and retry on the next pass.
         let r = row(true);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             if argv.contains(&"do".to_string()) {
@@ -1796,8 +2146,6 @@ mod tests {
         };
         let status = read_status(&r, &mut runner);
         assert!(matches!(status, Err(1)));
-        let text = nudge_text(&r, &status);
-        assert!(text.contains("pr status unread (exit 1)"), "{text}");
     }
 
     #[test]
@@ -1847,7 +2195,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (1, out.clone(), String::new())
             } else if argv.contains(&"send".to_string()) {
-                mail_text = Some(argv[5].clone());
+                mail_text = argv.last().cloned();
                 (0, "msg-1 delivered (hosted)\n".into(), String::new())
             } else {
                 (0, String::new(), String::new())
@@ -1999,7 +2347,7 @@ mod tests {
         // AC7-HP: one row, one ladder state, one payload - plan_with and
         // apply return the same action.
         let r = row(true);
-        let out = status_payload("pending", false, "0123456789abcdef");
+        let out = status_payload("green", true, "0123456789abcdef");
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dry-run"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
         save_state(&home, &r.session_id, &LadderState::default());

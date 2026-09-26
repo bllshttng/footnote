@@ -501,18 +501,7 @@ pub(crate) fn fno_bin_env_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Mirrors the loopcheck test helper: a shell script on disk, executable.
-    fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     #[test]
     fn extract_help_distress_attrs_and_shapes() {

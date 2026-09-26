@@ -115,6 +115,12 @@ fn log_of(dir: &Path, name: &str) -> String {
     std::fs::read_to_string(dir.join(name)).unwrap_or_default()
 }
 
+/// Writers commit to the event store, so the projection reads committed
+/// rows plus the live tail, never the raw file alone.
+fn store_text(dir: &Path) -> String {
+    fno_agents::event_store::journal_text(&dir.join("questions.jsonl"), &[])
+}
+
 const CONFLICT_PUSH_STDERR: &str = "pr-push: the branch is not safely rebasable onto origin/main (status needs_resolver; files: crates/fno-agents/src/a.rs, crates/fno/src/b.rs). Resolve the conflicts, then run `fno do pr rebase --continue`.";
 
 #[test]
@@ -127,7 +133,7 @@ fn a_rebase_conflict_files_one_fleet_task_and_a_clean_rebase_closes_it() {
     std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
     stub_fno_push(d, "", 3, CONFLICT_PUSH_STDERR);
     fno_agents::heal::run_heal(&args_for(d, &["--all", "--apply"]));
-    let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+    let store = store_text(d);
     assert_eq!(
         store.matches(r#""type":"fleet_task""#).count(),
         1,
@@ -154,7 +160,7 @@ fn a_rebase_conflict_files_one_fleet_task_and_a_clean_rebase_closes_it() {
         "",
     );
     fno_agents::heal::run_heal(&args_for(d, &["--all", "--apply"]));
-    let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+    let store = store_text(d);
     assert!(
         store.contains(r#""type":"fleet_task_closed""#) && store.contains(r#""reason":"rebased""#),
         "the clean rebase closed the task: {store}"
@@ -180,7 +186,7 @@ fn two_roots_with_the_same_conflict_file_two_tasks_distinguished_by_cwd() {
     argv.push("--cwd".to_string());
     argv.push(root1.to_string_lossy().into_owned());
     fno_agents::heal::run_heal(&argv);
-    let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+    let store = store_text(d);
     let tasks: Vec<&str> = store
         .lines()
         .filter(|l| l.contains(r#""type":"fleet_task""#))

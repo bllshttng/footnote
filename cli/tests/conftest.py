@@ -170,6 +170,10 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "tests/agents/test_codex_signal_handling.py::"
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
+        (
+            "tests/agents/test_spawn_pane.py::"
+            "test_late_codex_identity_composes_across_every_peer_surface"
+        ),
     }
 )
 
@@ -241,7 +245,6 @@ def _store_keeper_absent() -> bool:
 #: is a nodeid PREFIX (a file, or a file plus a class), so a new case inside a
 #: listed class is covered without a second edit here.
 _NEEDS_STORE_KEEPER = (
-    "tests/unit/test_doctor_graph_backend.py",
     "tests/test_pr_watch_dispatch.py::TestDurableGrantExecution",
     "tests/unit/test_cli_wrappers.py::test_get_one_id_never_invokes_the_binary",
     "tests/unit/test_pr_closure_producer.py::test_supersede_keeps_the_human_reason",
@@ -425,8 +428,8 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     Two layers, because seams differ. One guarded ``Popen`` subclass is set
     on the ``subprocess`` module: ``subprocess.run`` and ``check_output``
     read ``Popen`` from that module global at call time, so one patch covers
-    them plus every direct ``Popen(...)`` call (the bare calls in ``agy``,
-    ``pi`` and ``_acp`` included). The three harness aliases that captured
+    them plus every direct ``Popen(...)`` call (the bare calls in ``agy`` and
+    ``pi`` included). The three harness aliases that captured
     the original class at import time (``claude``, ``codex``,
     ``cursor_agent``) are repointed to the guarded class. A subclass keeps
     ``isinstance`` checks and ``Popen[bytes]`` working.
@@ -921,6 +924,56 @@ def native_backlog_door(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _closure_leg_hermetic(monkeypatch):
+    """Hermetic default for the closure-line forwarders.
+
+    `fno.pr.closure.parse_closure_trailer`/`render_closure_trailer` are thin
+    forwarders to the Rust leg (`fno-agents pr-closure-parse|render`, through
+    `fno.rust_binary.verb_call`). In the test environment that resolver can
+    find an installed binary without the new verb, or none at all, so the
+    default answers from a test-local copy of the shared-corpus grammar;
+    tests that pin the forwarder WIRING re-stub `fno.pr.closure.verb_call`
+    themselves (closure.py binds the transport at module level), and the
+    corpus test runs the real dev binary when one exists (skip otherwise,
+    the same contract as `native_backlog_door`).
+    """
+    from fno.graph._constants import is_wellformed_node_id
+
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        if verb == "pr-closure-render":
+            ids = [
+                t
+                for t in dict.fromkeys(payload.get("ids") or [])
+                if is_wellformed_node_id(t)
+            ]
+            return {"line": f"Fixes {' '.join(ids)}" if ids else ""}
+
+        def _line_ids(line):
+            stripped = line.strip()
+            for kw in ("fixes", "backlog-closure"):
+                if stripped.lower().startswith(kw):
+                    rest = stripped[len(kw):]
+                    if rest.startswith(":"):
+                        rest = rest[1:]
+                    if rest and not rest[0].isspace():
+                        return None  # glued word, not the keyword
+                    toks = [t for t in rest.replace(",", " ").split() if t]
+                    if not toks or not all(is_wellformed_node_id(t) for t in toks):
+                        return None  # one bad token: the line is prose
+                    return list(dict.fromkeys(toks))
+            return None
+
+        best = None
+        for line in (payload.get("body") or "").splitlines():
+            ids = _line_ids(line)
+            if ids is not None:
+                best = ids
+        return {"ids": best or []}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _fake_verb_call)
+
+
+@pytest.fixture(autouse=True)
 def _no_review_coverage_recompute(monkeypatch):
     """Hermetic default for the coverage recompute (x-3a3f).
 
@@ -978,6 +1031,10 @@ def _hermetic_resume_pin(monkeypatch):
     real = fork_lineage.spawn_axes_call
 
     def _answer(payload):
+        if payload.get("reentry_mechanism") is not None:
+            # The rung-2 respawn gate asks the Rust reentry resolver; the
+            # hermetic default keeps today's respawn-in-place behavior.
+            return {"mechanism": "respawn"}
         pin = payload.get("resume_pin")
         if pin is None:
             return real(payload)
@@ -1046,6 +1103,21 @@ def _hermetic_reap_receipt(monkeypatch):
     import fno.agents.spawn_axes_client as spawn_axes_client_module
 
     monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _answer)
+
+
+@pytest.fixture
+def loop_admission_ready(monkeypatch):
+    """Stub native readiness for CLI tests focused on other spawn behavior."""
+    import fno.rust_binary as rust_binary
+
+    real_call = rust_binary.call_binary_json
+
+    def ready(verb, args, *call_args, **call_kwargs):
+        if verb == "loop" and args and args[0] == "readiness":
+            return None, {"ready": True}
+        return real_call(verb, args, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(rust_binary, "call_binary_json", ready)
 
 
 def checkout_fno_agents_binary():
@@ -1129,3 +1201,51 @@ def _unbake_constants_facade():
     for name in _FACADE_NAMES:
         if name in vars(gc):
             delattr(gc, name)
+
+
+@pytest.fixture(autouse=True)
+def _no_status_ci_door(monkeypatch):
+    """Hermetic default for the status door transports.
+
+    `_verify._failing_required`, `_internal_gh._checks` and the merge flake
+    probe read their facts through `fno.rust_binary.verb_call` status ops.
+    In the test environment the resolver finds no dev binary or a stale
+    installed one, so an unstubbbed call is a real network read or a
+    wrong-shape answer. The default answers an empty row set for status-ci
+    (no required check failing) and the fail-open no-recovery fact for
+    status-rerun. ONLY the status door's verbs are faked: `verb_call` is the
+    universal transport (spawn-gate, spawn-axes, permission-tokens, ...), and
+    faking it whole refused every spawn in the suite with
+    "unavailable in tests" while CI's preserved FNO_AGENTS_BIN sat unread.
+    Tests pinning real door answers re-stub `fno.rust_binary.verb_call`.
+    """
+    import fno.rust_binary as rust_binary
+
+    real_verb_call = rust_binary.verb_call
+
+    def _fake_verb_call(
+        verb, payload, unavailable=rust_binary.VerbUnavailable, **kwargs
+    ):
+        op = payload.get("op") if isinstance(payload, dict) else None
+        if verb == "authorized-merge" and op == "status-ci":
+            return []
+        if verb == "authorized-merge" and op == "status-rerun":
+            raise unavailable(f"fno-agents {verb} {op} unavailable in tests")
+        return real_verb_call(verb, payload, unavailable=unavailable, **kwargs)
+
+    monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
+
+
+@pytest.fixture(autouse=True)
+def _no_review_lane_by_default(monkeypatch):
+    """Hermetic default: no review lane is configured (a fresh install).
+
+    The coverage gate's lane probe reads the real claims store when left
+    alone, so a worker whose own branch carries live review:branch claims
+    leaks them into unit tests that never staged coverage rows. Tests
+    pinning a lane set `fno.pr._merge._review_lane_configured` themselves
+    (the merge-world stub does).
+    """
+    from fno.pr import _merge
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)

@@ -8,7 +8,7 @@
 //! only (unreadable stdin, bad JSON), the same contract `spawn-axes` uses.
 
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,6 +126,28 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
     }
 }
 
+/// The typed answer the hosted Codex thread lane reads. The same `decide`
+/// contract unwrapped: the node's worktree path, or the hold reason.
+pub(crate) fn ensure_node_workdir(
+    cwd: &Path,
+    node: &str,
+    harness: &str,
+) -> Result<PathBuf, String> {
+    let payload = json!({
+        "recorded_cwd": cwd.to_string_lossy(),
+        "node": node,
+        "harness": harness,
+    });
+    let (answer, _receipt) = decide(&payload);
+    if let Some(hold) = answer.get("hold").and_then(Value::as_str) {
+        return Err(hold.to_string());
+    }
+    match answer.get("workdir").and_then(Value::as_str) {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+        _ => Err("launch-workdir answered neither a workdir nor a hold".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,19 +165,11 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let bin = dir.path().join("fno-py");
-        std::fs::write(
-            &bin,
-            format!("#!/bin/sh\ncat >/dev/null\necho '{ensure_stdout}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {}\n", repo_exit),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perm = std::fs::metadata(&bin).unwrap().permissions();
-            perm.set_mode(0o755);
-            std::fs::set_permissions(&bin, perm).unwrap();
-        }
+        let bin = crate::write_exec_stub(
+            dir.path(),
+            "fno-py",
+            &format!("#!/bin/sh\ncat >/dev/null\necho '{ensure_stdout}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {}\n", repo_exit),
+        );
         std::env::set_var("FNO_PY", &bin);
         let plain = tempfile::tempdir().unwrap();
         let cwd = if non_git {

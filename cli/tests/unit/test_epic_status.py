@@ -10,13 +10,17 @@ Read-only, so it emits nothing; the conftest per-module pin sets
 FNO_EVENTS_PATH to a per-test tmp journal regardless.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+
+_RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 def _node(node_id: str, **overrides) -> dict:
@@ -35,7 +39,7 @@ def _node(node_id: str, **overrides) -> dict:
         "pr_url": None,
         "status": "ready",
         "plan_path": "plans/x.md",
-        "created_at": "2026-01-01T00:00:00+00:00",
+        "created_at": _RECENT_CREATED,
     }
     base.update(overrides)
     if base["status"] == "done":
@@ -58,7 +62,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
 
     def _write(entries):
-        g.write_text(json.dumps({"entries": entries}) + "\n")
+        seed_graph(g, json.dumps({"entries": entries}) + "\n")
 
     return tmp_path, _write
 

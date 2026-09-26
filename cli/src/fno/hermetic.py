@@ -95,6 +95,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # developer's Rust build directory; Cargo supplies its own value to build
     # scripts when it invokes them.
     "OUT_DIR",
+    "EDITOR",  # the board editor (backlog_board.rs spawns it); a developer's editor is not a test input
     # Colour suppression, scrubbed rather than kept, which splits it from its
     # siblings TERM and COLORTERM in _ENVIRONMENT below. Those two DESCRIBE a
     # terminal's capability; this one SUPPRESSES output, so its mere presence
@@ -162,6 +163,11 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
     "GIT_COMMITTER_EMAIL",
+    # Editor selection for the board's $EDITOR description edit, with VISUAL
+    # its convention sibling. The client falls back to vi when unset, so the
+    # developer's exported editor is ambient state a test must not inherit.
+    "EDITOR",
+    "VISUAL",
 )
 
 # Read by source but NOT ambient state: the process needs these to run, and

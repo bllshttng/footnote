@@ -299,7 +299,7 @@ def test_every_session_builder_and_submit_path_names_the_shared_contract():
     consumers = [
         "cli/src/fno/agents/resume_cli.py", "cli/src/fno/agents/mux_spawn.py",
         "cli/src/fno/agents/harnesses/claude.py", "cli/src/fno/agents/harnesses/codex.py",
-        "crates/fno-agents/src/client_verbs.rs", "crates/fno-agents/src/provider.rs",
+        "crates/fno-agents/src/claude_resume.rs", "crates/fno-agents/src/provider.rs",
     ]
     for relative in consumers:
         assert "render_session_argv" in (root / relative).read_text(encoding="utf-8"), relative
@@ -799,6 +799,7 @@ def test_native_verbs_roster_is_filled_from_measured_sources():
         "/model",
         "/status",
         "/compact",
+        "/goal",
     ]
     assert capabilities("pi")["native_verbs"] == ["/name"]
     assert capabilities("gemini").get("native_verbs") is None
@@ -1218,7 +1219,7 @@ def test_native_and_review_verbs_come_from_the_capability_table():
 
     caps = capabilities("codex")
     assert set(caps["native_verbs"]) == {
-        "/review", "/code-review", "/model", "/status", "/compact",
+        "/review", "/code-review", "/model", "/status", "/compact", "/goal",
     }
     assert _CODEX_REVIEW_VERBS == {"/review", "/code-review"}
     assert _CODEX_REVIEW_VERBS <= set(caps["native_verbs"])

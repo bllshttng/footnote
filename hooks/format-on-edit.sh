@@ -33,27 +33,13 @@ PINNED_FMT="1.94.1"   # keep in lockstep with scripts/ci/preflight.sh PINNED_FMT
 PAYLOAD="$(cat 2>/dev/null || true)"
 [ -n "$PAYLOAD" ] || exit 0
 
-FILE_PATH=""
-if command -v jq >/dev/null 2>&1; then
-    FILE_PATH="$(printf '%s' "$PAYLOAD" | jq -er '.tool_input.file_path | select(type == "string" and length > 0)' 2>/dev/null || true)"
-elif command -v python3 >/dev/null 2>&1; then
-    FILE_PATH="$(printf '%s' "$PAYLOAD" | python3 -c '
-import json, sys
-try:
-    value = json.load(sys.stdin).get("tool_input", {}).get("file_path")
-    if isinstance(value, str) and value:
-        print(value)
-except Exception:
-    pass
-' 2>/dev/null || true)"
-fi
-
-[ -n "$FILE_PATH" ] || exit 0
-[ -f "$FILE_PATH" ] || exit 0
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 0
+# shellcheck source=lib/write-targets.sh
+source "$HOOK_DIR/lib/write-targets.sh" 2>/dev/null || exit 0
 
 _repo_root() {
     local dir
-    dir="$(cd "$(dirname "$FILE_PATH")" 2>/dev/null && pwd)" || return 1
+    dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd)" || return 1
     while [ "$dir" != "/" ]; do
         if [ -e "$dir/.git" ]; then
             printf '%s\n' "$dir"
@@ -64,16 +50,6 @@ _repo_root() {
     return 1
 }
 
-REPO_ROOT="$(_repo_root || true)"
-[ -n "$REPO_ROOT" ] || exit 0
-
-case "$FILE_PATH" in
-    /*) ABS="$FILE_PATH" ;;
-    *)  ABS="$(cd "$(dirname "$FILE_PATH")" 2>/dev/null && pwd)/$(basename "$FILE_PATH")" || exit 0 ;;
-esac
-REL="${ABS#"$REPO_ROOT"/}"
-[ "$REL" != "$ABS" ] || exit 0
-
 _sum() {
     if command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
@@ -82,24 +58,42 @@ _sum() {
     fi
 }
 
-BEFORE="$(_sum "$ABS")"
+# The per-file body, run once per path the payload wrote. Every failure
+# path returns 0: a formatter never fails the edit.
+format_one() {
+    local FILE_PATH="$1" REPO_ROOT REL ABS BEFORE AFTER
+    [ -f "$FILE_PATH" ] || return 0
+    REPO_ROOT="$(_repo_root "$FILE_PATH" || true)"
+    [ -n "$REPO_ROOT" ] || return 0
+    case "$FILE_PATH" in
+        /*) ABS="$FILE_PATH" ;;
+        *)  ABS="$(cd "$(dirname "$FILE_PATH")" 2>/dev/null && pwd)/$(basename "$FILE_PATH")" || return 0 ;;
+    esac
+    REL="${ABS#"$REPO_ROOT"/}"
+    [ "$REL" != "$ABS" ] || return 0
+    BEFORE="$(_sum "$ABS")"
+    case "$ABS" in
+        *.rs)
+            case "$REL" in
+                crates/*) ;;
+                *) return 0 ;;
+            esac
+            command -v rustfmt >/dev/null 2>&1 || return 0
+            rustfmt "+$PINNED_FMT" --edition 2021 "$ABS" >/dev/null 2>&1 || return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    AFTER="$(_sum "$ABS")"
+    if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" != "$AFTER" ]; then
+        echo "format-on-edit: rewrote $REL"
+    fi
+    return 0
+}
 
-case "$ABS" in
-    *.rs)
-        case "$REL" in
-            crates/*) ;;
-            *) exit 0 ;;
-        esac
-        command -v rustfmt >/dev/null 2>&1 || exit 0
-        rustfmt "+$PINNED_FMT" --edition 2021 "$ABS" >/dev/null 2>&1 || exit 0
-        ;;
-    *)
-        exit 0
-        ;;
-esac
-
-AFTER="$(_sum "$ABS")"
-if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$BEFORE" != "$AFTER" ]; then
-    echo "format-on-edit: rewrote $REL"
-fi
+while IFS= read -r TARGET; do
+    [ -n "$TARGET" ] || continue
+    format_one "$TARGET"
+done < <(payload_write_targets "$PAYLOAD")
 exit 0

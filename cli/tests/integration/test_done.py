@@ -7,6 +7,7 @@ Covers:
        Default (fill-if-null) behavior is the control case.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import re
@@ -27,7 +28,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh graph.json + ledger.json routed via monkeypatch."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
@@ -73,7 +74,7 @@ def _make_append_event_to(events_file: Path):
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:

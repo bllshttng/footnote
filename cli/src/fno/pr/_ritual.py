@@ -383,8 +383,8 @@ class Ritual:
 
     def leg_stamp(self) -> None:
         """Step 2: close the merged node(s), reconcile plan status, stamp ship."""
-        # --pr-number: bind every node this PR's exact Backlog-Closure
-        # trailer names to the PR BEFORE the drift scan the rest of reconcile
+        # --pr-number: bind every node this PR's exact closure line
+        # names to the PR BEFORE the drift scan the rest of reconcile
         # already ran unconditionally - a PR naming several nodes (only one of
         # which ever got individually stamped at creation) now closes all of
         # them here, not just the primary. --repo is passed explicitly when

@@ -2577,6 +2577,9 @@ def _sandbox_decision_graph(tmp_path, monkeypatch):
     """
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
     monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+    monkeypatch.setattr(
         "fno.paths.ledger_json", lambda: tmp_path / ".decision-index" / "ledger.json"
     )
     monkeypatch.setattr(
@@ -3327,8 +3330,6 @@ def test_status_and_merge_answer_one_word_on_one_constructed_chain(
     BOTH surfaces, must yield the same verdict. At the cap both answer
     COVERED: the merge gate discharges, and status holds on nothing. A
     stored `impossible` flag from an older producer is ignored on both."""
-    from fno.pr import _status
-
     _cap_gates(monkeypatch)
     row = dict(_cap_cov_row(), pr=42)
     _seed_cap_chain(

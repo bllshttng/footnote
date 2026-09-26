@@ -18,6 +18,7 @@ one short-vs-long parity proof per previously-untested risk):
   prior CLI test of any kind).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -40,7 +41,6 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
     "backlog-update": ["backlog", "update", "--help"],
     "backlog-next": ["backlog", "next", "--help"],
     "backlog-ready": ["backlog", "ready", "--help"],
-    "backlog-find": ["backlog", "find", "--help"],
     "backlog-capture-add": ["backlog", "capture", "add", "--help"],
     "mail-send": ["mail", "send", "--help"],
     "config-accounts-add": ["config", "accounts", "add", "--help"],
@@ -67,10 +67,30 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 # Parity: backlog find (read-only graph path).
 # --------------------------------------------------------------------------- #
 
+def test_backlog_find_native_help_registers() -> None:
+    """`backlog find --help` is the native binary's now; the flag decl still
+    parses and the surface answers."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "find", "--help"],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Usage" in proc.stdout + proc.stderr
+
+
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -79,28 +99,48 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # find routes through the guarded display reader, which resolves
     # paths.graph_json at call time.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native binary resolves the store through FNO_CONFIG's state_dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
+
+
+def _native_find(*args: str) -> tuple[int, str, str]:
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "find", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
     """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
         {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",
          "domain": "code", "project": "other"},
     ]}) + "\n")
-    long = runner.invoke(app, [
-        "backlog", "find", "rollout",
-        "--project", "fno", "--status", "done", "--json",
-    ])
-    short = runner.invoke(app, [
-        "backlog", "find", "rollout", "-p", "fno", "-s", "done", "-J",
-    ])
-    assert long.exit_code == 0, long.output
-    assert short.exit_code == long.exit_code
-    assert short.stdout == long.stdout
-    assert "ab-sf000001" in short.stdout
+    long_code, long_out, long_err = _native_find(
+        "rollout", "--project", "fno", "--status", "done", "--json",
+    )
+    short_code, short_out, _short_err = _native_find(
+        "rollout", "-p", "fno", "-s", "done", "-J",
+    )
+    assert long_code == 0, long_err
+    assert short_code == long_code
+    assert short_out == long_out
+    assert "ab-sf000001" in short_out
 
 
 # --------------------------------------------------------------------------- #

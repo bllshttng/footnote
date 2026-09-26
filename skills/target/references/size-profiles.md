@@ -29,9 +29,9 @@ Build it well. Standard ceremony.
 | Capability | Value | Notes |
 |------------|-------|-------|
 | Spec mode | full (default) | Folder plan for `/execute waves` |
-| Executor | operator | Wave orchestration with verification |
+| Executor | `waves` | Wave orchestration with verification |
 | Dynamic parallelization | auto | When file ownership map exists |
-| Research phase | off | Operator auto-detects if invoked directly |
+| Research phase | off | User auto-detects if invoked directly |
 | Code review | on | |
 | Fresh verification | on | |
 | Adversarial | off | |
@@ -49,7 +49,7 @@ Build it bulletproof. Full treatment.
 | Capability | Value | Notes |
 |------------|-------|-------|
 | Spec mode | full (default) | Folder plan for `/execute waves` |
-| Executor | operator | With all coordinator capabilities |
+| Executor | `waves` | With all coordinator capabilities |
 | Dynamic parallelization | auto | |
 | Research phase | on | Forces research even under target |
 | Code review | on | |
@@ -87,10 +87,10 @@ Build it bulletproof. Full treatment.
 Each toggle maps to existing config keys in target-state.md:
 
 ```yaml
-executor: do | operator        # determines /execute vs /execute waves invocation
-no_research: true | false      # from operator upgrade
-no_verify_fresh: true | false  # from operator upgrade
-adversarial: true | false      # from operator upgrade
+executor: do | waves            # determines /execute vs /execute waves invocation
+no_research: true | false      # from user upgrade
+no_verify_fresh: true | false  # from user upgrade
+adversarial: true | false      # from user upgrade
 no_clean: true | false         # existing
 no_external: true | false      # existing
 no_browser: true | false       # existing
@@ -119,7 +119,7 @@ no_how_to: true
 
 ### Medium
 ```yaml
-executor: operator
+executor: waves
 no_research: true
 no_verify_fresh: false
 adversarial: false
@@ -133,7 +133,7 @@ no_how_to: true
 
 ### Large
 ```yaml
-executor: operator
+executor: waves
 no_research: false
 no_verify_fresh: false
 adversarial: true

@@ -30,7 +30,7 @@ def test_every_tier_id_is_reachable_by_name():
 
 def test_a_planted_dead_id_is_flagged_by_name():
     """AC5-MARKER: plant, observe the flag, unplant, observe green."""
-    planted = {"high": ["claude-opus-5", "gpt-dead-9.9"]}
+    planted = {"high": ["claude-opus", "gpt-dead-9.9"]}
     flagged = bm.unreachable_tier_ids(planted)
     assert flagged == ["gpt-dead-9.9"]
     # Unplant: the shipped table is green.
@@ -43,7 +43,7 @@ def test_every_band_serves_every_harness_with_a_row():
 
 
 def test_a_band_a_harness_cannot_serve_is_reported():
-    planted = {"max": ["gpt-5.6-sol"], "low": ["claude-haiku-4-5"]}
+    planted = {"max": ["codex-sol"], "low": ["claude-haiku"]}
     holes = bm.empty_bands_for_harness(("claude", "codex"), tiers=planted)
     assert holes == {"claude": ["max"], "codex": ["low"]}
 
@@ -60,10 +60,10 @@ def test_max_and_high_share_the_codex_model_and_differ_by_design():
     LEVEL separation on that provider is the effort axis. The claude column
     keeps distinct models (fable vs opus), which is what makes a degraded max
     a real, detectable state rather than the universal case."""
-    assert "gpt-5.6-sol" in bm.STATIC_TIERS["max"]
-    assert "gpt-5.6-sol" in bm.STATIC_TIERS["high"]
-    assert "claude-fable-5" in bm.STATIC_TIERS["max"]
-    assert "claude-fable-5" not in bm.STATIC_TIERS["high"]
+    assert "codex-sol" in bm.STATIC_TIERS["max"]
+    assert "codex-sol" in bm.STATIC_TIERS["high"]
+    assert "claude-fable" in bm.STATIC_TIERS["max"]
+    assert "claude-fable" not in bm.STATIC_TIERS["high"]
 
 
 def test_the_generation_stale_generation_is_gone():
@@ -92,15 +92,26 @@ def test_the_verified_ids_carry_their_exact_provider_spellings():
     the codex ids against the codex model surface, the GLM spellings against
     the z.ai lane's 1M-context suffix form."""
     expected = {
-        "claude-fable-5": ("claude", "claude-fable-5"),
-        "claude-opus-5": ("claude", "claude-opus-5"),
-        "claude-sonnet-5": ("claude", "claude-sonnet-5"),
-        "claude-haiku-4-5": ("claude", "claude-haiku-4-5"),
+        "claude-fable": ("claude", "fable"),
+        "claude-opus": ("claude", "opus"),
+        "claude-sonnet": ("claude", "sonnet"),
+        "claude-haiku": ("claude", "haiku"),
         "glm-5.3[1m]": ("claude", "glm-5.3[1m]"),
         "glm-4.7": ("claude", "glm-4.7"),
-        "gpt-5.6-sol": ("codex", "gpt-5.6-sol"),
-        "gpt-5.6-terra": ("codex", "gpt-5.6-terra"),
-        "gpt-5.6-luna": ("codex", "gpt-5.6-luna"),
+        "codex-sol": ("codex", "sol"),
+        "codex-terra": ("codex", "terra"),
+        "codex-luna": ("codex", "luna"),
     }
     for name, row in expected.items():
         assert bm.REACHABILITY.get(name) == row, name
+
+
+def test_the_table_carries_no_model_version_ids():
+    """The table names families and aliases, never versions: a release needs
+    no edit here. The scan is the assertion (AC7-HP)."""
+    import re
+
+    src = (REPO_ROOT / "cli/src/fno/adapters/providers/benchmarks.py").read_text(
+        encoding="utf-8"
+    )
+    assert re.findall(r"gpt-\d|claude-[a-z]+-\d", src) == []

@@ -912,18 +912,9 @@ pub fn provider_quota_states(
     Some(quota_states_from_snapshot(&snapshot))
 }
 
-/// Append one line to `questions.jsonl` (the feed's question store).
-pub fn append_questions_row(path: &std::path::Path, row: &Value) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", row);
-    }
+/// Append one row through the store shared by Rust and Python readers.
+pub fn append_questions_row(path: &std::path::Path, row: &Value) -> Result<(), String> {
+    crate::event_store::append_envelope(path, &row.to_string(), None).map(|_| ())
 }
 
 /// `questions.jsonl` lives beside the agents home (`~/.fno`).
@@ -1257,7 +1248,7 @@ pub fn close_operator_question(
     closed_by: &str,
     now_epoch: i64,
 ) {
-    append_questions_row(
+    let _ = append_questions_row(
         &questions_path(home),
         &json!({
             "ts": epoch_to_rfc3339(now_epoch),
@@ -1839,7 +1830,7 @@ fn open_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
         .iter()
         .map(|m| format!("{} ({})", m.name, m.provider))
         .collect();
-    append_questions_row(
+    let _ = append_questions_row(
         &questions_path(home),
         &json!({
             "ts": epoch_to_rfc3339(now_epoch),
@@ -2819,9 +2810,12 @@ mod tests {
         }
     }
 
-    fn scan_fixture() -> CapScan {
-        let root = std::env::temp_dir().join(format!("pc-w3-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+    fn scan_fixture() -> (tempfile::TempDir, CapScan) {
+        // One dir per call: five parallel tests shared one pid-keyed path
+        // before, and a reader mid-rewrite of settings.yaml found no
+        // destination and answered `wait: no-healthy-destination`.
+        let root_holder = tempfile::tempdir().unwrap();
+        let root = root_holder.path().to_path_buf();
         // A healthy destination link so the sleep-hours path has somewhere to go.
         std::fs::write(
             root.join("settings.yaml"),
@@ -2835,15 +2829,33 @@ mod tests {
             r#"{"usage":{"codex-main":{"probed_at":9999999999,"windows":[{"label":"5h","used_pct":10,"resets_at":9999999999}]}}}"#,
         )
         .unwrap();
-        CapScan {
-            registry: root.join("registry.json"),
-            projects_dir: root.clone(),
-            runtime_state: root.join("runtime-state.json"),
-            settings_candidates: vec![root.join("settings.yaml")],
-            compaction_home: root.clone(),
-            claude_home: root.clone(),
-            record_zones: BTreeMap::new(),
-            codex_sessions_dir: None,
+        (
+            root_holder,
+            CapScan {
+                registry: root.join("registry.json"),
+                projects_dir: root.clone(),
+                runtime_state: root.join("runtime-state.json"),
+                settings_candidates: vec![root.join("settings.yaml")],
+                compaction_home: root.clone(),
+                claude_home: root.clone(),
+                record_zones: BTreeMap::new(),
+                codex_sessions_dir: None,
+            },
+        )
+    }
+
+    // AC2-HP: two calls root in distinct dirs, each holding its own files.
+    #[test]
+    fn scan_fixture_roots_are_distinct_and_self_sufficient() {
+        let (d1, s1) = scan_fixture();
+        let (d2, s2) = scan_fixture();
+        assert_ne!(d1.path(), d2.path(), "fixture roots must differ per call");
+        for (dir, s) in [(d1.path(), &s1), (d2.path(), &s2)] {
+            for name in ["settings.yaml", "runtime-state.json"] {
+                assert!(dir.join(name).is_file(), "{} missing from {:?}", name, dir);
+            }
+            assert!(s.runtime_state.is_file());
+            assert!(!s.settings_candidates.is_empty());
         }
     }
 
@@ -2876,15 +2888,8 @@ mod tests {
         };
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);
-        let out = run_leave_lane(
-            &home,
-            &scan_fixture(),
-            &lane,
-            None,
-            &cfg,
-            now_epoch_secs(),
-            &deps,
-        );
+        let (_fixture, scan) = scan_fixture();
+        let out = run_leave_lane(&home, &scan, &lane, None, &cfg, now_epoch_secs(), &deps);
         assert_eq!(out, "wait: short-reset");
         assert!(!question_path(&home, &lane.lane).exists());
         assert!(calls.borrow().iter().all(|c| !c.starts_with("spawn:")));
@@ -2903,29 +2908,14 @@ mod tests {
         };
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);
-        let out = run_leave_lane(
-            &home,
-            &scan_fixture(),
-            &lane,
-            None,
-            &cfg,
-            now_epoch_secs(),
-            &deps,
-        );
+        let (_fixture, scan) = scan_fixture();
+        let out = run_leave_lane(&home, &scan, &lane, None, &cfg, now_epoch_secs(), &deps);
         assert_eq!(out, "ask");
         assert!(question_path(&home, &lane.lane).exists());
         assert!(calls.borrow().iter().all(|c| !c.starts_with("spawn:")));
         // A second tick does not re-ask: the question is already open.
-        let _ = run_leave_lane(
-            &home,
-            &scan_fixture(),
-            &lane,
-            None,
-            &cfg,
-            now_epoch_secs(),
-            &deps,
-        );
-        let rows = std::fs::read_to_string(questions_path(&home)).unwrap_or_default();
+        let _ = run_leave_lane(&home, &scan, &lane, None, &cfg, now_epoch_secs(), &deps);
+        let rows = crate::event_store::journal_text(&questions_path(&home), &["operator_question"]);
         let asks = rows
             .lines()
             .filter(|l| l.contains("\"choices\""))
@@ -2947,15 +2937,8 @@ mod tests {
         };
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);
-        let out = run_leave_lane(
-            &home,
-            &scan_fixture(),
-            &lane,
-            None,
-            &cfg,
-            now_epoch_secs(),
-            &deps,
-        );
+        let (_fixture, scan) = scan_fixture();
+        let out = run_leave_lane(&home, &scan, &lane, None, &cfg, now_epoch_secs(), &deps);
         assert_eq!(out, "acted");
         assert!(!question_path(&home, &lane.lane).exists());
         let j = read_journal(&home);
@@ -3266,7 +3249,8 @@ mod tests {
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);
         let cfg = ProviderCapConfig::default();
-        let out = run_armed_with(&home, &scan_fixture(), &snap, &cfg, base, &deps);
+        let (_fixture, scan) = scan_fixture();
+        let out = run_armed_with(&home, &scan, &snap, &cfg, base, &deps);
         let _ = out;
         let calls_vec = calls.borrow();
         assert!(

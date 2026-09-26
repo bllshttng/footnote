@@ -11,6 +11,7 @@ HOME so Path.home() and the acquire root point at the same tmp dir.
 Refs: ab-fcf9cec5 (double-claim of ab-1e86b88e observed across PR #397/#398).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh graph.json routed to a temp file; HOME pinned to tmp_path so the
     global claims root (Path.home()/.fno/claims) is isolated too."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -78,7 +79,7 @@ def _store_entries(g):
 
 def test_next_skips_live_claimed_node(tmp_graph, tmp_path):
     """A live TTL claim on ab-aaaaaaaa makes `graph next` pick ab-bbbbbbbb."""
-    tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
     # TTL claim is live regardless of the acquiring process's liveness.
     acquire_claim(
         key="node:ab-aaaaaaaa",
@@ -102,7 +103,7 @@ def test_next_reads_each_liveness_source_once(tmp_graph, tmp_path, monkeypatch):
         {"id": "ab-cccccccc", "title": "C", "status": "ready", "priority": "p2",
          "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "c.md"},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     acquire_claim(
         key="node:ab-aaaaaaaa",
         holder="target-session:other",
@@ -138,7 +139,7 @@ def test_next_reads_each_liveness_source_once(tmp_graph, tmp_path, monkeypatch):
 def test_next_refuses_when_worked_evidence_is_unreadable(tmp_graph, monkeypatch):
     """An unreadable roster refuses selection; it never reads as unoccupied."""
     entries = _two_ready_entries()
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     def unavailable(**_kwargs):
         raise RuntimeError("roster timeout")
@@ -164,7 +165,7 @@ def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
     no rows prints `null`, which `advance` reads as the benign `no-work` skip.
     """
     entries = _two_ready_entries()
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     def unreadable(*_args, **_kwargs):
         raise RuntimeError("graph.json is corrupt")
@@ -181,7 +182,7 @@ def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
 
 def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
     """`graph ready` omits a live-claimed node from the listing."""
-    tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
     acquire_claim(
         key="node:ab-aaaaaaaa",
         holder="target-session:other",
@@ -212,7 +213,7 @@ def test_next_prefers_sibling_of_live_claimed_epic(tmp_graph, tmp_path):
          "parent": "ab-epic002", "priority": "p2", "created_at": _RECENT_CREATED,
          "project": "p", "blocked_by": [], "plan_path": "idle.md"},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     acquire_claim(
         key="node:ab-claimed1",
         holder="target-session:other",
@@ -237,7 +238,7 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
         }
         for i in range(1, max_lanes + 2)
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     selected: list[str] = []
 
     for lane in range(max_lanes):
@@ -261,7 +262,7 @@ def test_rank_uses_stored_status_board_lane(tmp_graph, tmp_path):
         {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
          "priority": "p3", "project": "p", "rank": 5.0},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
     acquire_claim(
         key="node:ab-claimed1",
         holder="target-session:other",
@@ -287,7 +288,7 @@ def test_rank_does_not_need_live_claim_state(tmp_graph):
         {"id": "ab-anchor01", "title": "Anchor", "status": "ready",
          "priority": "p3", "project": "p", "rank": 5.0},
     ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     result = _invoke(
         "backlog", "rank", "ab-target01", "--before", "ab-anchor01"
@@ -300,7 +301,7 @@ def test_rank_does_not_need_live_claim_state(tmp_graph):
 
 def test_released_claim_does_not_block(tmp_graph, tmp_path):
     """After release the node is selectable again (only LIVE claims filter)."""
-    tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
     acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000, root=tmp_path)
     release_claim(key="node:ab-aaaaaaaa", holder="h", root=tmp_path)
     r = _invoke("backlog", "ready", "--all")
@@ -313,7 +314,7 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
     tmp_graph, tmp_path, monkeypatch, command
 ):
     entries = _two_ready_entries()
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     locked = None
     if command[0] == "ready":
@@ -350,7 +351,7 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
 
 def test_expired_claim_does_not_block(tmp_graph, tmp_path):
     """A stale (expired TTL) claim must not exclude its node from selection."""
-    tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
     # Write an already-expired claim file directly (acquire validates ttl bounds).
     cdir = claims_dir(tmp_path)
     cdir.mkdir(parents=True, exist_ok=True)
@@ -373,7 +374,7 @@ def test_expired_claim_does_not_block(tmp_graph, tmp_path):
 
 def test_no_claims_directory_is_graceful(tmp_graph, tmp_path):
     """Absent claims dir: selection behaves exactly as before (no crash)."""
-    tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": _two_ready_entries()}) + "\n")
     r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None

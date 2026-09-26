@@ -2,7 +2,6 @@
 `_ExecClient`, no resident keeper is minted, and the envelope semantics match
 the socket path (ok -> result; error kind -> typed exception; a lost write is
 `WriteUnconfirmed`)."""
-
 import os
 
 import pytest
@@ -33,7 +32,6 @@ def test_exec_request_returns_the_envelopes_result(tmp_path, stub_worker):
         "printf '%s' '{\"ok\":true,\"result\":{\"entries\":[1,2]}}'\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
     client = store_mod._ExecClient(graph)
     result = client.request("read", {"strict": False, "keep_malformed": False})
     assert result == {"entries": [1, 2]}
@@ -48,9 +46,8 @@ def test_exec_argv_carries_store_exec_and_lock_timeout(tmp_path, stub_worker):
         "printf '%s' '{\"ok\":true,\"result\":{}}'\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
     client = store_mod._ExecClient(graph)
-    client.request("backend_status", {})
+    client.request("export_status", {})
     argv = argv_log.read_text().splitlines()
     assert "--store-exec" in argv
     assert "--graph" in argv
@@ -68,7 +65,6 @@ def test_exec_refusal_maps_to_the_typed_error(tmp_path, stub_worker):
         "printf '%s' '{\"ok\":false,\"error\":{\"kind\":\"corrupt\",\"message\":\"bad\"}}'\n"
     )
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
     client = store_mod._ExecClient(graph)
     with pytest.raises(store_mod.GraphCorruptError):
         client.request("read", {})
@@ -80,7 +76,6 @@ def test_exec_lost_write_is_unconfirmed(tmp_path, stub_worker):
     # refuses to claim either way.
     script.write_text("#!/bin/sh\ncat > /dev/null\nexit 1\n")
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
     client = store_mod._ExecClient(graph)
     with pytest.raises(store_mod.WriteUnconfirmed):
         client.request(
@@ -92,7 +87,6 @@ def test_exec_read_failure_without_reply_names_binary_lag(tmp_path, stub_worker)
     script, _ = stub_worker
     script.write_text("#!/bin/sh\ncat > /dev/null\nexit 1\n")
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
     client = store_mod._ExecClient(graph)
     with pytest.raises(store_mod.StoreUnavailable) as excinfo:
         client.request("read", {})

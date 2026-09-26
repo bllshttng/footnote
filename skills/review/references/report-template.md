@@ -77,7 +77,7 @@ finding. Forensics-only — does not affect verdict or severity._
 
 ## Terminal recommendation: RECOMMEND RESTART
 
-A blocking review is fix-in-place by default: the operator addresses the findings on the same branch. `RECOMMEND RESTART` is the one verdict that says *don't* fix in place - discard this attempt and re-derive from a fresh node. It exists because a builder never discards its own work (the generator is proud of its output), so the order to restart has to come from the reviewer, not the session under review.
+A blocking review is fixed in place by default. The user addresses findings on the same branch. `RECOMMEND RESTART` is the only verdict that rejects an in-place fix. Discard this attempt and derive from a fresh node. Builders rarely discard their own work. The reviewer must issue the restart order, not the session under review.
 
 **Legal only when** the panel judges re-derivation cheaper than patching: wrong architecture, a cascading design error the findings all descend from, or patch-on-patch accumulation where each fix spawns the next. Severity alone is NOT a trigger - a pile of P1s that are each fixable in place is a fix round, not a restart.
 
@@ -88,4 +88,4 @@ A `RECOMMEND RESTART` verdict MUST carry both:
 
 It must also name the honor sequence by explicit path: `skills/target/references/failure-recovery.md`, "Reviewer-ordered restart" section.
 
-**Malformed degrades to blocking.** A `RECOMMEND RESTART` missing its rationale or its lessons block is treated as a normal `Needs work` verdict (degrade, never guess an incomplete restart into an executed one). The operator side never honors a malformed recommendation.
+If `RECOMMEND RESTART` lacks its rationale or lessons block, use a normal `Needs work` verdict. Malformed recommendations block. Never execute an incomplete restart. The user side never honors them.

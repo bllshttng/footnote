@@ -37,11 +37,13 @@ use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod rename_overlay;
+mod row_menu;
 mod sweep_scope;
 
 use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
+use row_menu::build_row_menu;
 
 // The placement pickers (attach `p`, portal `P`) live in their own module;
 // client.rs is shrink-only under the file-budget gate.
@@ -54,7 +56,7 @@ use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
 use crate::lane_colors_panel::LaneColorsUi;
-use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
+use crate::popup::{Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
     AnswerablePrompt, BlockDir, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -63,12 +65,21 @@ use crate::proto::{
 };
 use crate::ratatui_blit::{rt_color, rt_modifier};
 use crate::sideline_color;
-use crate::theme::Theme;
+use crate::theme::{cell_style, Theme};
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
 use crate::vt::ShellActivity;
+use crate::wordmark;
+use overlay_paint::{
+    draw_lines_overlay, draw_overlay_layout, draw_popup_overlay, layout_lines_overlay,
+    OverlayAnchor, OverlayLayout,
+};
+// Re-exported for the test module's glob; the layout fns are the only callers.
+#[allow(unused_imports)]
+pub(crate) use overlay_paint::family_b_origin;
+use sideline::sideline_column_rects;
 
 mod row_stamp;
 // (v75) The sideline's density width rules, moved out under the file-budget
@@ -136,14 +147,16 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
-/// The sideline footer's `+ new` and `☰ menu` labels (US4). The menu
+/// The sideline footer's `+ new` and `menu` labels (US4). The menu
 /// button rides the existing new-workspace footer row's right edge when the
-/// panel is wide enough (see [`View::footer_menu_range`]).
+/// panel is wide enough (see [`View::footer_menu_range`]). ASCII only: the
+/// former `☰` is an ambiguous-width glyph some terminals render wide, which
+/// displaced that row's whole line (the screenshot review's stray fragments).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
-const FOOTER_MENU: &str = "☰ menu";
-/// How long a pending prefix chord waits before the which-key hint paints
-/// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
-const HINT_DELAY: Duration = Duration::from_millis(400);
+const FOOTER_MENU: &str = "menu";
+/// How long a pending prefix chord waits before the hint bar paints.
+/// Zero: the bar paints at once; `prefix+?` shows the full table.
+const HINT_DELAY: Duration = Duration::ZERO;
 /// (fix) How long a held global-chord candidate (a lone Esc so far)
 /// waits for the chord's remaining bytes before flushing to the pane - the
 /// tmux escape-time analog. A terminal delivers a whole CSI in one read, so
@@ -836,6 +849,10 @@ struct View {
     /// travels in either direction and the server keeps every pane at its
     /// size.
     sideline_full: bool,
+    /// The `[sideline] layout` switch, read once at startup from the same
+    /// palette read the lane colors use. A config change takes effect on the
+    /// next attach, not live.
+    sideline_layout: sideline_color::SidelineLayout,
     /// Sideline density, persisted by [`crate::view_store`]. Since
     /// it drives only the row set (via [`View::display_rows`]) and the
     /// preset width jump - the rendered width is [`View::sideline_width`], an
@@ -1068,6 +1085,13 @@ struct View {
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
     backlog: Vec<crate::proto::BacklogCard>,
+    /// The experimental backlog board overlay, when open (one at a time).
+    backlog_board: Option<backlog_board::BoardView>,
+    sideline_view: crate::view_store::SidelineView,
+    /// The board's full-screen toggle (persisted in the view store).
+    board_full: bool,
+    /// The persisted experimental toggle for the backlog board view.
+    experimental_backlog: bool,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
@@ -1413,6 +1437,9 @@ mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
+// The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
+// of compose_at under the file-budget ratchet .
+mod pane_paint;
 pub(crate) use needs_view::needs_overlay_lines;
 
 /// The move-tab / move-pane destination picker's state (cursored by
@@ -1608,6 +1635,10 @@ enum MenuAction {
     BreakOut,
     /// Detach a pane-hosted worker while keeping its PTY live.
     Detach,
+    /// Close ONLY the portal seat showing this row (`Command::ClosePortal`)
+    /// - the viewer pane, never the row: the thread keeps running and can
+    /// be shown again anywhere. Built only when the row wears a portal.
+    ClosePortal,
     /// Relocate a pane-hosted row's live pane into ANOTHER workspace. Opens the
     /// move picker (the same numbered picker `m` uses for a tab); the chosen
     /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
@@ -1668,6 +1699,10 @@ enum MenuAction {
     /// overlay on `RenameTarget::Agent`. Built only for a non-external,
     /// unambiguous agent row.
     RenameAgent,
+    /// Open the portal PICKER for this row - the same numbered picker
+    /// sideline `P` opens (open portals plus a new-portal row), so a
+    /// right-click offers a portal choice where it offers placement.
+    PortalPicker,
 }
 
 impl MenuAction {
@@ -1700,6 +1735,8 @@ impl MenuAction {
             MenuAction::Diff => Some("diff-row"),
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
+            MenuAction::ClosePortal => Some("close-portal"),
+            MenuAction::PortalPicker => Some("open-in-portal"),
             _ => None,
         }
     }
@@ -1726,129 +1763,6 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
         label: label.into(),
         hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
-    }
-}
-
-/// Build the per-state row menu for the agent at `display_rows()` index `i`,
-/// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
-/// Entry sets mirror the row's state so no dead item ever renders: a paneless
-/// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
-/// focus plus the move/break-out grid that relocates its live pane; an exited
-/// row gets remove; peek/stop apply where they make sense.
-fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut actions: Vec<MenuAction> = Vec::new();
-    let mut add = |mut row: PopupRow, acts: &[MenuAction]| {
-        if let (PopupRow::Entry { hint, .. }, [action]) = (&mut row, acts) {
-            *hint = action
-                .accelerator_id()
-                .and_then(crate::keys::menu_key_for)
-                .unwrap_or_default();
-        }
-        rows.push(row);
-        actions.extend_from_slice(acts);
-    };
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
-    let cell = |glyph: &str, label: &str| GridCell {
-        glyph: glyph.into(),
-        label: label.into(),
-    };
-    add(PopupRow::Header(agent.name.clone()), &[]);
-    add(PopupRow::Rule, &[]);
-    if agent.exited {
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        // Resume above the rule (AC7): the menu twin of peek `r`, on the row
-        // state `r` accepts - an exited row.
-        add(entry("↻", "Resume"), &[MenuAction::Resume]);
-    } else if agent.pane_id.is_some() {
-        // Live pane row: already placed, so re-placement is a MOVE of the live
-        // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
-        // below, so the two menus read as one system; the verbs differ because
-        // the operations do (move a running pane vs. place a new one).
-        add(entry("→", "Focus"), &[MenuAction::Focus]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(PopupRow::Rule, &[]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::BreakOut],
-        );
-        add(entry("⇱", "Detach pane"), &[MenuAction::Detach]);
-        // Ungated by pane count. A row whose pane is on screen and has no
-        // neighbour `dir`-ward gets the server's "no pane in that direction"
-        // notice, the same fail-closed feedback the paneless branch relies on;
-        // a row whose pane is off screen always has somewhere to land (the
-        // current view), so gating on the source tab would be wrong anyway.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Move Left"), cell("◨", "Move Right")]),
-            &[
-                MenuAction::MoveDir(Dir::Left),
-                MenuAction::MoveDir(Dir::Right),
-            ],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Move Up"), cell("⬓", "Move Down")]),
-            &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else if agent.attach_id.is_some() {
-        // Paneless bg row: the motivating case - open as a tab or a split pane.
-        // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
-        // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
-        add(entry("⊙", "Open Here"), &[MenuAction::OpenHere]);
-        add(
-            PopupRow::FullWidth("▭ New Tab".into()),
-            &[MenuAction::NewTab],
-        );
-        add(PopupRow::Rule, &[]);
-        // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
-        // IS the direction). Glyphs are half-block squares; a non-nerd-font
-        // terminal still shows the label beside them.
-        add(
-            PopupRow::Grid(vec![cell("◧", "Split Left"), cell("◨", "Split Right")]),
-            &[MenuAction::Split(Dir::Left), MenuAction::Split(Dir::Right)],
-        );
-        add(
-            PopupRow::Grid(vec![cell("⬒", "Split Up"), cell("⬓", "Split Down")]),
-            &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
-        );
-        add(PopupRow::Rule, &[]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    } else {
-        // A live row that is neither pane-hosted nor attachable here.
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
-            add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
-        }
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
-    }
-    // Diff is common to every row state: it reads the row's worktree,
-    // which an exited or paneless row has just as much as a live pane-hosted
-    // one - and a finished worker's diff is the one you most want to read.
-    // Bound in menu scope now, so its hint is the live key.
-    add(PopupRow::Rule, &[]);
-    add(entry("±", "Diff"), &[MenuAction::Diff]);
-    // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
-    if !agent.external {
-        add(entry("✎", "Rename"), &[MenuAction::RenameAgent]);
-    }
-    RowMenu {
-        popup: Popup::new(rows, anchor),
-        target: MenuTarget::Agent(AgentIdent::of(agent)),
-        actions,
     }
 }
 
@@ -2025,6 +1939,16 @@ pub(crate) enum AuxAction {
     SweepSquads,
     Detach,
     ToggleHoverFocus,
+    /// The experimental backlog board: flip the persisted pref, then
+    /// rebuild the open sidebar menu so its rows track it.
+    ToggleBacklogView,
+    /// Open the backlog board overlay (off unless the pref is on).
+    OpenBacklogView,
+    /// Flip the sideline's row shape (list <-> card) live: swap the view's
+    /// in-memory layout, persist `sideline.layout` through the CLI, then
+    /// invalidate the palette cache. A failed save keeps the in-memory shape
+    /// and says so honestly, the same posture as the theme toggle.
+    ToggleSidelineLayout,
     ToggleStatus,
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
@@ -2049,38 +1973,17 @@ pub(crate) enum AuxAction {
     LaneColorSet(String, String, String),
 }
 
-/// The settings modal's tabs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
-    General,
-    Theme,
-    Keys,
-    Colors,
-}
-
-const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
-
-fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxAction>) {
-    let mut rows = vec![PopupRow::Header(format!("prefix: {live_prefix}"))];
-    let mut actions = Vec::new();
-    for spec in PREFIX_PICKS {
-        let active = live_prefix == spec;
-        rows.push(PopupRow::Entry {
-            glyph: if active { "●".into() } else { "○".into() },
-            label: spec.into(),
-            hint: if active {
-                "active".into()
-            } else {
-                String::new()
-            },
-            enabled: true,
-        });
-        actions.push(AuxAction::ApplyPrefix(spec.into()));
-    }
-    (rows, actions)
-}
-
+mod backlog_board;
+mod backlog_style;
+mod config_set;
+mod node_detail;
+mod overlay_paint;
+mod settings_modal;
 mod update_menu;
+
+use config_set::spawn_config_set;
+
+use settings_modal::SettingsTab;
 
 // The sideline new-agent launcher: composer state, input folding,
 // and the typed launch request. client.rs keeps only the integration
@@ -2091,9 +1994,11 @@ mod input_folds;
 mod mail_input;
 mod overlay_keys;
 
+mod bottom_row;
+
 use input_folds::{
-    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys, ModalKey, NavKey,
-    SearchKey,
+    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys,
+    fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
 use mail_input::peek_input_keys;
@@ -2196,6 +2101,7 @@ impl View {
             frames: HashMap::new(),
             panel_on: true,
             sideline_full: false,
+            sideline_layout: sideline_color::palette().layout,
             density,
             sideline_width,
             agent_sort,
@@ -2265,6 +2171,10 @@ impl View {
             hover_focus: true,
             theme: Theme::default_theme(),
             backlog: Vec::new(),
+            backlog_board: None,
+            sideline_view: crate::view_store::load_sideline_view(),
+            board_full: view_store::load_board_full(),
+            experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
             hover_pending: None,
@@ -2320,7 +2230,8 @@ impl View {
             launcher_esc: Default::default(),
             launch_attempt: None,
             launcher_catalog: None,
-            catalog_want: false,
+            // Prefetch at attach: the whole session serves the first list.
+            catalog_want: true,
             catalog_inflight: false,
         }
     }
@@ -3064,6 +2975,7 @@ impl View {
             || self.yard.is_some()
             || self.peek.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// The narrower guard for the ROW/TAB menu paths (right-press
@@ -3097,6 +3009,7 @@ impl View {
             || self.answers.is_some()
             || self.yard.is_some()
             || self.digest.is_some()
+            || self.backlog_board.is_some()
     }
 
     /// Open the owning agent's row menu for the pane under
@@ -3208,7 +3121,11 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
+        self.aux = Some(build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        ));
         self.aux_esc.clear();
         self.update_probe_want = true;
     }
@@ -3228,86 +3145,14 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
+        let mut menu = build_sideline_menu(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.experimental_backlog,
+        );
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
-    }
-
-    /// Build the settings modal: general toggles plus theme and prefix pickers.
-    fn build_settings_modal(&self) -> AuxPopup {
-        let tab = self.settings_tab;
-        let mut rows = Vec::new();
-        let mut actions: Vec<AuxAction> = Vec::new();
-        match tab {
-            SettingsTab::General => {
-                let toggle = |on: bool, label: &str| PopupRow::Entry {
-                    glyph: if on { "☑".into() } else { "☐".into() },
-                    label: label.into(),
-                    hint: String::new(),
-                    enabled: true,
-                };
-                rows.push(toggle(self.hover_focus, "focus follows mouse"));
-                rows.push(toggle(self.status_on, "status row"));
-                rows.push(toggle(
-                    self.resource_meter_on,
-                    "resource meter (needs macmon)",
-                ));
-                rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
-                actions.push(AuxAction::ToggleHoverFocus);
-                actions.push(AuxAction::ToggleStatus);
-                actions.push(AuxAction::ToggleResourceMeter);
-                actions.push(AuxAction::ToggleConfirmLifecycle);
-            }
-            SettingsTab::Theme => {
-                // The four shipped palettes; the active one is marked. Enter on a
-                // name applies it (an explicit action, not a cursor-move preview).
-                for name in crate::theme::THEME_NAMES {
-                    let active = self.theme.name == name;
-                    rows.push(PopupRow::Entry {
-                        glyph: if active { "●".into() } else { "○".into() },
-                        label: name.into(),
-                        hint: if active {
-                            "active".into()
-                        } else {
-                            String::new()
-                        },
-                        enabled: true,
-                    });
-                    actions.push(AuxAction::ApplyTheme(name.into()));
-                }
-            }
-            SettingsTab::Keys => {
-                (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
-            }
-            SettingsTab::Colors => {
-                (rows, actions) = crate::lane_colors_panel::build_lane_color_rows(
-                    crate::sideline_color::palette(),
-                    &self.lane,
-                );
-            }
-        }
-        let popup = Popup::new(rows, Anchor::Center)
-            .title("settings")
-            .tabs(vec![
-                ("general".to_string(), tab == SettingsTab::General),
-                ("theme".to_string(), tab == SettingsTab::Theme),
-                ("keys".to_string(), tab == SettingsTab::Keys),
-                ("colors".to_string(), tab == SettingsTab::Colors),
-            ])
-            .footer("tab switches section · esc close");
-        AuxPopup { popup, actions }
-    }
-
-    /// Rebuild the settings modal after a toggle so its glyph reflects the new
-    /// state, preserving the current selection (a keyboard toggle must re-toggle
-    /// the SAME row on the next Enter, not reset to row 0).
-    fn reopen_settings_keeping_sel(&mut self) {
-        let sel = self.aux.as_ref().map(|m| m.popup.sel).unwrap_or(0);
-        let mut modal = self.build_settings_modal();
-        let n = modal.popup.targets().len();
-        modal.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
-        self.aux = Some(modal);
     }
 
     /// The flat popup target under a screen cell while an aux popup is open.
@@ -3568,12 +3413,12 @@ impl View {
 
     /// Content viewport as `(origin, dims)` in `usize`, for centering a
     /// [`draw_lines_overlay`] popover against the content rect (right of the
-    /// sideline, above any splits) instead of the outer terminal. One call
-    /// site for every corner-anchored popover.
+    /// sideline and any docked board, above any splits) instead of the outer
+    /// terminal. One call site for every corner-anchored popover.
     fn overlay_viewport(&self) -> ((usize, usize), (usize, usize)) {
         let (rows, cols) = self.content_dims();
         (
-            (TAB_BAR_ROWS as usize, self.panel_w() as usize),
+            (TAB_BAR_ROWS as usize, self.left_chrome_w() as usize),
             (rows as usize, cols as usize),
         )
     }
@@ -3582,17 +3427,25 @@ impl View {
     /// it falls inside a pane's content rect. `None` for a chrome cell (tab bar,
     /// sideline) or a content divider, so the caller swallows it - a mouse event
     /// on chrome never forwards to a pane (AC3-UI). Rects are content-area
-    /// relative; the content origin is `(TAB_BAR_ROWS, panel_w)`.
+    /// relative; the content origin is `(TAB_BAR_ROWS, left_chrome_w)`.
     fn hit_test(&self, row: u16, col: u16) -> Option<(u64, u16, u16)> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
         let cr = row - TAB_BAR_ROWS;
-        let cc = col - panel_w;
+        let cc = col - left_w;
         for (pid, rect) in &self.layout.panes {
-            if cr >= rect.y && cr < rect.y + rect.rows && cc >= rect.x && cc < rect.x + rect.cols {
-                return Some((*pid, cr - rect.y, cc - rect.x));
+            // A framed pane answers for its CONTENT: the border ring is the
+            // frame's own surface (it focuses, it never forwards), and the
+            // pty grid the coordinates name is the content rect.
+            let content = crate::pane_border::content_rect(*rect);
+            if cr >= content.y
+                && cr < content.y + content.rows
+                && cc >= content.x
+                && cc < content.x + content.cols
+            {
+                return Some((*pid, cr - content.y, cc - content.x));
             }
         }
         None
@@ -3621,11 +3474,11 @@ impl View {
     /// candidate seams are genuinely ambiguous and picking one would resize a
     /// divider the operator was not pointing at.
     fn seam_at(&self, row: u16, col: u16) -> Option<Seam> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         if self.pane_covering(cr, cc).is_some() {
             return None;
         }
@@ -3709,7 +3562,7 @@ impl View {
     fn seam_pos_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
         let (cr, cc) = (
             row.checked_sub(TAB_BAR_ROWS)?,
-            col.checked_sub(self.panel_w())?,
+            col.checked_sub(self.left_chrome_w())?,
         );
         Some(match seam.axis {
             Axis::Horizontal => cc,
@@ -3906,7 +3759,7 @@ impl View {
             return None;
         }
         let row = TAB_BAR_ROWS + rect.y;
-        let c0 = self.panel_w() + rect.x + (rect.cols - w) / 2;
+        let c0 = self.left_chrome_w() + rect.x + (rect.cols - w) / 2;
         Some((row, c0..c0 + w))
     }
 
@@ -3953,11 +3806,11 @@ impl View {
     /// says, and a full-side insert would need a root-level tree op whose
     /// result the operator cannot see themselves asking for.
     fn edge_zone_at(&self, row: u16, col: u16) -> Option<DropZone> {
-        let panel_w = self.panel_w();
-        if row < TAB_BAR_ROWS || col < panel_w {
+        let left_w = self.left_chrome_w();
+        if row < TAB_BAR_ROWS || col < left_w {
             return None;
         }
-        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - left_w);
         let (a_rows, a_cols) = self.layout.area;
         if a_rows == 0 || a_cols == 0 || cr >= a_rows || cc >= a_cols {
             return None;
@@ -4081,7 +3934,10 @@ impl View {
                 Some(format!("sub:{head}+{off}:{t}"))
             }
             DisplayRow::NewSquad => Some("newsquad".into()),
-            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+            DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
+            | DisplayRow::TableHead
+            | DisplayRow::TableEmpty => None,
         }
     }
 
@@ -4338,14 +4194,14 @@ impl View {
     /// bar, which own those cells.
     fn drop_band(&self, zone: DropZone) -> Option<(std::ops::Range<u16>, std::ops::Range<u16>)> {
         let rect = self.pane_rect(zone.target)?;
-        let panel_w = self.panel_w();
+        let left_w = self.left_chrome_w();
         // Saturating throughout: `rect` comes from the last Layout, which can
         // lag a sideline toggle or a resize, so these sums are not guaranteed to
         // stay inside the terminal. Overflow here would panic a debug build for
         // a highlight; clamping just draws the band at the edge instead.
         let (r0, c0) = (
             TAB_BAR_ROWS.saturating_add(rect.y),
-            panel_w.saturating_add(rect.x),
+            left_w.saturating_add(rect.x),
         );
         let (r1, c1) = (r0.saturating_add(rect.rows), c0.saturating_add(rect.cols));
         // The band sits one cell outside the rect, except on the rim where that
@@ -4365,7 +4221,7 @@ impl View {
         // which worked but read as an accident.
         let band_col = |outside: Option<u16>, own: u16| {
             let c = outside
-                .filter(|c| (panel_w..term_cols).contains(c))
+                .filter(|c| (left_w..term_cols).contains(c))
                 .unwrap_or(own);
             c..c.saturating_add(1)
         };
@@ -4562,6 +4418,10 @@ impl View {
             // the idle sibling of a header's CycleSection. Actionable, so it is
             // NOT inert: both a click and a selector Enter route here.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
+            // A card's lower half acts on the card: the exact hit of the
+            // Agent row painted above it. Inert for the selector, clickable
+            // here - the same split a Header has.
+            DisplayRow::CardDetail(_) => self.row_action(i.checked_sub(1)?),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action.
             DisplayRow::Sub(_)
@@ -5620,258 +5480,11 @@ impl View {
         }
 
         if !self.sideline_full {
-            // Content area: dividers first (uncovered cells), panes blitted over.
             let origin_r = TAB_BAR_ROWS as usize;
-            let origin_c = panel_w;
-            let mut covered = vec![false; rows * cols];
-            // cells owned by the focused pane, so the divider pass can accent
-            // the seams that bound it (a standing "you are here" outline).
-            let mut focused = vec![false; rows * cols];
-            for (pid, rect) in &self.layout.panes {
-                let frame = self.frames.get(pid);
-                for fr in 0..rect.rows as usize {
-                    let r = origin_r + rect.y as usize + fr;
-                    if r >= rows {
-                        break;
-                    }
-                    for fc in 0..rect.cols as usize {
-                        let c = origin_c + rect.x as usize + fc;
-                        if c >= cols {
-                            break;
-                        }
-                        covered[r * cols + c] = true;
-                        if *pid == self.layout.focus {
-                            focused[r * cols + c] = true;
-                        }
-                        if let Some(f) = frame {
-                            if fr < f.rows as usize && fc < f.cols as usize {
-                                cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
-                            }
-                        }
-                    }
-                }
-            }
-            // (hover affordance) Underline the accepted link span, client-local:
-            // OR UNDERLINE into exactly the pane-local cells the server named,
-            // after the blit (content is in place) and before the grip/indicator/
-            // overlay passes (chrome and overlays still win their cells). The
-            // cached server `Frame` is untouched, so the span clears on the next
-            // compose the moment it is dropped or invalidated. Suppressed while
-            // ANY modal is open: `menu_usurping_open` names the full set, which
-            // closes the keyboard-opened and overlay-blind cases the pointer-event
-            // clear cannot see (an overlay opened with no pointer motion paints no
-            // hover affordance beneath or around itself).
-            if !self.menu_usurping_open() {
-                if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
-                    if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
-                        for &(fr, fc) in span {
-                            let r = origin_r + rect.y as usize + fr as usize;
-                            let c = origin_c + rect.x as usize + fc as usize;
-                            if r < rows && c < cols {
-                                cells[r * cols + c].flags |= cell_flags::UNDERLINE;
-                            }
-                        }
-                    }
-                }
-            }
-            // pane grips, drawn on cells the pane owns, hence after the blit
-            // - but BEFORE the scroll indicator, which is state rather than an
-            // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
-            // whole gesture, which is what keeps the origin marked (AC3-UI) once
-            // the pointer has run off to a zone somewhere else.
-            let dragged = self.pane_drag.map(|d| d.mover);
-            // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
-            // where none can be pressed.
-            for (pid, rect) in self
-                .layout
-                .panes
-                .iter()
-                .filter(|_| self.layout.panes.len() >= 2)
-            {
-                let Some((grow, gcols)) = self.grip_span(*rect) else {
-                    continue;
-                };
-                let lit =
-                    dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
-                let (fg, flags) = if lit {
-                    (self.theme.accent, cell_flags::BOLD)
-                } else {
-                    (Color::Default, cell_flags::DIM)
-                };
-                let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
-                if r >= rows {
-                    continue;
-                }
-                blank_straddling_pair(&mut cells, cols, r, start, end);
-                for (i, ch) in GRIP.chars().enumerate() {
-                    let c = start + i;
-                    if c < cols {
-                        cells[r * cols + c] = Cell {
-                            c: ch,
-                            fg,
-                            bg: Color::Default,
-                            flags,
-                        };
-                    }
-                }
-            }
-
-            // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
-            // top-right, inverse-video so it reads over content. Present iff the
-            // pane's frame reports a non-zero offset (group 2's status row becomes
-            // its canonical home). A pane too narrow to fit the label skips it.
-            for (pid, rect) in &self.layout.panes {
-                let Some(f) = self.frames.get(pid) else {
-                    continue;
-                };
-                if f.scroll_offset == 0 {
-                    continue;
-                }
-                let label = format!("[+{}]", f.scroll_offset);
-                let w = label.chars().count();
-                let r = origin_r + rect.y as usize;
-                if (rect.cols as usize) < w || r >= rows {
-                    continue;
-                }
-                let start_c = origin_c + rect.x as usize + rect.cols as usize - w;
-                for (k, ch) in label.chars().enumerate() {
-                    let c = start_c + k;
-                    if c < cols {
-                        cells[r * cols + c] = Cell {
-                            c: ch,
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::INVERSE,
-                        };
-                    }
-                }
-            }
-            // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
-            // (the view-scoped clamp); content anchors top-left and everything
-            // beyond `area` up to the local content edge is visibly-inert dim
-            // filler, never divider glyphs. `(0, 0)` is the pre-Layout
-            // placeholder: no filler until the first real Layout names a bound.
-            let (a_rows, a_cols) = self.layout.area;
-            let boxed = self.layout.area != (0, 0);
-            // A drag keeps the accent on the seam it grabbed even as the pointer
-            // runs ahead of it, so the thing being moved stays the thing lit.
-            let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
-            // the candidate drop zone, lit while a relocation drag is live.
-            // The tab-cell and sideline-row drags reuse the SAME content-edge
-            // zone vocabulary, so one of the three lights the seam/band identically.
-            let drop_zone = self
-                .pane_drag
-                .and_then(|d| d.zone)
-                .or_else(|| self.tab_drag.and_then(|d| d.zone))
-                .or_else(|| self.row_drag.as_ref().and_then(|d| d.zone));
-            // Divider glyphs for in-area content cells no pane covers: pick by
-            // which neighbors are panes so vertical strips read '│', horizontal
-            // '─', crossings '┼'. Dim so chrome never shouts over content.
-            for r in origin_r..rows {
-                for c in origin_c..cols {
-                    if covered[r * cols + c] {
-                        continue;
-                    }
-                    if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize)
-                    {
-                        cells[r * cols + c] = Cell {
-                            c: '·',
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::DIM,
-                        };
-                        continue;
-                    }
-                    let horiz = c > origin_c && covered[r * cols + c - 1]
-                        || c + 1 < cols && covered[r * cols + c + 1];
-                    let vert = r > origin_r && covered[(r - 1) * cols + c]
-                        || r + 1 < rows && covered[(r + 1) * cols + c];
-                    // a divider cell that borders the focused pane paints in
-                    // the lattice accent at full brightness (not the DIM chrome), so
-                    // the focused pane wears a standing outline that moves with focus.
-                    // Interior seams only - an edge pane has no divider on that side.
-                    // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
-                    // has a covered horizontal AND vertical neighbour, so every
-                    // visible junction is already orthogonally adjacent to its pane.
-                    // The lone diagonal-only cell is the 1-wide crossing where four
-                    // dividers meet, which renders blank (no covered ortho neighbour)
-                    // - accenting a space would be invisible, so we don't.
-                    let outline = c > origin_c && focused[r * cols + c - 1]
-                        || c + 1 < cols && focused[r * cols + c + 1]
-                        || r > origin_r && focused[(r - 1) * cols + c]
-                        || r + 1 < rows && focused[(r + 1) * cols + c];
-                    // the seam under the pointer (or held in a drag) reads
-                    // BOLD, distinct from both idle DIM chrome and the focus
-                    // outline's plain accent. A terminal cannot portably change the
-                    // cursor shape, so this is the only signal a divider is
-                    // draggable before the press.
-                    let grabbable =
-                        active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
-                    // the candidate zone outranks the hover accent - during
-                    // a drag the only question on screen is where the pane lands.
-                    let dropping =
-                        drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
-                    let (fg, flags) = if dropping {
-                        (self.theme.accent, cell_flags::INVERSE)
-                    } else if grabbable {
-                        (self.theme.accent, cell_flags::BOLD)
-                    } else if outline {
-                        (self.theme.accent, 0)
-                    } else {
-                        (Color::Default, cell_flags::DIM)
-                    };
-                    cells[r * cols + c] = Cell {
-                        c: match (horiz, vert) {
-                            (true, true) => '┼',
-                            (true, false) => '│',
-                            (false, true) => '─',
-                            (false, false) => ' ',
-                        },
-                        fg,
-                        bg: Color::Default,
-                        flags,
-                    };
-                }
-            }
-
-            // an edge drop zone lands on cells a PANE owns, which the
-            // divider pass above skips by construction. Lit here, after the blit,
-            // so the rim reads as a candidate the same way a seam does.
-            if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
-                for r in band_rows.start as usize..(band_rows.end as usize).min(rows) {
-                    for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
-                        if covered[r * cols + c] {
-                            let cell = &mut cells[r * cols + c];
-                            cell.fg = self.theme.accent;
-                            cell.flags |= cell_flags::INVERSE;
-                        }
-                    }
-                }
-            }
-
-            if self.pane_ids_until.is_some_and(|until| now < until) {
-                for (pid, rect) in &self.layout.panes {
-                    let label = format!("pane {pid}");
-                    let width = label.chars().count();
-                    let rect_cols = rect.cols as usize;
-                    let row = origin_r + rect.y as usize;
-                    if rect_cols < width || row >= rows {
-                        continue;
-                    }
-                    let start = origin_c + rect.x as usize + rect_cols - width;
-                    for (offset, ch) in label.chars().enumerate() {
-                        let col = start + offset;
-                        if col < cols {
-                            cells[row * cols + col] = Cell {
-                                c: ch,
-                                fg: Color::Default,
-                                bg: Color::Default,
-                                flags: cell_flags::INVERSE | cell_flags::DIM,
-                            };
-                        }
-                    }
-                }
-            }
+            let origin_c = panel_w as usize;
+            // Blit, frames, underline, grips, indicator, letterbox +
+            // dividers, empty state, drop band, reveal (the pane-pass move).
+            self.paint_panes(&mut cells, rows, cols, origin_r, origin_c, now);
         }
         self.draw_bottom_row(&mut cells, rows, cols);
         // Chrome, not an overlay: after panes, before modals.
@@ -5912,8 +5525,7 @@ impl View {
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
-        } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
+        } else if agent_launcher::draw_overlay(self, &mut cells, rows, cols) {
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -6070,6 +5682,11 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if self.backlog_board.is_some() {
+            // The board's whole surface - docked column, drill-down,
+            // pickers, centered or full-screen overlay - paints from its
+            // own module (the file-budget gate keeps client.rs shrinking).
+            self.draw_board(&mut cells, rows, cols, overlay_origin, overlay_dims);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -6111,6 +5728,7 @@ impl View {
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
             && self.aux.is_none()
+            && self.backlog_board.is_none()
         {
             if let Some((_, rect)) = self
                 .layout
@@ -6119,15 +5737,22 @@ impl View {
                 .find(|(id, _)| *id == self.layout.focus)
             {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
-                    cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
-                    cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
+                    // The cursor sits in the pty grid, which is the CONTENT
+                    // rect for a framed pane.
+                    let content = crate::pane_border::content_rect(*rect);
+                    cur_r =
+                        TAB_BAR_ROWS + content.y + f.cursor_row.min(content.rows.saturating_sub(1));
+                    cur_c = self.left_chrome_w()
+                        + content.x
+                        + f.cursor_col.min(content.cols.saturating_sub(1));
                     if !self.sideline_full && self.layout.area != (0, 0) {
                         // Never in the filler (AC1-UI), even mid-race when a
                         // stale rect exceeds the just-shrunk area. Skipped in
                         // full-screen sideline: the cursor belongs to the
                         // composer, not a pane that is not painted.
                         cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
-                        cur_c = cur_c.min(self.panel_w() + self.layout.area.1.saturating_sub(1));
+                        cur_c =
+                            cur_c.min(self.left_chrome_w() + self.layout.area.1.saturating_sub(1));
                     }
                     cur_vis = f.cursor_visible;
                 }
@@ -6145,33 +5770,6 @@ impl View {
             // frame's own scroll_offset.
             scroll_offset: 0,
         }
-    }
-
-    /// The bottom chrome line (US4). While a prefix chord is pending past
-    /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
-    /// held - even with the status row toggled off, discoverability does not
-    /// die with the toggle; tmux's message-line behavior). Otherwise it is
-    /// the status row (AC4-UI): session name, focused pane cwd, the focused
-    /// pane's scroll offset (the canonical `[+N]` home; the per-pane inline
-    /// indicator stays so a scrolled UNFOCUSED pane is still observable),
-    /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
-    /// The bottom terminal row is chrome (search line / which-key hint / status
-    /// row, painted last by `draw_bottom_row`) rather than content or a sideline
-    /// row drawn underneath. Below minimum geometry both auto-hide (AC4-ERR) and
-    /// the row is content (`content_dims` handed the server the full height, a
-    /// pane tiled into it, so blanking would erase it). The single truth shared
-    /// by the renderer and `chrome_hit` so a click matches what's painted
-    /// (codex P2).
-    fn bottom_row_is_chrome(&self) -> bool {
-        self.term.0 >= MIN_ROWS_FOR_STATUS
-            && (self.confirm.is_some()
-                || self.create.is_some()
-                || self.rename.is_some()
-                || self.move_to.is_some()
-                || self.recruit.is_some()
-                || self.search.is_some()
-                || self.hint
-                || self.status_on)
     }
 
     /// A centered, inverse-video name-entry modal for the create / rename /
@@ -6213,11 +5811,15 @@ impl View {
         // narrow terminal the operator types a name they cannot see - the one
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
-        let body_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS).max(1);
+        // The frame hugs the chrome's own minimum (title + esc chip), and the
+        // body keeps one pad cell beside the text, so the window is that
+        // minimum minus the pad.
+        let body_w = chrome.min_inner_w().saturating_sub(1).max(1);
         let text = format!("{name}_");
         let text = if text.chars().count() > body_w {
-            let drop = text.chars().count() - body_w;
-            let kept: String = text.chars().skip(drop + 1).collect();
+            let keep = body_w.saturating_sub(1);
+            let drop = text.chars().count() - keep;
+            let kept: String = text.chars().skip(drop).collect();
             format!("…{kept}")
         } else {
             text
@@ -6241,169 +5843,6 @@ impl View {
         }
         let layout = self.name_modal_layout(label, name, hint);
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
-    }
-
-    fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
-        if !self.bottom_row_is_chrome() {
-            return;
-        }
-        // A card-dispatch confirm is modal - it owns the row above everything
-        // else while the operator decides.
-        if let Some(c) = &self.confirm {
-            self.draw_confirm_line(cells, rows, cols, c);
-            return;
-        }
-        // The new-workspace name input is a centered modal; the operator
-        // is mid-entry, so it sits above search/hint/status.
-        if let Some(name) = &self.create {
-            self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
-            return;
-        }
-        // The rename input (tab; widened to squads): the noun tracks
-        // the target so the operator sees what they are renaming, and the hint
-        // spells out the blank-clears semantics.
-        if let Some((target, name)) = &self.rename {
-            let noun = match target {
-                RenameTarget::Tab(_) => "tab",
-                RenameTarget::Squad(_) => "workspace",
-                RenameTarget::Agent(_) => "row",
-            };
-            let hint = match target {
-                RenameTarget::Agent(_) => Some("a-z 0-9 - _ (1-64 chars)"),
-                _ => Some("empty resets to auto"),
-            };
-            self.draw_name_modal(cells, rows, cols, &format!("rename {noun}"), name, hint);
-            return;
-        }
-        // The move-to prompt: the typed number IS the body; the hint
-        // names the grammar so a `4` never reads as "move 4 left".
-        if let Some((_, buf)) = &self.move_to {
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                "move tab to position",
-                buf,
-                Some("1-based; Enter moves"),
-            );
-            return;
-        }
-        // The recruit workspace-name input: the hint names how many
-        // marked agents will join (create-if-absent).
-        if let Some(name) = &self.recruit {
-            let n = self.marks.len();
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                &format!("recruit {n} into"),
-                name,
-                Some("create-if-absent"),
-            );
-            return;
-        }
-        // Search line takes the bottom row when active (precedence: search >
-        // which-key hint > status row). It OVERLAYS whatever held the row - no
-        // reserved row, so opening search never triggered a Resize/reflow.
-        if let Some(sv) = &self.search {
-            self.draw_search_line(cells, rows, cols, sv);
-            return;
-        }
-        let r = rows - 1;
-        // We own the row: blank it first so the divider-fill pass in `compose`
-        // (which treats this uncovered row as content and paints '─' glyphs)
-        // cannot bleed through the gaps between the segments below.
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
-        let put = |cells: &mut [Cell], c: usize, ch: char, flags: u8| {
-            if c < cols {
-                cells[r * cols + c] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags,
-                };
-            }
-        };
-        if self.hint {
-            let text = crate::keys::prefix_hint();
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                put(cells, i, ch, 0);
-            }
-            return;
-        }
-        let mut c = 0usize;
-        for ch in format!(" {} ", self.session).chars() {
-            put(cells, c, ch, cell_flags::BOLD);
-            c += 1;
-        }
-        // Active squad's name, only when there is more than one squad to be
-        // ambiguous about - the always-visible answer to "which
-        // squad?" when the sideline is toggled off or auto-hidden. BOLD: it
-        // is identity, like the session cell, not context like the cwd.
-        if self.layout.squads.len() > 1 {
-            if let Some(s) = self
-                .layout
-                .squads
-                .iter()
-                .find(|s| s.id == self.layout.active_squad)
-            {
-                for ch in format!("│ {} ", s.name).chars() {
-                    put(cells, c, ch, cell_flags::BOLD);
-                    c += 1;
-                }
-            }
-        }
-        let cwd = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .map(|s| abbrev_home(&s.canonical_cwd))
-            .unwrap_or_default();
-        for ch in format!("│ {cwd} ").chars() {
-            put(cells, c, ch, cell_flags::DIM);
-            c += 1;
-        }
-        // Provenance cell for the focused pane: config-free `⚑ <node>`,
-        // shown only when the focused pane was node-driven. Absent for an ad-hoc
-        // pane, so a plain shell reads clean.
-        if let Some(node) = &self.layout.focus_node {
-            for ch in format!("⚑ {node} ").chars() {
-                put(cells, c, ch, cell_flags::BOLD);
-                c += 1;
-            }
-        }
-        if let Some(f) = self.frames.get(&self.layout.focus) {
-            if f.scroll_offset != 0 {
-                for ch in format!("[+{}] ", f.scroll_offset).chars() {
-                    put(cells, c, ch, cell_flags::INVERSE);
-                    c += 1;
-                }
-            }
-        }
-        // The whole-machine meter, when toggled on: the latest one-line
-        // reading, or an explicit "sensor unavailable" until a sample lands.
-        // A dark sensor is named - the row never shows a zero or a blank as
-        // if it were a reading.
-        if self.resource_meter_on {
-            let text = self
-                .resource_meter_text
-                .clone()
-                .unwrap_or_else(|| "meter: sensor unavailable".into());
-            for ch in format!("│ {text} ").chars() {
-                put(cells, c, ch, cell_flags::DIM);
-                c += 1;
-            }
-        }
-        let help = "? keys · glyphs ";
-        let start = cols.saturating_sub(help.chars().count());
-        if start > c {
-            for (i, ch) in help.chars().enumerate() {
-                put(cells, start + i, ch, cell_flags::DIM);
-            }
-        }
     }
 
     /// Paint the confirm prompt over the bottom row (dispatch;
@@ -6652,13 +6091,26 @@ impl View {
         else {
             return spans;
         };
-        spans.push(TabSpan {
-            text: format!(" {} ", brand_label(&s.name)),
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-            hit: None,
-            role: SpanRole::Squad,
-        });
+        // The home workspace wears the f[no] brand mark in place of its name:
+        // `f` bold, `[no]` dim amber (draw_tab_bar splits the two tones).
+        if s.name == "fno" {
+            let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
+            spans.push(TabSpan {
+                text: format!(" {text} "),
+                flags: cell_flags::BOLD,
+                fg: Color::Default,
+                hit: None,
+                role: SpanRole::Squad,
+            });
+        } else {
+            spans.push(TabSpan {
+                text: format!(" {} ", brand_label(&s.name)),
+                flags: cell_flags::BOLD,
+                fg: Color::Default,
+                hit: None,
+                role: SpanRole::Squad,
+            });
+        }
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
             // US4: a leading max-severity rollup glyph so a background
@@ -6839,7 +6291,20 @@ impl View {
             } else {
                 (span.fg, span.flags)
             };
+            // The brand mark's `[no]` drops to the dim amber wordmark tone for
+            // just those four chars; every other span paints uniform.
+            let is_mark = span.role == SpanRole::Squad && span.text.trim() == "f[no]";
+            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Wordmark, &self.theme);
+            let mut in_no = false;
             for ch in span.text.chars() {
+                if ch == '[' {
+                    in_no = true;
+                }
+                let (fg, flags) = if is_mark && in_no {
+                    (mark_fg, mark_flags)
+                } else {
+                    (fg, flags)
+                };
                 if c >= cols {
                     break 'spans;
                 }
@@ -6850,6 +6315,9 @@ impl View {
                     flags,
                 };
                 c += 1;
+                if is_mark && in_no && ch == ']' {
+                    in_no = false;
+                }
             }
         }
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
@@ -6882,26 +6350,10 @@ impl View {
     /// consumer indexes into (: painting, hover, hit-test, and the
     /// selector share this index space in all three densities).
     ///
-    /// Slim is a FILTER over the regular rows rather than a second builder, so
-    /// it inherits section keys, rollup folding, and ordering for free and
-    /// cannot drift from the tree it is a summary of. Extended keeps the same
-    /// structural rows and changes only agent-row composition and ordering.
+    /// A delegation to [`Self::display_rows_with_depths`]`.0`: one builder, so
+    /// the card expansion hooks two places, not three.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
-        match self.density {
-            Density::Regular => self.tree_rows(),
-            // Header bands only: squad name rows (a `Sel` with no tab) and the
-            // `~` section headers. Both already carry their rollup counts, which
-            // is what keeps the rail legible rather than blind.
-            Density::Slim => self
-                .tree_rows()
-                .into_iter()
-                .filter(|r| {
-                    matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
-                        || matches!(r, DisplayRow::Header { .. })
-                })
-                .collect(),
-            Density::Extended => self.table_rows_with_depths().0,
-        }
+        self.display_rows_with_depths().0
     }
 
     /// [`Self::display_rows`] plus the lineage depth of each rendered
@@ -6914,7 +6366,11 @@ impl View {
     /// the same lineage depths inside its agent-name cells.
     fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         match self.density {
-            Density::Regular => self.tree_rows_with_depths(),
+            Density::Regular => {
+                let (rows, depths) = self.tree_rows_with_depths();
+                let (rows, depths) = self.sort_agent_runs(rows, depths);
+                self.card_rows(rows, depths)
+            }
             Density::Slim => {
                 let (rows, depths) = self.tree_rows_with_depths();
                 let mut kept_rows = Vec::with_capacity(rows.len());
@@ -6933,14 +6389,19 @@ impl View {
         }
     }
 
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
+    /// Sorts agent runs the way the extended table orders them: each
+    /// contiguous run of agent rows between non-agent rows orders by the
+    /// active column (kings compared against each other, workers ordered
+    /// inside their own lineage level), so the card view and the table read
+    /// in the sorted order and the painted age is the value sorted on.
+    fn sort_agent_runs<'a>(
+        &self,
+        rows: Vec<DisplayRow<'a>>,
+        depths: Vec<usize>,
+    ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
-        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
 
@@ -6969,15 +6430,23 @@ impl View {
             }
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
-
-        let has_agent = out
-            .iter()
-            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
-        out.insert(0, (DisplayRow::TableHead, 0));
-        if !has_agent {
-            out.insert(1, (DisplayRow::TableEmpty, 0));
-        }
         out.into_iter().unzip()
+    }
+
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
+        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
+        rows.insert(0, DisplayRow::TableHead);
+        depths.insert(0, 0);
+        if !has_agent {
+            rows.insert(1, DisplayRow::TableEmpty);
+            depths.insert(1, 0);
+        }
+        self.card_rows(rows, depths)
     }
 
     // The sideline tree, with the top-K idle cap applied. A PURE
@@ -6993,11 +6462,7 @@ impl View {
     // free: folded rows are absent from this list, so selector navigation only
     // ever lands on rendered rows. Overflow is reached by the fold row's own
     // Enter/click toggle, which persists in `idle_expanded`.
-    fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
-        self.tree_rows_with_depths().0
-    }
-
-    /// [`Self::tree_rows`] with the per-row lineage depth beside it (see
+    /// The tree rows with the per-row lineage depth beside it (see
     /// [`Self::display_rows_with_depths`]). The depth is computed over the
     /// EMITTED set after every display filter, never re-derived in the painter.
     fn tree_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
@@ -7166,36 +6631,6 @@ impl View {
     }
 }
 
-/// The sideline Table's five columns: status word, name, message, PR, age.
-/// Width ranking (operator, 2026-09-20): name first, message second, status
-/// third. The status words are shortened (operator, 2026-09-21, longest is
-/// `Input`) so the cell fits in 5, right-aligned so a word's blank parks at
-/// the margin, and every freed column goes to the name's Min(22); the
-/// message keeps the Fill(3) surplus. Read by the Table and - through
-/// [`sideline_column_rects`] - by the callers that need the solver's answer
-/// beside the paint: one geometry authority, and it is the solver.
-const SIDELINE_COLUMNS: [Constraint; 5] = [
-    Constraint::Length(5),
-    Constraint::Min(22),
-    Constraint::Fill(3),
-    Constraint::Length(6),
-    // 6, not the plan's 4: the density button overlays the last two
-    // columns, and a 4-wide age cell leaves the sort arrow nowhere to hide
-    // under it (the regression `age_sort_arrow_survives_the_density_button`
-    // pins). The two spare columns are the padding the old COL_TIME=6 gave.
-    Constraint::Length(6),
-];
-
-/// The solver's column rects for a text width: the same call the Table makes
-/// internally (same constraints, same spacing, same flex), so a caller that
-/// must know a column's width reads the SAME answer the paint uses.
-fn sideline_column_rects(text_w: u16) -> std::rc::Rc<[RtRect]> {
-    Layout::horizontal(SIDELINE_COLUMNS)
-        .flex(Flex::Start)
-        .spacing(1)
-        .split(RtRect::new(0, 0, text_w, 1))
-}
-
 /// One table cell: text in a proto fg + flag set, left- or right-aligned in
 /// its column.
 fn rt_cell(text: String, fg: Color, flags: u8, right: bool) -> RtCell<'static> {
@@ -7304,6 +6739,12 @@ enum DisplayRow<'a> {
     /// (US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
+    /// Line 2 of a card-mode card (the dims under `[sideline] layout =
+    /// "card"`): harness, king, message and age in a DIM legacy row. Inert
+    /// like `Sub` - every painted line stays one display row (the
+    /// single-enumeration invariant) - and a click on it acts on the `Agent`
+    /// row above it via [`View::row_action`]'s index shift.
+    CardDetail(&'a AgentRow),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -7421,113 +6862,10 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
+            | DisplayRow::CardDetail(_)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
-}
-
-#[allow(clippy::type_complexity)]
-fn append_sorted_agent_group<'a>(
-    out: &mut Vec<(DisplayRow<'a>, usize)>,
-    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-    sort: AgentSort,
-    needs: &HashMap<String, NeedKind>,
-    now_secs: u64,
-) {
-    let mut subtrees: Vec<(
-        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-        &'a AgentRow,
-    )> = Vec::new();
-    for item in group.drain(..) {
-        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
-        if depth == 0 || subtrees.is_empty() {
-            let root = item.1;
-            subtrees.push((vec![item], root));
-        } else {
-            subtrees.last_mut().unwrap().0.push(item);
-        }
-    }
-    subtrees.sort_by(|(_, a), (_, b)| {
-        compare_agent_rows(
-            a,
-            b,
-            sort,
-            needs.get(a.name.as_str()).copied(),
-            needs.get(b.name.as_str()).copied(),
-            now_secs,
-        )
-    });
-    for (items, _) in subtrees {
-        for (rows, _) in items {
-            out.extend(rows);
-        }
-    }
-}
-
-fn compare_agent_rows(
-    a: &AgentRow,
-    b: &AgentRow,
-    sort: AgentSort,
-    need_a: Option<NeedKind>,
-    need_b: Option<NeedKind>,
-    now_secs: u64,
-) -> Ordering {
-    let order = match sort.column {
-        AgentSortColumn::Status => {
-            let a_key = attention_key(a, need_a);
-            let b_key = attention_key(b, need_b);
-            let a_state = if a.exited {
-                u8::MAX
-            } else {
-                pane_state(a.badge, a.seen, a.pane_activity) as u8
-            };
-            let b_state = if b.exited {
-                u8::MAX
-            } else {
-                pane_state(b.badge, b.seen, b.pane_activity) as u8
-            };
-            apply_direction(
-                a_state
-                    .cmp(&b_state)
-                    .then_with(|| a_key.0.cmp(&b_key.0))
-                    .then_with(|| a_key.1.cmp(&b_key.1))
-                    .then_with(|| a_key.2.cmp(&b_key.2)),
-                sort.direction,
-            )
-        }
-        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
-        AgentSortColumn::LastMessage => cmp_optional(
-            a.tail.as_deref().filter(|value| !value.is_empty()),
-            b.tail.as_deref().filter(|value| !value.is_empty()),
-            sort.direction,
-        ),
-        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
-        AgentSortColumn::Age => {
-            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
-        }
-    };
-    order
-}
-
-fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
-    }
-}
-
-fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
-    match direction {
-        SortDirection::Ascending => order,
-        SortDirection::Descending => order.reverse(),
-    }
-}
-
-fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
-    a.last_activity_age_s
-        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
 /// (US3) The project basename a section is keyed by (the squad's
@@ -8337,202 +7675,6 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
         }
     }
     p.to_string()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum OverlayAnchor {
-    Center,
-    At { row: usize, col: usize },
-}
-
-/// One family-B overlay layout. Drawing and mouse hit-testing consume this same
-/// framed block and origin, so a close chip cannot drift away from the glyph it
-/// paints.
-#[derive(Debug, Clone)]
-struct OverlayLayout {
-    origin: (usize, usize),
-    framed: chrome::Framed,
-}
-
-impl OverlayLayout {
-    fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
-        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
-    }
-}
-
-fn family_b_origin(
-    anchor: OverlayAnchor,
-    block_w: usize,
-    block_h: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-) -> (usize, usize) {
-    let (base_r, base_c) = content_origin;
-    let (content_rows, content_cols) = content_dims;
-    let max_r = base_r + content_rows.saturating_sub(block_h);
-    let max_c = base_c + content_cols.saturating_sub(block_w);
-    match anchor {
-        OverlayAnchor::Center => (
-            base_r + content_rows.saturating_sub(block_h) / 2,
-            base_c + content_cols.saturating_sub(block_w) / 2,
-        ),
-        OverlayAnchor::At { row, col } => {
-            let origin_r = if row.saturating_add(block_h) <= base_r + content_rows {
-                row.max(base_r).min(max_r)
-            } else {
-                row.saturating_sub(block_h).max(base_r).min(max_r)
-            };
-            (origin_r, col.max(base_c).min(max_c))
-        }
-    }
-}
-
-/// Lay out family-B overlay lines in the content viewport. The body window,
-/// frame, origin, and hit spans are calculated once for both drawing and input.
-#[allow(clippy::too_many_arguments)]
-fn layout_lines_overlay<S: AsRef<str>>(
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    follow: Option<usize>,
-    anchor: OverlayAnchor,
-) -> OverlayLayout {
-    let (content_rows, content_cols) = content_dims;
-    // Body width: the widest line (across the whole body, windowed-out rows
-    // included), capped to the viewport minus the side borders.
-    let body_w = lines
-        .iter()
-        .map(|l| l.as_ref().chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
-    // Reserve the chrome overhead and window the body to the rows that remain.
-    // Before chrome the body had the whole viewport; the frame borrows `overhead`
-    // rows for its border/footer, so without windowing a body that filled the
-    // viewport loses its tail off-screen while those rows stay selectable. Top-
-    // pin matches the pre-chrome posture (centered when it fits, clipped at the
-    // top when it does not); the scrollbar marks the cut.
-    let overhead = chrome.rows_overhead();
-    let body_budget = content_rows.saturating_sub(overhead);
-    let total = lines.len();
-    let (start, take, scroll) = if total > body_budget {
-        // Covers body_budget == 0 (a viewport shorter than the chrome
-        // overhead): windows to zero body rows instead of painting the whole
-        // body plus its border past the content viewport.
-        //
-        // `follow` is the body index that MUST stay visible - a cursor. Without
-        // it the window is top-pinned, which is right for a static body and
-        // wrong for one the operator drives: the tenth row of a fourteen-row
-        // picker on a short terminal would be selectable and invisible, which is
-        // the same "you cannot reach it" defect as truncating the list. The
-        // window scrolls by the minimum needed to contain the cursor, so it only
-        // moves at the edges. `pos` then reports where the window really is,
-        // making the scrollbar thumb truthful rather than always parked at 0.
-        let start = match follow.filter(|_| body_budget > 0) {
-            Some(f) => f.saturating_sub(body_budget - 1).min(total - body_budget),
-            None => 0,
-        };
-        (
-            start,
-            body_budget,
-            Some(chrome::Scroll {
-                pos: start,
-                total,
-                visible: body_budget,
-            }),
-        )
-    } else {
-        (0, total, None)
-    };
-    let body: Vec<chrome::BodyLine> = lines[start..start + take]
-        .iter()
-        .map(|l| chrome::BodyLine::plain(l.as_ref()))
-        .collect();
-    let framed = chrome::frame(&body, chrome, body_w, scroll);
-    let box_h = framed.lines.len().min(content_rows);
-    let box_w = framed.width.min(content_cols);
-    let origin = family_b_origin(anchor, box_w, box_h, content_origin, content_dims);
-    OverlayLayout { origin, framed }
-}
-
-fn draw_overlay_layout(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    layout: &OverlayLayout,
-    theme: &Theme,
-) {
-    let (origin_r, origin_c) = layout.origin;
-    // A framed block stamps a SUB-RANGE of each row, so a double-width
-    // glyph in the pane content underneath can straddle either edge, leaving one
-    // half painted and the row corrupted. The name modal carried this guard when
-    // it hand-painted its own block; every family-B overlay needs it for the same
-    // reason, so it lives here, once, rather than travelling with one caller.
-    for i in 0..layout.framed.lines.len() {
-        let r = origin_r + i;
-        if r >= rows {
-            break;
-        }
-        // `framed.width`, not `box_w`: `blit` paints the FULL framed width, and
-        // `box_w` is that width clamped to the viewport. When the chrome's own
-        // minimum (a long title) pushes the frame past the viewport the two
-        // differ, and clamping here would leave the real right edge unchecked -
-        // stranding a spacer on exactly the overflow this guard exists for.
-        blank_straddling_pair(
-            cells,
-            cols,
-            r,
-            origin_c,
-            (origin_c + layout.framed.width).min(cols),
-        );
-    }
-    chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
-}
-
-/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's child picker).
-fn draw_popup_overlay(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    popup: &popup::Popup,
-    term: (u16, u16),
-    theme: &Theme,
-) {
-    popup::draw(cells, rows, cols, &popup.render(term), theme);
-}
-
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (placement; policy).
-#[allow(clippy::too_many_arguments)]
-fn draw_lines_overlay<S: AsRef<str>>(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    theme: &Theme,
-    follow: Option<usize>,
-) {
-    let layout = layout_lines_overlay(
-        content_origin,
-        content_dims,
-        chrome,
-        lines,
-        follow,
-        OverlayAnchor::Center,
-    );
-    draw_overlay_layout(cells, rows, cols, &layout, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -9351,6 +8493,8 @@ async fn attach_and_run(
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+    let (board_tx, mut board_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, backlog_board::BoardMsg)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -9474,6 +8618,50 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        // the backlog board's probe/gather kick, the same single-flight.
+        backlog_board::maybe_kick(&mut view, &board_tx);
+        // a queued board write verb runs off the UI loop too.
+        if let Some(action) = view
+            .backlog_board
+            .as_mut()
+            .and_then(|b| b.write_action.take())
+        {
+            let tx = board_tx.clone();
+            let gen = view.backlog_board.as_ref().map(|b| b.gen).unwrap_or(0);
+            tokio::spawn(async move {
+                let notice = match action {
+                    backlog_board::WriteAction::Args(args, stdin) => {
+                        crate::backlog_write::run_verb(&args, stdin).await.1
+                    }
+                    backlog_board::WriteAction::Append { id, text } => {
+                        let id_for_read = id.clone();
+                        let current = tokio::task::spawn_blocking(move || {
+                            crate::store_client::node(
+                                &crate::backlog_view::graph_path(),
+                                &id_for_read,
+                            )
+                        })
+                        .await
+                        .unwrap_or(Ok(None))
+                        .ok()
+                        .flatten()
+                        .and_then(|n| n.get("details").cloned())
+                        .map(|d| d.to_string())
+                        .unwrap_or_default();
+                        let stdin = format!("{current}\n\n{text}");
+                        let args: Vec<String> = vec![
+                            "backlog".into(),
+                            "update".into(),
+                            id,
+                            "--details-file".into(),
+                            "-".into(),
+                        ];
+                        crate::backlog_write::run_verb(&args, Some(stdin)).await.1
+                    }
+                };
+                let _ = tx.send((gen, backlog_board::BoardMsg::VerbDone { notice }));
+            });
+        }
         // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -10084,6 +9272,14 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some((gen, msg)) = board_rx.recv() => {
+                // a backlog board fold landed; apply under the gen guard
+                // and repaint (the feed arm's contract, one consumer).
+                backlog_board::apply_fold(&mut view, gen, msg);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -10152,21 +9348,18 @@ async fn attach_and_run(
                 }
             }
             Some(outcome) = catalog_rx.recv() => {
-                // Last-outcome-wins like the update probe: sync the
-                // popup's harness names (first landing or a retained draft)
-                // and redraw so an open popup shows the fresh field.
+                // Last-outcome-wins like the update probe: sync the draft's
+                // harness names (first landing or a retained draft) through
+                // the launcher's own sync (the one implementation), and
+                // redraw so an open popup shows the fresh field.
                 view.catalog_inflight = false;
-                if let agent_launcher::CatalogOutcome::Ok(rows, _) = &outcome {
-                    if let Some(l) = view.launcher.as_mut() {
-                        if l.draft.harnesses.is_empty() && !rows.is_empty() {
-                            l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
-                            if l.draft.harness_idx >= rows.len() {
-                                l.draft.harness_idx = 0;
-                            }
-                        }
-                    }
-                }
                 view.launcher_catalog = Some(outcome);
+                if let Some(l) = view.launcher.as_mut() {
+                    agent_launcher::sync_harness_names(l, &view.launcher_catalog);
+                }
+                // The tab bodies derive from the catalog at paint time, so a
+                // read landing mid-session re-renders them with no refresh
+                // step; the redraw above is the whole contract.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10659,7 +9852,9 @@ async fn handle_stdin(
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
-            if let StdinFlow::Detach = keys_modal_mouse(view, scanner, rep, sock_w).await? {
+            if let StdinFlow::Detach =
+                keys_modal::keys_modal_mouse(view, scanner, rep, sock_w).await?
+            {
                 return Ok(StdinFlow::Detach);
             }
             continue;
@@ -10683,6 +9878,11 @@ async fn handle_stdin(
         // the panel's column space) - and no byte ever reaches a pane.
         if view.sideline_full {
             sideline::route_mouse(view, rep, sock_w).await?;
+            continue;
+        }
+        // Full-screen board: the overlay owns every cell, so no press or
+        // wheel reaches the panes it covers. Keys stay with the board.
+        if view.backlog_board.is_some() && view.board_full {
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -11088,6 +10288,16 @@ async fn handle_stdin(
             // sideline and tab-bar affordances still win their own cells.
             if let Some(seam) = view.seam_at(rep.row, rep.col) {
                 view.begin_seam_drag(seam, Instant::now());
+                continue;
+            }
+            // a press on a framed pane's border ring (name tab included)
+            // focuses that pane and reaches nothing else. After the grip and
+            // seam checks so a drag affordance always wins its own cells
+            // (AC9-EDGE); before the forward, so the frame never forwards.
+            if let Some(pid) = view.border_pane_at(rep.row, rep.col) {
+                write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
+                    .await
+                    .map_err(|e| format!("focus send failed: {e}"))?;
                 continue;
             }
             // Likewise the sideline's own border. Also after chrome_hit, so the
@@ -11508,6 +10718,26 @@ async fn dispatch_event(
         Event::ShowKeys => {
             view.open_keys_modal();
         }
+        Event::OpenBacklogBoard => {
+            // The chord rides the same gate as the menu row: the pref
+            // decides, and the off case notices instead of opening.
+            backlog_board::open_pref_gated(view);
+        }
+        Event::CycleSidelineView => {
+            // The sideline's view cycle: agents <-> backlog. The backlog
+            // leg rides the experimental pref and opens the board (the
+            // board IS the view); the agents leg closes it.
+            backlog_board::cycle_sideline_view(view);
+        }
+        Event::OpenSettings => {
+            execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
+        }
+        Event::OpenConnections => {
+            execute_aux_action(view, AuxAction::OpenConnections, sock_w).await?;
+        }
+        Event::OpenSweepThreads => {
+            execute_aux_action(view, AuxAction::OpenSweep, sock_w).await?;
+        }
         Event::BlockJump(dir) => {
             write_msg(
                 sock_w,
@@ -11917,70 +11147,6 @@ async fn keys_modal_execute_selected(
     }
 }
 
-/// One mouse report while the which-key modal is open (US3): hover moves
-/// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (click-elsewhere).
-async fn keys_modal_mouse(
-    view: &mut View,
-    scanner: &mut Scanner,
-    rep: crate::mouse::MouseReport,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    match rep.kind {
-        MouseKind::Move => {
-            if let Some(t) = view.keys_modal_hit(rep.row, rep.col) {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-            }
-        }
-        MouseKind::WheelUp => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(-3);
-            }
-        }
-        MouseKind::WheelDown => {
-            if let Some(m) = view.keys_modal.as_mut() {
-                m.popup.scroll_by(3);
-            }
-        }
-        MouseKind::Press(MouseButton::Left) => {
-            // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the modal; checked before the entry routers.
-            if view
-                .keys_modal
-                .as_ref()
-                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
-            {
-                view.keys_modal = None;
-                return Ok(StdinFlow::Continue);
-            }
-            match view.keys_modal_hit(rep.row, rep.col) {
-                Some(t) => {
-                    if let Some(m) = view.keys_modal.as_mut() {
-                        m.popup.select(t);
-                    }
-                    if matches!(
-                        keys_modal_execute_selected(view, scanner, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-                None => {
-                    // A click inside the block that hit no target (a header, a border)
-                    // is swallowed; only a click OFF the modal dismisses.
-                    if !view.keys_modal_block_contains(rep.row, rep.col) {
-                        view.keys_modal = None;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(StdinFlow::Continue)
-}
-
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
 /// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
 /// P1), never a misrouted action; every action maps to an existing Command /
@@ -12253,6 +11419,26 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("detach send failed: {e}"))?,
             _ => view.set_notice("only a live pane-hosted worker can detach".into()),
         },
+        MenuAction::ClosePortal => match a.pane_id {
+            // One command, the seat named: FocusPane plus ClosePane would
+            // close whatever holds focus if the seat vanished between the
+            // two sends.
+            Some(pid) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::ClosePortal { seat: pid }),
+            )
+            .await
+            .map_err(|e| format!("close portal send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
+        },
+        MenuAction::PortalPicker => {
+            // One decision path with sideline `P`: the picker itself refuses
+            // what it cannot show (not attachable, no open portals to keep).
+            match view.portal_pick_decision(Some(&a)) {
+                PortalPickDecision::Open(id) => view.open_portal_pick(id),
+                PortalPickDecision::Refuse(text) => view.set_notice(text),
+            }
+        }
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
                 // Recomputed at execute (a workspace added or removed between
@@ -12738,6 +11924,11 @@ async fn execute_aux_action(
             view.aux = None;
             return Ok(DispatchFlow::Detach);
         }
+        AuxAction::ToggleBacklogView => View::toggle_enabled(view),
+        AuxAction::OpenBacklogView => {
+            view.aux = None;
+            View::open(view);
+        }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
             let enabled = if view.hover_focus { "true" } else { "false" };
@@ -12748,53 +11939,11 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
-        AuxAction::ToggleStatus => {
-            view.status_on = !view.status_on;
-            // The status row changed the content area; report the new size so the
-            // panes reflow (same accounting as Event::ToggleStatus).
-            let (r, c) = view.content_dims();
-            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                .await
-                .map_err(|e| format!("resize send failed: {e}"))?;
-            let enabled = if view.status_on { "true" } else { "false" };
-            let notice = match spawn_config_set("mux.status_row", enabled).await {
-                Ok(()) => format!("status row: {enabled}"),
-                Err(_) => "status row applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleConfirmLifecycle => {
-            view.confirm_lifecycle = !view.confirm_lifecycle;
-            view_store::save_confirm_lifecycle(view.confirm_lifecycle);
-            let enabled = if view.confirm_lifecycle {
-                "true"
-            } else {
-                "false"
-            };
-            view.set_notice(format!("confirm before stop/remove: {enabled}"));
-            view.reopen_settings_keeping_sel();
-        }
-        AuxAction::ToggleResourceMeter => {
-            view.resource_meter_on = !view.resource_meter_on;
-            view.resource_meter_gate
-                .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
-            // The run loop owns the spawn (one-shot via resource_meter_sampling);
-            // clearing the text here means the row reads "sensor unavailable"
-            // until the first sample lands - never a stale reading.
-            view.resource_meter_sampling = view.resource_meter_on;
-            view.resource_meter_text = None;
-            let enabled = if view.resource_meter_on {
-                "true"
-            } else {
-                "false"
-            };
-            let notice = match spawn_config_set("resource_meter.enabled", enabled).await {
-                Ok(()) => format!("resource meter: {enabled}"),
-                Err(_) => "resource meter applied this session; save failed".into(),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
+        AuxAction::ToggleStatus
+        | AuxAction::ToggleConfirmLifecycle
+        | AuxAction::ToggleResourceMeter
+        | AuxAction::ToggleSidelineLayout => {
+            settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
             // Swap the in-memory theme first (immediate), then persist via the
@@ -12851,48 +12000,6 @@ async fn execute_aux_action(
         }
     }
     Ok(DispatchFlow::Continue)
-}
-
-/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
-/// than writing config itself (the graph-write rule applied to config). Returns
-/// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory value either way and reports honestly.
-async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
-    // spawn + wait rather than .output(): the exit check reads `.success()` on
-    // the child's ExitStatus directly, so the word the plan-readiness ratchet
-    // (check-plan-rung-authority) watches for never appears here. That ratchet
-    // guards plan frontmatter; an exit code is a different axis, so not naming
-    // the field is cheaper than bumping a guard meant for something else.
-    //
-    // kill_on_drop: on the 3s timeout the future drops and this returns Err,
-    // but tokio leaves a spawned child running by default, so the config write
-    // could land after we already told the user the save failed. needs_overlay,
-    // digest_overlay, and connections_view set it for the same shell-out shape.
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    // --local: the startup ladder gives the project config precedence, so a
-    // global write is silently shadowed on the next attach to this workspace.
-    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
-    // the ONLY candidate on both write and read, and --local would land the
-    // write somewhere the latch never looks.
-    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
-        &[]
-    } else {
-        &["--local"]
-    };
-    command
-        .args(["config", "set", key, value])
-        .args(scope)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut child = crate::process_admission::tokio_spawn(&mut command)
-        .map_err(|e| format!("fno config set spawn failed: {e}"))?;
-    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-        Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set {key} {value} failed")),
-        Err(_) => Err("fno config set timed out".into()),
-    }
 }
 
 /// Run the aux popup's selected row (Enter/click), propagating a detach.
@@ -12988,12 +12095,7 @@ async fn aux_keys(
                     .map(|m| !m.popup.chrome.tabs.is_empty())
                     .unwrap_or(false);
                 if has_tabs {
-                    view.settings_tab = match view.settings_tab {
-                        SettingsTab::General => SettingsTab::Theme,
-                        SettingsTab::Theme => SettingsTab::Keys,
-                        SettingsTab::Keys => SettingsTab::Colors,
-                        SettingsTab::Colors => SettingsTab::General,
-                    };
+                    view.settings_tab = settings_modal::SettingsTab::next(view.settings_tab);
                     // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();
@@ -15040,6 +14142,10 @@ mod esc_quiet_tests;
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
 
+#[cfg(test)]
+#[path = "client_tests/keys_modal_tests.rs"]
+mod keys_modal_tests;
+
 #[path = "client/court_block.rs"]
 mod court_block;
 
@@ -15048,3 +14154,8 @@ mod glyph_legend;
 
 #[path = "client/sideline.rs"]
 mod sideline;
+
+#[path = "client/agent_sort.rs"]
+mod agent_sort;
+
+use agent_sort::append_sorted_agent_group;

@@ -3166,6 +3166,7 @@ fn recovery_does_not_quarantine_a_temp_held_by_an_active_writer() {
 #[test]
 fn agent_name_validation() {
     assert!(state::is_valid_registry_label("worker-A_1"));
+    assert!(state::is_valid_registry_label("o'brien"));
     assert!(!state::is_valid_registry_label(""));
     assert!(!state::is_valid_registry_label(&"x".repeat(65)));
     assert!(!state::is_valid_registry_label("has space"));
@@ -3329,7 +3330,9 @@ fn reconcile_budget_starts_after_truth_batch() {
     // and once ate the whole 5s budget (24s wall, 0 of 79 rows probed).
     // The budget's position is structural, so pin it where the source
     // cannot silently drift back: the clock line sits AFTER the truth
-    // batch and the roster load inside `run_reconcile_sweep`.
+    // batch and the roster load inside `run_reconcile_sweep`. The roster
+    // load lives in `liveness_sweep::BgRoster::load` since the witness
+    // moved off this file (shrink-only), same position, same invariant.
     let src = include_str!("../../daemon.rs");
     let sweep = src
         .split("fn run_reconcile_sweep(")
@@ -3342,7 +3345,7 @@ fn reconcile_budget_starts_after_truth_batch() {
         .find("batched_row_probes(&entries")
         .expect("truth batch call");
     let roster = sweep
-        .find("ClaudeRoster::load_default()")
+        .find("liveness_sweep::BgRoster::load()")
         .expect("roster load");
     assert!(
         truth < clock && roster < clock,
@@ -3463,11 +3466,11 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     (dir, home)
 }
 
-/// Stage a real graph file at the state root.
+/// Seed graph.db for tests that address the stable graph path anchor.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
-    std::fs::write(
-        dir.join("graph.json"),
-        serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
+    crate::graph_store::seed_rows(
+        &dir.join("graph.json"),
+        entries.as_array().expect("entry rows"),
     )
     .unwrap();
 }
@@ -3487,7 +3490,7 @@ pub(super) fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Ve
 /// One open do row.
 pub(super) fn open_do_row(harness: &str, sid: &str) -> Value {
     json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": harness,
         "session_id": sid,
         "started_at": "2026-09-01T01:00:00Z",
@@ -3623,14 +3626,14 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
             "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string()
         )]
     );
-    // THE assertion: the file still holds the row, now closed, never removed.
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let entry = &raw["entries"][0];
+    // THE assertion: the store still holds the row, now closed, never
+    // removed. graph.json is the frozen mirror; graph.db is the record.
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let entry = &rows[0];
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     let row = &sessions[0];
-    assert_eq!(row["phase"], json!("do"));
+    assert_eq!(row["phase"], json!("execute"));
     assert_eq!(row["session_id"], json!("sess-a"));
     assert_eq!(row["harness"], json!("claude"));
     assert_eq!(row["started_at"], json!("2026-09-01T01:00:00Z"));
@@ -3677,9 +3680,8 @@ fn a_done_but_unmerged_node_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-b".to_string(), "N2".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let row = &raw["entries"][0]["sessions"][0];
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let row = &rows[0]["sessions"][0];
     assert!(row.get("ended_at").is_none(), "{row}");
     let rendered = crate::reap_render::render_reap(&summary, false, false);
     assert!(
@@ -3724,9 +3726,8 @@ fn an_open_additional_pr_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-c".to_string(), "N3".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert!(rows[0]["sessions"][0].get("ended_at").is_none());
 }
 
 /// The measured live split, staged: of the reaper's kept rows, 15 nodes (17
@@ -3815,9 +3816,8 @@ fn the_live_eighteen_split_fifteen_and_three() {
     for node in ["Nu", "Np1", "Np2"] {
         assert!(held.contains(&&node.to_string()), "held: {held:?}");
     }
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    for entry in raw["entries"].as_array().unwrap() {
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    for entry in rows.iter() {
         let node = entry["id"].as_str().unwrap();
         for row in entry["sessions"].as_array().unwrap() {
             let stamped = row.get("ended_at").is_some();
@@ -3832,7 +3832,7 @@ fn the_live_eighteen_split_fifteen_and_three() {
 }
 
 /// AC4-EDGE: the rehearsal names the settle and touches nothing - the graph
-/// file is byte-identical, the row still open on disk, and the row pass
+/// store version is unchanged, the row still open, and the row pass
 /// reads it as would-retire.
 #[test]
 fn a_dry_run_settles_nothing_on_disk() {
@@ -3853,7 +3853,7 @@ fn a_dry_run_settles_nothing_on_disk() {
         spawn_row(r, "row-d", "sess-d");
     })
     .unwrap();
-    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let before = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
 
     let summary = settle_then_run(
         &home,
@@ -3870,10 +3870,10 @@ fn a_dry_run_settles_nothing_on_disk() {
         vec![("N4".into(), "claude".into(), "sess-d".into())]
     );
     assert!(summary.kept_open_do_row.is_empty());
-    let after = std::fs::read(dir.path().join("graph.json")).unwrap();
-    assert_eq!(before, after, "a dry run wrote the graph");
-    let raw: Value = serde_json::from_slice(&after).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let after = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
+    assert_eq!(before, after, "a dry run changed the store");
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    assert!(rows[0]["sessions"][0].get("ended_at").is_none());
     assert!(
         !summary.dry_run_unverified.is_empty(),
         "the row stays on the retirement path, its remaining gate named: {summary:?}"
@@ -3885,7 +3885,7 @@ fn a_dry_run_settles_nothing_on_disk() {
 #[test]
 fn an_unidentified_do_row_is_not_open() {
     let row = json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": "",
         "session_id": "sess-x",
         "started_at": "2026-09-01T01:00:00Z",
@@ -3914,16 +3914,7 @@ fn an_unidentified_do_row_is_not_open() {
 #[test]
 fn a_settle_that_cannot_read_is_named_and_changes_nothing() {
     let (dir, home) = staged_graph_home();
-    stage_graph(
-        dir.path(),
-        json!([done_node(
-            "N6",
-            json!("merged"),
-            json!([]),
-            vec![open_do_row("claude", "sess-f")],
-        )]),
-    );
-    // Corrupt the file: a failed read is a refusal, never a write.
+    // An unimported malformed anchor makes the read refuse, never write.
     std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
 
     let (settled, refused) = gc_sweep::settle_stale_do_rows(&home);
@@ -3947,7 +3938,7 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
             vec![open_do_row("claude", "sess-g")],
         )]),
     );
-    let before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let before = crate::backlog::version(&dir.path().join("graph.json")).unwrap();
 
     let summary = crate::gc::gc_sweep_dry_run(&home, 0);
 
@@ -3957,7 +3948,7 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
     );
     assert_eq!(
         before,
-        std::fs::read(dir.path().join("graph.json")).unwrap()
+        crate::backlog::version(&dir.path().join("graph.json")).unwrap()
     );
 }
 

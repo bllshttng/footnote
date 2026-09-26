@@ -18,6 +18,7 @@ import pytest
 
 from fno.backlog import batch as B
 from fno.graph.store import read_graph_strict
+from tests.fixtures.graph_seed import seed_graph
 
 
 def _open(root: Path, domain: str = "code", **kw) -> dict:
@@ -54,7 +55,7 @@ def graph(tmp_path, monkeypatch):
     path = tmp_path / "graph.json"
 
     def write(entries):
-        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(path, entries)
         return path
 
     write([])

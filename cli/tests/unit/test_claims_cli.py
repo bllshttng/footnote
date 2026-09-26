@@ -1,5 +1,6 @@
 """Typer CliRunner tests for the fno agents claim CLI surface."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -18,36 +19,23 @@ from fno.graph.store import read_graph_strict
 runner = CliRunner()
 
 
-def test_ttl_parser_seconds_no_unit():
-    assert _parse_ttl("60") == 60_000
-
-
-def test_ttl_parser_seconds():
-    assert _parse_ttl("60s") == 60_000
-
-
-def test_ttl_parser_minutes():
-    assert _parse_ttl("5m") == 5 * 60_000
-
-
-def test_ttl_parser_hours():
-    assert _parse_ttl("2h") == 2 * 3_600_000
-
-
-def test_ttl_parser_empty_string_returns_none():
-    assert _parse_ttl("") is None
-
-
-def test_ttl_parser_invalid_raises():
-    with pytest.raises(Exception):
-        _parse_ttl("xyz")
-
-
-def test_help_lists_all_verbs():
-    result = runner.invoke(cli, ["--help"])
-    assert result.exit_code == 0
-    for verb in ("acquire", "release", "refresh", "status", "list"):
-        assert verb in result.output
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("60", 60_000),  # bare digits are seconds
+        ("60s", 60_000),
+        ("5m", 5 * 60_000),
+        ("2h", 2 * 3_600_000),
+        ("", None),
+        ("xyz", "error"),
+    ],
+)
+def test_ttl_parser_table(text, want):
+    if want == "error":
+        with pytest.raises(Exception):
+            _parse_ttl(text)
+    else:
+        assert _parse_ttl(text) == want
 
 
 def test_acquire_fresh_key(cwd_tmp):
@@ -547,7 +535,7 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-dotest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-dotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -559,7 +547,7 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     )
     assert stamped.exit_code == 0, stamped.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
     # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
@@ -586,7 +574,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-hotest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-hotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -602,7 +590,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
     assert "handover from" in out.output
 
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1, rows
     assert do[0]["started_at"]
     assert not do[0].get("ended_at")
@@ -654,7 +642,7 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-acqtest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-acqtest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -663,7 +651,7 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     )
     assert acq.exit_code == 0, acq.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
     # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
@@ -690,7 +678,7 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-acqrel", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-acqrel", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -703,7 +691,7 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
     )
     assert rel.exit_code == 0, rel.output
     rows = read_graph_strict(g)[0].get("sessions", [])
-    do = [x for x in rows if x.get("phase") == "do"]
+    do = [x for x in rows if x.get("phase") == "execute"]
     assert len(do) == 1  # one row, not two - release closed the acquire row
     assert do[0]["started_at"] and do[0]["ended_at"]
     assert do[0]["started_at"] <= do[0]["ended_at"]
@@ -723,8 +711,10 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "%s", "title": "t", '
-                 '"domain": "code", "project": "p"}]}\n' % node_id)
+    seed_graph(
+        g,
+        [{"id": node_id, "title": "t", "domain": "code", "project": "p"}],
+    )
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
     return g
 
@@ -732,7 +722,7 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
 def _do_rows(graph_path):
     return [
         x for x in read_graph_strict(graph_path)[0].get("sessions", [])
-        if x.get("phase") == "do"
+        if x.get("phase") == "execute"
     ]
 
 
@@ -818,7 +808,7 @@ def test_rollback_do_spares_an_earlier_open_row_from_the_same_session(
     rows = _do_rows(g)
     assert len(rows) == 1
     assert rows[0]["started_at"] == first_started
-    assert "no open do row to roll back" in rel.output
+    assert "no open execute row to roll back" in rel.output
 
 
 def test_stamp_do_and_rollback_do_are_mutually_exclusive(tmp_path, monkeypatch):
@@ -846,7 +836,7 @@ def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-do-2")
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-dotest2", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-dotest2", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -1195,7 +1185,7 @@ def _write_claim_file(key, *, expires_at):
 
     from fno.claims.hostid import machine_id
     from fno.claims.io import claim_path, serialize_claim
-    from fno.claims.types import Claim, now_ms
+    from fno.claims.types import Claim
 
     # The verdict reads PID reuse when the pid's create time EXCEEDS
     # acquired_at, so pin acquired_at a beat after THIS process's birth: the

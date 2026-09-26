@@ -415,7 +415,7 @@ fn count_runs(text: &str, hour: &str, activity: &mut Activity) {
     }
 }
 
-fn codex_call_text(line: &str) -> Option<String> {
+pub(crate) fn codex_call_text(line: &str) -> Option<String> {
     let row = serde_json::from_str::<Value>(line).ok()?;
     let p = row.get("payload")?;
     match p.get("type").and_then(|v| v.as_str())? {

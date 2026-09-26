@@ -21,3 +21,7 @@ The plan's codex expectation ("keeps `codex resume <sid> --remote unix://` in bo
 - Python: `test_registry.py` + `test_lineage_resolution.py` + `test_agents_history.py`: 121 passed. `check-python-static.sh`: clean.
 - `check-file-budget.sh`: cli/src/fno +24 against the 30 budget and the 26 grant cap. No over-budget file grew. `check-no-internal-refs.sh`: clean.
 - Live binary probe with planted rows: the zai row prints `fno agents spawn --resume <sid> -P zai -m 'glm-5.3-flash[1m]'` with `removal_trigger: session`. The anthropic row prints `claude --resume <sid> --model claude-opus-5`.
+
+## Plan note
+
+- The address guard now expands directory arguments to tracked Markdown files. Its prior file-only behavior rejected the plan's `skills/reign` acceptance. That acceptance now passes across 11 files.

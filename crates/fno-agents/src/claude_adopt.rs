@@ -93,6 +93,52 @@ pub fn transcript_model(session_id: &str) -> Option<String> {
     model
 }
 
+/// The thread title an adopt names its row after: the transcript's FIRST
+/// `summary` entry. `None` for a missing/unreadable transcript or a session
+/// that stated no summary yet - the caller falls through to the next naming
+/// source, never to a guess.
+pub fn transcript_title(session_id: &str) -> Option<String> {
+    transcript_title_in(&crate::claude_drive::claude_projects_dir(), session_id)
+}
+
+/// The synthesized registry row's display name: the thread title when the
+/// transcript carries one (capped, so a long title still fits the sideline
+/// cell), else the linked node id, else the derivable `t-<short>` form
+/// (`t-` is the bridge's manual form: no provenance). A bare short id reads
+/// as a phantom row, never as work.
+pub fn synthesized_entry_name(session: &str, fno_id: &str, short: &str) -> String {
+    transcript_title(session)
+        .map(|t| t.chars().take(48).collect::<String>())
+        .or_else(|| (!fno_id.is_empty()).then(|| fno_id.to_string()))
+        .unwrap_or_else(|| format!("t-{short}"))
+}
+
+/// [`transcript_title`] under an explicit projects base, so the read is
+/// unit-testable without touching the ambient `~/.claude`.
+pub fn transcript_title_in(base: &Path, session_id: &str) -> Option<String> {
+    let path = crate::claude_drive::find_transcript_in(base, session_id)?;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        // A transcript is append-only JSONL; summaries live on their own
+        // `type: "summary"` entries and the first one is the thread's title.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("summary") {
+            if let Some(title) = v
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The model-provider this session's observed model is recorded to run on,
 /// matched against `~/.fno/route-settings/*.json`. The file's
 /// `FNO_ROUTE_PROVIDER` stamp is the source - the observed model only SELECTS
@@ -103,6 +149,36 @@ pub fn transcript_model(session_id: &str) -> Option<String> {
 /// `FNO_ROUTE_SETTINGS_DIR` overrides the directory for tests.
 pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
     let model = model.filter(|m| !m.is_empty())?;
+    let mut providers: Vec<String> = Vec::new();
+    for (_path, v) in route_settings_files() {
+        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+            continue;
+        };
+        let file_model = env.get("ANTHROPIC_MODEL").and_then(|m| m.as_str());
+        if file_model == Some(model) {
+            if let Some(p) = env
+                .get("FNO_ROUTE_PROVIDER")
+                .and_then(|p| p.as_str())
+                .filter(|p| !p.is_empty())
+            {
+                if !providers.iter().any(|x| x == p) {
+                    providers.push(p.to_string());
+                }
+            }
+        }
+    }
+    if providers.len() == 1 {
+        providers.pop()
+    } else {
+        None
+    }
+}
+
+/// Every parseable `.json` file under the recorded route-settings dir
+/// (`FNO_ROUTE_SETTINGS_DIR`, else `$HOME/.fno/route-settings`), as
+/// (path, parsed JSON) pairs. Unreadable or malformed files drop out; a
+/// missing dir answers empty.
+pub(crate) fn route_settings_files() -> Vec<(PathBuf, serde_json::Value)> {
     let dir = std::env::var_os("FNO_ROUTE_SETTINGS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -112,8 +188,10 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
                 .join(".fno")
                 .join("route-settings")
         });
-    let entries = std::fs::read_dir(dir).ok()?;
-    let mut providers: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, serde_json::Value)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -125,28 +203,9 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
-            continue;
-        };
-        let file_model = env.get("ANTHROPIC_MODEL").and_then(|m| m.as_str());
-        if file_model != Some(model) {
-            continue;
-        }
-        let provider = env
-            .get("FNO_ROUTE_PROVIDER")
-            .and_then(|p| p.as_str())
-            .filter(|p| !p.is_empty());
-        if let Some(p) = provider {
-            if !providers.iter().any(|x| x == p) {
-                providers.push(p.to_string());
-            }
-        }
+        out.push((path, v));
     }
-    if providers.len() == 1 {
-        providers.pop()
-    } else {
-        None
-    }
+    out
 }
 
 /// One frontmatter scalar from a king manifest: `key: value`, quotes stripped,
@@ -301,9 +360,74 @@ mod tests {
     }
 
     #[test]
+    fn transcript_title_reads_the_first_summary_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{uuid}.jsonl")),
+            concat!(
+                r#"{"type":"user","message":{"role":"user"}}"#,
+                "\n",
+                r#"{"type":"summary","summary":"Fix the sideline phantom rows","leafUuid":"x"}"#,
+                "\n",
+                r#"{"type":"summary","summary":"A later summary never wins","leafUuid":"y"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_title_in(tmp.path(), uuid).as_deref(),
+            Some("Fix the sideline phantom rows"),
+            "the first summary entry is the thread title"
+        );
+        // A transcript with no summary answers nothing: the caller falls
+        // through to the next naming source, never to a guess.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(
+            bare.join(format!("{uuid}.jsonl")),
+            r#"{"type":"user","message":{"role":"user"}}"#,
+        )
+        .unwrap();
+        assert_eq!(transcript_title_in(bare.as_path(), uuid), None);
+        // A missing transcript answers nothing too.
+        assert_eq!(
+            transcript_title_in(tmp.path(), "b1c2d3e4-1111-2222-3333-444455556666"),
+            None
+        );
+    }
+
+    #[test]
     fn holder_and_name_formats() {
         assert_eq!(pty_claim_holder("a1b2c3d4"), "pty:a1b2c3d4");
         assert_eq!(adopted_name("a1b2c3d4"), "cc-a1b2c3d4");
+    }
+
+    #[test]
+    fn synthesized_entry_name_prefers_title_then_node_then_short_form() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        // The transcript title wins, capped at 48 chars.
+        let long = "x".repeat(80);
+        seed_transcript(
+            "entry-name",
+            uuid,
+            &[format!(r#"{{"type":"summary","summary":"{long}"}}"#)],
+        );
+        let named = synthesized_entry_name(uuid, "linked-task", "a1b2c3d4");
+        assert_eq!(named.chars().count(), 48, "the title is capped");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        // No title: the linked task id names the row.
+        assert_eq!(
+            synthesized_entry_name(uuid, "linked-task", "a1b2c3d4"),
+            "linked-task"
+        );
+        // Neither: the derivable t- form (the bridge's manual form).
+        assert_eq!(synthesized_entry_name(uuid, "", "a1b2c3d4"), "t-a1b2c3d4");
     }
 
     #[test]

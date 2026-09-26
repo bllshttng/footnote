@@ -47,12 +47,8 @@ class BenchmarkError(RuntimeError):
 # z.ai secondary lane (the GLM routing work owns that flag mapping). These are
 # curated defaults an operator edits, not an exhaustive registry.
 #
-# Every id here was verified against a configured provider at implementation
-# time (2026-08-26): the codex ids against the codex app-server model surface,
-# the GLM spellings against the z.ai lane (glm-5.3[1m] is the 1M-context
-# suffix form that lane serves), the claude ids against the harness's own
-# current model-id set. Two operator-named candidates were OMITTED because no
-# configured provider serves an id matching them: `gemini-3.7-flash` (the
+# Two operator-named candidates were OMITTED because no configured provider
+# serves an id matching them: `gemini-3.7-flash` (the
 # google surface here tops out at antigravity-gemini-3.x and gemini-2.5) and
 # opencode's "0x Alpha Free" tier (a marketing name; opencode's real free ids
 # are hy3-free, mimo-v2.5-free, muse-spark-1.2-contributor-free,
@@ -60,15 +56,15 @@ class BenchmarkError(RuntimeError):
 # or alpha name). The omission is the rule working: an unverifiable id is
 # never guessed into a routing table.
 REACHABILITY: dict[str, tuple[str, str]] = {
-    "claude-fable-5": ("claude", "claude-fable-5"),
-    "claude-opus-5": ("claude", "claude-opus-5"),
-    "claude-sonnet-5": ("claude", "claude-sonnet-5"),
-    "claude-haiku-4-5": ("claude", "claude-haiku-4-5"),
+    "claude-fable": ("claude", "fable"),
+    "claude-opus": ("claude", "opus"),
+    "claude-sonnet": ("claude", "sonnet"),
+    "claude-haiku": ("claude", "haiku"),
     "glm-5.3[1m]": ("claude", "glm-5.3[1m]"),
     "glm-4.7": ("claude", "glm-4.7"),
-    "gpt-5.6-sol": ("codex", "gpt-5.6-sol"),
-    "gpt-5.6-terra": ("codex", "gpt-5.6-terra"),
-    "gpt-5.6-luna": ("codex", "gpt-5.6-luna"),
+    "codex-sol": ("codex", "sol"),
+    "codex-terra": ("codex", "terra"),
+    "codex-luna": ("codex", "luna"),
 }
 
 # Static fallback tier bands (curated) used ONLY when no snapshot exists, so tier
@@ -76,15 +72,12 @@ REACHABILITY: dict[str, tuple[str, str]] = {
 # blocks. The resolver picks the cheapest reachable model within a band; order
 # here is not significant. `max` is the deliberate exception: a max request
 # takes the STRONGEST reachable model, not the cheapest that clears (see
-# route_resolve.resolve_tier). The previous generation of this table (gpt-5.5 /
-# gpt-5.4 / claude-opus-4-8) drifted a full model release with nothing
-# detecting it; the staleness test in cli/tests/unit/test_tier_table.py is the
-# tripwire that fires when it drifts again.
+# route_resolve.resolve_tier).
 STATIC_TIERS: dict[str, list[str]] = {
-    "max": ["claude-fable-5", "gpt-5.6-sol"],
-    "high": ["claude-opus-5", "gpt-5.6-sol"],
-    "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
-    "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
+    "max": ["claude-fable", "codex-sol"],
+    "high": ["claude-opus", "codex-sol"],
+    "medium": ["claude-sonnet", "glm-5.3[1m]", "codex-terra"],
+    "low": ["glm-4.7", "claude-haiku", "codex-luna"],
 }
 
 

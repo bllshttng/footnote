@@ -89,7 +89,7 @@ impl AnnouncePaths {
 // Small shared helpers
 // ---------------------------------------------------------------------------
 
-fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
 }
 
@@ -103,12 +103,12 @@ fn row_session_id(row: &Value) -> Option<String> {
     (!sid.is_empty()).then(|| sid.to_string())
 }
 
-fn row_terminal(row: &Value) -> bool {
+pub(crate) fn row_terminal(row: &Value) -> bool {
     let status = row_str(row, "status").unwrap_or("live");
     TERMINAL_STATUSES.contains(&status)
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -216,7 +216,7 @@ impl BusLock {
 /// appender.
 // ponytail: Rust never rotates; the next Python append rotates an over-size
 // live segment.
-fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
@@ -237,7 +237,7 @@ fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 /// answers false. `project:<p>` rides the same rule. An unreadable project
 /// map answers equality only: without it a portfolio reads as an epic set
 /// and would answer for each of its projects.
-fn crown_answers(
+pub(crate) fn crown_answers(
     held: Option<&str>,
     requested: &str,
     projects: Option<&HashMap<String, String>>,
@@ -604,7 +604,7 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
     }
 }
 
-fn new_msg_id() -> String {
+pub(crate) fn new_msg_id() -> String {
     // 'msg-XXXXXX', matching bus/log.py::new_msg_id (6 hex chars).
     let mut buf = [0u8; 3];
     if getrandom::fill(&mut buf).is_err() {
@@ -638,13 +638,15 @@ fn expired(m: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
 // Cursor: per-session seen-id set (decision 4)
 // ---------------------------------------------------------------------------
 
-fn cursor_path(state_root: &Path, session_id: &str) -> PathBuf {
+// pub(crate): the law edit read (law_match edit_answer) keeps its own
+// per-session seen-id set beside this one, so the dir is the caller's word.
+pub(crate) fn cursor_path(state_root: &Path, dir: &str, session_id: &str) -> PathBuf {
     let safe = format!("{}.json", session_id.replace('/', "_"));
-    state_root.join("announce-cursors").join(safe)
+    state_root.join(dir).join(safe)
 }
 
-fn load_cursor(state_root: &Path, session_id: &str) -> HashSet<String> {
-    let text = match std::fs::read_to_string(cursor_path(state_root, session_id)) {
+pub(crate) fn load_cursor(state_root: &Path, dir: &str, session_id: &str) -> HashSet<String> {
+    let text = match std::fs::read_to_string(cursor_path(state_root, dir, session_id)) {
         Ok(t) => t,
         Err(_) => return HashSet::new(),
     };
@@ -662,8 +664,8 @@ fn load_cursor(state_root: &Path, session_id: &str) -> HashSet<String> {
     }
 }
 
-fn save_cursor(state_root: &Path, session_id: &str, seen: &HashSet<String>) {
-    let path = cursor_path(state_root, session_id);
+pub(crate) fn save_cursor(state_root: &Path, dir: &str, session_id: &str, seen: &HashSet<String>) {
+    let path = cursor_path(state_root, dir, session_id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -766,7 +768,7 @@ pub(crate) fn read_render(
     let registry = crate::client_verbs::load_registry_entries(&paths.registry)?;
     let projects =
         crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
-    let mut seen = load_cursor(&paths.state_root, session_id);
+    let mut seen = load_cursor(&paths.state_root, "announce-cursors", session_id);
 
     let mut fresh: Vec<&Value> = Vec::new();
     let mut standing_seen: Vec<&Value> = Vec::new();
@@ -847,7 +849,7 @@ fn prune_and_save(
         .map(str::to_string)
         .collect();
     seen.retain(|id| live_ids.contains(id));
-    save_cursor(&paths.state_root, session_id, &seen);
+    save_cursor(&paths.state_root, "announce-cursors", session_id, &seen);
 }
 
 pub(crate) fn run_announce_read(args: &[String], paths: &AnnouncePaths) -> i32 {

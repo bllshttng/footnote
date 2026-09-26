@@ -411,7 +411,7 @@ def test_cell4_inject_boundary_parses_the_reason_side_channel(monkeypatch):
         dispatch_mod.subprocess, "run", _verb('{"delivered": false, "reason": "attach-failed"}')
     )
     assert dispatch_mod._mail_inject_claude("ses-1", "hi", reason_out=reason) is False
-    assert reason == ["attach-failed"]
+    assert reason == ["attach-failed", "waited-0s"]
 
     reason.clear()
     monkeypatch.setattr(
@@ -634,6 +634,54 @@ def test_live_failure_receipt_positives_the_durable_leg_and_hides_the_token(
     assert "io-error" in combined, (
         f"the diagnostic token must survive off the receipt line: {combined}"
     )
+
+
+def test_live_miss_receipt_names_wait_and_transcript_age(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """AC3 (x-7345): the receipt says how long the live leg waited and how
+    long the recipient has been quiet. Words only: the raw tokens stay on
+    stderr (x-1602's pin still binds)."""
+
+    def _miss(recipient, text, *, sender=None, reason_out=None):
+        if reason_out is not None:
+            reason_out.extend(["not-confirmed", "waited-32s"])
+        return False
+
+    _seed_asleep_transcript(monkeypatch, tmp_path)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _miss)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "spawn-exit-1"),
+    )
+
+    res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
+    assert "live leg unconfirmed after 32s" in receipt, receipt
+    assert "transcript quiet" in receipt, receipt
+    assert "durable leg holds" in receipt, receipt
+    assert "not-confirmed" not in receipt, receipt
+    assert "waited-" not in receipt, receipt
+
+
+def test_durable_leg_story_says_transcript_age_unknown(monkeypatch):
+    """AC5 (x-7345): an unreadable transcript prints unknown, never 0s."""
+    import fno.agents.session_truth as session_truth
+    from fno.mail.receipts import durable_leg_story
+
+    monkeypatch.setattr(
+        session_truth, "resolve_session_truth", lambda _r: {"last_activity_age_s": None}
+    )
+    story = durable_leg_story("io-error", "some-target")
+    assert story is not None
+    assert "transcript age unknown" in story, story
+    assert "0s" not in story, story
+    assert "io-error" not in story, story
+    # no waited token -> no "after" clause; no recipient -> no age clause
+    assert " after " not in durable_leg_story("io-error", "some-target")
+    assert durable_leg_story("io-error") == "live leg unconfirmed; durable leg holds"
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import pytest
 
 from fno.backlog import note_notify
 from fno.backlog.note_notify import NoteReaders, Refused, note_readers, pointer, readers_before_append
+from tests.fixtures.graph_seed import seed_graph
 
 
 def _holders(**by_node: str):
@@ -41,7 +42,7 @@ def _graph(tmp_path: Path, entries: list[dict]) -> Path:
         if row["status"] == "done" and not row.get("completed_at"):
             row["completed_at"] = "2026-09-01T00:00:00Z"
         complete.append(row)
-    path.write_text(json.dumps({"entries": complete}), encoding="utf-8")
+    seed_graph(path, complete)
     return path
 
 
@@ -399,41 +400,49 @@ def test_an_unresolvable_role_holder_skips_instead_of_failing() -> None:
 # --- the sender is a resolvable handle, never a literal ----------------------
 
 
-def test_send_pointer_stamps_the_callers_own_handle(monkeypatch) -> None:
-    """Provenance is looked up by from_name, so the sender must be this
-    session's own handle: a literal that matches no registry row ships
-    harness=unknown with no from_session."""
-    import fno.agents.dispatch as dispatch_mod
-    from fno.harness_identity import canonical_handle
+def _fake_machine_mail(monkeypatch, receipt: str) -> list[list[str]]:
+    import subprocess
+    from pathlib import Path
 
+    import fno.agents.dispatch as dispatch_mod
+    import fno.rust_binary as rust_binary
+
+    calls: list[list[str]] = []
+
+    def fake_dispatch_send(address, body, provider, **kwargs):
+        return SimpleNamespace(delivery="hosted", msg_id="legacy-msg")
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout=receipt, stderr="")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_dispatch_send)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/fake/fno-agents"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_send_pointer_forwards_to_rust_machine_mail_with_session(monkeypatch) -> None:
     session = "a1535d0b88424e4dbcafd733b8defc9c"
-    seen: dict = {}
-
-    def fake_send(address, body, provider, **kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(delivery="hosted", msg_id="msg-abc12345")
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
     monkeypatch.setattr(note_notify, "own_session", lambda: session)
+    calls = _fake_machine_mail(monkeypatch, "hosted msg-abc12345")
+
     assert note_notify.send_pointer("sess-worker", "body") == "hosted msg-abc12345"
-    assert seen["from_name"] == canonical_handle(session)
+    assert calls == [[
+        "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
+    ]]
 
 
-def test_send_pointer_without_identity_keeps_the_default_and_still_sends(
-    monkeypatch,
-) -> None:
-    import fno.agents.dispatch as dispatch_mod
-
-    seen: dict = {}
-
-    def fake_send(address, body, provider, **kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(delivery="durable", msg_id="msg-abc12345")
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
+def test_send_pointer_forwards_to_rust_machine_mail_without_session(monkeypatch) -> None:
     monkeypatch.setattr(note_notify, "own_session", lambda: None)
+    calls = _fake_machine_mail(monkeypatch, "durable msg-abc12345")
+
     assert note_notify.send_pointer("sess-worker", "body") == "durable msg-abc12345"
-    assert seen["from_name"] == "fno"
+    assert calls == [[
+        "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
+    ]]
 
 
 # --- the refusal: resolution runs before the append ---------------------------
@@ -973,3 +982,41 @@ def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert written == ["x-0d08"]
+
+
+def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
+    """The finding flags never touch the note machinery in Python: the bridge
+    is a passthrough and Rust owns routing, delivery and the receipt."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    calls: list[list[str]] = []
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(argv, check=False):
+        calls.append(argv)
+        return Proc()
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
+    monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the note machinery must not run for a blocking finding")
+
+    monkeypatch.setattr("fno.backlog.note_notify.readers_before_append", must_not_run)
+    monkeypatch.setattr(note_bridge, "_write_state", must_not_run)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls, "the native action must run"
+    assert calls[0][1:3] == ["backlog", "note"]
+    assert calls[0][-1] == "--blocking"
+    assert "x-5a62" in calls[0] and "the gate leak" in calls[0], (
+        "the positionals ride through verbatim"
+    )

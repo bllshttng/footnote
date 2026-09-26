@@ -61,7 +61,6 @@ def test_classify_origin_distinguishes_peer_operator_and_unknown(monkeypatch):
 
 
 def test_mail_envelope_carries_and_validates_origin(monkeypatch):
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     from fno.mail.envelope import ForgedEnvelopeError, fno_mail_open, wrap_fno_mail
 
     assert (
@@ -278,52 +277,18 @@ def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
-    envelope.fleet_has_crown_at.cache_clear()
-
     rendered = envelope.wrap_fno_mail(
         "run the smoke", from_="king", from_session="session-king"
     )
     assert rendered.startswith(
-        '<fno_mail from="session-king" from_rank="L1 fno">'
+        '<fno_mail from="session-king" harness="codex" '
+        'from_rank="L1 fno" from_name="king">'
     )
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 
 
-def test_registry_read_error_keeps_footer_on(tmp_path, monkeypatch):
-    """An unreadable registry keeps the crown read enabled: the extra attribute
-    is cheap, and suppressing it when the fleet may be crowned is not.
-
-    Its own FNO_AGENTS_HOME, like every other test here, because the root is
-    the cache key and a test that borrows the ambient one borrows whatever
-    answer an earlier test already resolved for it.
-    """
-    import fno.mail.envelope as envelope
-
-    monkeypatch.setattr(
-        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
-    )
-    monkeypatch.setattr(
-        envelope,
-        "load_registry",
-        lambda **_: (_ for _ in ()).throw(OSError()),
-    )
-    assert envelope.fleet_has_crown() is True
-
-
 def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch):
-    """The crown read resolves ``agents_registry_path()``, the writer's path.
-
-    ``crown_level`` is stamped through ``update_registry`` -> ``_registry_path``
-    -> ``agents_registry_path()``. That is config-overridable, and separately
-    overridable from the Rust ``FNO_AGENTS_HOME``, which the registry's own
-    schema-bump refusal names as two knobs. Reading the Rust home from here
-    means reading a file this side never wrote once they are set apart, and a
-    missing file is not an error, so the rank is dropped silently on a
-    genuinely crowned fleet.
-
-    The two roots are pointed at OPPOSITE answers, so a read of the wrong one
-    cannot coincidentally agree.
-    """
+    """The Rust renderer reads the registry this process's writer resolves."""
     import fno.mail.envelope as envelope
 
     writer_root = tmp_path / "writer"
@@ -331,8 +296,9 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
     writer_root.mkdir()
     rust_home.mkdir()
     (writer_root / "registry.json").write_text(
-        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp",'
-        '"log_path":"/tmp/log","harness":"codex","status":"live",'
+        '{"schema_version":19,"agents":[{"name":"folio","cwd":"/tmp",'
+        '"log_path":"/tmp/log","harness":"claude",'
+        '"harness_session_id":"session-folio","status":"live",'
         '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
         '"crown_scope":"epic"}]}',
         encoding="utf-8",
@@ -345,72 +311,11 @@ def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch)
         envelope, "agents_registry_path", lambda: writer_root / "registry.json"
     )
 
-    assert envelope.fleet_has_crown() is True
-
-
-def test_two_roots_in_one_process_get_their_own_answers(tmp_path):
-    """The crown read is cached on its ROOT, not on nothing (x-3d21 R5).
-
-    A zero-argument cached read is a global keyed on nothing: the first caller
-    in a process fixes the answer for every caller after it, so the result
-    tracks execution order rather than the root asked about. That shipped once
-    here and made two tests green locally and red in CI, because the developer
-    machine carried a crowned registry and the runner did not.
-
-    Resolving BOTH roots in ONE process is the whole assertion. A test that
-    reads one root per process cannot fail when the key goes away.
-
-    What this does NOT pin is the cache SIZE. `maxsize=1` still keys on the
-    argument and merely evicts, so it answers both roots correctly and this
-    test passes under it (measured). The defect was the zero-argument
-    signature, not the size, and that is what this pins.
-    """
-    from fno.mail.envelope import fleet_has_crown_at
-
-    crownless = tmp_path / "crownless"
-    crowned = tmp_path / "crowned"
-    crownless.mkdir()
-    crowned.mkdir()
-    (crownless / "registry.json").write_text(
-        '{"schema_version":19,"agents":[]}', encoding="utf-8"
+    rendered = envelope.wrap_fno_mail(
+        "hi", from_="folio-short", from_session="session-folio", harness="claude"
     )
-    (crowned / "registry.json").write_text(
-        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp",'
-        '"log_path":"/tmp/log","harness":"codex","status":"live",'
-        '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
-        '"crown_scope":"epic"}]}',
-        encoding="utf-8",
-    )
-
-    # Crownless FIRST: a read keyed on nothing answers False for both.
-    assert fleet_has_crown_at(crownless / "registry.json") is False
-    assert fleet_has_crown_at(crowned / "registry.json") is True
-    # Back again, so a cached hit is exercised rather than only a cold read.
-    assert fleet_has_crown_at(crownless / "registry.json") is False
-
-
-def test_recipient_crown_is_read_from_the_live_matching_registry_row(tmp_path):
-    from fno.mail.envelope import crown_at
-
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(
-        '{"schema_version":19,"agents":['
-        '{"name":"king","cwd":"/tmp","log_path":"/tmp/log",'
-        '"harness":"codex","harness_session_id":"session-king",'
-        '"related_session_id":"session-king-related",'
-        '"status":"live","created_at":"2026-01-01T00:00:00Z",'
-        '"crown_level":1,"crown_scope":"fno"},'
-        '{"name":"former-king","cwd":"/tmp","log_path":"/tmp/log",'
-        '"harness":"codex","harness_session_id":"session-former",'
-        '"status":"live","created_at":"2026-01-01T00:00:00Z"}]}',
-        encoding="utf-8",
-    )
-
-    assert crown_at(registry_path, "session-king") == "L1 fno"
-    assert crown_at(registry_path, "session-king-related") == "L1 fno"
-    assert crown_at(registry_path, "session-former") is None
-    assert crown_at(registry_path, "session-stranger") is None
-    assert crown_at(registry_path, None) is None
+    assert 'from_name="folio"' in rendered
+    assert 'from_rank="L1 epic"' in rendered
 
 
 def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
@@ -434,7 +339,6 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
         encoding="utf-8",
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
-    envelope.fleet_has_crown_at.cache_clear()
 
     abdicated = envelope.wrap_fno_mail(
         "rule on this",
@@ -453,27 +357,11 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
     assert 'to_rank="L1 fno"' in crowned
 
 
-def test_unreadable_registry_never_tells_a_king_it_was_deposed(monkeypatch):
-    """`fleet_has_crown` fails OPEN and `crown_at` fails CLOSED, so an
-    unreadable registry made the two agree on a sentence neither measured:
-    "none" is a positive claim that the reader lost its crown."""
+def test_unreadable_registry_does_not_claim_recipient_rank(tmp_path, monkeypatch):
     import fno.mail.envelope as envelope
-
-    def _unreadable(**_kwargs):
-        raise OSError("registry mid-write")
-
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
-    monkeypatch.setattr(envelope, "crown_at", lambda _path, _session: None)
-    monkeypatch.setattr(envelope, "load_registry", _unreadable)
-
-    from fno.mail.envelope import _to_rank
-
-    assert _to_rank("session-king") is None
-
-    # Positive control: the same call with a readable registry DOES render the
-    # rank, so the None above is the read failing and not the gate being dead.
-    monkeypatch.setattr(envelope, "load_registry", lambda **_kwargs: [])
-    assert _to_rank("session-king") == "none"
+    monkeypatch.setattr(envelope, "agents_registry_path", lambda: tmp_path / "missing.json")
+    rendered = envelope.wrap_fno_mail("hi", from_="peer", to_session="session-king")
+    assert "to_rank" not in rendered
 
 
 def test_unresolved_recipient_gets_no_crown_attribute(monkeypatch):
@@ -482,14 +370,13 @@ def test_unresolved_recipient_gets_no_crown_attribute(monkeypatch):
     measurement at all."""
     import fno.mail.envelope as envelope
 
-    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
     rendered = envelope.wrap_fno_mail(
         "hi", from_="peer", to_session=None
     )
     assert "to_rank" not in rendered
 
 
-def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
+def test_crownless_fleet_envelope_includes_the_current_recipient_name(tmp_path, monkeypatch):
     import fno.mail.envelope as envelope
 
     registry_path = tmp_path / "registry.json"
@@ -501,12 +388,10 @@ def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
-    envelope.fleet_has_crown_at.cache_clear()
-
     rendered = envelope.wrap_fno_mail(
         "hi", from_="peer", to_session="session-w"
     )
-    assert rendered == '<fno_mail from="peer">hi</fno_mail>'
+    assert rendered == '<fno_mail from="peer" to_name="w">hi</fno_mail>'
 
 
 def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch):
@@ -515,12 +400,6 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     monkeypatch.setattr(
         envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
     )
-    monkeypatch.setattr(
-        envelope,
-        "load_registry",
-        lambda **_: (_ for _ in ()).throw(OSError()),
-    )
-
     # Unreadable state grants no standing AND raises nothing: the render
     # degrades to the plain one-line envelope.
     rendered = envelope.wrap_fno_mail(

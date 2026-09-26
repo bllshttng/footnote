@@ -47,12 +47,20 @@ cleanup() {
         wait "$SERVER_PID" 2>/dev/null || true
     fi
     # The restart's daemon leg lazy-starts a daemon in the private home:
-    # end it so the run leaves nothing behind.
+    # end it and HOLD for its exit, because its last writes (and its
+    # children's) race the sweep below and turn rm -rf into
+    # "Directory not empty".
     if [[ -f "$AGENTS_HOME/supervisor.sock.lock" ]]; then
         DPID="$(head -1 "$AGENTS_HOME/supervisor.sock.lock" | awk '{print $1}')"
-        kill -9 "$DPID" 2>/dev/null || true
+        if [[ -n "$DPID" ]] && kill -0 "$DPID" 2>/dev/null; then
+            kill -9 "$DPID" 2>/dev/null || true
+            for _ in {1..100}; do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 0.05
+            done
+        fi
     fi
-    rm -rf "$TMP_DIR"
+    rm -rf "$TMP_DIR" 2>/dev/null || { sleep 0.5; rm -rf "$TMP_DIR"; }
 }
 trap cleanup EXIT
 

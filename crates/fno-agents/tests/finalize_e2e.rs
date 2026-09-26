@@ -2199,6 +2199,10 @@ fn finalize_files_outstanding_question_on_stuck_terminal() {
 
     let c = fno_calls(&env);
     assert!(c.contains("outstanding ask"), "{c}");
+    // The rescued question records as a pin: the ask argv carries --ask,
+    // which the ask port requires now that it refuses context-free asks.
+    assert!(c.contains("--ask"), "{c}");
+    assert!(c.contains("the asker went quiet on this question"), "{c}");
     assert!(
         env.outstanding_store.exists(),
         "the stub must have recorded the filed question"

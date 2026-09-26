@@ -133,7 +133,7 @@ if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
   # caught this exact line.
   #
   # Read in a SUBSHELL, so only STATE_DIR crosses back. The stub exports
-  # STATE_DIR, LATCHES_DIR, GRAPH_JSON_PATH, WORKTREES_BASE and CONFIG_FILE,
+  # STATE_DIR, LATCHES_DIR, WORKTREES_BASE and CONFIG_FILE,
   # and its own header says it is config-blind. Sourcing it here put those
   # built-in defaults into the environment of every child this hook spawns,
   # and other hooks do read them: context-nudge.sh reads ${STATE_DIR} and

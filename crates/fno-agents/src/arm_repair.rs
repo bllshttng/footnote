@@ -55,7 +55,12 @@ fn entry(
             Some(OPERATOR),
         ),
         "timeout" => (
-            "the arm's run hit its time limit",
+            "the arm's run hit its time limit; the step named in the detail is where the clock stopped, not a measured cause",
+            Some(WATCH_STATUS),
+            Some(OPERATOR),
+        ),
+        "budget_spent" => (
+            "the pass ran out of its slice before it covered every unit it enumerated; the detail names how many of N it reached",
             Some(WATCH_STATUS),
             Some(OPERATOR),
         ),
@@ -334,6 +339,8 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
             "select_unmeasured".to_string(),
             Some(select_unmeasured_repair(&detail)),
         )
+    } else if skip == "budget_spent" {
+        ("budget_spent".to_string(), None)
     } else if skip == "timeout" {
         ("timeout".to_string(), None)
     } else if detail.contains("not a git repository") {
@@ -351,17 +358,8 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
     row.line = format!("{} cause={cause} ({hint}){}", render_row(row), suffix(row));
 }
 
-/// The project a select-read unmeasured detail names; `None` when it names
-/// none (`-`).
-fn project_from_detail(detail: &str) -> Option<&str> {
-    detail
-        .split_once(crate::select_read::PROJECT_TOKEN)
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .filter(|project| *project != "-")
-}
-
 fn select_unmeasured_repair(detail: &str) -> String {
-    match project_from_detail(detail) {
+    match crate::select_read::project_from_detail(detail) {
         Some(project) => format!("fno backlog advance --project {project} --source ac --json"),
         None => "fno backlog advance --source ac --json".to_string(),
     }
@@ -526,22 +524,18 @@ pub fn heal(
         let ok = run("install");
         parts.push(format!("install:{}", if ok { "spawned" } else { "failed" }));
     }
-    let mut advance_rows: Vec<&ArmStatus> = rows
-        .iter()
-        .filter(|r| r.cause.as_deref() == Some("select_unmeasured"))
-        .collect();
-    advance_rows.sort_by_key(|r| r.last_ts.as_deref().unwrap_or("never"));
-    for row in advance_rows {
-        let token = row.last_ts.as_deref().unwrap_or("never");
-        if !crate::operator_notice::mark_once(store, "self_heal:advance", token) {
+    // The per-project retry candidates ride the row: each attempt fires once
+    // (token = the attempt's ts) and two projects never overwrite each
+    // other's token, which the single shared key let them do.
+    let mut candidates: Vec<&crate::tick_ledger::UnmeasuredRetry> =
+        rows.iter().flat_map(|r| r.retries.iter()).collect();
+    candidates.sort_by(|a, b| a.ts.cmp(&b.ts));
+    for cand in candidates {
+        let key = format!("self_heal:advance:{}", cand.project);
+        if !crate::operator_notice::mark_once(store, &key, &cand.ts) {
             continue;
         }
-        let project = row
-            .detail
-            .as_deref()
-            .and_then(project_from_detail)
-            .unwrap_or("-");
-        let action = format!("advance:{project}");
+        let action = format!("advance:{}", cand.project);
         let ok = run(&action);
         parts.push(format!(
             "{action}:{}",
@@ -636,7 +630,7 @@ pub fn run_repair(action: &str, cwd: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::claims::{encode_key, hostname, machine_id, now_ms, SCHEMA_VERSION};
-    use crate::tick_ledger::SCHED_LAUNCHD;
+    use crate::tick_ledger::{UnmeasuredRetry, SCHED_LAUNCHD};
 
     fn row(arm: &str, sched: &str) -> ArmStatus {
         ArmStatus {
@@ -661,6 +655,7 @@ mod tests {
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         }
     }
 
@@ -919,43 +914,52 @@ mod tests {
     }
 
     #[test]
-    fn heal_retries_each_unmeasured_selection_once_per_timestamp() {
+    fn heal_retries_each_unmeasured_attempt_once_per_project() {
         let td = tempfile::TempDir::new().unwrap();
         let store = td.path().join("signals.json");
         let mut ac = row("auto_continue", SCHED_DAEMON);
-        ac.failing = true;
-        ac.cause = Some("select_unmeasured".into());
-        // Round-trip through the writer itself: select_read owns the detail
-        // format, so a wording drift here fails this test instead of silently
-        // degrading the repair verb.
-        ac.detail = Some(crate::select_read::unmeasured_detail(
-            crate::select_read::Kind::Next,
-            &["--project".to_string(), "fno".to_string()],
-            120,
-            Some("selection stalled"),
-        ));
+        ac.retries = vec![
+            UnmeasuredRetry {
+                project: "alpha".into(),
+                ts: "2026-09-04T12:00:00Z".into(),
+            },
+            UnmeasuredRetry {
+                project: "beta".into(),
+                ts: "2026-09-04T12:05:00Z".into(),
+            },
+        ];
         let rows = vec![ac];
         let mut runs = Vec::new();
         let first = heal(&rows, &[], true, &store, 0, 1800, &mut |action| {
             runs.push(action.to_string());
             true
         });
-        assert_eq!(first, "heal=advance:fno:spawned");
+        assert_eq!(first, "heal=advance:alpha:spawned,advance:beta:spawned");
         let second = heal(&rows, &[], true, &store, 300, 1800, &mut |action| {
             runs.push(action.to_string());
             true
         });
         assert_eq!(second, "heal=0");
-        assert_eq!(runs, ["advance:fno"]);
+        assert_eq!(runs, ["advance:alpha", "advance:beta"]);
 
+        // A new attempt for a third project fires; a failed spawn keeps its
+        // token marked, so the same attempt never re-runs.
         let mut next = rows.clone();
-        next[0].last_ts = Some("2026-09-04T13:00:00Z".into());
+        next[0].retries = vec![UnmeasuredRetry {
+            project: "gamma".into(),
+            ts: "2026-09-04T13:00:00Z".into(),
+        }];
         let third = heal(&next, &[], true, &store, 600, 1800, &mut |action| {
             runs.push(action.to_string());
             false
         });
-        assert_eq!(third, "heal=advance:fno:failed");
-        assert_eq!(runs, ["advance:fno", "advance:fno"]);
+        assert_eq!(third, "heal=advance:gamma:failed");
+        let fourth = heal(&next, &[], true, &store, 900, 1800, &mut |action| {
+            runs.push(action.to_string());
+            false
+        });
+        assert_eq!(fourth, "heal=0");
+        assert_eq!(runs, ["advance:alpha", "advance:beta", "advance:gamma"]);
     }
 
     #[test]
@@ -1017,6 +1021,44 @@ mod tests {
         annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
         assert_eq!(rows[0].cause.as_deref(), Some("timeout"));
         assert!(rows[0].line.contains("repair: fno do pr watch status"));
+    }
+
+    // AC2: a budget_spent row names the shortfall; a timeout row stops
+    // blaming the step the clock happened to land in.
+    #[test]
+    fn budget_spent_row_names_the_count_and_timeout_names_the_clock() {
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.failing = true;
+        kw.skip_reason = Some("budget_spent".into());
+        kw.detail = Some(
+            "crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns".into(),
+        );
+        let mut rows = vec![kw];
+        annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
+        assert_eq!(rows[0].cause.as_deref(), Some("budget_spent"));
+        assert!(rows[0].line.contains("repair: fno do pr watch status"));
+        assert!(
+            rows[0]
+                .line
+                .contains("ran out of its slice before it covered every unit it enumerated"),
+            "line: {}",
+            rows[0].line
+        );
+
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.failing = true;
+        kw.skip_reason = Some("timeout".into());
+        kw.detail = Some("phase slice 45s spent at king_wake:mail".into());
+        let mut rows = vec![kw];
+        annotate(&mut rows, &RepairFacts::new(install_off_main(None), &[]));
+        assert_eq!(rows[0].cause.as_deref(), Some("timeout"));
+        assert!(
+            rows[0]
+                .line
+                .contains("the step named in the detail is where the clock stopped"),
+            "line: {}",
+            rows[0].line
+        );
     }
 
     #[test]

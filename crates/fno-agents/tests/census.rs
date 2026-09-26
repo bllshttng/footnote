@@ -54,7 +54,7 @@ fn rpc(stream: &mut UnixStream, id: u64, method: &str, params: Value) -> Value {
 async fn census_finds_a_store_keeper_by_self_report() {
     let home = short_home("walk");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
     let sock = home.join("graph.json.store.sock");
     let mut keeper = Command::new(WORKER_BIN)
         .args([

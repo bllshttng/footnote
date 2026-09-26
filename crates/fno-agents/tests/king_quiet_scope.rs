@@ -47,21 +47,28 @@ fn a_quiet_board_with_undelivered_scope_stops_while_waiting() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let graph = home.join("graph.json");
-    std::fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        r#"{"entries":[{"id":"x-epic","type":"epic","priority":"p1","status":"done"}]}"#,
+        &[serde_json::json!({
+            "id": "x-epic", "slug": "x-epic", "title": "epic", "type": "epic",
+            "priority": "p1", "status": "done", "completed_at": "2026-08-18T00:00:00Z"
+        })],
     )
     .unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
         format!(
-            "[paths]\ngraph_json = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
-            graph.to_string_lossy()
+            "state_dir = {:?}\n[work.workspaces.test]\nprojects = [{{name = \"fno\"}}]\n",
+            home.to_string_lossy()
         ),
     )
     .unwrap();
-    write_exec(&bin, "fno-py", "#!/bin/sh\nprintf '[]\\n'");
+    write_exec(
+        &bin,
+        "fno-py",
+        "#!/bin/sh\nprintf '{\"questions\":[],\"verdicts\":{}}\\n'",
+    );
     let gh = write_exec(&bin, "gh", "#!/bin/sh\nprintf '[]\\n'");
     let fno = write_exec(
         dir.path(),
@@ -90,6 +97,7 @@ fn a_quiet_board_with_undelivered_scope_stops_while_waiting() {
         set_env("FNO_CONFIG", &config),
         set_env("FNO_AGENTS_HOME", dir.path().join("agents")),
         set_env("FNO_CLAIMS_ROOT", dir.path().join("claims")),
+        set_env("FNO_SPACES_DIR", dir.path().join("spaces")),
         set_env("FNO_PY", bin.join("fno-py")),
         set_env("PATH", path),
     ];

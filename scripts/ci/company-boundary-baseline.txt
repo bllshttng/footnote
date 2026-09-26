@@ -1,5 +1,8 @@
 # Known company-boundary findings held by the CI ratchet.
-# Each entry is exact: importing file and line, layer pair, and import statement.
+# Each entry is exact: importing file, layer pair, and import statement.
+# The import's line number is deliberately not recorded: it moves on every
+# unrelated edit above the import, and a ratchet that churns on such edits
+# teaches people to regenerate it. Strict mode still prints the line.
 # Remove an entry only in the same PR that removes the corresponding dependency.
 #
 # Both survivors are the same finding: the `fno doctor event emit` envelope builder
@@ -21,14 +24,13 @@
 # is core or a composition root. The second of the pair is the claim-holder
 # vocabulary, which the agents layer owns; the probe must parse a holder to
 # look its session up, and duplicating that parser in core is how two
-# spellings of one vocabulary start drifting. (Lines refreshed 2026-09-11 for
-# same-statement shifts only; no dependency moved.)
+# spellings of one vocabulary start drifting.
 # See docs/architecture/company-boundaries.md.
-cli/src/fno/events/cli.py:142: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
-cli/src/fno/events/cli.py:174: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/claims/cli.py:1168: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
-cli/src/fno/claims/cli.py:1441: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1464: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/events/cli.py: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
+cli/src/fno/events/cli.py: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
+cli/src/fno/claims/cli.py: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
+cli/src/fno/claims/cli.py: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 #
 # Added 2026-09-03. `fno agents claim list --silent-after` reads a
 # claim's own transcript tail to answer "has this worker gone quiet", the
@@ -37,12 +39,12 @@ cli/src/fno/claims/cli.py:1464: L1 core -> L5 runtime / from fno.agents.truth_st
 # or opencode worker). tail_facts IS the transcript reader; there is no
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
-cli/src/fno/claims/roster.py:35: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
-cli/src/fno/claims/roster.py:41: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
-cli/src/fno/claims/roster.py:96: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-cli/src/fno/claims/roster.py:103: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
-cli/src/fno/claims/roster.py:121: L1 core -> L5 runtime / from fno.agents.reachability import (
-cli/src/fno/claims/roster.py:132: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.reachability import (
+cli/src/fno/claims/roster.py: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
 #
 # Added 2026-09-11 (the liveness-readers node). Every roster row, the status
 # crosscheck and the graph's worked overlay now classify through the ONE
@@ -53,7 +55,7 @@ cli/src/fno/claims/roster.py:132: L1 core -> L5 runtime / from fno.agents.watchd
 # shape as the entries above. The retirement path is descending the pure core
 # (the verdict constants and classify_reachability) into L1 claims; the
 # instruments cannot follow it down, so the roster's watchdog edges stay.
-cli/src/fno/graph/statuses.py:328: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/graph/statuses.py: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
 
 # Added 2026-09-10. The maintain abandoned-do-row leg's prover answers "is
 # this do row's session gone" from transcript truth: finished_with_the_tree
@@ -62,5 +64,5 @@ cli/src/fno/graph/statuses.py:328: L1 core -> L5 runtime / from fno.agents.reach
 # the same shape as the roster.py entries above. The detector takes the
 # prover as an injected parameter, so tests drive it hermetically; the
 # edge lives only where the sweep composes its instrument.
-cli/src/fno/graph/maintain.py:2100: L1 core -> L5 runtime / from fno.agents.watchdog import finished_with_the_tree, tail_facts
+cli/src/fno/graph/maintain.py: L1 core -> L5 runtime / from fno.agents.watchdog import finished_with_the_tree, tail_facts
 layer cycle: L0 platform -> L5 runtime -> L0 platform

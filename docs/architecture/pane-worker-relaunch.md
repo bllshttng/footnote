@@ -44,7 +44,7 @@ Selecting an idle row sends `Command::ResumeAgent { name }`. The server joins th
 
 | Harness | Resume argv |
 |---------|-------------|
-| claude (pane-hosted, or dead bg row) | `claude --resume <harness_session_id>` |
+| claude | the `revive` re-entry plan: `claude respawn <job id>` when `claude agents --json --all` lists the job, else `claude --bg --resume <harness_session_id>`, then `claude attach <job id>` in the pane |
 | codex | `codex resume <harness_session_id>` |
 | anything else | no Resume offered |
 

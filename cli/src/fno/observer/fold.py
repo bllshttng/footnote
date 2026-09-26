@@ -693,7 +693,7 @@ if __name__ == "__main__":
             "termination_reason": "DonePRGreen",
             "graph_node_id": "x-2",
             "sessions": ["s2"],
-            "phases_completed": ["do"],  # different skill -> not attributed
+            "phases_completed": ["execute"],  # different skill -> not attributed
         },
     ]
     graph_nodes = [{"id": "x-1", "merge_status": "merged", "reverted": False}, {"id": "x-2", "reverted": False}]
@@ -788,7 +788,7 @@ if __name__ == "__main__":
     }
     t_rows = [
         # a churny build attempt in-window with NO PR -> no_pr class
-        {"completed": "2026-07-14T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["do"], "sessions": ["snope"]},
+        {"completed": "2026-07-14T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["execute"], "sessions": ["snope"]},
         # a plan-only thread -> NOT a no_pr attempt
         {"completed": "2026-07-14T11:00:00", "termination_reason": "DoneAdvisory", "phases_completed": ["think"], "sessions": ["splan"]},
     ]

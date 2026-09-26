@@ -1,0 +1,723 @@
+{
+ "days": 30,
+ "scope": {
+  "harnesses": [
+   "claude",
+   "codex",
+   "opencode"
+  ],
+  "all_projects": true,
+  "projects": [],
+  "roots": [
+   "/Users/king/fixture"
+  ]
+ },
+ "sessions": [],
+ "nodes": [],
+ "skipped": {},
+ "totals": {
+  "sessions": 132
+ },
+ "witness": {
+  "submits": 300,
+  "bound": 200
+ },
+ "populations": {
+  "transcripts": 200,
+  "dropped": {
+   "keepalive_only": 12,
+   "self": 2
+  },
+  "scanned": 132,
+  "attended": 41,
+  "substantive": 90,
+  "eligible": 87,
+  "sampled": 41,
+  "judged": 41
+ },
+ "activity": {
+  "tokens": {
+   "input": 1000,
+   "output": 2000,
+   "cache_read": 3000,
+   "cache_write": 400
+  },
+  "lines": {
+   "added": 5000,
+   "removed": 800
+  },
+  "tool_errors": {
+   "Bash": 9,
+   "Edit": 4,
+   "WebFetch": 1
+  },
+  "interruptions": 7,
+  "languages": {
+   "rs": 900,
+   "py": 300
+  },
+  "unmeasured": {}
+ },
+ "hours": {
+  "utc_offset": "+02:00",
+  "operator_turns": [
+   2,
+   1,
+   0,
+   0,
+   0,
+   0,
+   1,
+   2,
+   18,
+   14,
+   10,
+   8,
+   9,
+   11,
+   22,
+   15,
+   9,
+   7,
+   5,
+   4,
+   3,
+   2,
+   2,
+   1
+  ]
+ },
+ "response_time": {
+  "n": 210,
+  "median_s": 24,
+  "p90_s": 210,
+  "buckets": {
+   "2-10s": 90,
+   "10-30s": 60,
+   "30-60s": 30,
+   "1-2m": 30
+  }
+ },
+ "parallel": {
+  "window_s": 1800,
+  "overlap_pairs": 6,
+  "sessions": 9
+ },
+ "daily": [
+  {
+   "date": "2026-08-26",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 7,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-08-26",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-08-27",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-08-27",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-08-28",
+   "harness": "claude",
+   "sessions": 4,
+   "operator_turns": 9,
+   "tool_use": 16,
+   "output_tokens": 4800
+  },
+  {
+   "date": "2026-08-28",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 2,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-08-29",
+   "harness": "claude",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-08-29",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-08-30",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-08-30",
+   "harness": "codex",
+   "sessions": 3,
+   "operator_turns": 6,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-08-31",
+   "harness": "claude",
+   "sessions": 0,
+   "operator_turns": 0,
+   "tool_use": 0,
+   "output_tokens": 0
+  },
+  {
+   "date": "2026-08-31",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-01",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 8,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-01",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-02",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-02",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-03",
+   "harness": "claude",
+   "sessions": 4,
+   "operator_turns": 10,
+   "tool_use": 16,
+   "output_tokens": 4800
+  },
+  {
+   "date": "2026-09-03",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-04",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 7,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-04",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-05",
+   "harness": "claude",
+   "sessions": 1,
+   "operator_turns": 4,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-05",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-06",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-06",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-07",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 8,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-07",
+   "harness": "codex",
+   "sessions": 3,
+   "operator_turns": 6,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-08",
+   "harness": "claude",
+   "sessions": 0,
+   "operator_turns": 0,
+   "tool_use": 0,
+   "output_tokens": 0
+  },
+  {
+   "date": "2026-09-08",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-09",
+   "harness": "claude",
+   "sessions": 4,
+   "operator_turns": 9,
+   "tool_use": 16,
+   "output_tokens": 4800
+  },
+  {
+   "date": "2026-09-09",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-10",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-10",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-11",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 7,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-11",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-12",
+   "harness": "claude",
+   "sessions": 1,
+   "operator_turns": 4,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-12",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-13",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-13",
+   "harness": "codex",
+   "sessions": 3,
+   "operator_turns": 6,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-14",
+   "harness": "claude",
+   "sessions": 4,
+   "operator_turns": 9,
+   "tool_use": 16,
+   "output_tokens": 4800
+  },
+  {
+   "date": "2026-09-14",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 4,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-15",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 8,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-15",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-16",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-16",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-17",
+   "harness": "claude",
+   "sessions": 1,
+   "operator_turns": 4,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-17",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-18",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 7,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-18",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-19",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-19",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-20",
+   "harness": "claude",
+   "sessions": 4,
+   "operator_turns": 10,
+   "tool_use": 16,
+   "output_tokens": 4800
+  },
+  {
+   "date": "2026-09-20",
+   "harness": "codex",
+   "sessions": 3,
+   "operator_turns": 6,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-21",
+   "harness": "claude",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-21",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 4,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-22",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-22",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 3,
+   "tool_use": 4,
+   "output_tokens": 1200
+  },
+  {
+   "date": "2026-09-23",
+   "harness": "claude",
+   "sessions": 3,
+   "operator_turns": 7,
+   "tool_use": 12,
+   "output_tokens": 3600
+  },
+  {
+   "date": "2026-09-23",
+   "harness": "codex",
+   "sessions": 2,
+   "operator_turns": 5,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-24",
+   "harness": "claude",
+   "sessions": 2,
+   "operator_turns": 6,
+   "tool_use": 8,
+   "output_tokens": 2400
+  },
+  {
+   "date": "2026-09-24",
+   "harness": "codex",
+   "sessions": 1,
+   "operator_turns": 4,
+   "tool_use": 4,
+   "output_tokens": 1200
+  }
+ ],
+ "daily_undated": 0,
+ "sample": {
+  "requested": 50,
+  "rank": "blake3(session_id)",
+  "idle_secs": 1800
+ },
+ "categories": {
+  "question_key": "0a1b2c3d",
+  "judged": 41,
+  "unjudged": [],
+  "items": [
+   {
+    "name": "Relay handoffs",
+    "description": "Mail moved between workers.",
+    "metrics": {
+     "sessions": 20,
+     "share_pct": 48.8,
+     "tool_use": {
+      "total": 240,
+      "median": 12
+     },
+     "commits": 6,
+     "duration_s": {
+      "median": 1800
+     },
+     "tokens": {
+      "output": 80000
+     },
+     "tool_errors": 1,
+     "interruptions": 0,
+     "prs": {
+      "with_pr": 10,
+      "merged": 6
+     },
+     "relay_breaches": 1,
+     "friction": {
+      "workflow_friction": 10
+     }
+    },
+    "subcategories": [
+     {
+      "name": "Undelivered mail",
+      "description": "Rows no transcript shows.",
+      "sessions": 6,
+      "share_pct": 30.0,
+      "metrics": {
+       "sessions": 6,
+       "share_pct": 30.0
+      }
+     },
+     {
+      "name": "Late answers",
+      "description": "Replies past the contract.",
+      "sessions": 14,
+      "share_pct": 70.0,
+      "metrics": {
+       "sessions": 14,
+       "share_pct": 70.0
+      }
+     }
+    ]
+   },
+   {
+    "name": "Review gate",
+    "description": "Reviews wedged on stale bases.",
+    "metrics": {
+     "sessions": 2,
+     "share_pct": 4.9,
+     "tool_use": {
+      "total": 24,
+      "median": 12
+     },
+     "commits": 0,
+     "duration_s": {
+      "median": 1800
+     },
+     "tokens": {
+      "output": 8000
+     },
+     "tool_errors": 1,
+     "interruptions": 0,
+     "prs": {
+      "with_pr": 1,
+      "merged": 0
+     },
+     "relay_breaches": 1,
+     "friction": {
+      "workflow_friction": 1
+     }
+    },
+    "subcategories": []
+   },
+   {
+    "name": "Coordination",
+    "description": "Fleet control and spawn lanes.",
+    "metrics": {
+     "sessions": 19,
+     "share_pct": 46.3,
+     "tool_use": {
+      "total": 228,
+      "median": 12
+     },
+     "commits": 6,
+     "duration_s": {
+      "median": 1800
+     },
+     "tokens": {
+      "output": 76000
+     },
+     "tool_errors": 1,
+     "interruptions": 0,
+     "prs": {
+      "with_pr": 9,
+      "merged": 6
+     },
+     "relay_breaches": 1,
+     "friction": {
+      "workflow_friction": 9
+     }
+    },
+    "subcategories": [
+     {
+      "name": "Spawn lanes",
+      "description": "Worker dispatch.",
+      "sessions": 6,
+      "share_pct": 66.7,
+      "metrics": {
+       "sessions": 6,
+       "share_pct": 66.7
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

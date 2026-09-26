@@ -40,12 +40,13 @@
 pub(crate) mod budget;
 mod claims;
 mod classify;
+pub mod pr_closure;
 pub(crate) mod prs;
 mod queues;
 pub(crate) mod scope;
 mod stranded;
 
-pub(crate) use queues::not_read_status;
+pub(crate) use queues::{not_read_status, unreadable_status};
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -204,6 +205,13 @@ impl SourceRead {
     }
     pub(crate) fn is_ok(&self) -> bool {
         self.error.is_none()
+    }
+    /// No evidence either way: the source answered, or the board chose not
+    /// to pay for the read. A fold whose failing inputs all read this saw
+    /// nothing because the board stopped looking, never because a source
+    /// failed, and must not render as unreadable.
+    pub(crate) fn not_evidence(&self) -> bool {
+        self.is_ok() || self.over_budget
     }
     pub(crate) fn rows(&self) -> Vec<Value> {
         match &self.payload {
@@ -375,7 +383,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // budget, and an unbounded in-process read cannot honor a deadline).
     let graph_path = graph_json_path(&cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    let entries: Option<Vec<Value>> = match budget.slice() {
+    let entries: Option<Vec<Value>> = match budget.source_deadline() {
         None => {
             warnings.push("graph not read: board budget exhausted".to_string());
             None
@@ -413,6 +421,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_worked = budget.start(SRC_WORKED);
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
+    let s_truth = budget.start("truth probe");
     let s_blocked_child = budget.start(SRC_DISTRESS);
 
     // Mostly in-process: graph already read; claims scan, claimed-node lookups,
@@ -421,7 +430,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let claims = match s_claims {
         None => {
             spent(&mut sources, "claims", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
         Some(_) => {
             let read = read_claims(&cwd);
@@ -439,24 +448,30 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let undispatched = match s_undispatched {
         None => {
             spent(&mut sources, "undispatched", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
-        Some(slice) => {
-            let mut cmd = fno_py_cmd();
-            cmd.extend([
-                "backlog".to_string(),
-                "undispatched".to_string(),
-                "--json".to_string(),
-            ]);
-            let read = run_json(cmd, &cwd, slice);
-            mark(&mut sources, "undispatched", &read, false);
-            let rows = read
-                .payload
-                .as_ref()
-                .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
-            match rows {
-                Some(rows) => SourceRead::ok(Value::Array(rows)),
-                None => read,
+        Some(dl) => {
+            let bound = Budget::spawn_bound(dl);
+            if bound.is_zero() {
+                spent(&mut sources, "undispatched", &budget);
+                budget.spent_read()
+            } else {
+                let mut cmd = fno_py_cmd();
+                cmd.extend([
+                    "backlog".to_string(),
+                    "undispatched".to_string(),
+                    "--json".to_string(),
+                ]);
+                let read = run_json(cmd, &cwd, bound);
+                mark(&mut sources, "undispatched", &read, false);
+                let rows = read
+                    .payload
+                    .as_ref()
+                    .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
+                match rows {
+                    Some(rows) => SourceRead::ok(Value::Array(rows)),
+                    None => read,
+                }
             }
         }
     };
@@ -465,11 +480,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let (claimed_nodes, mut holders, claimed_warnings) = match s_stalled {
         None => {
             spent(&mut sources, "claimed_nodes", &budget);
-            (
-                SourceRead::err(budget.spent_error()),
-                Vec::new(),
-                Vec::new(),
-            )
+            (budget.spent_read(), Vec::new(), Vec::new())
         }
         Some(_) => {
             let (read, mut holders, w) = read_claimed_nodes(&claims, entries.as_deref());
@@ -494,11 +505,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // get the same transcript measurement the claim holders get.
     let s_drivers = budget.start(SRC_DRIVERS);
     let (drivers, roster_tokens, driver_name_tokens) = match s_drivers {
-        None => (
-            SourceRead::err(budget.spent_error()),
-            Vec::new(),
-            HashMap::new(),
-        ),
+        None => (budget.spent_read(), Vec::new(), HashMap::new()),
         Some(_) => {
             let (mut read, name_to_token) = read_driver_rows(entries.as_deref());
             let mut tokens: Vec<String> = Vec::new();
@@ -538,16 +545,20 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
+    // The spent receipt is captured BEFORE the threads spawn: a source whose
+    // deadline is already past at its own spawn marks itself spent with the
+    // same wording the join-side gates use, and never spawns a child it
+    // would kill at once.
+    let spent_err = budget.spent_error();
     // Held nodes: ONE fold over the question journals, computed once
-    // and read by the ready partition below. Fail-open: an unreadable journal
-    // is an empty map, the same posture the question scans elsewhere take.
-    // catch_unwind like the blocked-child read below: the fold resolves the
-    // state root, which panics under a test process with no declared root,
-    // and this function never panics on a source.
-    let held_map = std::panic::catch_unwind(|| {
-        crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd))
-    })
-    .unwrap_or_default();
+    // and read by the ready partition below. needs::held_map is the
+    // fail-open door (an unreadable journal is an empty map, the same
+    // posture the question scans elsewhere take).
+    let held_map = if budget.source_deadline().is_none() {
+        Default::default()
+    } else {
+        crate::needs::held_map(&home_dot_fno(), &cwd)
+    };
     let (
         prs,
         pr_nodes,
@@ -560,28 +571,34 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         needs,
         holder_activity,
         holder_activity_error,
+        holder_starved,
     ) = std::thread::scope(|s| {
         // The worked read is a full fno-py cold start plus fleet roster read,
         // so it rides the concurrent section too: its join waits below, after
         // the other subprocess threads are already running, and only the
         // ready thread (its one consumer) waits for the result.
-        let t_worked = s_worked.map(|slice| {
+        let t_worked = s_worked.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                let bound = Budget::spawn_bound(dl);
+                if bound.is_zero() {
+                    return SourceRead::over_budget(spent_err);
+                }
                 let mut cmd = fno_py_cmd();
                 cmd.extend([
                     "backlog".to_string(),
                     "worked".to_string(),
                     "--json".to_string(),
                 ]);
-                run_json(cmd, &cwd, slice)
+                run_json(cmd, &cwd, bound)
             })
         });
-        let t_prs = s_prs.map(|slice| {
+        let t_prs = s_prs.map(|dl| {
             let cwd = cwd_for_threads.clone();
-            let gate_slice = s_pr_gate;
+            let gate_dl = s_pr_gate;
             s.spawn(move || {
-                let (prs, pr_nodes, mut w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
+                let (prs, pr_nodes, mut w) = read_prs(&cwd, dl, opts.max_pr_reads, entries_ref);
                 // The gate read rides the same thread: its input is the
                 // listing's own narrowed candidates, so there is nothing to
                 // overlap until the listing lands.
@@ -590,14 +607,14 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     .iter()
                     .filter_map(|r| r.get("number").and_then(Value::as_i64))
                     .collect();
-                let (pr_gates, gate_w) = read_pr_gates(&cwd, &candidates, gate_slice);
+                let (pr_gates, gate_w) = read_pr_gates(&cwd, &candidates, gate_dl);
                 w.extend(gate_w);
                 let truncated = w.iter().any(|x| x.contains("hit its"));
                 (prs, pr_nodes, w, truncated, pr_gates)
             })
         });
         let mut worked = match t_worked {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("worked: reader panicked")),
@@ -613,16 +630,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 holders.push(t);
             }
         }
-        let t_ready = s_ready.map(|_slice| {
+        let t_ready = s_ready.map(|dl| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
             let worked_ids = worked_ids.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
                 // In-process now: the admission decision lives in this
                 // binary (backlog_ready::select) and reads the graph the
                 // board already loaded, so the source costs plan-document
                 // disk reads, not an interpreter cold start. The budget
-                // slice stays - the source still costs wall time.
+                // deadline still gates the START: a thread scheduled after
+                // the deadline marks itself spent instead of reading.
+                if Budget::spawn_bound(dl).is_zero() {
+                    return SourceRead::over_budget(spent_err);
+                }
                 let Some(entries) = entries else {
                     return SourceRead::err("graph unreadable: no entries for ready selection");
                 };
@@ -660,40 +682,58 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 }
             })
         });
-        let t_outstanding = s_outstanding.map(|slice| {
+        let t_outstanding = s_outstanding.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                let bound = Budget::spawn_bound(dl);
+                if bound.is_zero() {
+                    return SourceRead::over_budget(spent_err);
+                }
                 let mut cmd = fno_py_cmd();
                 cmd.extend(
                     ["inbox", "outstanding", "--json"]
                         .iter()
                         .map(|s| s.to_string()),
                 );
-                run_json(cmd, &cwd, slice)
+                run_json(cmd, &cwd, bound)
             })
         });
         // ONE batched truth probe for every holder the king cares about (the
         // single-transcript-reader constraint; a probe per holder would pay
-        // one interpreter cold start each).
-        let t_truth = if holders.is_empty() {
-            None
-        } else {
-            let tokens: Vec<String> = holders
-                .iter()
-                .map(|h| {
-                    h.split_once(':')
-                        .map(|(_, t)| t.to_string())
-                        .unwrap_or_else(|| h.clone())
-                })
-                .collect();
-            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_measured(&tokens)))
+        // one interpreter cold start each). It rides the board deadline like
+        // every other source: its own 20s-to-60s page bound is capped by what
+        // remains, and a page reached after the deadline is unmeasured, never
+        // no-evidence (the probe measured ~7s of overrun into every board).
+        let t_truth = match (holders.is_empty(), s_truth) {
+            (true, _) | (_, None) => None,
+            (false, Some(dl)) => {
+                let tokens: Vec<String> = holders
+                    .iter()
+                    .map(|h| {
+                        h.split_once(':')
+                            .map(|(_, t)| t.to_string())
+                            .unwrap_or_else(|| h.clone())
+                    })
+                    .collect();
+                Some(s.spawn(move || {
+                    crate::truth_probe::family1_truth_probe_many_measured_within(&tokens, Some(dl))
+                }))
+            }
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
         // ~7s on a busy fleet, which no longer sits on the critical path.
-        let t_needs = s_needs.map(|_slice| {
+        let t_needs = s_needs.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                // In-process, but the deadline still gates the START: the
+                // refused-worker leg batch-probes the whole registry and
+                // measured ~7s on a busy fleet.
+                if Budget::spawn_bound(dl).is_zero() {
+                    return SourceRead::over_budget(spent_err);
+                }
                 let home = crate::paths::AgentsHome::from_env();
                 let (mut event_paths, default_ledger) = default_needs_sources(&home);
                 // The canonical checkout's journal, exactly as `run_needs`
@@ -710,14 +750,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     }
                 }
                 let since = now_secs_board().saturating_sub(crate::needs::DEFAULT_WINDOW_SECS);
-                crate::needs::collect_needs_items(
+                let items = crate::needs::collect_needs_items(
                     &home,
                     &event_paths,
                     &default_ledger,
                     since,
                     crate::needs::DEFAULT_FIRES_FLOOR,
                     &cwd,
-                )
+                );
+                SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([])))
             })
         });
 
@@ -725,11 +766,11 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             None => {
                 let err = budget.spent_error();
                 (
-                    SourceRead::err(err.clone()),
-                    SourceRead::err(err.clone()),
+                    SourceRead::over_budget(err.clone()),
+                    SourceRead::over_budget(err.clone()),
                     Vec::new(),
                     true,
-                    SourceRead::err(err),
+                    SourceRead::over_budget(err),
                 )
             }
             Some(h) => h.join().unwrap_or_else(|_| {
@@ -744,7 +785,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         };
         mark(&mut sources, "pr_gate", &pr_gates, false);
         let ready = match t_ready {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
@@ -765,7 +806,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             );
         }
         let outstanding = match t_outstanding {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("outstanding: reader panicked")),
@@ -776,25 +817,29 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             outstanding
         };
         let needs = match t_needs {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             // A panicked fold must read UNREADABLE, never ok-empty: an
             // empty needs stream and a stream that never answered are
             // different boards, and the queue's loudness is the only
             // place the difference survives.
             Some(h) => h
                 .join()
-                .map(|items| SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([]))))
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
-        let (holder_activity, holder_activity_error): (
+        let (holder_activity, holder_activity_error, holder_starved): (
             HashMap<String, crate::truth_probe::TruthProbe>,
             Option<String>,
+            bool,
         ) = match t_truth {
-            None => (HashMap::new(), None),
+            // No deadline for a non-empty holder set is a spent board: the
+            // probe never ran, which reads not-read (a budget kill), never
+            // ok-empty and never a source failure.
+            None if holders.is_empty() => (HashMap::new(), None, false),
+            None => (HashMap::new(), Some(spent_err.clone()), true),
             Some(h) => match h.join() {
-                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None),
+                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None, false),
                 Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
-                    (map, None)
+                    (map, None, false)
                 }
                 // An empty timed-out page is UNREADABLE. A non-empty partial
                 // page remains usable, and queues name its missing holders.
@@ -804,10 +849,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         "truth probe: batch of {} handles timed out",
                         holders.len()
                     )),
+                    false,
                 ),
                 Err(_) => (
                     HashMap::new(),
                     Some("truth probe: reader panicked".to_string()),
+                    false,
                 ),
             },
         };
@@ -823,6 +870,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             needs,
             holder_activity,
             holder_activity_error,
+            holder_starved,
         )
     });
     warnings.extend(pr_warnings);
@@ -950,113 +998,130 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let blocked_child = match s_blocked_child {
         None => {
             spent(&mut sources, "blocked_child", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
-        Some(slice) => {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let home = crate::paths::AgentsHome::from_env();
-                let journal = crate::daemon::global_events_path(&home);
-                match read_blocked_rows(&journal) {
-                    Err(e) => SourceRead::err(e),
-                    Ok(rows) => {
-                        let claim_rows = claims.rows();
-                        let claim_state_by_node: HashMap<String, String> = claim_rows
-                            .iter()
-                            .filter_map(|row| {
-                                let node = s_str(row, "key")?.strip_prefix("node:")?;
-                                Some((
-                                    node.to_string(),
-                                    s_str(row, "state").unwrap_or("").to_string(),
-                                ))
-                            })
-                            .collect();
-                        let status_by_node: HashMap<String, String> = entries
-                            .as_deref()
-                            .unwrap_or(&[])
-                            .iter()
-                            .filter_map(|n| {
-                                Some((
-                                    s_str(n, "id")?.to_string(),
-                                    s_str(n, "status").unwrap_or("").to_string(),
-                                ))
-                            })
-                            .collect();
-                        let candidates = queues::resolve_blocked_child_candidates(
-                            rows,
-                            &claim_state_by_node,
-                            &claim_acquired_at_by_node(&claim_rows),
-                            &status_by_node,
-                            blocked_child_grace_minutes(&cwd),
-                            now_secs_board() as i64,
-                        );
-                        if candidates.is_empty() {
-                            SourceRead::ok(Value::Array(Vec::new()))
-                        } else {
-                            // A row keyed by its run id is never bus-addressed;
-                            // the node's live claim names the harness session
-                            // the bus does address.
-                            let claim_session_by_node: HashMap<String, String> = claim_rows
+        Some(dl) => {
+            if Budget::spawn_bound(dl).is_zero() {
+                spent(&mut sources, "blocked_child", &budget);
+                budget.spent_read()
+            } else {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let home = crate::paths::AgentsHome::from_env();
+                    let journal = crate::daemon::global_events_path(&home);
+                    match read_blocked_rows(&journal) {
+                        Err(e) => SourceRead::err(e),
+                        Ok(rows) => {
+                            let claim_rows = claims.rows();
+                            let claim_state_by_node: HashMap<String, String> = claim_rows
                                 .iter()
                                 .filter_map(|row| {
                                     let node = s_str(row, "key")?.strip_prefix("node:")?;
-                                    Some((node.to_string(), s_str(row, "session_id")?.to_string()))
+                                    Some((
+                                        node.to_string(),
+                                        s_str(row, "state").unwrap_or("").to_string(),
+                                    ))
                                 })
                                 .collect();
-                            let mail_candidates: Vec<(String, Option<String>, String)> = candidates
+                            let status_by_node: HashMap<String, String> = entries
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
-                                .map(|(row, _)| {
-                                    let holder = row
-                                        .node
-                                        .as_deref()
-                                        .and_then(|n| claim_session_by_node.get(n))
-                                        .cloned();
-                                    (row.session.clone(), holder, row.ts.clone())
+                                .filter_map(|n| {
+                                    Some((
+                                        s_str(n, "id")?.to_string(),
+                                        s_str(n, "status").unwrap_or("").to_string(),
+                                    ))
                                 })
                                 .collect();
-                            let answered =
-                                queues::mail_answered_since(&bus_live_log_path(), &mail_candidates);
+                            let candidates = queues::resolve_blocked_child_candidates(
+                                rows,
+                                &claim_state_by_node,
+                                &claim_acquired_at_by_node(&claim_rows),
+                                &status_by_node,
+                                blocked_child_grace_minutes(&cwd),
+                                now_secs_board() as i64,
+                            );
+                            if candidates.is_empty() {
+                                SourceRead::ok(Value::Array(Vec::new()))
+                            } else {
+                                // A row keyed by its run id is never bus-addressed;
+                                // the node's live claim names the harness session
+                                // the bus does address.
+                                let claim_session_by_node: HashMap<String, String> = claim_rows
+                                    .iter()
+                                    .filter_map(|row| {
+                                        let node = s_str(row, "key")?.strip_prefix("node:")?;
+                                        Some((
+                                            node.to_string(),
+                                            s_str(row, "session_id")?.to_string(),
+                                        ))
+                                    })
+                                    .collect();
+                                let mail_candidates: Vec<(String, Option<String>, String)> =
+                                    candidates
+                                        .iter()
+                                        .map(|(row, _)| {
+                                            let holder = row
+                                                .node
+                                                .as_deref()
+                                                .and_then(|n| claim_session_by_node.get(n))
+                                                .cloned();
+                                            (row.session.clone(), holder, row.ts.clone())
+                                        })
+                                        .collect();
+                                let answered = queues::mail_answered_since(
+                                    &bus_live_log_path(),
+                                    &mail_candidates,
+                                );
 
-                            let mut sessions: Vec<String> = Vec::new();
-                            for (session, holder, _) in &mail_candidates {
-                                for key in [Some(session.as_str()), holder.as_deref()]
-                                    .into_iter()
-                                    .flatten()
-                                {
-                                    if !sessions.iter().any(|s| s == key) {
-                                        sessions.push(key.to_string());
+                                let mut sessions: Vec<String> = Vec::new();
+                                for (session, holder, _) in &mail_candidates {
+                                    for key in [Some(session.as_str()), holder.as_deref()]
+                                        .into_iter()
+                                        .flatten()
+                                    {
+                                        if !sessions.iter().any(|s| s == key) {
+                                            sessions.push(key.to_string());
+                                        }
                                     }
                                 }
+                                let mut cmd = fno_py_cmd();
+                                cmd.extend([
+                                    "agents".to_string(),
+                                    "distress-verdicts".to_string(),
+                                    "--sessions".to_string(),
+                                    serde_json::to_string(&sessions)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                ]);
+                                let verdict_bound = Budget::spawn_bound(dl);
+                                let verdict_payload = if verdict_bound.is_zero() {
+                                    SourceRead::err(spent_err.clone())
+                                } else {
+                                    run_json(cmd, &cwd, verdict_bound)
+                                };
+                                let verdicts: HashMap<String, String> = mail_candidates
+                                    .iter()
+                                    .filter_map(|(session, holder, _)| {
+                                        queues::verdict_for(
+                                            verdict_payload.payload.as_ref(),
+                                            session,
+                                            holder.as_deref(),
+                                        )
+                                        .map(|v| (session.clone(), v))
+                                    })
+                                    .collect();
+                                SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
+                                    candidates, &answered, &verdicts,
+                                )))
                             }
-                            let mut cmd = fno_py_cmd();
-                            cmd.extend([
-                                "agents".to_string(),
-                                "distress-verdicts".to_string(),
-                                "--sessions".to_string(),
-                                serde_json::to_string(&sessions)
-                                    .unwrap_or_else(|_| "[]".to_string()),
-                            ]);
-                            let verdict_payload = run_json(cmd, &cwd, slice);
-                            let verdicts: HashMap<String, String> = mail_candidates
-                                .iter()
-                                .filter_map(|(session, holder, _)| {
-                                    queues::verdict_for(
-                                        verdict_payload.payload.as_ref(),
-                                        session,
-                                        holder.as_deref(),
-                                    )
-                                    .map(|v| (session.clone(), v))
-                                })
-                                .collect();
-                            SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
-                                candidates, &answered, &verdicts,
-                            )))
                         }
                     }
-                }
-            }));
-            let read = result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
-            mark(&mut sources, "blocked_child", &read, false);
-            read
+                }));
+                let read =
+                    result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
+                mark(&mut sources, "blocked_child", &read, false);
+                read
+            }
         }
     };
 
@@ -1112,6 +1177,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         drivers,
         holder_activity,
         holder_activity_error,
+        holder_activity_starved: holder_starved,
         prs,
         pr_nodes,
         pr_gates,
@@ -1429,6 +1495,7 @@ mod tests {
             drivers: ok_read(Value::Array(Vec::new())),
             holder_activity: HashMap::new(),
             holder_activity_error: None,
+            holder_activity_starved: false,
             prs: ok_read(Value::Array(Vec::new())),
             pr_nodes: ok_read(Value::Array(Vec::new())),
             pr_gates: ok_read(Value::Array(Vec::new())),
@@ -1742,7 +1809,7 @@ mod tests {
         let unplanned = queues.iter().find(|q| q["name"] == "unplanned").unwrap();
         let note = unplanned["note"].as_str().unwrap();
         assert!(!note.is_empty());
-        assert!(note.contains('3') || note.to_lowercase().contains("three"));
+        assert!(note.to_lowercase().contains("per king"));
         let undispatched = queues.iter().find(|q| q["name"] == "undispatched").unwrap();
         assert_eq!(undispatched["verb"], "/fno:target");
         assert!(!undispatched["note"]
@@ -2291,6 +2358,37 @@ mod tests {
     }
 
     #[test]
+    fn a_starved_truth_batch_reads_the_five_queues_over_budget() {
+        // The probe never got a slice: the board stopped looking, it did not
+        // fail. The five claim-dependent queues carry the kill, not the
+        // failure word, so a starved board never renders as unreadable.
+        let node = json!({"id": "x-blind", "priority": "p0", "status": "in_progress"});
+        let claims = json!([{"key": "node:x-blind", "state": "live", "holder": "h"}]);
+        let mut inputs = inputs_with(json!([]), claims, json!([node]));
+        inputs.entries = Some(Vec::new());
+        inputs.holder_activity_error =
+            Some("not-read: board budget exhausted after ~/.fno/events.jsonl".to_string());
+        inputs.holder_activity_starved = true;
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        for name in [
+            "stalled_holder",
+            "stale_claim",
+            "unheld_progress",
+            "undriven_pr",
+            "unplanned",
+        ] {
+            let q = queues.iter().find(|q| q["name"] == name).expect(name);
+            assert_eq!(q["status"], "over_budget", "{name}");
+        }
+        let parsed = crate::king_termination::parse_king_board_value(&board).expect("parses");
+        assert!(
+            !parsed.unreadable_sources,
+            "a starved board is not an unreadable board"
+        );
+    }
+
+    #[test]
     fn an_unreadable_claims_source_reads_the_claims_queues_unreadable() {
         // AC5-ERR: the claims source's Err must arrive as unreadable
         // queues, never as an empty-fleet success that would re-dispatch held
@@ -2744,7 +2842,7 @@ mod tests {
         let entries = vec![json!({
             "id": "x-open",
             "status": "in_progress",
-            "sessions": [phase_row("do", "uuid-open", None)],
+            "sessions": [phase_row("execute", "uuid-open", None)],
         })];
         let (read, _) = read_driver_rows(Some(&entries));
         std::env::remove_var("FNO_AGENTS_HOME");
@@ -2788,7 +2886,7 @@ mod tests {
                 "id": "x-pr",
                 "status": "in_review",
                 "pr_number": 2126,
-                "sessions": [phase_row("do", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
+                "sessions": [phase_row("execute", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
             }),
             json!({
                 "id": "x-nopr",
@@ -2834,12 +2932,12 @@ mod tests {
                 "id": "x-old",
                 "status": "in_review",
                 "pr_number": 2126,
-                "sessions": [phase_row("do", "uuid-move", Some("2026-09-17T06:19:07Z"))],
+                "sessions": [phase_row("execute", "uuid-move", Some("2026-09-17T06:19:07Z"))],
             }),
             json!({
                 "id": "x-now",
                 "status": "in_progress",
-                "sessions": [phase_row("do", "uuid-move", None)],
+                "sessions": [phase_row("execute", "uuid-move", None)],
             }),
         ];
         let (read, _) = read_driver_rows(Some(&entries));
@@ -2881,7 +2979,7 @@ mod tests {
         let entries = vec![json!({
             "id": "x-graph",
             "status": "in_progress",
-            "sessions": [phase_row("do", "uuid-stamp", None)],
+            "sessions": [phase_row("execute", "uuid-stamp", None)],
         })];
         let (read, _) = read_driver_rows(Some(&entries));
         std::env::remove_var("FNO_AGENTS_HOME");
@@ -3010,9 +3108,11 @@ mod tests {
     #[test]
     fn a_slow_source_is_killed_inside_the_whole_board_budget() {
         // A scripted `fno` that sleeps 5 seconds under a
-        // 2,000ms board budget must be killed at its slice, so the collector
-        // returns inside ~3s and the over-budget source reads as unreadable -
-        // never the measured 40,776ms-against-30,000ms overrun.
+        // 2,000ms board budget must be killed at its deadline-derived spawn
+        // bound, so the collector returns inside ~2.75s and the over-budget
+        // source reads as unreadable - never the measured 40,776ms-against-
+        // 30,000ms overrun, and never the 4.9s the captured-slice shape
+        // accepted.
         let _env = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3026,17 +3126,16 @@ mod tests {
         std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
         std::env::set_var("HOME", dir.path());
         crate::paths::pin_test_claims_root(dir.path());
-        let script = dir.path().join("sleepy-fno-py");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script =
+            crate::write_exec_stub(dir.path(), "sleepy-fno-py", "#!/bin/sh\nexec sleep 5\n");
         let prev = std::env::var_os("FNO_PY");
         std::env::set_var("FNO_PY", &script);
         let start = std::time::Instant::now();
+        // The cwd too: from the crate dir the needs fold reads the canonical
+        // checkout's live journal, which measured 20s in a debug build.
         let payload = read_board(&BoardOpts {
             budget_ms: 2_000,
+            cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         });
         let elapsed = start.elapsed();
@@ -3045,15 +3144,118 @@ mod tests {
             None => std::env::remove_var("FNO_PY"),
         }
         // The kill bound is the SLEEP length: an unbounded read would blow
-        // past 5s, a slice-honoring kill must land well under it.
+        // past 5s, and a spawn after the in-process work would land past the
+        // budget; the deadline-derived bound must keep the whole board under
+        // budget plus the serialization reserve.
         assert!(
-            elapsed < std::time::Duration::from_millis(4_900),
+            elapsed < std::time::Duration::from_millis(2_750),
             "board took {elapsed:?} against a 2,000ms budget with a 5s sleep source"
         );
         let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
+        // A budget kill is the board's own choice, not evidence about the
+        // source: it must not block completion, but it must stay named.
         assert!(
-            parsed.unreadable_sources,
-            "the killed source must read as unreadable"
+            !parsed.unreadable_sources,
+            "the killed source must read as not-read, not unreadable"
+        );
+        assert!(
+            !parsed.blind_queues.is_empty(),
+            "the killed source must still be named"
+        );
+    }
+
+    #[test]
+    fn a_slow_truth_batch_is_capped_by_the_board_budget_and_reads_unmeasured() {
+        // The truth probe's own 20s-to-60s page bound used to run OUTSIDE the
+        // board budget. With a holder seeded (a stale claim) and a `fno` stub
+        // whose truth batch sleeps 30s, the board must cap the batch at what
+        // remains of its own 2,000ms budget, return inside ~2.75s, and read
+        // the holder UNMEASURED - never no-evidence.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "HOME",
+            "FNO_CLAIMS_ROOT",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("HOME", dir.path());
+        // Declared directly, not through the skip-if-unset pin: a parallel
+        // test's leaked root must not send the claims scan at a dead dir.
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
+        // ONE stale claim: off-host holder with an expired TTL reads stale,
+        // and a dead-stated holder is exactly the token the board probes.
+        let now_ms = crate::claims::now_ms();
+        let lock = crate::claims::claim_path("node:king-truth-holder", Some(dir.path())).unwrap();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lock,
+            serde_json::json!({
+                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
+                "key": "node:king-truth-holder",
+                "holder": "claude:t-2440-truth",
+                "acquired_at": now_ms - 3_600_000,
+                "host": "board-test-off-host",
+                "pid_unavailable": true,
+                "expires_at": now_ms - 1_800_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The truth batch shells to bare `fno` on PATH; stub it to sleep 30s.
+        let stub_dir = dir.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub = crate::write_exec_stub(
+            &stub_dir,
+            "fno",
+            "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
+        );
+        let prev_py = std::env::var_os("FNO_PY");
+        let prev_path = std::env::var_os("PATH");
+        std::env::set_var("FNO_PY", &stub); // non-truth fno-py reads answer at once
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.display(),
+                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
+            ),
+        );
+
+        let start = std::time::Instant::now();
+        let payload = read_board(&BoardOpts {
+            budget_ms: 2_000,
+            // Pin the board to the temp space: the unset default reads the
+            // test process's cwd, whose real journals and canonical checkout
+            // the needs fold would sync whole, unbudgeted.
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        });
+        let elapsed = start.elapsed();
+
+        match prev_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_750),
+            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
+        );
+        let err = payload["sources"]["holder_activity"]["error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            err.contains("timed out"),
+            "the holder must read unmeasured, got holder_activity error: {err:?}"
         );
     }
 

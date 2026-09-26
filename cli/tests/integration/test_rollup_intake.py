@@ -4,6 +4,7 @@ Covers AC1 (auto-link + receipt), AC2 (suggest below the bar), the orphan line,
 and AC4 (a rollup failure never breaks intake).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -45,7 +46,7 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     g = tmp_path / "graph.json"
 
     def _write(entries: list[dict]) -> Path:
-        g.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(g, json.dumps({"entries": entries}))
         _route_graph(g, tmp_path, monkeypatch)
         return g
 

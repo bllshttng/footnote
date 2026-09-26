@@ -118,6 +118,26 @@ SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
 resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
 
+# The worktree that owns a resolved manifest. A space-slice manifest sits
+# outside every checkout, so its `owner_cwd:` stamp is the answer; the parent
+# of `.fno/` is only right for a legacy checkout manifest.
+manifest_owner_cwd() {
+    local state="$1" owner
+    owner=$(sed -n 's/^owner_cwd:[[:space:]]*//p' "$state" 2>/dev/null \
+        | head -1 | sed 's/[[:space:]]*$//')
+    # YAML may quote the value: strip one matching outer pair only, so a
+    # quote that is part of the path (an apostrophe in a user dir) survives.
+    case "$owner" in
+        '"'*'"') owner=${owner#\"}; owner=${owner%\"} ;;
+        "'"*"'") owner=${owner#\'}; owner=${owner%\'} ;;
+    esac
+    if [[ -n "$owner" && -d "$owner" ]]; then
+        (cd "$owner" && pwd -P)
+        return
+    fi
+    (cd "$(dirname "$state")/.." 2>/dev/null && pwd -P)
+}
+
 BIN=""
 TARGET_RESOLVE_BROKEN=0
 TARGET_NO_MATCH=0
@@ -143,7 +163,7 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
         fi
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
@@ -165,7 +185,7 @@ else
             --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"

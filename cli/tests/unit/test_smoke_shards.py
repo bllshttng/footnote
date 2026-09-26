@@ -88,8 +88,8 @@ def test_the_workflow_actually_shards_the_gate() -> None:
     assert selectors, "the smoke gate needs no shard jobs carrying --only/--skip"
     counts = {job: sum(1 for candidate, *_rest in selectors if candidate == job)
               for job, *_rest in selectors}
-    assert counts == {"smoke-pytest": 8, "smoke-rest": 4}, (
-        f"expected eight pytest legs and four rest legs, found {counts}"
+    assert counts == {"smoke-pytest": 13, "smoke-rest": 4}, (
+        f"expected thirteen pytest legs and four rest legs, found {counts}"
     )
 
 
@@ -118,12 +118,40 @@ def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
     assert checked == 2, "both full-gate lanes must declare shard matrices"
 
 
-def test_full_gate_shards_cover_main_changed_packet_is_pr_only() -> None:
+def test_every_pr_affected_job_overrides_the_implicit_success_gate() -> None:
+    """changed-packet-size is PR-only, so on a push it skips and GitHub's
+    implicit success() would skip every transitive dependent with it: main
+    then runs no tests at all. Each job gated on pr-affected must override
+    the implicit gate with !cancelled(); pr-affected itself already does.
+    """
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     jobs = workflow["jobs"]
 
-    assert jobs["smoke-pytest"].get("if") is None
-    assert jobs["smoke-rest"].get("if") is None
+    for name, job in jobs.items():
+        job_if = job.get("if") or ""
+        if "needs.pr-affected" not in job_if:
+            continue
+        assert "!cancelled()" in job_if, (
+            f"{name} is gated on pr-affected without !cancelled(); a push "
+            "run skips it and main runs no tests"
+        )
+
+    # Guard the guard: a shard whose if stops referencing pr-affected would
+    # silently drop out of the loop above.
+    for name in (
+        "smoke-pytest",
+        "smoke-rest",
+        "hook-latency",
+        "test-agents",
+        "test-agents-integration",
+        "test-mux",
+    ):
+        assert "needs.pr-affected" in (jobs[name].get("if") or ""), (
+            f"{name} stopped being gated on pr-affected; update this guard"
+        )
+
+    assert "pr-affected" in jobs["smoke"].get("needs", [])
+    assert jobs["pr-affected"].get("if") == "${{ !cancelled() }}"
     assert jobs["changed-smoke"].get("if") == "github.event_name == 'pull_request'"
 
 
@@ -146,7 +174,7 @@ def test_the_shards_cover_every_step() -> None:
 
 
 def test_pytest_runs_in_every_pytest_shard() -> None:
-    """The expensive half runs once in each of the eight pytest legs."""
+    """The expensive half runs once in each of the thirteen pytest legs."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
@@ -155,7 +183,7 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
         for job, shard, total, flag, globs in _shard_selectors()
         if step in _selected(names, flag, globs, shard, total)
     ]
-    assert carriers == [("smoke-pytest", shard) for shard in range(1, 9)]
+    assert carriers == [("smoke-pytest", shard) for shard in range(1, 14)]
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
@@ -295,7 +323,29 @@ def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
 
 def test_rust_stress_cleans_both_packages_before_building() -> None:
     workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
-    steps = workflow["jobs"]["stress"]["steps"]
+    stress_job = workflow["jobs"]["stress"]
+    steps = stress_job["steps"]
+    stress_env_step = next(
+        (
+            step
+            for step in steps
+            if step.get("name") == "Stress the process-backed e2e binaries"
+        ),
+        None,
+    )
+    assert stress_env_step is not None
+    assert stress_env_step["env"]["STRESS_SKIP_SLOW"] == "1"
+    cli_workflow = yaml.safe_load(_WORKFLOW.read_text())
+    changed_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["changed-smoke"]["steps"]
+            if step.get("name") == "Changed packet (CHANGED SUBSET)"
+        ),
+        None,
+    )
+    assert changed_step is not None
+    assert changed_step["env"]["STRESS_SKIP_SLOW"] == "1"
     run = "\n".join(step.get("run", "") for step in steps)
     lines = _command_lines(run)
     stress = lines.index("bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?")
@@ -305,3 +355,14 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
         )
         assert clean < stress, f"stress can execute a stale cached {package} harness"
+
+    smoke_env_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["smoke-rest"]["steps"]
+            if step.get("name", "").startswith("Smoke shard: everything except pytest")
+        ),
+        None,
+    )
+    assert smoke_env_step is not None
+    assert smoke_env_step["env"]["STRESS_SKIP_SLOW"] == "1"

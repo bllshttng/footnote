@@ -1,6 +1,6 @@
 ---
 name: mail
-description: "Message background agent workers and projects from a runner-less surface (phone / Happy app), or hold this session's incoming mail while the operator needs uninterrupted time. One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, drain, and timed DND hold. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message', 'check my unread', 'hold my mail', 'turn on DND', 'do not interrupt me', or 'I need your time for ten minutes'."
+description: "Message background agent workers and projects from a runner-less surface (phone / Happy app), or hold this session's incoming mail while the user needs uninterrupted time. One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, drain, and timed DND hold. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message', 'check my unread', 'hold my mail', 'turn on DND', 'do not interrupt me', or 'I need your time for ten minutes'."
 argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  unread|list|status [name]"
 metadata:
   internal: false
@@ -40,9 +40,8 @@ happens when that misses, and it is recovery, not delivery.**
 
 `fno agents mail send` tries a live inject first. On success the `<fno_mail>` turn lands in the recipient's session and an audit-only `delivery: hosted` row records it in `messages.jsonl`. Recipient drains ignore that row because delivery already happened. When no live inject confirms, the envelope instead enters the durable queue and waits on a drain the recipient does not reliably run. Both exit 0, so **read the receipt, not the exit code**:
 
-- `msg-<id> delivered (hosted)` - the inject was confirmed into the recipient's session and is visible in the sender's outbox. This is the normal outcome.
-- `msg-<id> queued (durable)` - live delivery was **not confirmed**, so treat it
-  as not delivered. Nobody checks their voicemail.
+- `msg-<id> delivered (hosted)` - the live inject was accepted. It does not prove the recipient read it.
+- `msg-<id> queued (durable)` - live delivery was not confirmed. This is durable fallback, not delivery.
 
 The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
 fallback queue, which is why they read like a mailbox. They are the recovery
@@ -95,7 +94,7 @@ because a misrouted `send` could publish a malformed message.)
 
 ## `hold` - timed DND for the current session
 
-Route explicit hold verbs and ordinary operator language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session stops prompt-line mail injection while the operator is talking to it.
+Route explicit hold verbs and ordinary user language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session stops prompt-line mail injection while the user is talking to it.
 
 - A single duration runs `fno agents mail hold --minutes <N>`.
 - A duration range uses its upper bound: "5-10 minutes" runs `--minutes 10`, so DND does not expire inside the requested window.
@@ -103,7 +102,7 @@ Route explicit hold verbs and ordinary operator language to the shipped timed ho
 - "Is DND on?" or equivalent runs `fno agents mail hold --status`.
 - No duration uses the CLI's five-minute default.
 
-Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry. It does not mute the operator's ordinary typing in the attached mux client.
+Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry. It does not mute the user's ordinary typing in the attached mux client.
 
 ---
 
@@ -151,7 +150,7 @@ fno agents mail send --to-project "<to_project>" "<body>"
 
 `fno agents mail send` exits 0 for both outcomes, so the receipt line is the only signal:
 
-- `msg-<id> delivered (hosted)` - a live recipient took it now. Report it plainly.
+- `msg-<id> delivered (hosted)` - the live inject was accepted. That does not prove the recipient read it.
 - `msg-<id> queued (durable)` - **report this as NOT delivered**, not as success.
   The CLI prints the recovery ladder on stderr; relay it. Offer to `resume` the
   session and re-send rather than telling the user to wait for a drain.

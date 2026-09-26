@@ -6,7 +6,7 @@ Everything after a push already had a reader. `fno do pr status` names the faili
 
 heal reads the PR's failing checks over REST, gets each failing job's log, matches it against a signature table, and applies the mechanical fix. `--playbook` prints the table. This page keeps no copy of the table, because a doc copy drifts and the verb's own output cannot.
 
-heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Backlog-Closure` trailer to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push.
+heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Fixes` closure line to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push.
 
 ## The rerun-before-real rule
 

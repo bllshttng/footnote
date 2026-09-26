@@ -156,7 +156,11 @@ def test_an_extension_harness_with_no_declared_installer_is_refused(monkeypatch)
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "agy"])
-def test_a_native_harness_is_dispatched(harness):
+def test_a_native_harness_is_dispatched(monkeypatch, harness):
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda *a, **k: (None, {"ready": True}),
+    )
     check_loop_participation(harness, "/target x-1")
 
 
@@ -189,7 +193,11 @@ def test_resolve_dispatch_resolves_a_looping_target_at_pi(monkeypatch):
     assert resolved["loop_participation"] == "extension"
 
 
-def test_resolve_dispatch_still_resolves_a_looping_target_at_claude():
+def test_resolve_dispatch_still_resolves_a_looping_target_at_claude(monkeypatch):
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda *a, **k: (None, {"ready": True}),
+    )
     resolved = resolve_dispatch(harness="claude", node_id="x-1")
     assert resolved["command"].startswith("/target")
     assert resolved["loop_participation"] == "native"
@@ -210,3 +218,24 @@ def test_the_direct_spawn_seam_still_calls_the_gate():
     """
     source = (REPO_ROOT / "cli/src/fno/agents/cli.py").read_text()
     assert "check_loop_participation(harness, message)" in source
+
+
+def test_native_loop_admission_surfaces_rust_readiness_refusal(monkeypatch):
+    import fno.rust_binary
+
+    calls = []
+
+    def refuse(verb, args):
+        calls.append((verb, args))
+        return "plugin-missing: fno@footnote is not enabled", None
+
+    monkeypatch.setattr(fno.rust_binary, "call_binary_json", refuse)
+    with pytest.raises(DispatchResolveError, match="plugin-missing"):
+        check_loop_participation("codex", "/target x-1")
+
+    assert calls == [
+        (
+            "loop",
+            ["readiness", "--pre-launch", "--harness", "codex", "--command", "/target x-1"],
+        )
+    ]

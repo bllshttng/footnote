@@ -4,7 +4,7 @@
 //! Python shim resolved: text, flags, identity, live law rows, storage root),
 //! one JSON answer on stdout, and the exit code carries the verdict. It
 //! registers no client verb - the shrink law (d-fe66560a) allows no new
-//! action - and callers reach it through `verb_call`, like `backlog-update`.
+//! action - and callers reach it through `verb_call`, like the patch door.
 //!
 //! Owns: the law refusal (`law_match`), the context parse
 //! (`escalation::parse` with the question-file sections), the node-pointer
@@ -12,13 +12,14 @@
 //! subject plus node, the 2000-character cut, the id mint, the dual write
 //! (project journal fatal, index best-effort) and the render-position
 //! receipt. The exit CODE lives in the answer (the transport always exits 0
-//! once the request parsed, the `law-match` shape); refusal MESSAGES stay
+//! once the request parsed, the question-intake shape); refusal MESSAGES stay
 //! in the shim, which owns the user's name.
 
 use crate::paths::AgentsHome;
 use crate::provider_cap::questions_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -72,7 +73,7 @@ pub struct IntakeAnswer {
     pub lines: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qid: Option<String>,
-    /// `law` | `node_pointer` | `dedup` | `write` | `index`.
+    /// `law` | `node_pointer` | `context` | `decide_yourself` | `dedup` | `write` | `index`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,13 +147,13 @@ struct OpenRow {
 /// Latest ask per id minus closes, folded from the machine index. A
 /// malformed line is skipped; the receipt is advisory and dedup is best
 /// effort against the rows that do parse.
-fn open_rows(index: &Path) -> Vec<OpenRow> {
+pub fn question_rows(index: &Path) -> (Map<String, Value>, HashSet<String>) {
     // Store rows first: Python commits closes to questions.db without
     // touching the raw journal, so a raw read marks closed questions open.
     let raw =
         crate::event_store::journal_text(index, &["operator_question", "operator_question_closed"]);
     let mut asked: Map<String, Value> = Map::new();
-    let mut closed: Vec<String> = Vec::new();
+    let mut closed = HashSet::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
             continue;
@@ -168,10 +169,17 @@ fn open_rows(index: &Path) -> Vec<OpenRow> {
             Some("operator_question") => {
                 asked.insert(qid, v);
             }
-            Some("operator_question_closed") => closed.push(qid),
+            Some("operator_question_closed") => {
+                closed.insert(qid);
+            }
             _ => {}
         }
     }
+    (asked, closed)
+}
+
+fn open_rows(index: &Path) -> Vec<OpenRow> {
+    let (asked, closed) = question_rows(index);
     let mut out: Vec<OpenRow> = asked
         .into_iter()
         .filter(|(id, _)| !closed.contains(id))
@@ -260,6 +268,28 @@ fn mint_id() -> String {
     format!("q-{hex}")
 }
 
+/// True when the question carries retract intent and names one of `ids`.
+/// The id citation is what keeps the exemption narrow - "revoke the
+/// credentials" alone never qualifies - and mirrors the nearby tier's own
+/// remedy ("name every id above and ask again").
+fn cites_retraction(question: &str, ids: &[String]) -> bool {
+    let lower = question.to_lowercase();
+    let intent = ["retract", "repeal", "rescind", "revoke", "overturn"]
+        .iter()
+        .any(|w| lower.contains(w));
+    intent && ids.iter().any(|id| lower.contains(&id.to_lowercase()))
+}
+
+/// True when the question's closing action is the retraction of a live law
+/// whose retraction only the operator may record. The lane verdict is the
+/// retract gate's own rule (`_decision_lane`), consumed as data.
+fn targets_operator_retraction(question: &str, laws: &[crate::law_match::LawRow]) -> bool {
+    laws.iter().any(|l| {
+        l.retraction_needs_operator()
+            && cites_retraction(question, std::slice::from_ref(&l.decision_id))
+    })
+}
+
 pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     // The user's name for the refusal line, and the render cap for the
     // receipt; both absent read as the plain shapes.
@@ -277,14 +307,24 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     }
 
     // The law refusal first: a live law on this subject means the question
-    // is never recorded (fail-closed, d-0fa92eb9).
+    // is never recorded (fail-closed, d-0fa92eb9) - unless the question's
+    // closing action is the retraction of that law. A law-lane row refuses
+    // every non-operator retraction (`retract_decision`), so "act on the
+    // law; do not ask" has no agent-side remedy there and the user is the
+    // only door. The closing action may ride the pin line (`--ask`), so it
+    // scans with the question, not after it.
+    let closing_text = match req.ask.as_deref() {
+        Some(ask) if !ask.trim().is_empty() => format!("{}\n{}", req.question, ask),
+        _ => req.question.clone(),
+    };
+    let retraction_ask = targets_operator_retraction(&closing_text, &req.laws);
     let law_verdict = crate::law_match::ask_answer(&crate::law_match::AskRequest {
         question: req.question.clone(),
         subject: req.subject.clone(),
         node: req.node.clone(),
         laws: req.laws.clone(),
     });
-    if !law_verdict.exact.is_empty() || law_verdict.nearby_refusal.is_some() {
+    if (!law_verdict.exact.is_empty() && !retraction_ask) || law_verdict.nearby_refusal.is_some() {
         for hit in &law_verdict.exact {
             let mut line = format!(
                 "outstanding: refused: live law already rules on '{}' ({}). Read it: \
@@ -296,6 +336,8 @@ fno inbox decisions {} --lane law --state live. Act on the law; do not ask {who}
             if req.subject.is_none() {
                 line += " If the question is about another subject, name it with --subject.";
             }
+            line += " If the question asks to retract this law, name its id in the \
+question and ask again: only the user may record that retraction.";
             answer.lines.push(line);
         }
         if let Some(refusal) = law_verdict.nearby_refusal {
@@ -323,6 +365,78 @@ One line plus a node pointer (law d-59af3235)."
         answer.refusal = Some("node_pointer".to_string());
         answer.exit_code = 2;
         return answer;
+    }
+
+    // The context refusal (user design 2026-09-22): the page writer cannot
+    // invent context, so a question carries what, why, two options and a
+    // recommendation with its reason. One action with no choice is a pin
+    // and passes.
+    let is_pin = !has_options && req.ask.as_deref().is_some_and(|a| !a.trim().is_empty());
+    if !is_pin {
+        let mut missing: Vec<&str> = Vec::new();
+        if title_of(&req.question, &parsed.title).trim().is_empty() {
+            missing.push("what");
+        }
+        if parsed.blocked_because.trim().is_empty() {
+            missing.push("why");
+        }
+        if parsed.options.len() < 2 && req.options.len() < 2 {
+            missing.push("two options");
+        }
+        let recommendation_ok = parsed
+            .recommend
+            .is_some_and(|r| (1..=parsed.options.len()).contains(&r))
+            && !parsed.recommendation.trim().is_empty();
+        if !recommendation_ok {
+            missing.push("a recommendation");
+        }
+        if !missing.is_empty() {
+            answer.lines.push(format!(
+                "outstanding: refused: a question needs {}. Write a question file \
+(docs/architecture/attention-items.md, \"Asking with context\") and pass \
+--question-file. One action with no choice is a pin: pass --ask \"<the action>\".",
+                missing.join(", ")
+            ));
+            answer.refusal = Some("context".to_string());
+            answer.exit_code = 2;
+            return answer;
+        }
+        // The asker-must-decide refusal (user ruling 2026-09-22): a
+        // reversible question with a recommendation is one the asker or its
+        // king settles itself; it reaches the user only with a user-only
+        // reason in why_user. A question whose closing action is an
+        // operator-only retraction is not the asker's to settle, whatever
+        // the file says: the same authority rule decides here.
+        if parsed.reversible.trim().eq_ignore_ascii_case("yes") {
+            let why = parsed.why_user.to_ascii_lowercase();
+            let user_only = [
+                "irreversible",
+                "money",
+                "credential",
+                "outside",
+                "product",
+                "taste",
+            ]
+            .iter()
+            .any(|k| why.contains(k));
+            if !user_only && !retraction_ask {
+                let decide = match node {
+                    Some(n) => format!("fno backlog decide {n} \"<ruling>\""),
+                    None => "fno backlog decide <node> \"<ruling>\"".to_string(),
+                };
+                answer.lines.push(format!(
+                    "outstanding: refused: you can decide this one: it carries a \
+recommendation and marks itself reversible. Record the ruling yourself or \
+hand it to your king: {decide} (--authority crown or agent), then continue. \
+The user answers only what only a user can: irreversible, spends money or a \
+credential, reaches outside the machine, or a product or taste call - name it \
+with why_user: in the question file."
+                ));
+                answer.refusal = Some("decide_yourself".to_string());
+                answer.exit_code = 2;
+                return answer;
+            }
+        }
     }
 
     // Dedup: an open question on the same subject and node already waits.
@@ -470,7 +584,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     }
 
     // Machine-wide recall index: best-effort, reported.
-    let index_error = write_index_row(&index, &event).err();
+    let index_error = crate::provider_cap::append_questions_row(&index, &event).err();
     if let Some(e) = index_error {
         answer.lines.push(format!(
             "outstanding: recorded {qid} in the project journal, but the recall index \
@@ -509,19 +623,6 @@ raise it another way or answer it yourself."
     }
     answer.qid = Some(qid);
     answer
-}
-
-fn write_index_row(index: &Path, event: &Value) -> Result<(), String> {
-    use std::io::Write;
-    if let Some(parent) = index.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(index)
-        .map_err(|e| e.to_string())?;
-    writeln!(f, "{event}").map_err(|e| e.to_string())
 }
 
 /// Where the new id lands in the render: (position 1-based, total). None
@@ -621,6 +722,9 @@ the three readings kings have acted on
 ## Downside
 a repair can hide a feature
 
+## Recommendation
+Option 1, the narrowest door: every later fix needs it.
+
 ## Not thought through
 whether a net-zero move between files counts
 
@@ -681,7 +785,8 @@ stops
             Some(1)
         );
         // The index row landed too.
-        let index = std::fs::read_to_string(questions_path(&home)).unwrap();
+        let index =
+            crate::event_store::journal_text(&questions_path(&home), &["operator_question"]);
         assert!(index.contains(&qid));
         assert_eq!(answer.position, Some(1));
         assert_eq!(answer.total, Some(1));
@@ -698,25 +803,229 @@ stops
     }
 
     #[test]
-    fn ac7_edge_plain_flags_ask_still_records_bare_options() {
+    fn ac7_edge_plain_flags_with_options_refuse_for_context() {
         let home = tmp_home("edge");
         let root = tmp_root("edge");
         let mut r = req("plain text question", &root);
         r.options = vec!["a".to_string(), "b".to_string()];
         r.node = Some("x-aaaa".to_string());
         let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2);
+        assert_eq!(answer.refusal.as_deref(), Some("context"));
+        assert!(answer.lines.iter().any(|l| l.contains("a question needs")));
+        assert!(journal_text(&root).is_empty());
+    }
+
+    #[test]
+    fn ac9_hp_plain_ask_line_is_refused_and_records_nothing() {
+        let home = tmp_home("hp-refusal");
+        let root = tmp_root("hp-refusal");
+        let answer = run_intake(&req("which lane?", &root), &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("context"));
+        assert!(
+            answer
+                .lines
+                .iter()
+                .any(|l| l.contains("why, two options and a recommendation")
+                    || l.contains("a question needs")),
+            "the refusal names the missing parts: {:?}",
+            answer.lines
+        );
+        assert!(journal_text(&root).is_empty());
+        assert_eq!(answer.qid, None);
+    }
+
+    #[test]
+    fn ac9_edge_a_pin_and_a_complete_question_file_pass() {
+        // A pin passes: one action, no choice.
+        let home = tmp_home("pin");
+        let root = tmp_root("pin");
+        let mut pin = req("note to self", &root);
+        pin.ask = Some("publish the crate".to_string());
+        let answer = run_intake(&pin, &home);
         assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
-        let row: Value = journal_text(&root)
-            .lines()
-            .last()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .unwrap();
-        let options = row
-            .pointer("/data/options")
-            .and_then(Value::as_array)
-            .unwrap();
-        assert_eq!(options[0], json!("a"));
-        assert!(row.pointer("/data/context").is_none());
+        assert!(journal_text(&root).lines().count() == 1);
+        // A complete question file passes.
+        let home = tmp_home("file-ok");
+        let root = tmp_root("file-ok");
+        let mut r = req(QUESTION_FILE, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer2 = run_intake(&r, &home);
+        assert_eq!(answer2.exit_code, 0, "lines: {:?}", answer2.lines);
+        let _ = answer;
+    }
+
+    #[test]
+    fn rule10_reversible_recommended_question_refused_without_why_user() {
+        let home = tmp_home("rule10");
+        let root = tmp_root("rule10");
+        let question = QUESTION_FILE.replace("## Reversible\ncostly", "## Reversible\nyes");
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+        assert!(
+            answer
+                .lines
+                .iter()
+                .any(|l| l.contains("fno backlog decide")),
+            "the refusal names the decide door: {:?}",
+            answer.lines
+        );
+        assert!(journal_text(&root).is_empty());
+    }
+
+    #[test]
+    fn rule10_why_user_irreversible_lets_it_pass() {
+        let home = tmp_home("rule10-pass");
+        let root = tmp_root("rule10-pass");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "## Meanwhile\nstops\n",
+                "## Meanwhile\nstops\n\n## Why user\nirreversible\n",
+            );
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+    }
+
+    #[test]
+    fn rule10_empty_why_user_is_refused() {
+        let home = tmp_home("rule10-empty");
+        let root = tmp_root("rule10-empty");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "## Meanwhile\nstops\n",
+                "## Meanwhile\nstops\n\n## Why user\n\n",
+            );
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+    }
+
+    fn junk_law() -> crate::law_match::LawRow {
+        crate::law_match::LawRow {
+            decision_id: "d-junk0001".to_string(),
+            subject: Some("junk-law".to_string()),
+            decision: Some("a placeholder ruling".to_string()),
+            ts: Some("2026-08-29T19:20:10Z".to_string()),
+            lane: Some("law".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_question_to_retract_a_law_is_accepted() {
+        // The closing action is a retraction, and the retract gate refuses
+        // every non-operator authority on a law-lane row: the ask is the
+        // only door, so neither the law refusal nor decide_yourself fires.
+        let home = tmp_home("retract-accept");
+        let root = tmp_root("retract-accept");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "Is a net-zero Python repair legal with no grant?",
+                "Retract d-junk0001: the junk law ruling on junk-law?",
+            );
+        let mut r = req(&question, &root);
+        r.subject = Some("junk-law".to_string());
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        assert!(journal_text(&root).lines().count() == 1);
+    }
+
+    #[test]
+    fn the_retraction_exemption_needs_the_id_not_the_intent_alone() {
+        let home = tmp_home("retract-no-id");
+        let root = tmp_root("retract-no-id");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "Is a net-zero Python repair legal with no grant?",
+                "Retract the junk law ruling on junk-law?",
+            );
+        let mut r = req(&question, &root);
+        r.subject = Some("junk-law".to_string());
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn citing_the_law_id_without_retract_intent_still_refuses() {
+        let home = tmp_home("cite-no-retract");
+        let root = tmp_root("cite-no-retract");
+        let mut r = req(
+            "d-junk0001 rules on junk-law; how do we comply with it?",
+            &root,
+        );
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("note the reading".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn a_reversible_agent_decidable_question_is_still_refused() {
+        // Live laws in the payload do not widen the exemption: without the
+        // id citation and intent, rule 10 holds. No law matches this
+        // question, so the decide_yourself gate is what refuses it.
+        let home = tmp_home("retract-still-refused");
+        let root = tmp_root("retract-still-refused");
+        let question = QUESTION_FILE.replace("## Reversible\ncostly", "## Reversible\nyes");
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("decide_yourself"));
+    }
+
+    #[test]
+    fn a_row_without_a_lane_verdict_keeps_the_old_refusal() {
+        // Older callers send no lane; the exemption never arms, which keeps
+        // the captured goldens and every pre-lane caller on the old door.
+        let home = tmp_home("retract-no-lane");
+        let root = tmp_root("retract-no-lane");
+        let mut law = junk_law();
+        law.lane = None;
+        let mut r = req(
+            "Retract d-junk0001: the junk law ruling on junk-law?",
+            &root,
+        );
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("retract the junk law".to_string());
+        r.laws = vec![law];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 2, "lines: {:?}", answer.lines);
+        assert_eq!(answer.refusal.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn a_pin_whose_ask_line_carries_the_retraction_is_accepted() {
+        // The closing action is the --ask line: a pin whose question names
+        // the law only by subject still passes when the action names the id.
+        let home = tmp_home("retract-pin-ask");
+        let root = tmp_root("retract-pin-ask");
+        let mut r = req("the junk law on junk-law blocks this node.", &root);
+        r.subject = Some("junk-law".to_string());
+        r.ask = Some("retract d-junk0001".to_string());
+        r.laws = vec![junk_law()];
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        assert!(journal_text(&root).lines().count() == 1);
     }
 
     #[test]
@@ -726,11 +1035,13 @@ stops
         let mut first = req("first", &root);
         first.subject = Some("subject-s".to_string());
         first.node = Some("x-aaaa".to_string());
+        first.ask = Some("finish the lane".to_string());
         assert_eq!(run_intake(&first, &home).exit_code, 0);
 
         let mut second = req("second", &root);
         second.subject = Some("subject-s".to_string());
         second.node = Some("x-aaaa".to_string());
+        second.ask = Some("finish the lane".to_string());
         let answer = run_intake(&second, &home);
         assert_eq!(answer.exit_code, 2);
         assert_eq!(answer.refusal.as_deref(), Some("dedup"));
@@ -752,6 +1063,7 @@ stops
             subject: Some("test-subject".to_string()),
             decision: Some("stay strict".to_string()),
             ts: Some("2026-09-01T00:00:00Z".to_string()),
+            lane: Some("law".to_string()),
         }];
         let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 2);
@@ -769,7 +1081,9 @@ stops
         let home = tmp_home("cap");
         let root = tmp_root("cap");
         let long = "x".repeat(QUESTION_CAP + 50);
-        let answer = run_intake(&req(&long, &root), &home);
+        let mut r = req(&long, &root);
+        r.ask = Some("note the cap".to_string());
+        let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 0);
         assert!(answer.truncated);
         let row: Value = journal_text(&root)
@@ -798,8 +1112,10 @@ stops
             "source": "target",
             "data": {"question_id": "q-old", "question": "old", "blocks": ["x-1", "x-2"]}
         });
-        write_index_row(&index, &older).unwrap();
-        let answer = run_intake(&req("newest question", &root), &home);
+        crate::provider_cap::append_questions_row(&index, &older).unwrap();
+        let mut r = req("newest question", &root);
+        r.ask = Some("finish the lane".to_string());
+        let answer = run_intake(&r, &home);
         assert_eq!(answer.total, Some(2));
         assert_eq!(answer.position, Some(1), "newest sorts first");
     }

@@ -46,13 +46,17 @@ def test_record_denominator_choice_classifies_each_exit(monkeypatch, tmp_path):
     target_cli._record_denominator_choice("/x/p.md", None, None)  # plan
     target_cli._record_denominator_choice("", 1, None)  # deliverables:1
     target_cli._record_denominator_choice("", None, None)  # none
+    target_cli._record_denominator_choice(
+        "", 4, {"title": "four bands", "details": "(1) a; (2) b; (3) c; (4) d"},
+        derived=True,
+    )  # derived from the node's own details
 
     from tests._event_rows import event_rows
 
     denom = sorted(
         e["data"]["denominator"] for e in event_rows(tmp_path / ".fno" / "events.jsonl")
     )
-    assert denom == ["deliverables", "none", "plan"]
+    assert denom == ["deliverables", "derived", "none", "plan"]
 
 
 def test_ratio_command_flags_a_bypass(monkeypatch, tmp_path):

@@ -5,6 +5,7 @@ backlog CLI.  The graph bytes are the mutation oracle: a discovery run may
 build a disposable FTS cache, but it must never rewrite graph state.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -23,7 +24,6 @@ def _node(node_id: str, **overrides: object) -> dict:
         "id": node_id,
         "title": f"node {node_id}",
         "slug": f"node-{node_id}",
-        "details": "",
         "project": "fno",
         "type": "feature",
         "parent": None,
@@ -45,7 +45,6 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from fno.graph import store
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}) + "\n", encoding="utf-8")
     monkeypatch.setattr(constants, "GRAPH_JSON", graph)
     monkeypatch.setattr(constants, "GRAPH_ARCHIVE_JSON", tmp_path / "archive.json")
     monkeypatch.setattr(store, "GRAPH_JSON", graph)
@@ -55,7 +54,7 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _seed(graph: Path, entries: list[dict]) -> None:
-    graph.write_text(json.dumps({"entries": entries}) + "\n", encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": entries}) + "\n")
 
 
 def test_candidates_union_recall_lanes(tmp_graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,7 +135,7 @@ def test_discover_expired_population_is_read_only(tmp_graph: Path, monkeypatch: 
         ],
     )
     monkeypatch.setattr(discovery, "candidates", lambda *args, **kwargs: discovery.CandidateResults())
-    before = tmp_graph.read_bytes()
+    before = tmp_graph.with_suffix(".db").read_bytes()
 
     result = runner.invoke(cli, ["discover", "--json"])
 
@@ -145,7 +144,7 @@ def test_discover_expired_population_is_read_only(tmp_graph: Path, monkeypatch: 
     assert report["assessed"] == 1
     assert report["excluded_by_kind"] == 1
     assert report["worklist"][0]["verdict"] == "undecided"
-    assert tmp_graph.read_bytes() == before
+    assert tmp_graph.with_suffix(".db").read_bytes() == before
 
 
 def test_discover_none_match_reports_positive_control(tmp_graph: Path, monkeypatch: pytest.MonkeyPatch) -> None:

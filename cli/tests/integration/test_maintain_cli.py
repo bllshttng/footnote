@@ -7,6 +7,7 @@ claimed-node skip, empty-graph no-op, idempotency, and the health-history report
 Filter: `python -m pytest tests/ -k maintain_cli`
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -51,7 +52,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:
@@ -673,7 +674,9 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     _seed(
         tmp_graph,
         [
-            _node("ab-blkE2E"),  # blocker (no plan_path -> done skips the stamp)
+            # blocker carries an artifact link so the close-evidence rule
+            # passes; no plan_path still keeps the stamp skip.
+            _node("ab-blkE2E", artifact_url="https://example.test/artifact"),
             _ready("ab-depE2E", blocked_by=["ab-blkE2E"]),
         ],
     )
@@ -721,7 +724,16 @@ def validity_env(tmp_path, monkeypatch):
 
 def test_validity_ac1_hp_bounded_deck(tmp_graph, validity_env):
     # AC1-HP: >25 ideas older than 60d -> reviews the 25 oldest, writes a deck.
-    _seed(tmp_graph, [_old_idea(f"ab-i{i:03d}", 100 + i) for i in range(30)])
+    # Split candidates across cap scopes so this tests selection, not intake.
+    entries = [
+        _node("ab-epic-a", type="epic", status="ready"),
+        _node("ab-epic-b", type="epic", status="ready"),
+        *[
+            _old_idea(f"ab-i{i:03d}", 100 + i, parent="ab-epic-a" if i < 15 else "ab-epic-b")
+            for i in range(30)
+        ],
+    ]
+    _seed(tmp_graph, entries)
     r = _invoke([])
     assert r.exit_code == 0, r.output
     assert "validity: reviewed 25 ideas" in r.output
@@ -933,11 +945,11 @@ def test_maintain_abandoned_leg_settles_gone_holds_active(
     live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed(tmp_graph, [
         _node("ab-gone01", cwd="/repo/x", sessions=[
-            {"phase": "do", "harness": "claude", "session_id": _SID_GONE,
+            {"phase": "execute", "harness": "claude", "session_id": _SID_GONE,
              "started_at": gone_at},
         ]),
         _node("ab-held01", cwd="/repo/x", sessions=[
-            {"phase": "do", "harness": "claude", "session_id": _SID_LIVE,
+            {"phase": "execute", "harness": "claude", "session_id": _SID_LIVE,
              "started_at": live_at},
         ]),
     ])

@@ -322,7 +322,7 @@ pub fn project(
             let Some(started) = s_field(row, "started_at") else {
                 continue;
             };
-            if phase == "do" {
+            if phase == "execute" {
                 rows.push(FeedRow {
                     ts: started.to_string(),
                     kind: "node_started".into(),
@@ -354,7 +354,7 @@ pub fn project(
                     });
                 }
             }
-            if phase == "do" || phase == "ship" {
+            if phase == "execute" || phase == "ship" {
                 let stamp = started.to_string();
                 let newer = latest_session
                     .as_ref()
@@ -610,7 +610,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         // should know the lifecycle leg is absent, so its absence keeps its
         // own note (AC3) where a present-but-empty store is just empty.
         let path = graph_path(home);
-        if !path.exists() {
+        if !crate::backlog::database_path(&path).exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
             match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
@@ -699,7 +699,7 @@ mod tests {
             "sessions": [
                 {"phase": "blueprint", "harness": "claude", "session_id": "s-blue",
                  "ended_at": "2026-09-02T16:00:00Z"},
-                {"phase": "do", "harness": "claude", "session_id": "s-do",
+                {"phase": "execute", "harness": "claude", "session_id": "s-do",
                  "observed_model": {"kind": "observed", "model": "claude-opus-5", "samples": 12},
                  "effort": "high",
                  "started_at": "2026-09-02T17:12:52Z"},
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
         assert_eq!(started.effort.as_deref(), Some("high"));
-        assert_eq!(started.phase.as_deref(), Some("do"));
+        assert_eq!(started.phase.as_deref(), Some("execute"));
         let ended = p.rows.iter().find(|r| r.kind == "node_ended").unwrap();
         assert_eq!(ended.harness.as_deref(), Some("claude"));
     }

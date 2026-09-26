@@ -967,6 +967,9 @@ def fake_managed_slot(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
     monkeypatch.setattr(
+        managed, "_vault", lambda action, *args: {"verdict": "unchanged" if action == "sync" else "fresh"}
+    )
+    monkeypatch.setattr(
         managed, "canonical_slot_blobs",
         lambda cli: [slot[cli]] if slot.get(cli) else [],
     )

@@ -6,6 +6,7 @@ external sinks. This file covers all ACs across the six user stories; the
 ``-k`` filters in the plan's per-task verify lines select the relevant subset.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import os
 import subprocess
@@ -840,7 +841,7 @@ def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     for mod in (gc, gs):
@@ -852,7 +853,7 @@ def tmp_graph(tmp_path, monkeypatch):
 
 def _seed(graph_path, entry):
     import json as _json
-    graph_path.write_text(_json.dumps({"entries": [entry]}) + "\n")
+    seed_graph(graph_path, _json.dumps({"entries": [entry]}) + "\n")
 
 
 def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):

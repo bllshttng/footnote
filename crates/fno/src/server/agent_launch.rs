@@ -158,6 +158,13 @@ impl LaunchDesk {
 /// spawn door, refused before any effect. The door itself stays the
 /// authority on harness support, routing, capacity and permissions.
 fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
+    crate::dispatch_launch::validate_extra_flags(&req.extra_flags)?;
+    if req.provider.is_some() && req.model.is_none() {
+        return Err("a provider pin requires a model".to_string());
+    }
+    if req.provider.is_some() && req.model_names_harness {
+        return Err("a provider pin cannot omit the selected harness".to_string());
+    }
     if req.harness.trim().is_empty() {
         return Err("no harness selected".to_string());
     }
@@ -178,6 +185,17 @@ fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
     }
     if !cwd.is_dir() {
         return Err(format!("project path {:?} does not exist", req.cwd));
+    }
+    // A board prefill's node id becomes an argv element; refuse anything
+    // that could read as a flag or splat. The door stays the authority on
+    // whether the node exists.
+    if let Some(id) = &req.node {
+        if id.is_empty()
+            || id.starts_with('-')
+            || id.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(format!("invalid node id {id:?}"));
+        }
     }
     if req.message.chars().count() > crate::proto::MAX_MAIL_TEXT {
         return Err(format!(
@@ -211,6 +229,17 @@ impl super::Core {
         account: Option<String>,
         plan: bool,
     ) -> super::Flow {
+        // The plan branch refuses ONLY an in-flight node: the blueprint
+        // spawn door accepts an idea node (nothing to route to yet), and a
+        // card being worked already must not fork a second plan.
+        if plan {
+            if let Some(refusal) = self.plan_refusal(&node) {
+                self.notice(client_id, refusal);
+            } else {
+                self.dispatch_next(client_id, Some(node), account, true);
+            }
+            return super::Flow::Continue;
+        }
         if super::card_ready_to_dispatch(&self.backlog, &node) {
             self.dispatch_next(client_id, Some(node), account, plan);
         } else if plan {
@@ -231,8 +260,18 @@ impl super::Core {
         super::Flow::Continue
     }
 
-    /// "Grab work" (prefix+g): dispatch the next ready backlog node into
-    /// a new pane. Board selection is `fno backlog next`; the launch is the door
+    /// The plan-spawn door's refusal: a node the server feed shows in
+    /// flight names its session instead of getting a second blueprint.
+    /// Everything else passes - an idea node (no feed card at all), an
+    /// unranked or blocked card: the model decides readiness, the spawn
+    /// door answers, and a blueprint for worked work is not asked twice.
+    pub(super) fn plan_refusal(&self, node: &str) -> Option<String> {
+        self.inflight_hint(node).map(|hint| {
+            format!("{node} is already being worked ({hint}); open its session instead")
+        })
+    }
+
+    /// "Grab work" (prefix+g): dispatch the next ready backlog node into    /// a new pane. Board selection is `fno backlog next`; the launch is the door
     /// (`fno agents spawn`), shelled OFF the core loop in a detached
     /// task so a slow backlog read never stalls a pane. The launched pane
     /// appears through the existing registry reader; the outcome (dispatched /
@@ -386,13 +425,16 @@ mod tests {
             harness: "claude".to_string(),
             substrate: "pane".to_string(),
             model: None,
+            provider: None,
             model_names_harness: false,
             effort: None,
             permission_mode: None,
             placement: None,
             portal: None,
             split: None,
+            node: None,
             message: String::new(),
+            extra_flags: Vec::new(),
         }
     }
 

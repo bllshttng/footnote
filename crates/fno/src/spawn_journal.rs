@@ -132,10 +132,6 @@ pub(crate) struct ReentryVerdict {
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<String>,
     pub(crate) config_dir: Option<std::path::PathBuf>,
-    /// The resolver's mechanism word ("attach" | "respawn" | "resume" |
-    /// "bg-resume"). A pane consumer refuses "bg-resume": the launcher
-    /// backgrounds and exits at once, so the pane would host nothing.
-    pub(crate) mechanism: Option<String>,
 }
 
 impl ReentryVerdict {
@@ -180,16 +176,10 @@ impl ReentryVerdict {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        let mechanism = value
-            .get("mechanism")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
         Ok(Self {
             argv,
             env,
             config_dir,
-            mechanism,
         })
     }
 

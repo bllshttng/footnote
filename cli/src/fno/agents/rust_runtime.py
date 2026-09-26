@@ -235,17 +235,12 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
-        # Batch graph read, bash-census, and session-start bytes: all
-        # three dispatch directly in client.rs before build_request, never `fno agents`.
-        "graph-get",
+        # bash-census and session-start bytes dispatch directly in
+        # client.rs before build_request, never `fno agents`; the batch
+        # graph read and the note actions folded into `fno-agents backlog`.
         "bash-census",
         "session-start-bytes",
         "judge",
-        # backlog-note + backlog-notes (the bounded-state change): direct
-        # client.rs dispatch, never `fno agents` routing; keeps the
-        # client.rs<->router parity test in sync.
-        "backlog-note",
-        "backlog-notes",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
@@ -389,8 +384,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # boundary and must not become the generator - truncating there would make
     # the name a caller reasons about differ from the one the runtime registers.
     "name",
-    # Pane retasking remains Python-owned orchestration. Label rename went the
-    # other way: the Rust client carries it over the daemon RPC.
     "retask",
     # The cadence-deadline silence backstop. Pure Python: it reads the registry
     # and each row's transcript truth through fno.agents.sweep, writes nothing,
@@ -528,9 +521,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
     "recover": "Restore a recorded claude session under its account and route: <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
-    "graph-get": "Batch graph.json read by id; invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
-    "backlog-note": "The native note action: bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
-    "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback; the migration runbook drives it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
@@ -547,7 +537,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by fno.update.running_components, not `fno agents` routing.",
-    "fleet-incident": "Durable fleet incident breaker: stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
+    "fleet-incident": "Durable fleet incident breaker: stop --reason T [--hold spawns,tests,merges] / clear --reason T write the machine-wide record (no --hold holds all three); status [--json] reads it with its typed holds/admits reach (exit 0 clear, 1 stopped or unavailable); check [--scope spawns|tests|merges] is one scope's admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches, and the merge primitive refuses while merges are held. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
     "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts. The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
     "capabilities": "One harness's config-independent capability contract: <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
@@ -751,12 +741,16 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
-    """Project the seam's facts to the node-seed verb and apply the answer pre-route."""
+    """Project the seam's facts to the node-seed verb and apply the answer pre-route.
+
+    A payload-named node's refusals name the payload, not ``--node``.
+    """
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    node_source = None
     if not node:
         from fno.rust_binary import VerbUnavailable, verb_call
         try:
@@ -772,6 +766,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
             if answer.get("action") == "compose":
                 args = [str(tok) for tok in answer.get("argv") or list(args)]
                 node = (_spawn_flag_value(args, "--node") or "").strip()
+                node_source = "payload" if answer.get("source") == "payload" else None
                 if not node and (reason := _spawn_flag_value(args, "--node-reason")):
                     os.environ["FNO_NODE_REASON"] = reason
                     del args[args.index("--node-reason") : args.index("--node-reason") + 2]
@@ -803,6 +798,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         "effective_verb": effective_verb,
         "stored_verb": stored or None,
         "derive_error": derive_error,
+        "node_source": node_source,
         "family": list(_TARGET_FAMILY_VERBS),
         "crown": _is_crown_bearing_spawn("spawn", args),
         "resume": _is_resume_bearing_spawn("spawn", args),

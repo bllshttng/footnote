@@ -1,5 +1,9 @@
 //! Decision records and their node join rows, owned by the graph store.
+//! Schema 4: an event's time is its row's creation time, so the schema-3
+//! `ts` column is `created_at` now (user ruling 2026-09-23). The flattened
+//! rows keep `ts`, the event envelope key every reader parses.
 
+use super::schema_v4::{iso, norm_sql, stamps, touch, updated, NOW};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::path::Path;
@@ -7,27 +11,66 @@ use std::path::Path;
 const DECISION_EVENT: &str = "operator_decision";
 const RETRACTION_EVENT: &str = "decision_retracted";
 
-pub const DDL: &str = "CREATE TABLE IF NOT EXISTS decisions (
+pub fn ddl() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS decisions (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL UNIQUE,
   event_type TEXT NOT NULL,
-  ts TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT ({NOW}),
   source TEXT,
-  data TEXT NOT NULL
+  data TEXT NOT NULL{},
+  {}
 );
 CREATE INDEX IF NOT EXISTS decisions_event_id ON decisions(event_id);
 CREATE TABLE IF NOT EXISTS node_decisions (
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   event_id TEXT NOT NULL REFERENCES decisions(event_id) ON DELETE CASCADE,
-  seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL{},
   PRIMARY KEY (node_id, event_id)
 );
-CREATE INDEX IF NOT EXISTS node_decisions_order ON node_decisions(node_id, seq);";
+CREATE INDEX IF NOT EXISTS node_decisions_order ON node_decisions(node_id, seq);",
+        updated("decisions"),
+        iso("decisions", "created_at"),
+        stamps("node_decisions"),
+    )
+}
+
+pub fn triggers() -> String {
+    format!("{}{}", touch("decisions"), touch("node_decisions"))
+}
 
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
-        .execute_batch(DDL)
+        .execute_batch(&ddl())
         .map_err(|error| error.to_string())
+}
+
+/// Schema-4 migration copy from `decisions_v3` (and `node_decisions_v3`
+/// when the store has one): seq, and so journal order, is kept, and the
+/// AUTOINCREMENT high-water mark carries over.
+pub(crate) fn copy_from_v3(connection: &Connection, with_joins: bool) -> Result<(), String> {
+    let mut sql = format!(
+        "INSERT INTO decisions (seq, event_id, event_type, created_at, source, data, updated_at)
+         SELECT seq, event_id, event_type, ts, source, data, COALESCE({}, {NOW})
+         FROM decisions_v3;
+         UPDATE sqlite_sequence
+         SET seq = MAX(seq, COALESCE((SELECT seq FROM sqlite_sequence
+                                      WHERE name = 'decisions_v3'), 0))
+         WHERE name = 'decisions';",
+        norm_sql("ts"),
+    );
+    if with_joins {
+        let stamp = format!("COALESCE({}, {NOW})", norm_sql("d.ts"));
+        sql.push_str(&format!(
+            "INSERT INTO node_decisions (node_id, event_id, seq, created_at, updated_at)
+             SELECT j.node_id, j.event_id, j.seq, {stamp}, {stamp}
+             FROM node_decisions_v3 j LEFT JOIN decisions_v3 d ON d.event_id = j.event_id;"
+        ));
+    }
+    connection
+        .execute_batch(&sql)
+        .map_err(|error| format!("schema v4 decisions copy: {error}"))
 }
 
 /// Import the durable machine-wide decision journal once, then validate every
@@ -76,37 +119,23 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
         }
     }
 
-    if graph.exists() {
-        let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
-        if !text.trim().is_empty() {
-            let document: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-            if let Some(entries) = document.get("entries").and_then(Value::as_array) {
-                for entry in entries {
-                    let Some(node_id) = entry.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(decisions) = entry.get("decisions").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    for (position, reference) in decisions.iter().enumerate() {
-                        let Some(event_id) = reference.get("decision_id").and_then(Value::as_str)
-                        else {
-                            return Err(format!(
-                                "decisions import: node {node_id} decision at position {} has no decision_id",
-                                position + 1
-                            ));
-                        };
-                        if !event_exists(&transaction, event_id)? {
-                            return Err(format!(
-                                "decisions import: node {node_id} references missing decision {event_id}"
-                            ));
-                        }
-                        attach_node(&transaction, node_id, event_id)?;
-                    }
-                }
-            }
-        }
+    let orphan: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT nd.node_id, nd.event_id
+             FROM node_decisions nd
+             LEFT JOIN decisions d ON d.event_id = nd.event_id
+             WHERE d.event_id IS NULL
+             ORDER BY nd.node_id, nd.event_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("decisions import: cannot validate node references: {error}"))?;
+    if let Some((node_id, event_id)) = orphan {
+        return Err(format!(
+            "decisions import: node {node_id} references missing decision {event_id}"
+        ));
     }
 
     super::stamp_meta(&transaction, "decisions_imported", "1")?;
@@ -143,7 +172,7 @@ pub fn record_connected(
 /// Return flattened event rows in journal order and a count of malformed rows.
 pub fn read_rows(connection: &Connection) -> Result<(Vec<Value>, usize), String> {
     let mut statement = connection
-        .prepare("SELECT event_type, ts, data FROM decisions ORDER BY seq")
+        .prepare("SELECT event_type, created_at, data FROM decisions ORDER BY seq")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -176,7 +205,7 @@ pub fn read_rows(connection: &Connection) -> Result<(Vec<Value>, usize), String>
 pub fn node_decisions(connection: &Connection, node_id: &str) -> Result<Vec<Value>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT d.event_type, d.ts, d.data
+            "SELECT d.event_type, d.created_at, d.data
              FROM node_decisions nd
              JOIN decisions d ON d.event_id = nd.event_id
              WHERE nd.node_id = ?1
@@ -193,6 +222,32 @@ pub fn node_decisions(connection: &Connection, node_id: &str) -> Result<Vec<Valu
         })
         .map_err(|error| error.to_string())?;
     flatten_rows(rows)
+}
+
+/// The newest unretracted ruling that answers a question: its time, source
+/// and data.
+pub fn live_answer(
+    connection: &Connection,
+    question_id: &str,
+) -> Result<Option<(String, Option<String>, String)>, String> {
+    connection
+        .query_row(
+            "SELECT d.created_at, d.source, d.data
+             FROM decisions d
+             WHERE d.event_type = ?1
+               AND json_extract(d.data, '$.question_id') = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM decisions r
+                   WHERE r.event_type = ?3
+                     AND json_extract(r.data, '$.target_decision_id') =
+                         json_extract(d.data, '$.decision_id')
+               )
+             ORDER BY d.seq DESC LIMIT 1",
+            params![DECISION_EVENT, question_id, RETRACTION_EVENT],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
 }
 
 fn flatten_rows<I>(rows: I) -> Result<Vec<Value>, String>
@@ -238,29 +293,26 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
             .ok_or_else(|| "decision_retracted has no retraction_id".to_string())?,
         _ => unreachable!(),
     };
-    let ts = event.get("ts").and_then(Value::as_str).unwrap_or_default();
+    // An event with no ts takes the row's own write time. DO NOTHING names
+    // the event_id conflict alone: OR IGNORE would also skip a row its
+    // timestamp CHECK refuses, a silent loss.
+    let ts = event
+        .get("ts")
+        .and_then(Value::as_str)
+        .filter(|ts| !ts.is_empty());
     let source = event.get("source").and_then(Value::as_str);
     let data_json = serde_json::to_string(data).map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT OR IGNORE INTO decisions (event_id, event_type, ts, source, data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            &format!(
+                "INSERT INTO decisions (event_id, event_type, created_at, source, data)
+                 VALUES (?1, ?2, COALESCE(?3, {NOW}), ?4, ?5)
+                 ON CONFLICT(event_id) DO NOTHING"
+            ),
             params![event_id, event_type, ts, source, data_json],
         )
         .map_err(|error| error.to_string())?;
     Ok(event_id.to_string())
-}
-
-fn event_exists(connection: &Connection, event_id: &str) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT 1 FROM decisions WHERE event_id = ?1",
-            params![event_id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string())
 }
 
 fn attach_subject(connection: &Connection, event: &Value, event_id: &str) -> Result<(), String> {
@@ -296,8 +348,8 @@ fn attach_node(connection: &Connection, node_id: &str, event_id: &str) -> Result
         .map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT OR IGNORE INTO node_decisions (node_id, event_id, seq)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO node_decisions (node_id, event_id, seq) VALUES (?1, ?2, ?3)
+             ON CONFLICT(node_id, event_id) DO NOTHING",
             params![node_id, event_id, next_seq],
         )
         .map_err(|error| error.to_string())?;
@@ -312,7 +364,7 @@ mod tests {
     fn connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .execute_batch(&crate::backlog::graph_meta_ddl())
             .unwrap();
         ensure_table(&connection).unwrap();
         connection
@@ -347,23 +399,41 @@ mod tests {
     fn decisions_import_rejects_an_orphan_node_reference() {
         let temp = TempDir::new().unwrap();
         let graph = temp.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::json!({
-                "entries": [{
-                    "id": "x-node",
-                    "decisions": [{"decision_id": "d-missing"}]
-                }]
-            })
-            .to_string(),
-        )
+        let mut connection = crate::backlog::open(&graph).unwrap();
+        connection
+            .execute(
+                "DELETE FROM graph_meta WHERE key = 'decisions_imported'",
+                [],
+            )
+            .unwrap();
+        let node = crate::backlog::model::Node::from_json(&serde_json::json!({
+            "id": "x-node",
+            "slug": "node",
+            "title": "Node",
+            "type": "feature",
+            "status": "ready",
+            "priority": "p2"
+        }))
         .unwrap();
+        crate::backlog::nodes::save(&connection, &node).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO node_decisions (node_id, event_id, seq)
+                 VALUES ('x-node', 'd-missing', 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
         std::fs::write(
             temp.path().join("decisions.jsonl"),
             serde_json::to_string(&event("d-present")).unwrap() + "\n",
         )
         .unwrap();
-        let mut connection = connection();
 
         let error = import_if_needed(&mut connection, &graph).unwrap_err();
 

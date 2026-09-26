@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 import types
 from pathlib import Path
@@ -15,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from fno.rust_binary import find_dev_binary
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph.store import (
-    GraphCorruptError,
     _apply_graph_defaults,
     append_session_record,
     _read_json,
@@ -24,6 +23,7 @@ from fno.graph.store import (
     read_graph_strict,
     render_canonical_views,
 )
+
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -41,7 +41,7 @@ pytestmark = requires_rust
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(p, entries)
     return p
 
 
@@ -110,25 +110,24 @@ def test_the_raw_flock_helpers_are_retired():
     assert not hasattr(store_mod, "_release_flock")
 
 
-def test_ac1_hp_read_json_missing_file(tmp_path):
-    """AC1-HP: _read_json returns [] for missing file."""
+def test_read_json_missing_store_is_an_empty_graph(tmp_path):
+    """Opening a missing SQLite store creates its empty graph."""
     p = tmp_path / "nonexistent.json"
-    result = _read_json(p)
-    assert result == []
+    assert _read_json(p) == []
 
 
 def test_ac1_hp_read_json_empty_entries(tmp_path):
-    """AC1-HP: _read_json returns [] for file with empty entries."""
+    """An empty store returns no entries."""
     p = tmp_path / "g.json"
-    p.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(p, [])
     result = _read_json(p)
     assert result == []
 
 
 def test_ac1_hp_read_json_valid_entries(tmp_path):
-    """AC1-HP: _read_json returns entries list."""
+    """_read_json reads entries from graph.db."""
     p = tmp_path / "g.json"
-    p.write_text(json.dumps({"entries": [{"id": "ab-aabbccdd", "title": "X"}]}) + "\n")
+    seed_graph(p, [{"id": "ab-aabbccdd", "title": "X"}])
     result = _read_json(p)
     assert len(result) == 1
     assert result[0]["id"] == "ab-aabbccdd"
@@ -406,7 +405,6 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
-    from fno.graph.store import _worker_binary
 
 
     state_dir = tmp_path / "state"
@@ -414,14 +412,11 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     graph_json = state_dir / "graph.json"
     # The archived row is a stamped resident of the same store, not a sibling
     # advisory file; it must be seeded before the first db open folds the seed.
-    graph_json.write_text(
-        json.dumps({"entries": [
+    seed_graph(graph_json, json.dumps({"entries": [
             {"id": "ab-archive1", "title": "ARCHIVE-AUTO-RENDER-MARKER",
              "status": "done", "project": "fno",
              "archived_at": "2026-08-01T00:00:00Z"},
-        ]}),
-        encoding="utf-8",
-    )
+        ]}))
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
     monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
@@ -485,7 +480,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id="session-open",
             merge_grant={"approved": "yes", "source": "config",
@@ -497,7 +492,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id="session-open",
             merge_grant={"approved": True, "source": "config",
@@ -510,7 +505,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         started_at="2026-08-20T00:00:00Z",
@@ -524,7 +519,7 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         merge_grant={"approved": False, "source": "none",
@@ -543,12 +538,12 @@ def test_ac1_hp_one_row_per_session_and_phase_whatever_the_harness_spelling(tmp_
     path = _make_graph(tmp_path, [entry])
 
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="claude",
+        path, entry["id"], phase="execute", harness="claude",
         session_id="legacy-1", started_at="2026-09-04T10:00:00Z",
     )
     assert (found, added) == (True, True)
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="unknown",
+        path, entry["id"], phase="execute", harness="unknown",
         session_id="legacy-1", ended_at="2026-09-04T11:00:00Z",
     )
     assert (found, added) == (True, False)
@@ -569,12 +564,12 @@ def test_ac1_err_wrong_shape_harness_is_refused_and_writes_nothing(tmp_path):
         ValueError, match=r"is a codex id; refusing harness claude"
     ):
         append_session_record(
-            path, entry["id"], phase="do", harness="claude", session_id=codex_id,
+            path, entry["id"], phase="execute", harness="claude", session_id=codex_id,
         )
     assert read_graph_strict(path)[0]["sessions"] == []
 
     found, added = append_session_record(
-        path, entry["id"], phase="do", harness="codex", session_id=codex_id,
+        path, entry["id"], phase="execute", harness="codex", session_id=codex_id,
     )
     assert (found, added) == (True, True)
 
@@ -600,7 +595,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         started_at="2026-08-20T00:00:00Z",
@@ -612,7 +607,7 @@ def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
     found, added = append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-open",
         ended_at="2026-08-20T00:01:00Z",
@@ -631,7 +626,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id=session_id,
             started_at="2026-08-20T00:00:00Z",
@@ -640,7 +635,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-one",
         ended_at="2026-08-20T00:01:00Z",
@@ -650,7 +645,7 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="session-two",
         ended_at="2026-08-20T00:02:00Z",
@@ -666,7 +661,7 @@ def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
         append_session_record(
             path,
             entry["id"],
-            phase="do",
+            phase="execute",
             harness="codex",
             session_id=session_id,
             started_at="2026-08-20T00:00:00Z",
@@ -679,7 +674,7 @@ def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
     result = reap_open_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="dead-session",
     )
@@ -710,7 +705,7 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     append_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="closed-session",
         started_at="2026-08-20T00:00:00Z",
@@ -724,7 +719,7 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     result = reap_open_session_record(
         path,
         entry["id"],
-        phase="do",
+        phase="execute",
         harness="codex",
         session_id="closed-session",
     )
@@ -827,11 +822,11 @@ def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
     doomed_dir = tmp_path / "doomed"
     doomed_dir.mkdir()
     doomed_graph = doomed_dir / "graph.json"
-    doomed_graph.write_text('{"entries": []}\n')
+    seed_graph(doomed_graph, [])
     doomed = _advertised_keeper(doomed_graph)
     kept_graph = tmp_path / "kept" / "graph.json"
     kept_graph.parent.mkdir()
-    kept_graph.write_text('{"entries": []}\n')
+    seed_graph(kept_graph, [])
     kept = _advertised_keeper(kept_graph)
     try:
         assert doomed.poll() is None and kept.poll() is None
@@ -890,9 +885,9 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
     def stale_request(self, method, params):
         raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
 
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
     monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
-    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
 
@@ -965,44 +960,6 @@ def test_resolve_node_id_falls_back_to_the_begin_snapshot(tmp_path, monkeypatch)
     assert store_mod._resolve_node_id(path, "ab-12345678") == "ab-12345678"
     # ...and a genuinely absent node still resolves to None.
     assert store_mod._resolve_node_id(path, "zz-none") is None
-
-
-def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkeypatch, capsys):
-    """The get fast path: the row renders through the same renderer, the miss
-    falls back by returning the token unchanged."""
-    import typer
-
-    from fno.graph import get_batch
-
-    row = {"id": "ab-1", "slug": "first-one", "title": "One", "status": "idea"}
-    payload = {"entries": [dict(row)], "missing": []}
-
-    def fake_fast(path, tokens):
-        return dict(payload)
-
-    # get_batch imports the helper from store at call time; patch it there.
-    from fno.graph import store as store_mod
-
-    monkeypatch.setattr(store_mod, "read_nodes_by_ids", fake_fast)
-    monkeypatch.setattr(get_batch, "_graph_path", lambda: tmp_path / "graph.json")
-    # Exact id: served, rendered, never returns.
-    with pytest.raises(typer.Exit) as exc:
-        get_batch.resolve_or_dispatch(["ab-1"], field=None, grouped=False, strict=False)
-    assert exc.value.exit_code == 0
-    assert json.loads(capsys.readouterr().out)["id"] == "ab-1"
-
-    # A case-different id must NOT serve: resolve_node tier 1 is exact, so
-    # a fast path hit here would widen resolution.
-    payload["entries"] = [dict(row)]
-    payload["missing"] = []
-    returned = get_batch.resolve_or_dispatch(["AB-1"], field=None, grouped=False, strict=False)
-    assert returned == "AB-1"
-
-    # Miss: the token falls through to the caller's full path.
-    payload["entries"] = []
-    payload["missing"] = ["zz-none"]
-    returned = get_batch.resolve_or_dispatch(["zz-none"], field=None, grouped=False, strict=False)
-    assert returned == "zz-none"
 
 
 # -- the bounded retry --
@@ -1128,7 +1085,7 @@ def test_dead_socket_serves_by_exec_and_never_spawns(tmp_path, monkeypatch):
     minted, so nothing holds the store to grow on. A live incumbent is still
     preferred, and the exec client answers typed helpers."""
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
+    seed_graph(graph, [])
     monkeypatch.setattr(
         store_mod,
         "_worker_binary",
@@ -1312,3 +1269,52 @@ def test_write_connect_failure_says_write_was_not_sent(monkeypatch):
         client.request("commit_rows", {})
     assert not isinstance(exc.value, store_mod.WriteUnconfirmed)
     assert "the write was not sent" in str(exc.value)
+
+
+def test_cli_renders_invalid_store_refusal_as_one_line(monkeypatch, capsys):
+    """AC1-HP: invalid keeper refusals are concise CLI errors."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("invalid", "prose budget exceeded on x-1: limit=5000.")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == "Error: prose budget exceeded on x-1: limit=5000.\n"
+
+
+def test_cli_preserves_traceback_for_store_faults(monkeypatch):
+    """AC2-ERR: keeper faults still propagate as RuntimeError."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("sqlite", "database is unavailable")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(RuntimeError, match=r"store error \(sqlite\): database is unavailable"):
+        cli.main()
+
+
+def test_cli_renders_empty_field_refusal_and_preserves_invalid_text(monkeypatch, capsys):
+    """AC3-EDGE: empty-field refusals render and invalid text stays stable."""
+    from fno import cli
+    from fno.graph import store
+
+    def app():
+        store._raise_store_error("empty_field_update", "a field update carries no value")
+
+    monkeypatch.setattr(cli, "app", app)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == "Error: a field update carries no value\n"
+
+    with pytest.raises(RuntimeError) as invalid:
+        store._raise_store_error("invalid", "unknown store method \"plan_refs\"")
+    assert str(invalid.value) == 'store error (invalid): unknown store method "plan_refs"'

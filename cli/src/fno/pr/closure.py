@@ -1,4 +1,4 @@
-"""Exact `Backlog-Closure:` trailer: parse, render, and bind PR-to-node closure.
+"""The PR-body closure line: parse, render, and bind PR-to-node closure.
 
 A merged PR's body may name several backlog nodes, but only the ONE node
 stamped into `.fno/target-state.md` at creation ever gets its `pr_number`
@@ -9,9 +9,13 @@ the reverse branch-name map only carries the primary node's id.
 Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") are
 measurement-only (see `scripts/metrics/pr-node-closure-audit.py`) and must
 NEVER become a closure claim - a dependency note or a follow-up filing reads
-identically to a close claim to a prose scanner. The exact trailer is the
-only runtime-recognized closure grammar, so a claim is either the literal
-line or it does not exist.
+identically to a close claim to a prose scanner. The exact line is the only
+runtime-recognized closure grammar, so a claim is either the literal line or
+it does not exist.
+
+The LINE FORMAT lives in one leg: the Rust parser `king_board/pr_closure.rs` (verbs
+`pr-closure-parse` / `pr-closure-render`); the forwarders below speak for Python.
+Writers emit only `Fixes`; readers accept the retired `Backlog-Closure:` spelling.
 """
 from __future__ import annotations
 
@@ -22,52 +26,19 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
-
-TRAILER_KEY = "Backlog-Closure"
-
-# Anchored to the START of a line (MULTILINE): a sentence merely containing
-# "the Backlog-Closure trailer is..." mid-paragraph must never parse as the
-# trailer itself, matching git trailer convention.
-_TRAILER_LINE_RE = re.compile(
-    rf"^{re.escape(TRAILER_KEY)}:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE
-)
+from fno.rust_binary import VerbUnavailable, verb_call
 
 
 def parse_closure_trailer(body: str) -> list[str]:
-    """Well-formed node ids named on the LAST exact ``Backlog-Closure:`` line.
-
-    Order-preserved, deduplicated. Only a line that starts exactly with the
-    trailer key counts (AC2-EDGE) - prose in a Dependencies/Follow-ups/
-    Collisions section never becomes a claim, however it phrases a mention.
-    Multiple trailer lines (e.g. after a rebase carried a stale one forward):
-    only the LAST wins, mirroring git trailer semantics. A malformed token on
-    an otherwise-good line (typo, stray punctuation) is silently dropped here;
-    the CI backstop (``check-pr-node-closure.sh``) is what enforces
-    well-formedness at PR-open time, not this runtime parser refusing an
-    otherwise-legitimate merge over one bad token.
-    """
+    """Forward to the Rust leg: ids on the LAST closure line of ``body``."""
     if not isinstance(body, str) or not body:
         return []
-    lines = _TRAILER_LINE_RE.findall(body)
-    if not lines:
-        return []
-    ids: list[str] = []
-    seen: set[str] = set()
-    for token in lines[-1].replace(",", " ").split():
-        if is_wellformed_node_id(token) and token not in seen:
-            seen.add(token)
-            ids.append(token)
-    return ids
+    return verb_call("pr-closure-parse", {"body": body}, VerbUnavailable)["ids"]
 
 
 def render_closure_trailer(node_ids: list[str]) -> str:
-    """The one place a trailer LINE is built, so parse<->render round-trips.
-
-    Drops malformed/duplicate ids; returns "" (no line) when nothing well-formed
-    remains, so a caller can safely append the result to a body unconditionally.
-    """
-    ids = [n for n in dict.fromkeys(node_ids) if is_wellformed_node_id(n)]
-    return f"{TRAILER_KEY}: {' '.join(ids)}" if ids else ""
+    """Forward to the Rust leg: the one ``Fixes`` line ("" when nothing well-formed)."""
+    return verb_call("pr-closure-render", {"ids": list(node_ids)}, VerbUnavailable)["line"]
 
 
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:

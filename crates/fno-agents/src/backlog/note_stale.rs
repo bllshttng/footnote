@@ -180,7 +180,7 @@ mod tests {
 
     fn graph_with(dir: &Path, row: Value) -> std::path::PathBuf {
         let graph = dir.join("graph.json");
-        std::fs::write(&graph, json!({"entries": [row]}).to_string()).unwrap();
+        crate::graph_store::seed_rows(&graph, &[row]).unwrap();
         graph
     }
 

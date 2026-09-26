@@ -25,9 +25,12 @@ fn write_hold_plan(dir: &Path, hold_frontmatter: &str) -> String {
 
 fn write_graph_with_hold_node(fno_home: &Path, node_id: &str, plan_path: &str) {
     let graph = fno_home.join("graph.json");
-    fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        serde_json::json!({"entries": [{"id": node_id, "plan_path": plan_path}]}).to_string(),
+        &[serde_json::json!({
+            "id": node_id, "slug": node_id, "title": node_id, "type": "feature",
+            "status": "ready", "priority": "p1", "plan_path": plan_path
+        })],
     )
     .unwrap();
 }

@@ -539,58 +539,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         )
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
-    _validate_probe_decls(root.get("probe"))
     return version, harnesses
-
-
-#: The three ways a probe declaration says a field can be settled, kept
-#: identical to the Rust validator's PROBE_KINDS.
-_PROBE_KINDS = {"declared", "behavioral", "unprobeable"}
-
-
-def _validate_probe_decls(probe: object) -> None:
-    """Validate the ``[probe.*]`` instrument declarations : a kind
-    may carry only the fields its instrument needs, and a declared pattern
-    must compile. A declaration IS an instrument spec; a spec that cannot
-    run is a guess with extra steps."""
-    if probe is None:
-        return
-    if not isinstance(probe, dict):
-        raise DispatchResolveError("harness capability contract probe table is not a table")
-    for field, decl in probe.items():
-        if not isinstance(decl, dict) or decl.get("kind") not in _PROBE_KINDS:
-            raise _contract_error(field, "probe.kind", "unknown kind")
-        kind = decl["kind"]
-        need = {
-            "declared": ("authority", "pattern"),
-            "behavioral": ("marker",),
-            "unprobeable": ("reason",),
-        }[kind]
-        forbid = {
-            "declared": ("marker", "reason"),
-            "behavioral": ("authority", "pattern", "reason"),
-            "unprobeable": ("authority", "pattern", "marker"),
-        }[kind]
-        for key in need:
-            if not str(decl.get(key) or "").strip():
-                raise _contract_error(field, f"probe.{key}", f"kind {kind!r} needs {key}")
-        for key in forbid:
-            if str(decl.get(key) or "").strip():
-                raise _contract_error(
-                    field, f"probe.{key}", f"kind {kind!r} must not carry {key}"
-                )
-        if kind == "declared":
-            try:
-                re.compile(decl["pattern"])
-            except re.error as exc:
-                raise _contract_error(field, "probe.pattern", f"invalid pattern: {exc}") from exc
-
-
-def probe_declarations() -> dict[str, dict]:
-    """The ``[probe.*]`` instrument table: how each named field can be
-    settled. A field absent from it is UNDECLARED, and the probe reports it
-    as such instead of guessing an instrument."""
-    return deepcopy(_PROBE_DECLS)
 
 
 def normalize_command(command: str, harness: str) -> str:
@@ -848,6 +797,11 @@ def check_loop_participation(harness: str, command: str) -> None:
     caps = capabilities(harness)
     participation = caps["loop_participation"]
     if participation == "native":
+        from fno.rust_binary import call_binary_json
+        args = ["readiness", "--pre-launch", "--harness", harness, "--command", command]
+        error, _ = call_binary_json("loop", args)
+        if error:
+            raise DispatchResolveError(error)
         return
     if participation == "extension" and caps.get("loop_extension"):
         if not _loop_extension_installed(harness):
@@ -908,7 +862,6 @@ _PACKAGED_CONTRACT_TEXT = (
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
 MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
-_PROBE_DECLS: dict[str, dict] = tomllib.loads(_PACKAGED_CONTRACT_TEXT).get("probe") or {}
 # Non-empty subset of the complete roster, mirroring parse_capability_contract:
 # the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
 assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
@@ -1576,14 +1529,8 @@ def resolve_dispatch(
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
-    # The loop gate, at the same choke point every spawn surface resolves
-    # through. It reads a CAPABILITY, never a harness name, and it fires after
-    # normalization so it judges the per-harness /target spelling the worker
-    # will actually receive. Deliberately not at registry load: an alien or
-    # one-shot dispatch must still resolve fine, matching the existing split
-    # where the load gate is a shape check and the dispatch gate is where a
-    # capability is required.
-    check_loop_participation(chosen_harness, template)
+    # Resolution is read-only. The spawn door checks loop readiness after it
+    # has the actual caller session context and before it launches a worker.
     # `{id}` must appear at least once; a template may reference it more than
     # once. A registry verb declaring takes_node_id=false is exempt: ignoring
     # the id is declared, not a dropped substitution.

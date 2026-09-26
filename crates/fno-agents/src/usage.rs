@@ -131,10 +131,10 @@ mod tests {
     /// source, so a new flag cannot land undocumented.
     #[test]
     fn loop_check_help_covers_every_accepted_flag() {
-        let source = include_str!("loopcheck.rs");
+        let source = include_str!("loopcheck/args.rs");
         let start = source
             .find("fn parse_args(")
-            .expect("parse_args not found in loopcheck.rs");
+            .expect("parse_args not found in loopcheck/args.rs");
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").expect("parse_args has no closing brace")];
 

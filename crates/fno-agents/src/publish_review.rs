@@ -270,6 +270,265 @@ fn newest_head_attestation(journals: &[PathBuf], head: &str) -> Option<Value> {
     newest.map(|(_, data)| data)
 }
 
+/// The newest `review_attestation` naming `branch`, last-wins on ts. The
+/// held-findings store IS this row: a no-PR review (`--comment` with no PR)
+/// already writes it keyed to branch and head, so the PR-open leg reads it
+/// back instead of a second store. Rows predating the `branch` field carry no
+/// branch and cannot be scoped to one PR, so they never match.
+fn newest_branch_attestation(journals: &[PathBuf], branch: &str) -> Option<Value> {
+    let mut newest: Option<(String, Value)> = None;
+    for path in journals {
+        let Ok(text) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if row.get("type").and_then(Value::as_str) != Some("review_attestation") {
+                continue;
+            }
+            let Some(data) = row.get("data").filter(|d| d.is_object()) else {
+                continue;
+            };
+            if data.get("branch").and_then(Value::as_str) != Some(branch) {
+                continue;
+            }
+            let ts = row
+                .get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let take = match &newest {
+                Some((best_ts, _)) => ts >= *best_ts,
+                None => true,
+            };
+            if take {
+                newest = Some((ts, data.clone()));
+            }
+        }
+    }
+    newest.map(|(_, data)| data)
+}
+
+/// The one marker a held-findings comment ends with; idempotency keys on it.
+fn held_marker(branch: &str, reviewed_head: &str) -> String {
+    format!("<!-- fno-held-review branch={branch} head={reviewed_head} -->")
+}
+
+/// The comment body: one line per finding (`file:line [category] summary`),
+/// the moved-head caveat when the PR advanced past the reviewed commit, and
+/// the marker last.
+fn held_comment_body(
+    branch: &str,
+    reviewed_head: &str,
+    pr_head: &str,
+    findings: &[Value],
+) -> String {
+    let mut body = format!("fno held review (branch `{branch}`)\n");
+    if reviewed_head != pr_head {
+        body.push_str(&format!(
+            "\nreviewed at {reviewed_head}; PR head is {pr_head}; this review does not cover the newer commits\n"
+        ));
+    }
+    for f in findings {
+        let key = f.get("finding_key").and_then(Value::as_str).unwrap_or("");
+        let category = f.get("category").and_then(Value::as_str).unwrap_or("");
+        let suffix = format!(":{category}");
+        let file_line = match key.strip_suffix(&suffix) {
+            Some(head) => head,
+            None => key,
+        };
+        let summary = f.get("summary").and_then(Value::as_str).unwrap_or("");
+        body.push_str(&format!("\n- `{file_line}` [{category}] {summary}"));
+    }
+    body.push_str(&format!("\n\n{}", held_marker(branch, reviewed_head)));
+    body
+}
+
+/// The held-findings answer for one PR-open post attempt. Independent of the
+/// verdict mirror: a lane with no bot identity still owes the author their
+/// findings. `status`: posted | stale-posted | already-posted | skipped |
+/// failed. `journals` is injected so callers (and tests) pin the store.
+pub struct HeldAnswer {
+    pub status: &'static str,
+    pub reviewed_head: String,
+    pub pr_head: String,
+    pub reason: String,
+    pub findings: Vec<Value>,
+}
+
+impl HeldAnswer {
+    fn done(
+        status: &'static str,
+        reason: impl Into<String>,
+        reviewed_head: &str,
+        pr_head: &str,
+    ) -> Self {
+        HeldAnswer {
+            status,
+            reviewed_head: reviewed_head.to_string(),
+            pr_head: pr_head.to_string(),
+            reason: reason.into(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "status": self.status,
+            "reviewed_head": self.reviewed_head,
+            "pr_head": self.pr_head,
+            "reason": self.reason,
+            "findings": self.findings,
+        })
+    }
+}
+
+/// Read the PR's held findings and post them as ONE issue comment under the
+/// caller's own gh auth. Idempotent by the marker: a comment already carrying
+/// this branch and reviewed head posts nothing. A reviewed head behind the PR
+/// head still posts (post, never drop), naming both shas; coverage stays
+/// head-pinned, so the newer commits still owe their own round.
+pub fn publish_held(payload: &Value, gh: &dyn Gh, journals: &[PathBuf]) -> HeldAnswer {
+    let cwd = Path::new(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let pr_number = payload.get("pr_number").and_then(Value::as_u64);
+
+    // One gh read: the PR to post on, its head, its branch, its slug.
+    let mut view: Vec<String> = vec!["pr".to_string(), "view".to_string()];
+    if let Some(n) = pr_number {
+        view.push(n.to_string());
+    }
+    view.extend(
+        ["--json", "number,headRefOid,headRefName,url"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    let out = gh.run(&view, None, cwd);
+    let fields: Value = if out.ok {
+        serde_json::from_str(out.stdout.trim()).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    if fields.is_null() {
+        return HeldAnswer::done("skipped", "could not read PR", "", "");
+    }
+    let number = fields.get("number").and_then(Value::as_u64);
+    let Some(number) = number else {
+        return HeldAnswer::done("skipped", "could not read PR number", "", "");
+    };
+    let pr_head = fields
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let branch = fields
+        .get("headRefName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if pr_head.is_empty() || branch.is_empty() {
+        return HeldAnswer::done("skipped", "could not read PR head or branch", "", "");
+    }
+    let slug = slug_from_url(fields.get("url").and_then(Value::as_str).unwrap_or(""));
+    if slug.is_empty() {
+        return HeldAnswer::done("skipped", "could not resolve repo slug", "", &pr_head);
+    }
+
+    // The held record: the newest attestation for this branch, any head.
+    let Some(att) = newest_branch_attestation(journals, &branch) else {
+        return HeldAnswer::done(
+            "skipped",
+            format!("no held attestation for branch {branch}"),
+            "",
+            &pr_head,
+        );
+    };
+    let reviewed_head = att
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let findings: Vec<Value> = att
+        .get("findings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if findings.is_empty() {
+        return HeldAnswer::done(
+            "skipped",
+            "held attestation carries no findings; the verdict mirror covers it",
+            &reviewed_head,
+            &pr_head,
+        );
+    }
+
+    // Idempotency: scan existing comments for this exact marker. --paginate
+    // walks every page, so a busy PR cannot push its marker past the scan.
+    let list: Vec<String> = [
+        "api",
+        "--paginate",
+        &format!("/repos/{slug}/issues/{number}/comments?per_page=100"),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let out = gh.run(&list, None, cwd);
+    if out.ok && out.stdout.contains(&held_marker(&branch, &reviewed_head)) {
+        return HeldAnswer::done(
+            "already-posted",
+            format!("held findings for {reviewed_head} already posted on #{number}"),
+            &reviewed_head,
+            &pr_head,
+        )
+        .with_findings(findings);
+    }
+
+    let body = held_comment_body(&branch, &reviewed_head, &pr_head, &findings);
+    let post: Vec<String> = [
+        "api",
+        "-X",
+        "POST",
+        &format!("/repos/{slug}/issues/{number}/comments"),
+        "-f",
+        &format!("body={body}"),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let out = gh.run(&post, None, cwd);
+    if !out.ok {
+        let mut a = HeldAnswer::done(
+            "failed",
+            format!("gh api POST comment failed (exit {})", out.code),
+            &reviewed_head,
+            &pr_head,
+        );
+        a.findings = findings;
+        a.reason = format!("{}: {}", a.reason, out.stderr.trim());
+        return a;
+    }
+    let status = if reviewed_head == pr_head {
+        "posted"
+    } else {
+        "stale-posted"
+    };
+    HeldAnswer::done(
+        status,
+        format!("held findings posted on #{number}"),
+        &reviewed_head,
+        &pr_head,
+    )
+    .with_findings(findings)
+}
+
+impl HeldAnswer {
+    fn with_findings(mut self, findings: Vec<Value>) -> Self {
+        self.findings = findings;
+        self
+    }
+}
+
 fn git_head(cwd: &Path) -> Option<String> {
     let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -545,6 +804,8 @@ pub fn publish(payload: &Value, gh: &dyn Gh, env: &dyn Fn(&str) -> Option<String
 /// The verb entry: one JSON payload on stdin, one JSON answer on stdout,
 /// always exit 0 (the answer carries the caller-facing exit under "exit";
 /// only a transport failure - unreadable or malformed stdin - exits 2).
+/// Two independent legs ride one answer: the verdict mirror under the bot
+/// identity, and the held-findings post under the caller's own auth (`held`).
 pub fn run_publish_review(_args: &[String]) -> i32 {
     use std::io::Read;
 
@@ -560,10 +821,11 @@ pub fn run_publish_review(_args: &[String]) -> i32 {
             return 2;
         }
     };
-    println!(
-        "{}",
-        publish(&parsed, &GhReal, &|name: &str| std::env::var(name).ok()).to_json()
-    );
+    let mut answer = publish(&parsed, &GhReal, &|name: &str| std::env::var(name).ok()).to_json();
+    let cwd = Path::new(parsed.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let journals = [crate::paths::events_path(cwd)];
+    answer["held"] = publish_held(&parsed, &GhReal, &journals).to_json();
+    println!("{answer}");
     0
 }
 
@@ -1007,5 +1269,142 @@ mod tests {
         assert_eq!(no_att.exit(), 2);
         let refused = Answer::done("refused", "bot identity b is the PR author");
         assert_eq!(refused.exit(), 1);
+    }
+
+    fn held_row(branch: &str, head: &str) -> String {
+        let findings = "[{\"category\":\"correctness\",\"verdict\":\"CONFIRMED\",\"blocking\":true,\
+            \"has_required_fields\":true,\"finding_key\":\"src/a.py:42:correctness\",\"summary\":\"first bug\"},\
+            {\"category\":\"style\",\"verdict\":\"PLAUSIBLE\",\"blocking\":false,\
+            \"has_required_fields\":false,\"finding_key\":\"src/b.py:7:style\",\"summary\":\"second note\"}]";
+        format!(
+            "{{\"type\":\"review_attestation\",\"ts\":\"2026-09-24T10:00:00Z\",\"data\":{{\"branch\":\"{branch}\",\"head_sha\":\"{head}\",\"verdict\":\"fail\",\"reviewer\":\"code-review\",\"findings\":{findings}}}}}\n"
+        )
+    }
+
+    fn held_view(head: &str) -> GhOut {
+        GhOut {
+            ok: true,
+            code: 0,
+            stdout: format!(
+                r#"{{"number": 931, "headRefOid": "{head}", "headRefName": "feature/x", "url": "https://github.com/bllshttng/footnote/pull/931"}}"#
+            ),
+            stderr: String::new(),
+        }
+    }
+
+    fn comments_out(bodies: &[String]) -> GhOut {
+        let items: Vec<String> = bodies
+            .iter()
+            .map(|b| format!(r#"{{"body": {}}}"#, serde_json::to_string(b).unwrap()))
+            .collect();
+        GhOut {
+            ok: true,
+            code: 0,
+            stdout: format!("[{}]", items.join(",")),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn held_findings_post_once_for_the_reviewed_head() {
+        let dir = temp_repo("held");
+        let journal = dir.join("events.jsonl");
+        std::fs::write(&journal, held_row("feature/x", "h1sha")).unwrap();
+        let marker = held_marker("feature/x", "h1sha");
+        let fake = GhFake::new(vec![held_view("h1sha"), comments_out(&[]), post_ok()]);
+        let answer = publish_held(
+            &json!({"pr_number": 931, "cwd": dir.to_string_lossy()}),
+            &fake,
+            &[journal.clone()],
+        );
+        assert_eq!(answer.status, "posted");
+        assert_eq!(answer.reviewed_head, "h1sha");
+        assert_eq!(answer.pr_head, "h1sha");
+        assert_eq!(answer.findings.len(), 2);
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].iter().any(|a| a.contains("/issues/931/comments")));
+        let post_body = calls[2]
+            .iter()
+            .find(|a| a.starts_with("body="))
+            .expect("comment POST carries the body");
+        assert!(post_body.contains("src/a.py:42"));
+        assert!(post_body.contains("[correctness] first bug"));
+        assert!(post_body.contains("src/b.py:7"));
+        assert!(post_body.contains(&marker));
+        // Second run: the marker is already on the PR, nothing posts.
+        let fake2 = GhFake::new(vec![
+            held_view("h1sha"),
+            comments_out(&[format!("findings\n\n{marker}")]),
+        ]);
+        let answer2 = publish_held(
+            &json!({"pr_number": 931, "cwd": dir.to_string_lossy()}),
+            &fake2,
+            &[journal],
+        );
+        assert_eq!(answer2.status, "already-posted");
+        assert_eq!(fake2.calls().len(), 2);
+        assert!(!fake2
+            .calls()
+            .iter()
+            .any(|c| c.iter().any(|a| a == "-X" || a == "POST")));
+    }
+
+    #[test]
+    fn held_findings_on_a_moved_head_post_with_both_shas() {
+        let dir = temp_repo("held-stale");
+        let journal = dir.join("events.jsonl");
+        std::fs::write(&journal, held_row("feature/x", "h1sha")).unwrap();
+        let fake = GhFake::new(vec![held_view("h2sha"), comments_out(&[]), post_ok()]);
+        let answer = publish_held(
+            &json!({"pr_number": 931, "cwd": dir.to_string_lossy()}),
+            &fake,
+            &[journal],
+        );
+        assert_eq!(answer.status, "stale-posted");
+        assert_eq!(answer.reviewed_head, "h1sha");
+        assert_eq!(answer.pr_head, "h2sha");
+        let calls = fake.calls();
+        let post_body = calls[2]
+            .iter()
+            .find(|a| a.starts_with("body="))
+            .expect("comment POST carries the body");
+        assert!(post_body.contains("reviewed at h1sha; PR head is h2sha"));
+        assert!(post_body.contains("does not cover the newer commits"));
+        assert!(post_body.contains(&held_marker("feature/x", "h1sha")));
+    }
+
+    #[test]
+    fn held_leg_skips_when_no_attestation_or_no_findings() {
+        let dir = temp_repo("held-skip");
+        let journal = dir.join("events.jsonl");
+        // A pass row with no findings array: the verdict mirror covers it.
+        std::fs::write(
+            &journal,
+            format!(
+                "{{\"type\":\"review_attestation\",\"ts\":\"2026-09-24T10:00:00Z\",\"data\":{{\"branch\":\"feature/x\",\"head_sha\":\"h1sha\",\"verdict\":\"pass\",\"reviewer\":\"code-review\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let fake = GhFake::new(vec![held_view("h1sha")]);
+        let answer = publish_held(
+            &json!({"pr_number": 931, "cwd": dir.to_string_lossy()}),
+            &fake,
+            &[journal],
+        );
+        assert_eq!(answer.status, "skipped");
+        assert!(answer.reason.contains("no findings"));
+        assert_eq!(fake.calls().len(), 1);
+        // No journal row for the branch at all: same skip, still one gh read.
+        let empty = temp_repo("held-skip-empty").join("events.jsonl");
+        let fake2 = GhFake::new(vec![held_view("h1sha")]);
+        let answer2 = publish_held(
+            &json!({"pr_number": 931, "cwd": dir.to_string_lossy()}),
+            &fake2,
+            &[empty],
+        );
+        assert_eq!(answer2.status, "skipped");
+        assert!(answer2.reason.contains("no held attestation"));
+        assert_eq!(fake2.calls().len(), 1);
     }
 }

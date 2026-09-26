@@ -718,6 +718,24 @@ pub(crate) fn consume_merge_cleanup_requests(
     let node_states = crate::gc_sweep::read_graph_node_states(home);
     let ledger = crate::gc_sweep::ledger_rows(&crate::gc_sweep::default_ledger_path());
     let mut pending = pending_merge_cleanup_requests_all(home);
+    // The merge ends each node's ship rows at the instant the merge
+    // recorded, grace or not. A request with no merged_at waits for the
+    // sweep, which reads the merge commit instead.
+    let ship_ends: Vec<(String, String)> = pending
+        .iter()
+        .filter_map(|r| Some((r, chrono::DateTime::from_timestamp(r.merged_at?, 0)?)))
+        .flat_map(|(r, at)| {
+            let at = at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            r.node_ids.iter().map(move |id| (id.clone(), at.clone()))
+        })
+        .collect();
+    let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
+    for (node, error) in crate::phase_close::close_ship_rows_at(&store, &ship_ends, "merge") {
+        let _ = emitter.emit(
+            "daemon_recovery_error",
+            &json!({"op": "close_ship_rows", "node": node, "error": error}),
+        );
+    }
     let worktrees_by_root: HashMap<String, Vec<(String, std::path::PathBuf)>> = roots
         .iter()
         .map(|root| {

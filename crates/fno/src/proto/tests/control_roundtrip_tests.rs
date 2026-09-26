@@ -96,6 +96,7 @@ fn proto_v4_control_replies_roundtrip() {
                 predecessor_session_ids: Vec::new(),
                 forked_from_session_id: None,
                 name: None,
+                portal: None,
             }],
         },
         ServerMsg::PaneText {

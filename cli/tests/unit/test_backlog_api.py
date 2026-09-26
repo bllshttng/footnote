@@ -6,6 +6,7 @@ backlog::api function -> typed reply parsed back into
 fno.graph.types models.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -52,7 +53,7 @@ def _row(id: str, title: str, status: str, **extra) -> dict:
 
 def _seed(tmp_path: Path, rows: list[dict]) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": rows}) + "\n")
+    seed_graph(graph, json.dumps({"entries": rows}) + "\n")
     return graph
 
 

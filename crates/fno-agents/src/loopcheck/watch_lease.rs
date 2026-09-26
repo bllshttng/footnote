@@ -58,11 +58,11 @@ instead of re-waking every tick.";
 /// live-verified follow-up - so all of those keep today's block behavior rather
 /// than idling with nothing to wake them (a dead watch). This is the design's
 /// "unroutable harness -> status quo, never a dead watch" degradation.
-pub(super) fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
+pub(crate) fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
     author_harness == Some("claude") && !is_loop_run_child
 }
 
-pub(super) fn watching_harness_refusal(
+pub(crate) fn watching_harness_refusal(
     author_harness: Option<&str>,
     is_loop_run_child: bool,
 ) -> String {

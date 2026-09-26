@@ -279,42 +279,12 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
 
 
 def read_graph_nodes(path: Path) -> list[dict]:
-    """Best-effort graph read for the optional survival signal. A missing or
-    unreadable graph is not fatal - survival just degrades to n/a.
-
-    Runs the canonical ``_apply_graph_defaults`` pass so the scoreboard speaks the
-    same migrated vocabulary as every other reader; it used to parse raw, so a row
-    still on disk as ``claimed`` never matched an ``in_progress`` comparison here.
-
-    Deliberately NOT ``read_graph``, though that is the same defaults pass: on a
-    corrupt graph ``read_graph`` copies a ``.bak`` and warns on stderr before
-    degrading to ``[]``. Correct for a command whose job IS the graph, wrong for
-    an optional display signal - a read-only scoreboard must not write files, and
-    the warning lands in the ``-J`` stream and breaks the JSON. The census row
-    asked for one MIGRATION seam, not one corruption policy."""
-    from fno.graph.store import _apply_graph_defaults
+    from fno.graph.store import STORE_READ_ERRORS, read_graph_strict
 
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # missing / unreadable / non-utf8 / bad json
+        return read_graph_strict(Path(path))
+    except STORE_READ_ERRORS:
         return []
-    nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
-    if isinstance(nodes, dict):
-        nodes = list(nodes.values())
-    if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
-        return []
-    # Seed rows keep the pre-rename `_status` key; recover it before the
-    # defaults pass drops it, or a seeded claimed row reads unclaimed.
-    for node in nodes:
-        if isinstance(node, dict) and node.get("status") is None:
-            legacy = node.get("_status")
-            if legacy == "claimed":
-                node["status"] = "in_progress"
-    # Filtered HERE rather than in the shared pass: this is a display signal, so
-    # a malformed row is nothing but noise. Other readers count those rows as
-    # evidence the graph is corrupt, which is why the migration pass skips them
-    # without removing them.
-    return _apply_graph_defaults([n for n in nodes if isinstance(n, dict)])
 
 
 def _parse_ts(raw) -> datetime | None:
@@ -613,13 +583,15 @@ def build_calibration(
 # loadable session). A row with neither is an explicit "unattributed" bucket,
 # never silently dropped (mirrors the calibration fold's honesty rule).
 
-# think/plan/do/review/docs/ship/external are /target's own phase names;
+# think/plan/execute/review/docs/ship/external are /target's own phase names;
 # ship+external both route through /pr (create vs check) so they collapse to
-# one skill id.
+# one skill id. "do" is the phase's retired spelling: ledger.json history rows
+# still carry it, so its key stays until those rows age out.
 _PHASE_TO_SKILL = {
     "think": "fno:think",
     "plan": "fno:blueprint",
     "do": "fno:do",
+    "execute": "fno:execute",
     "review": "fno:review",
     "docs": "fno:ship-docs",
     "ship": "fno:pr",
@@ -675,7 +647,7 @@ _SKILL_COMMIT_HISTORY_CACHE: dict[tuple[str, str], list[tuple[datetime, str]]] =
 
 # The ledger phase and skill directory are separate vocabularies. Keep old
 # phase rows pointed at the renamed skill until the compatibility shim retires.
-_PHASE_TO_SKILL_DIR = {"do": "execute"}
+_PHASE_TO_SKILL_DIR = {"do": "execute", "execute": "execute"}
 
 
 def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
@@ -2468,7 +2440,7 @@ if __name__ == "__main__":
     skill_rows = [
         {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 4.0,
          "sessions": ["11111111-1111-1111-1111-111111111111"]},
-        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["do"], "cost_usd": 1.0},
+        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "phases_completed": ["execute"], "cost_usd": 1.0},
         {"completed": "2026-07-01T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-9", "cost_usd": 2.0},
     ]
     sb3 = build_skill_scoreboard(

@@ -30,10 +30,18 @@ def _entry():
 
 
 def _runner(calls, *, screen="", returncode=0):
-    """A fake ``subprocess.run`` covering the pane verbs this lane issues."""
+    """A fake ``subprocess.run`` covering the pane verbs this lane issues.
+
+    The ``mail-envelope`` render is NOT faked: the renderer lives behind the
+    Rust binary, and a fake here would turn the envelope assertions below into
+    tautologies. Pass that one through to the real subprocess.
+    """
+    real_run = dispatch.subprocess.run
 
     def run(argv, **kwargs):
         calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if "mail-envelope" in argv:
+            return real_run(argv, **kwargs)
         if argv[1:4] == ["mux", "pane", "read"]:
             return SimpleNamespace(returncode=0, stdout=screen, stderr="")
         return SimpleNamespace(returncode=returncode, stdout="", stderr="")
@@ -89,7 +97,6 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     renderer produced, not which topology produces a trailer (that pair is
     asserted in ``test_mail_origin.py``).
     """
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)

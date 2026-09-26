@@ -22,8 +22,10 @@ fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
     let shielded_sock = state_root.join("graph.json.store.sock");
     let corpse = std::os::unix::net::UnixListener::bind(&shielded_sock).unwrap();
     drop(corpse);
-    let shielded_graph = state_root.join("graph.json");
-    std::fs::write(&shielded_graph, b"{}").unwrap();
+    // The shield is the STORE file (graph.db): the sweep judges a sibling
+    // alive by its store's existence, never the json anchor name.
+    let shielded_graph = crate::backlog::database_path(&state_root.join("graph.json"));
+    std::fs::write(&shielded_graph, b"SQLite format 3\0").unwrap();
 
     // An orphaned sibling: same dead shape, but its graph is gone, so no
     // keeper can ever be behind the path again.

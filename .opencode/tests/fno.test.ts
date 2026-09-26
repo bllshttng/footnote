@@ -1,4 +1,7 @@
 import { test, expect } from "bun:test"
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import fnoPlugin, {
   inferCategory,
   parseFrontmatter,
@@ -13,6 +16,7 @@ import fnoPlugin, {
   protectionScriptsFor,
   parseHookDecision,
   runProtections,
+  setupV2,
 } from "../plugins/fno.ts"
 
 // Run plugin init with FNO_OPENCODE forced, restoring the prior value.
@@ -465,29 +469,35 @@ test("parseHookDecision honors deny and reads allow (AC8-HP)", () => {
 })
 
 test("runProtections denies on the script's decision and throws at the seam (AC8-HP)", async () => {
-  const seen: string[] = []
-  const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
-    seen.push(script)
-    return JSON.stringify({
-      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
+  // A plugin root must resolve, or the seam reports no-root and allows. Stub
+  // the env so the suite never depends on the dev machine's ~/.fno.
+  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
+    const seen: string[] = []
+    const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
+      seen.push(script)
+      return JSON.stringify({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
+      })
     })
+    expect(out.denied).toBe(true)
+    expect(out.reason).toBe("protected manifest")
+    expect(seen.length).toBeGreaterThan(0)
   })
-  expect(out.denied).toBe(true)
-  expect(out.reason).toBe("protected manifest")
-  expect(seen.length).toBeGreaterThan(0)
 })
 
 test("a missing/deciding-nothing script reports once and allows - fail-open (AC8-ERR)", async () => {
-  const errors: string[] = []
-  const orig = console.error
-  console.error = (...a: unknown[]) => errors.push(a.join(" "))
-  try {
-    const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
-    expect(out.denied).toBe(false)
-    expect(errors.some((e) => e.includes("no decision"))).toBe(true)
-  } finally {
-    console.error = orig
-  }
+  await withEnv({ FNO_PLUGIN_ROOT: "/fno-ac8-stub-root" }, async () => {
+    const errors: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => errors.push(a.join(" "))
+    try {
+      const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
+      expect(out.denied).toBe(false)
+      expect(errors.some((e) => e.includes("no decision"))).toBe(true)
+    } finally {
+      console.error = orig
+    }
+  })
 })
 
 test("resolvePluginRoot reads the env chain and the plugin-root file", () => {
@@ -525,4 +535,239 @@ test("a finished child frees its slot; a running one holds it (review fix)", asy
   const t2 = createTaskTool(baseDeps(client2))
   const refused = await t2.execute({ prompt: "x", category: "do" } as any, ctx)
   expect(refused).toContain("concurrency limit reached")
+})
+
+// ---- V2 setup arm (AC1-*, stub ctx records registrations) ------------------
+
+/** A stub V2 context: every hook registration is recorded, nothing runs. */
+function stubV2Ctx(directory: string) {
+  const calls: Array<{ kind: string; name: string; handler: (e: any) => any }> = []
+  const ctx: any = {
+    directory,
+    session: {
+      hook: (name: string, handler: (e: any) => any) => calls.push({ kind: "session", name, handler }),
+    },
+    tool: {
+      hook: (name: string, handler: (e: any) => any) => calls.push({ kind: "tool", name, handler }),
+    },
+  }
+  return { ctx, calls }
+}
+
+/** Set env vars for one test body, restoring the prior values after. */
+async function withEnv(vars: Record<string, string | undefined>, body: () => unknown) {
+  const saved: Record<string, string | undefined> = {}
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k]
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+  try {
+    await body()
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
+
+function captureStderr() {
+  const lines: string[] = []
+  const orig = console.error
+  console.error = (...a: unknown[]) => lines.push(a.join(" "))
+  return {
+    lines,
+    restore: () => {
+      console.error = orig
+    },
+  }
+}
+
+/** A temp project dir carrying one restriction-free footnote agent. */
+function v2ProjectDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "fno-v2-"))
+  mkdirSync(join(dir, "agents"))
+  writeFileSync(join(dir, "agents", "helper.md"), "---\ndescription: helper\n---\nBody.\n")
+  return dir
+}
+
+test("setup on a stub V2 ctx registers the four hooks and returns a safe cleanup (AC1-PORT)", async () => {
+  const dir = v2ProjectDir()
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+    const err = captureStderr()
+    let cleanup: () => void
+    try {
+      cleanup = setupV2(ctx)
+    } finally {
+      err.restore()
+    }
+    expect(calls.map((c) => `${c.kind}:${c.name}`).sort()).toEqual([
+      "session:compaction",
+      "session:context",
+      "tool:execute.after",
+      "tool:execute.before",
+    ])
+    expect(() => cleanup()).not.toThrow()
+  })
+})
+
+test("the V2 context hook pushes the orchestrator prompt as a text part (AC1-PORT)", async () => {
+  const dir = v2ProjectDir()
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+    const err = captureStderr()
+    let cleanup: () => void
+    try {
+      cleanup = setupV2(ctx)
+    } finally {
+      err.restore()
+    }
+    const event: any = { system: [], sessionID: "ses_v2" }
+    await calls.find((c) => c.name === "context")!.handler(event)
+    expect(event.system.length).toBe(1)
+    expect(event.system[0].type).toBe("text")
+    expect(event.system[0].text).toContain("delivery orchestrator")
+    cleanup()
+  })
+})
+
+test("the V2 execute.before hook throws the script's reason on deny and allows a silent script (AC1-DENY)", async () => {
+  const dir = v2ProjectDir()
+  const denyRoot = mkdtempSync(join(tmpdir(), "fno-root-"))
+  mkdirSync(join(denyRoot, "hooks"))
+  const denyScript = join(denyRoot, "hooks", "graph-write-protect.sh")
+  writeFileSync(
+    denyScript,
+    '#!/bin/sh\nprintf \'{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"protected manifest"}}\'\n',
+  )
+  chmodSync(denyScript, 0o755)
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv(
+    { FNO_OPENCODE: "1", FNO_PLUGIN_ROOT: denyRoot, FNO_AGENTS_BIN: "/nonexistent-fno-agents" },
+    async () => {
+      const err = captureStderr()
+      let cleanup: () => void
+      try {
+        cleanup = setupV2(ctx)
+      } finally {
+        err.restore()
+      }
+      const before = calls.find((c) => c.name === "execute.before")!.handler
+      await expect(before({ tool: "write", sessionID: "ses_d", input: {} })).rejects.toThrow(
+        "protected manifest",
+      )
+      cleanup()
+    },
+  )
+
+  const allowRoot = mkdtempSync(join(tmpdir(), "fno-root-"))
+  mkdirSync(join(allowRoot, "hooks"))
+  const silentScript = join(allowRoot, "hooks", "graph-write-protect.sh")
+  writeFileSync(silentScript, "#!/bin/sh\n")
+  chmodSync(silentScript, 0o755)
+  const { ctx: ctx2, calls: calls2 } = stubV2Ctx(dir)
+  await withEnv(
+    { FNO_OPENCODE: "1", FNO_PLUGIN_ROOT: allowRoot, FNO_AGENTS_BIN: "/nonexistent-fno-agents" },
+    async () => {
+      const err = captureStderr()
+      let cleanup: () => void
+      try {
+        cleanup = setupV2(ctx2)
+      } finally {
+        err.restore()
+      }
+      const before = calls2.find((c) => c.name === "execute.before")!.handler
+      // A script that gives no decision allows the call, as on V1.
+      await expect(before({ tool: "write", sessionID: "ses_a", input: {} })).resolves.toBeUndefined()
+      cleanup()
+    },
+  )
+})
+
+test("setup with FNO_OPENCODE unset registers nothing and returns a safe cleanup (AC1-INERT)", () => {
+  const { ctx, calls } = stubV2Ctx("/nonexistent")
+  const err = captureStderr()
+  let cleanup: () => void
+  try {
+    cleanup = setupV2(ctx)
+  } finally {
+    err.restore()
+  }
+  expect(calls).toEqual([])
+  expect(() => cleanup()).not.toThrow()
+})
+
+test("the V2 arm names the agents it did not register and the remedy, once (AC1-AGENTS)", async () => {
+  const dir = v2ProjectDir()
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+    const err = captureStderr()
+    let cleanup: () => void
+    try {
+      cleanup = setupV2(ctx)
+    } finally {
+      err.restore()
+    }
+    cleanup()
+    const lines = err.lines.filter((l) => l.includes("not registered"))
+    expect(lines.length).toBe(1)
+    expect(lines[0]).toContain("fno:helper")
+    expect(lines[0]).toContain("agent files")
+    expect(lines[0]).not.toMatch(/x-[0-9a-f]{4}/)
+    expect(lines[0]).not.toMatch(/#?\d{3,}/)
+    // No registration of any agent: the only calls are the four hooks.
+    expect(calls.length).toBe(4)
+  })
+})
+
+test("the V2 arm registers neither delegation tool and says why, once (AC1-DELEGATION)", async () => {
+  const dir = v2ProjectDir()
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+    const err = captureStderr()
+    let cleanup: () => void
+    try {
+      cleanup = setupV2(ctx)
+    } finally {
+      err.restore()
+    }
+    cleanup()
+    const lines = err.lines.filter((l) => l.includes("delegation"))
+    expect(lines.length).toBe(1)
+    expect(lines[0]).toContain("live child count")
+    expect(calls.find((c) => c.name === "task")).toBeUndefined()
+    expect(calls.find((c) => c.name === "task_result")).toBeUndefined()
+  })
+})
+
+test("the V2 definition is a plain dual export with no V2 package import (AC1-NODEP)", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "plugins", "fno.ts"), "utf8")
+  expect(source.includes("@opencode/plugin")).toBe(false)
+  expect((fnoPlugin as any).id).toBe("fno")
+  expect(typeof (fnoPlugin as any).server).toBe("function")
+  expect(typeof (fnoPlugin as any).setup).toBe("function")
+})
+
+test("both arms work side by side: server keeps its tools, setup keeps its hooks (AC4-BOTH)", async () => {
+  const dir = v2ProjectDir()
+  const { ctx, calls } = stubV2Ctx(dir)
+  await withEnv({ FNO_OPENCODE: "1", FNO_AGENTS_BIN: "/nonexistent-fno-agents" }, async () => {
+    const err = captureStderr()
+    let hooks: any
+    let cleanup: () => void
+    try {
+      // V1 arm: the server entrypoint still carries hooks and tools.
+      hooks = await (fnoPlugin as any).server({ client: {}, directory: "/nonexistent" })
+      // V2 arm: the setup entrypoint still registers the four hooks.
+      cleanup = setupV2(ctx)
+    } finally {
+      err.restore()
+    }
+    expect(hooks.tool.task).toBeDefined()
+    expect(hooks.tool.task_result).toBeDefined()
+    expect(calls.length).toBe(4)
+    cleanup!()
+  })
 })

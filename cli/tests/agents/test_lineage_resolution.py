@@ -163,7 +163,6 @@ def test_resume_by_predecessor_full_uuid_keeps_that_exact_id() -> None:
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )
@@ -188,7 +187,6 @@ def test_resume_by_name_keeps_the_current_session() -> None:
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )
@@ -217,7 +215,6 @@ def test_claude_exact_predecessor_resume_refuses_and_names_the_spawn_door() -> N
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )

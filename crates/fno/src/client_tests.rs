@@ -2,7 +2,10 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
-use crate::client::{input_folds::MAX_ESC_CARRY, keys_modal::build_keys_modal};
+use crate::client::{
+    input_folds::MAX_ESC_CARRY,
+    keys_modal::{build_keys_modal, keys_modal_mouse},
+};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
@@ -19,6 +22,11 @@ mod sweep_both_tests;
 // The x-9fd0 portal-placement-picker family lives in its own module too.
 #[path = "client/tests/portal_pick_tests.rs"]
 mod portal_pick_tests;
+
+// The attach-placement picker family (p, cursor-vs-here commits) and the
+// picker arrow-twin guarantees live in their own module too.
+#[path = "client/tests/placement_picker_tests.rs"]
+mod placement_picker_tests;
 
 // The status-glyph family joined the nav family. The rename-overlay family
 // (tab, squad, agent targets) lives in its own module too.
@@ -406,6 +414,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -610,129 +619,21 @@ pub(super) fn two_pane_view() -> View {
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
     view.frames.insert(11, text_frame(29, 36, 'b'));
+    // Pin the row shape: these helpers assert display-row geometry, and the
+    // card default (ambient config or no config at all) inserts a detail
+    // line per agent and moves every row index.
+    view.sideline_layout = sideline_color::SidelineLayout::List;
     view
-}
-
-#[test]
-fn client_compose_places_panes_divider_and_chrome() {
-    let view = two_pane_view();
-    let frame = view.compose();
-    assert!(frame.geometry_ok());
-    let text = frame_text(&frame);
-    let lines: Vec<&str> = text.lines().collect();
-    // Tab strip (x-cd67 US1): scoped to the content columns on row 0, so
-    // line 0 carries both the sideline's squad-1 row (cols 0..27) and the
-    // strip (cols 28+) - the active squad name + bracketed active tab.
-    assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
-    // Sideline (x-0090 agents-first): tab rows left the sideline, so an
-    // expanded squad with no agents shows only its name row; the next squad
-    // follows directly. Active squad carries the `*` glyph (x-2f99). The
-    // sideline now owns row 0, so squad 1 leads line 0; a US3 Blank spacer
-    // sits on line 1 and squad 2 follows on line 2.
-    assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
-    assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
-    // Content row 1 (pane a at content origin): the sideline cols are the
-    // blank spacer, then the divider and pane content.
-    let row1: Vec<char> = lines[1].chars().collect();
-    assert_eq!(row1[27], '│', "panel divider column");
-    assert_eq!(row1[28], 'a', "pane 10 starts at content origin");
-    assert_eq!(row1[28 + 35], '│', "pane divider between the panes");
-    assert_eq!(row1[28 + 36], 'b', "pane 11 after the divider");
-    // Cursor: focused pane 11's (0,0) offset by chrome + rect.
-    assert_eq!(frame.cursor_row, 1);
-    assert_eq!(frame.cursor_col, 28 + 36);
-    assert!(frame.cursor_visible);
 }
 
 #[path = "client_tests/pane_id_reveal_tests.rs"]
 mod pane_id_reveal_tests;
 
-#[test]
-fn focus_outline_accents_focused_pane_seams_and_moves_with_focus() {
-    // x-5a52 US1 / AC1-HP: the divider cells bounding the focused pane render
-    // in the lattice accent at full brightness; a seam between two unfocused
-    // panes stays DIM. Moving focus moves the accent in the same compose.
-    let view = three_pane_view(); // focus = pane 10
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let seam_10_11 = 28 + 23; // divider left of pane 11: borders focused 10
-    let seam_11_12 = 28 + 47; // divider between unfocused 11 and 12
-    let row = 5;
-    let accented = frame.cells[row * cols + seam_10_11];
-    assert_eq!(
-        accented.c, '│',
-        "the accented cell is still a divider glyph"
-    );
-    assert_eq!(accented.fg, LATTICE_ACCENT, "focused-pane seam is amber");
-    assert_eq!(
-        accented.flags & cell_flags::DIM,
-        0,
-        "focus outline is full-bright, never dimmed"
-    );
-    let dim = frame.cells[row * cols + seam_11_12];
-    assert_eq!(
-        dim.fg,
-        Color::Default,
-        "unfocused seam keeps the default fg"
-    );
-    assert_eq!(
-        dim.flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "unfocused seam stays the DIM chrome"
-    );
+#[path = "client_tests/pane_border_tests.rs"]
+mod pane_border_tests;
 
-    // Move focus to pane 12: the accent follows to its seam in the same
-    // frame, and the old seam reverts to DIM (AC1-HP "in the same frame").
-    let mut moved = three_pane_view();
-    moved.layout.focus = 12;
-    let frame = moved.compose();
-    assert_eq!(
-        frame.cells[row * cols + seam_11_12].fg,
-        LATTICE_ACCENT,
-        "accent follows focus to pane 12"
-    );
-    assert_eq!(
-        frame.cells[row * cols + seam_10_11].flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "the previously-focused seam reverts to DIM"
-    );
-}
-
-#[test]
-fn single_pane_tab_paints_no_focus_outline() {
-    // x-5a52 AC5-EDGE: one pane fills the content area, so there are no
-    // interior seams and nothing paints the accent - the sideline markers
-    // alone carry the "you are here" state.
-    let mut view = three_pane_view();
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            10,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 10,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-    });
-    let frame = view.compose();
-    // The sideline still marks the active squad, so scope the check to the
-    // content area (col >= panel_w) where the outline would live.
-    let cols = frame.cols as usize;
-    let panel_w = view.panel_w() as usize;
-    let outline_in_content = (0..frame.rows as usize)
-        .any(|r| (panel_w..cols).any(|c| frame.cells[r * cols + c].fg == LATTICE_ACCENT));
-    assert!(
-        !outline_in_content,
-        "a single-pane tab paints no accent outline in the content area"
-    );
-}
+#[path = "client/tests/focus_outline_tests.rs"]
+mod focus_outline_tests;
 
 // A 2x2 grid over two_pane_view's geometry: A|B on top, C|D below, meeting
 // at a `┼` junction. focus = A (pane 10).
@@ -789,36 +690,31 @@ fn four_pane_view() -> View {
 
 #[test]
 fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
-    // x-5a52 AC1-HP (the 2x2 case the horizontal-split test missed): the
-    // focused top-left pane borders on TWO interior sides, so the outline
-    // must accent both its right `│` seam and its bottom `─` seam - and a
-    // seam bordering only the unfocused panes stays dim.
+    // x-5a52 AC1-HP, under the pane frames: the focused top-left pane
+    // delineates itself with its own accent border on both interior sides,
+    // and the gap between two frames reads blank instead of a divider.
     let frame = four_pane_view().compose(); // focus = pane 10 (top-left)
     let cols = frame.cols as usize;
-    // A's right seam: vertical divider at content col 35 -> outer col 63,
-    // within A's rows (outer 1..14). Sample outer row 5.
-    let right_seam = frame.cells[5 * cols + (28 + 35)];
-    assert_eq!(right_seam.c, '│', "A's right border is a vertical divider");
-    assert_eq!(right_seam.fg, LATTICE_ACCENT, "A's right seam is accented");
-    // A's bottom seam: horizontal divider at content row 14 -> outer row 15,
-    // within A's cols (outer 28..62). Sample outer col 40.
-    let bottom_seam = frame.cells[15 * cols + (28 + 10)];
+    // A's right frame border: content col 34 -> outer col 62, within A's
+    // rows (outer 1..14). Sample outer row 5.
+    let right_border = frame.cells[5 * cols + (28 + 34)];
+    assert_eq!(right_border.c, '│', "A's right frame border is a rule");
     assert_eq!(
-        bottom_seam.c, '─',
-        "A's bottom border is a horizontal divider"
+        right_border.fg, LATTICE_ACCENT,
+        "the focused pane's frame is accented"
     );
-    assert_eq!(
-        bottom_seam.fg, LATTICE_ACCENT,
-        "A's bottom seam is accented"
-    );
-    // The C/D vertical seam (below A, outer row 20 col 63) borders only the
-    // unfocused panes and stays dim.
-    let cd_seam = frame.cells[20 * cols + (28 + 35)];
-    assert_eq!(
-        cd_seam.flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "a seam not bordering the focused pane stays dim"
-    );
+    // A's bottom frame border: outer row 14, within A's cols. Sample outer
+    // col 38.
+    let bottom_border = frame.cells[14 * cols + (28 + 10)];
+    assert_eq!(bottom_border.c, '─', "A's bottom frame border is a rule");
+    assert_eq!(bottom_border.fg, LATTICE_ACCENT);
+    // The A/B gap (outer col 63) reads blank: two boxes, not a divider.
+    let gap = frame.cells[5 * cols + (28 + 35)];
+    assert_eq!(gap.c, ' ', "the gap between two frames reads blank");
+    assert_eq!(gap.flags, 0);
+    // The C/D gap (outer row 20 col 63) borders no focused pane: blank too.
+    let cd_gap = frame.cells[20 * cols + (28 + 35)];
+    assert_eq!(cd_gap.c, ' ');
 }
 
 // An agent row hosting a given pane, under squad 1.
@@ -859,6 +755,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -937,50 +834,43 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
     // Display row 1 -> outer row 1: the focused agent row is a full-width
-    // INVERSE band, and the `▎` gutter glyph is gone.
+    // accent band, and the `▎` gutter glyph is gone.
     let lead = frame.cells[cols]; // outer row 1, col 0
     assert_ne!(
         lead.c, '▎',
         "the ▎ gutter is retired; the band is the signal"
     );
     assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row carries the standing INVERSE band"
+        lead.bg, LATTICE_ACCENT,
+        "the focused row carries the standing accent band"
     );
-    // The band fills the panel width (a right-edge text cell is still INVERSE).
+    // The band fills the panel width (a right-edge text cell is still banded).
     assert_eq!(
-        frame.cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        frame.cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "the focus band fills the panel width"
     );
 }
 
 #[test]
-fn active_marker_composes_with_selection_inverse() {
-    // x-4374 / AC3-UI: when the selector sits on the focused row, the XOR
-    // de-inverts its standing band so the selection reads under the cursor -
-    // the same grammar the old header bands used - instead of band and cursor
-    // masking each other.
+fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
+    // x-4374 / AC3-UI, restated for explicit bands: when the selector sits on
+    // the focused row, the chosen accent band wins - the cursor never masks
+    // the "you are here" signal (the card contract, list mode too).
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11));
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
     let lead = frame.cells[cols]; // outer row 1, col 0
-    assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        0,
-        "the selector de-inverts the focused row's band so the cursor reads"
-    );
+    assert_eq!(lead.bg, LATTICE_ACCENT, "the chosen band wins on selection");
 }
 
 #[test]
 fn xf331_focus_band_and_selector_are_distinct_treatments() {
     // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
-    // selector parked on a DIFFERENT row is a plain-INVERSE bar in the default
-    // colour - three-distinguishable, and the distinction is colour (survives
-    // weak-BOLD themes), not weight.
+    // selector parked on a DIFFERENT row is the palette-following hover band -
+    // the distinction is colour (survives weak-BOLD themes), not weight.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
     view.selector = Some(3); // notes squad header, a different actionable row
@@ -990,24 +880,19 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
 
     let focus_cell = frame.cells[cols]; // display row 1: the focus band
     assert_eq!(
-        focus_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focus row still wears a band"
-    );
-    assert_eq!(
-        focus_cell.fg, LATTICE_ACCENT,
-        "the focus band wears the accent colour"
+        focus_cell.bg, LATTICE_ACCENT,
+        "the focus row still wears the accent band"
     );
 
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
-        sel_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selector row is an inverse bar"
+        sel_cell.bg,
+        Color::Indexed(0),
+        "the selector row is the palette-following cursor band"
     );
     assert_ne!(
-        sel_cell.fg, LATTICE_ACCENT,
-        "the selector bar is NOT the focus accent - the two read as distinct"
+        sel_cell.bg, LATTICE_ACCENT,
+        "the selector band is NOT the focus accent - the two read as distinct"
     );
 }
 
@@ -1227,8 +1112,9 @@ fn draw_lines_overlay_centers_within_viewport() {
         "body cells stay inverse under terminal"
     );
     assert_eq!(cells[(origin_r + 2) * cols + a_col].c, 'c');
-    // The top border corner sits one row up and one col left of the body.
-    assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '┌');
+    // The top border corner sits one row up and two cols left of the body
+    // (border, then the body's side pad).
+    assert_eq!(cells[origin_r * cols + (a_col - 2)].c, '╭');
     // Nothing painted at the old hardcoded top-left corner.
     assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
 }
@@ -1307,7 +1193,7 @@ fn draw_lines_overlay_zero_body_budget_paints_no_body() {
         "no body row should paint at zero body budget"
     );
     // Positive control: the chrome border still paints within the viewport.
-    assert!(painted('┌'), "the chrome border must still paint");
+    assert!(painted('╭'), "the chrome border must still paint");
 }
 
 #[test]
@@ -1316,13 +1202,14 @@ fn client_hit_test_maps_pane_and_swallows_chrome() {
     // chrome cells (tab bar, sideline) and dividers resolve to None so the
     // caller swallows them (AC3-UI: nothing forwards to a pane).
     let view = two_pane_view();
-    // Inside pane 10 (content origin at outer (1, 28)).
-    assert_eq!(view.hit_test(5, 30), Some((10, 4, 2)));
-    // Inside pane 11 (content col 36 -> outer col 64), its top-left cell.
-    // Pins press-cell == anchor-cell for a pane with a NONZERO x origin: the
-    // first visible column of an offset pane maps to pane-col 0, so a drag
+    // Inside pane 10: the frame ring insets the content one cell, so the
+    // content origin sits at outer (2, 29).
+    assert_eq!(view.hit_test(5, 30), Some((10, 3, 1)));
+    // Inside pane 11 (content col 37 -> outer col 65), its top-left content
+    // cell. Pins press-cell == anchor-cell for a pane with a NONZERO x origin:
+    // the first visible column of an offset pane maps to pane-col 0, so a drag
     // anchored there selects from that glyph, not N chars late.
-    assert_eq!(view.hit_test(3, 64), Some((11, 2, 0)));
+    assert_eq!(view.hit_test(3, 65), Some((11, 1, 0)));
     // Tab bar row is chrome.
     assert_eq!(view.hit_test(0, 40), None);
     // Sideline column (< panel_w 28) is chrome.
@@ -1458,24 +1345,18 @@ fn hovered_seam_renders_a_distinct_accent_in_compose() {
         let f = view.compose();
         f.cells[row * f.cols as usize + col]
     };
-    // Two different idle states exist. The seam at col 75 (between the
-    // unfocused 11 and 12) is plain dim chrome; the one at col 51 borders
-    // the focused pane 10, so it already wears x-5a52's standing outline.
-    // The hover accent has to be distinct from BOTH.
+    // Between FRAMED panes the idle gap reads blank: each pane is its own
+    // box, so the idle divider and the standing outline are gone. The hover
+    // still redraws the gap as a grabbable seam, distinct from that blank.
     let idle_chrome = cell_at(&view, 5, 75);
-    let focus_outline = cell_at(&view, 5, 51);
-    assert_eq!(idle_chrome.c, '│', "the divider glyph itself is unchanged");
-    assert_eq!(idle_chrome.flags, cell_flags::DIM);
-    assert_eq!(
-        focus_outline.flags, 0,
-        "the focus outline is undimmed accent"
-    );
+    assert_eq!(idle_chrome.c, ' ', "the gap between frames reads blank");
+    assert_eq!(idle_chrome.flags, 0);
 
     view.on_hover(5, 75, Instant::now());
     let lit = cell_at(&view, 5, 75);
     assert_eq!(
         lit.c, '│',
-        "hover accents the divider, it does not redraw it"
+        "hover redraws the gap as the seam, it does not stay blank"
     );
     assert_eq!(lit.flags, cell_flags::BOLD);
     assert_eq!(lit.fg, LATTICE_ACCENT);
@@ -1483,21 +1364,13 @@ fn hovered_seam_renders_a_distinct_accent_in_compose() {
         (lit.flags, lit.fg) != (idle_chrome.flags, idle_chrome.fg),
         "distinct from idle chrome"
     );
-    assert!(
-        (lit.flags, lit.fg) != (focus_outline.flags, focus_outline.fg),
-        "distinct from the focused pane's standing outline, so a hovered \
-             seam beside the focused pane still reads as grabbable"
-    );
-    // Hovering one seam does not light another.
-    assert_eq!(
-        cell_at(&view, 5, 51).flags,
-        0,
-        "still just the focus outline"
-    );
+    // Hovering one seam does not light another: the other gap stays blank.
+    assert_eq!(cell_at(&view, 5, 51).flags, 0, "the other gap stays blank");
 
-    // Leaving the band clears it.
+    // Leaving the band clears it back to blank.
     view.on_hover(5, 40, Instant::now());
-    assert_eq!(cell_at(&view, 5, 75).flags, cell_flags::DIM);
+    assert_eq!(cell_at(&view, 5, 75).c, ' ');
+    assert_eq!(cell_at(&view, 5, 75).flags, 0);
 }
 
 #[test]
@@ -2221,7 +2094,8 @@ fn link_hover_compose_underlines_exactly_the_accepted_cells() {
     view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
     let lit = view.compose();
     let ul = cell_flags::UNDERLINE;
-    // Pane 10's rect sits at the content origin (row 1, col 28).
+    // Pane 10's content origin sits at (row 2, col 29): the frame ring
+    // insets the content one cell.
     let underlined = |f: &Frame| -> Vec<(usize, usize)> {
         (0..f.rows as usize)
             .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
@@ -2230,7 +2104,7 @@ fn link_hover_compose_underlines_exactly_the_accepted_cells() {
     };
     assert_eq!(
         underlined(&lit),
-        vec![(1, 28 + 3), (2, 28 + 4)],
+        vec![(2, 28 + 4), (3, 28 + 5)],
         "exactly the two accepted cells, at the pane's screen position"
     );
     assert!(
@@ -2640,6 +2514,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3247,6 +3122,7 @@ fn view_with_dead_interleaved() -> View {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3279,7 +3155,7 @@ fn cycle_section_tri_state_filters_then_collapses_then_restores() {
     let mut view = view_with_dead_interleaved();
     assert_eq!(
         agent_names(&view),
-        vec!["live-a", "dead-a", "live-b", "dead-b"],
+        ["live-a", "live-b", "dead-a", "dead-b"], // active sort: live first, exited last
         "expanded shows every row"
     );
 
@@ -3397,6 +3273,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3657,6 +3534,7 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3726,6 +3604,7 @@ fn section_header_caret_tracks_all_three_states() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3850,6 +3729,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3895,6 +3775,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3939,6 +3820,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4027,6 +3909,7 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -4067,9 +3950,10 @@ fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
     let frame = view.compose();
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
-    let row1: Vec<char> = lines[1].chars().collect();
-    // start_c = origin_c(28) + rect.x(0) + rect.cols(35) - width("[+7]"=4).
-    let seg: String = row1[59..63].iter().collect();
+    // A framed pane anchors the indicator on its first CONTENT row, right
+    // aligned to the content: start_c = 28 + rect.x(0) + 1 + inner(33) - 4.
+    let row2: Vec<char> = lines[2].chars().collect();
+    let seg: String = row2[58..62].iter().collect();
     assert_eq!(seg, "[+7]");
 }
 
@@ -4125,7 +4009,7 @@ fn client_status_row_shows_focus_node_provenance() {
         .last()
         .unwrap()
         .to_string();
-    assert!(bottom.contains("hjkl focus"), "hint takeover: {bottom:?}");
+    assert!(bottom.contains("esc cancel"), "hint takeover: {bottom:?}");
     assert!(!bottom.contains('⚑'), "hint hides the cell: {bottom:?}");
 }
 
@@ -4158,13 +4042,13 @@ fn client_status_off_leaves_bottom_row_as_content() {
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
     assert!(
-        bottom.contains('a') || bottom.contains('b'),
-        "bottom row must keep pane content when status is off: {bottom:?}"
+        bottom.contains('╰'),
+        "bottom row must keep the panes' own frame edges when status is off: {bottom:?}"
     );
     // A pending hint still transiently paints over that content row.
     view.hint = true;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
@@ -4176,47 +4060,27 @@ fn client_compose_hint_paints_over_bottom_row() {
     view.hint = true;
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
-    assert!(bottom.contains("hjkl focus"), "{bottom:?}");
+    assert!(bottom.contains("esc cancel"), "{bottom:?}");
     assert!(!bottom.contains("? for keys"), "{bottom:?}");
     view.status_on = false;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
-}
-
-#[test]
-fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // prefix+? opens the centered which-key modal, built from the single-source binding table.
-    let mut view = two_pane_view();
-    view.term = (40, 80);
-    view.open_keys_modal();
-    let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "modal title present");
-    assert!(text.contains("esc close"), "dismiss affordance present");
-    // Section headers + a sampling of bindings the table advertises.
-    assert!(text.contains("panes"), "section header");
-    assert!(text.contains("detach"), "the d binding's action");
-    assert!(
-        text.contains("find: goto squad/tab/pane/agent"),
-        "the f binding's action names every row class nav_rows emits"
-    );
-    // The digit row names the gesture and its resolve doors: an honest description of an input path the scanner really runs.
-    assert!(
-        text.contains("jump to tab by number")
-            && text.contains("Enter")
-            && text.contains("Alt works too"),
-        "the digit row names the gesture and its resolve doors"
-    );
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
 fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
-    // The default selection is the first binding; row_events[selected] must
-    // be exactly the Event a direct chord of that key would produce (Locked
-    // 3 parity, at the modal boundary).
+    // The default selection is the first selectable row. The global
+    // (no prefix) section's rows are display-only (Enter on them BELs), so
+    // the first EXECUTABLE row is the first Global binding, and
+    // row_events[selected] must be exactly the Event a direct chord of that
+    // key would produce (Locked 3 parity, at the modal boundary).
     let m = build_keys_modal();
     let (ri, _) = m.popup.selected().expect("a selectable row");
-    let ev = m.row_events[ri].clone().expect("first row is executable");
-    // The first section is Global; its first binding is `w` -> OpenSelector.
+    let ev = m.row_events[ri..]
+        .iter()
+        .find_map(|e| e.clone())
+        .expect("a first executable row");
+    // That first executable row is Global's `w` -> OpenSelector.
     assert_eq!(ev, crate::keys::resolve_chord(b'w'));
 }
 
@@ -4587,6 +4451,7 @@ fn row_menu_entries_gate_by_agent_state() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -5499,6 +5364,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -6682,8 +6548,9 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
     // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections; a short window scrolls them).
-    view.term = (64, 100);
+    // ride below the binding sections): the global section spent five rows
+    // and the V chord one more, so the pin moved from 64.
+    view.term = (73, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
@@ -7035,6 +6902,7 @@ async fn tab_menu_join_targets_the_viewed_tab_and_refuses_itself() {
     squad.tabs[0].panes.push(crate::proto::PaneMeta {
         id: focus,
         label: "focused".into(),
+        ..Default::default()
     });
     let ((tr, tc), _) = tab_and_new_tab_cells(&v);
     assert!(v.open_tab_menu(tr, tc, Anchor::Center));
@@ -7299,6 +7167,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -7667,7 +7536,7 @@ fn settings_theme_tab_lists_the_shipped_palettes() {
 
 #[test]
 fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
-    let (rows, actions) = build_prefix_settings_rows("C-b");
+    let (rows, actions) = settings_modal::build_prefix_settings_rows("C-b");
     assert!(matches!(
         rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-b"
@@ -7679,13 +7548,13 @@ fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(specs, PREFIX_PICKS.map(String::from));
+    assert_eq!(specs, settings_modal::PREFIX_PICKS.map(String::from));
     assert!(rows.iter().any(|row| matches!(
         row,
         PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
     )));
 
-    let (custom_rows, _) = build_prefix_settings_rows("C-q");
+    let (custom_rows, _) = settings_modal::build_prefix_settings_rows("C-q");
     assert!(matches!(
         custom_rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-q"
@@ -7906,14 +7775,14 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
         assert!(
             r.lines
                 .iter()
-                .any(|l| l.text.starts_with('┌') || l.text.starts_with('└')),
+                .any(|l| l.text.starts_with('╭') || l.text.starts_with('╰')),
             "a border corner was drawn"
         );
     };
     // Centered (Full): keys modal, sideline MENU, settings.
     assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
     assert_chrome(
-        &build_sideline_menu(Anchor::Center, None).popup,
+        &build_sideline_menu(Anchor::Center, None, false).popup,
         chrome::Level::Full,
     );
     let v = two_pane_view();
@@ -7926,41 +7795,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     );
 }
 
-#[test]
-fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None);
-    let i = menu
-        .popup
-        .rows
-        .iter()
-        .position(|row| {
-            matches!(
-                row,
-                PopupRow::Entry { glyph, label, .. }
-                    if glyph == "♺" && label == "sweep threads"
-            )
-        })
-        .expect("sweep threads entry");
-    let action_i = menu
-        .popup
-        .rows
-        .iter()
-        .take(i + 1)
-        .filter(|row| matches!(row, PopupRow::Entry { .. }))
-        .count()
-        - 1;
-    assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
-    assert!(crate::popup::menu_glyph_is_bmp("♺"));
-    assert!(!crate::popup::menu_glyph_is_bmp("📄"));
-    assert_eq!(
-        menu.actions
-            .iter()
-            .filter(|action| **action == AuxAction::Detach)
-            .count(),
-        1,
-        "the global detach slot remains distinct"
-    );
-}
+#[path = "client/tests/backlog_pref_tests.rs"]
+mod backlog_pref_tests;
 
 #[tokio::test]
 async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {
@@ -8035,9 +7871,9 @@ async fn update_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.aux = Some(build_update_modal(None));
     let r = v.aux.as_ref().unwrap().popup.render(v.term);
-    let footer = overlay_footer_cell(&OverlayLayout {
-        origin: r.origin,
-        framed: chrome::Framed {
+    let footer = overlay_footer_cell(&OverlayLayout::from_parts(
+        r.origin,
+        chrome::Framed {
             lines: r
                 .lines
                 .iter()
@@ -8049,7 +7885,7 @@ async fn update_modal_footer_esc_close_click_closes() {
                 .collect(),
             width: r.width,
         },
-    });
+    ));
     let mut buf: Vec<u8> = Vec::new();
     aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
         .await
@@ -8363,6 +8199,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8405,6 +8242,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8447,6 +8285,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8496,14 +8335,14 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
     sel_view.selector = Some(4);
     let sel_frame = sel_view.compose();
     let sel_cell = sel_frame.cells[notes_row * cols + 2];
-    // (x-4374) The notes squad is a demoted header (no standing INVERSE); the
-    // selector TOGGLES INVERSE, so selecting it ADDS the band and the cursor
-    // row renders DIFFERENTLY from the unselected header.
+    // (x-4374) The notes squad is a demoted header (no standing band); the
+    // selector paints the explicit hover band, so the cursor row renders
+    // DIFFERENTLY from the unselected header.
     assert_ne!(
-        sel_cell.flags & cell_flags::INVERSE,
-        unsel_cell.flags & cell_flags::INVERSE,
+        sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
+    assert_eq!(sel_cell.bg, Color::Indexed(0), "hover band bg");
 }
 
 #[test]
@@ -8568,6 +8407,7 @@ fn squad_header_rollup_counts_in_every_view_state() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -8708,14 +8548,13 @@ fn headers_demoted_and_focused_row_wears_the_band() {
     assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
     // Row 1 = the agent row owning the focused pane: the sole standing band.
     assert_eq!(
-        cells[cols].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row wears the full-width band"
+        cells[cols].bg, LATTICE_ACCENT,
+        "the focused row wears the full-width accent band"
     );
-    // The band spans the full width (a right-edge text cell is still INVERSE).
+    // The band spans the full width (a right-edge text cell is still banded).
     assert_eq!(
-        cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "band fills the panel width"
     );
     // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
@@ -8899,27 +8738,28 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     let at = |v: &View| {
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_sideline(&mut cells, rows, cols, panel_w);
-        cells[(footer - v.sideline_offset()) * cols].flags
+        cells[(footer - v.sideline_offset()) * cols]
     };
 
     let rest = at(&view);
-    assert_eq!(rest & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(rest & cell_flags::DIM, 0, "DIM reads as disabled");
-    assert_eq!(rest & cell_flags::INVERSE, 0);
+    assert_eq!(rest.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(rest.flags & cell_flags::DIM, 0, "DIM reads as disabled");
+    assert_eq!(rest.flags & cell_flags::INVERSE, 0);
 
     // The `N marked ·R` variant rides the same row and the same style.
     let mut marked = two_pane_view();
     marked.term = (29, 72);
     marked.marks.insert("a1".to_string());
-    let marked_flags = at(&marked);
-    assert_eq!(marked_flags & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(marked_flags & cell_flags::DIM, 0);
+    let marked_cell = at(&marked);
+    assert_eq!(marked_cell.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(marked_cell.flags & cell_flags::DIM, 0);
 
-    // Hover still toggles INVERSE on top of BOLD (the row is not inert).
+    // Hover paints the explicit hover band on the footer row (the row is
+    // actionable, not inert); the band's own pair replaces BOLD.
     view.hover_row = Some(footer);
     let hovered = at(&view);
-    assert_eq!(hovered & cell_flags::INVERSE, cell_flags::INVERSE);
-    assert_eq!(hovered & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(hovered.bg, Color::Indexed(0));
+    assert_eq!(hovered.flags & cell_flags::INVERSE, 0);
 }
 
 #[test]
@@ -8994,6 +8834,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9036,6 +8877,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9078,6 +8920,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9123,6 +8966,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9217,8 +9061,8 @@ fn client_compose_panel_autohides_below_min_width() {
     let text = frame_text(&frame);
     let row1 = text.lines().nth(1).unwrap();
     assert!(
-        row1.starts_with('a'),
-        "content must start at column 0 when the panel hides: {row1:?}"
+        row1.starts_with("╭─ shell"),
+        "the pane frame must start at column 0 when the panel hides: {row1:?}"
     );
 }
 
@@ -9266,14 +9110,14 @@ fn client_compose_agents_first_omits_tab_rows_and_highlights_squad() {
         "no active-tab row renders in the sideline"
     );
     // The selector row (squad 2, display index 2 -> frame row 2). squad 2 is
-    // an inactive header band (INVERSE+DIM); the selector TOGGLES INVERSE
-    // (x-6851 US1), so it must render DIFFERENTLY from the same row
-    // unselected rather than simply carrying INVERSE.
+    // an inactive header with no standing highlight; the selector paints the
+    // explicit hover band (x-6851 US1), so it must render DIFFERENTLY from
+    // the same row unselected.
     let cols = frame.cols as usize;
     let unsel_frame = two_pane_view().compose();
     assert_ne!(
-        frame.cells[2 * cols].flags & cell_flags::INVERSE,
-        unsel_frame.cells[2 * cols].flags & cell_flags::INVERSE,
+        frame.cells[2 * cols].bg,
+        unsel_frame.cells[2 * cols].bg,
         "selector cursor row must be visibly toggled"
     );
     // While the selector is open the terminal cursor hides.
@@ -9288,9 +9132,13 @@ fn client_compose_ignores_stale_frames_and_clips_overflow() {
     view.frames.insert(10, text_frame(40, 60, 'X'));
     let frame = view.compose();
     let text = frame_text(&frame);
-    let row1: Vec<char> = text.lines().nth(1).unwrap().chars().collect();
-    assert_eq!(row1[28 + 34], 'X', "last in-rect column draws");
-    assert_eq!(row1[28 + 35], '│', "divider survives an oversized frame");
+    // Screen row 2 is the pane's first CONTENT row (row 1 is the frame's
+    // top edge). The frame ring owns the rect's outer ring, so an oversized
+    // pty frame clips to the content rect inside it.
+    let row2: Vec<char> = text.lines().nth(2).unwrap().chars().collect();
+    assert_eq!(row2[28 + 33], 'X', "last in-rect content column draws");
+    assert_eq!(row2[28 + 34], '│', "the frame's right border wins its ring");
+    assert_eq!(row2[28 + 35], ' ', "the gap survives an oversized frame");
     // set_layout drops frames for panes the new Layout does not know.
     let mut view = two_pane_view();
     view.set_layout(LayoutView {
@@ -9346,8 +9194,9 @@ fn client_compose_letterboxes_beyond_the_clamped_area() {
     view.frames.insert(10, text_frame(20, 50, 'a'));
     let frame = view.compose();
     let cols = frame.cols as usize;
-    // In-area content cell.
-    assert_eq!(frame.cells[cols + 28].c, 'a');
+    // The frame's top-left corner, then the in-area content cell one cell in.
+    assert_eq!(frame.cells[cols + 28].c, '╭');
+    assert_eq!(frame.cells[2 * cols + 29].c, 'a');
     // One column beyond the area: filler, dim.
     let beyond_col = &frame.cells[cols + 28 + 50];
     assert_eq!(beyond_col.c, '·', "beyond-area column must be filler");
@@ -9413,6 +9262,7 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
     // something this layer has no mapping for, so it is dropped rather than
     // silently acted on as an unmodified press.
     let mut esc = Vec::new();
+    assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;2D"), b"");
     assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5B"), Vec::<u8>::new());
 
     // Still split-safe: a parameterised sequence broken across reads leaks
@@ -9638,6 +9488,7 @@ fn unified_rows_view() -> View {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -9973,6 +9824,7 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10428,6 +10280,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10491,6 +10344,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -10829,65 +10683,6 @@ async fn selector_enter_reaches_bg_agent_thread_pane() {
     }
 }
 
-#[tokio::test]
-async fn selector_p_opens_attach_placement_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    let picker = v.attach_place.as_ref().expect("placement picker opens");
-    assert_eq!(picker.id, "c19cd2c3");
-    assert_eq!(picker.target(), Some(1));
-    assert_eq!(picker.squads, vec![1, 2]);
-    // The footer must let each axis name its OWN keys, and must say which
-    // key acts on the `›` marker. The old footer listed the split
-    // directions as if they were list navigation, which was the mislabel
-    // half of the reported defect. This footer collapses it to two lines
-    // and spells the split row `shift+HJKL` so the shift relationship to
-    // lowercase hjkl reads in words, not just in case.
-    let overlay = v.attach_place_lines(picker).join("\n");
-    for label in [
-        "hjkl/arrows move",
-        "1-9 jump",
-        // enter/t send byte-identical new-tab messages; space/. send
-        // byte-identical here messages. Each pair is one footer entry.
-        "enter/t new tab in ›",
-        "shift+HJKL split",
-        "space/. here",
-        "cancel",
-    ] {
-        assert!(overlay.contains(label), "missing {label}: {overlay}");
-    }
-    assert!(buf.is_empty());
-    assert_eq!(v.selector, None);
-}
-
-#[tokio::test]
-async fn attach_placement_selects_target_and_direction() {
-    // The digit jumps the cursor; UPPERCASE commits with a split direction.
-    // Lowercase `h` here would now only move the cursor (see
-    // attach_placement_arrows_move_the_cursor_without_attaching).
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"2H", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(2),
-                split: Some(Dir::Left),
-                ..Default::default()
-            },
-        })
-    );
-    assert!(v.attach_place.is_none());
-}
-
 /// Replace a view's layout with `n` real workspaces (ids 1..=n), so a picker
 /// opened over it has to cope with more destinations than there are digits.
 /// 14 is the operator's real number, and the number at which five used to
@@ -11090,240 +10885,6 @@ async fn move_picker_out_of_range_digit_bels_and_keeps_the_picker() {
 }
 
 #[tokio::test]
-async fn attach_placement_keys_do_not_depend_on_cursor_history() {
-    // The hard constraint behind superseding x-fbb1: a key must mean the
-    // same thing whether or not the cursor has moved. The tempting cheap
-    // fix was "Enter means here on the starting row, and commits the cursor
-    // once moved", which is a hidden mode - the exact class this node
-    // closes. Enter on an UNMOVED cursor must still commit that cursor,
-    // never silently fall back to the route.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let start = v.attach_place.as_ref().unwrap().target().unwrap();
-    let mut buf = Vec::new();
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-            assert_eq!(
-                placement.target,
-                PaneTarget::SquadId(start),
-                "Enter commits the cursor even when it has never moved"
-            );
-            assert!(!placement.here, "and is not secretly the route");
-        }
-        other => panic!("expected AttachAgent, got {other:?}"),
-    }
-
-    // And the cursor's ROUTE to a row does not change what commits: digit
-    // and arrows landing on the same index must produce the same command.
-    let by_digit = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"4\r", &mut buf).await.unwrap();
-        buf
-    };
-    let by_arrows = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj\r", &mut buf).await.unwrap();
-        buf
-    };
-    assert_eq!(
-        by_digit, by_arrows,
-        "how the cursor got there cannot matter"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
-    // A digit past the end of the list is a BEL, not a selection, and the
-    // notice says the row is not there rather than claiming the workspace is
-    // "no longer available" - it never was. The cursor stays put and the
-    // picker stays open, so the operator can just press the right key next.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "an out-of-range digit sends nothing");
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_drops_the_rest_of_the_batch() {
-    // The BEL alone is not enough. Terminal reads arrive in batches, so the
-    // keys typed AFTER a bad digit are already in the same buffer - and they
-    // were composed believing row 9 existed. `L` would commit a right split
-    // into whatever the cursor happened to be on, a placement the operator
-    // never chose, with only a beep between intent and commit. So the bad
-    // digit abandons the whole read: nothing is sent, the cursor is untouched
-    // and the picker stays open on screen the operator can now actually read.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
-    assert!(
-        buf.is_empty(),
-        "the trailing commit key must not reach the socket"
-    );
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and the cursor never moved");
-    assert!(
-        v.notice.is_some(),
-        "the operator is told why nothing happened"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_arrows_move_the_cursor_without_attaching() {
-    // AC3-FR, the exact reported defect: `j` (and therefore Down, which
-    // fold_selector_keys rewrites to `j`) used to return
-    // Some(Some(Dir::Down)) and attach IMMEDIATELY. Scanning the list with
-    // the arrow keys finalized a placement the operator never chose. This is
-    // the test that had to fail before the fix.
-    for key in [b"j".as_slice(), b"\x1b[B".as_slice()] {
-        let mut v = unified_rows_view();
-        v.selector = Some(8); // bg-claude
-        let mut buf = Vec::new();
-        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        assert_eq!(v.attach_place.as_ref().unwrap().cursor, 0);
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "key {key:?} must send no AttachAgent");
-        let picker = v.attach_place.as_ref().expect("picker stays open");
-        assert_eq!(picker.cursor, 1, "key {key:?} moves the cursor");
-        assert_eq!(picker.target(), Some(2));
-    }
-    // ...and back up, clamped at the top rather than wrapping.
-    let mut v = unified_rows_view();
-    v.selector = Some(8);
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"kk", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert_eq!(
-        v.attach_place.as_ref().unwrap().cursor,
-        0,
-        "clamped, no wrap"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_new_tab_and_cancel_are_distinct() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // `t` is Enter's named alias: both open a new tab in the
-    // cursor-marked workspace. Space and `.` are the separate "here" pair.
-    attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(1),
-                split: None,
-                ..Default::default()
-            },
-        })
-    );
-
-    v.selector = Some(8); // bg-claude
-    let mut cancelled = Vec::new();
-    selector_keys(&mut v, b"p", &mut cancelled).await.unwrap();
-    attach_place_keys(&mut v, b"q", &mut cancelled)
-        .await
-        .unwrap();
-    assert!(cancelled.is_empty());
-    assert!(v.attach_place.is_none());
-}
-
-#[tokio::test]
-async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
-    // SUPERSEDES x-fbb1's Enter-is-here ruling, which was correct while the
-    // picker had no cursor to contradict it. Adding a cursor removed its
-    // premise: the overlay drew a marker on one workspace and Enter
-    // attached to another, which is this node's own defect one layer up.
-    //
-    // This re-splits Enter and Space, which had been merged into one
-    // "new tab in ›" commit: Enter (and its alias `t`) always commits the
-    // cursor; Space (and its alias `.`) always attaches HERE. No key's
-    // meaning depends on cursor history either way.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let mut buf = Vec::new();
-    // Drive the cursor somewhere the digits cannot reach, which is the
-    // case the cursor exists for and the case the old Enter broke.
-    attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(10),
-                split: None,
-                ..Default::default()
-            },
-        }),
-        "Enter must attach to the marked workspace, not here"
-    );
-    assert!(v.attach_place.is_none());
-
-    // Space and `.` both ignore the cursor BY DESIGN rather than by
-    // accident - including after the cursor has moved, so their meaning
-    // is history-independent too.
-    for key in [b" ".as_slice(), b".".as_slice()] {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-                assert_eq!(placement.target, PaneTarget::CurrentRoute);
-                assert!(placement.here, "key {key:?} is route-anchored");
-            }
-            other => panic!("expected AttachAgent, got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn attach_placement_refuses_stale_target_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // Park the cursor on squad 2, then delete it out from under the open
-    // picker: the cursor guarantees an in-range index, never a live squad.
-    v.attach_place.as_mut().unwrap().cursor = 1;
-    v.layout.squads.retain(|s| s.id != 2);
-    attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert!(v.notice.is_some());
-    assert!(v.attach_place.is_none());
-}
-
-#[tokio::test]
 async fn selector_enter_refusal_keeps_selector_open() {
     // AC1-ERR + AC2-ERR (locked 3): a refusal row (a DEAD paneless agent,
     // blocked card, in-flight card) shows a notice, sends nothing, and the
@@ -11516,6 +11077,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -11558,6 +11120,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -11639,6 +11202,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11825,6 +11389,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12266,10 +11831,12 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         PaneMeta {
             id: 10,
             label: "claude".into(),
+            ..Default::default()
         },
         PaneMeta {
             id: 20,
             label: "htop".into(),
+            ..Default::default()
         },
     ];
     v.layout.agents = vec![AgentRow {
@@ -12308,6 +11875,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12337,6 +11905,7 @@ async fn nav_goto_pane_cross_squad_sends_squad_tab_focus() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 55,
         label: "vim".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -12373,6 +11942,7 @@ async fn nav_goto_pane_active_view_is_bare_focus() {
     v.layout.squads[0].tabs[1].panes = vec![PaneMeta {
         id: 77,
         label: "shell".into(),
+        ..Default::default()
     }];
     let idx = v
         .nav_rows()
@@ -12405,6 +11975,7 @@ async fn nav_goto_pane_same_squad_other_tab_selects_tab_only() {
     v.layout.squads[0].tabs[0].panes = vec![PaneMeta {
         id: 88,
         label: "logs".into(),
+        ..Default::default()
     }]; // tab idx 0, id 0
     let idx = v
         .nav_rows()
@@ -12522,6 +12093,7 @@ pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) 
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -13447,9 +13019,9 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 }
 
 #[test]
-fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
+fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
     // A partial crown (level set, scope None) must never panic: it orders at
-    // its altitude and its badge scope degrades to `?`.
+    // its altitude and paints no bracket tag - the registry label is the name.
     let mut v = view_with_agents(vec![
         crowned_row("dir", 2, Some(1), None),
         crowned_row("leaf", 3, None, None),
@@ -13459,8 +13031,8 @@ fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
     let text = frame_text(&v.compose());
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
-        dir_line.contains("[L1 ?]"),
-        "malformed scope badges ?: {dir_line:?}"
+        !dir_line.contains("[L1 ?]"),
+        "no bracket badge on a crowned row: {dir_line:?}"
     );
 }
 
@@ -13561,14 +13133,17 @@ fn foreign_cwd_agent_gets_dim_inert_subline() {
     // The sub row paints DIM.
     let sub_cell = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(sub_cell.flags & cell_flags::DIM, cell_flags::DIM);
-    // AC1-UI: hover on the sub index paints no INVERSE bar.
+    // AC1-UI, restated for explicit bands: hovering the sub row paints the
+    // hover band, never an INVERSE bar.
     v.hover_row = Some(ai + 1);
     let frame = v.compose();
+    let hovered = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(
-        frame.cells[(ai + 1) * cols + 4].flags & cell_flags::INVERSE,
+        hovered.flags & cell_flags::INVERSE,
         0,
-        "an inert sub row is never highlighted"
+        "never an INVERSE bar"
     );
+    assert_eq!(hovered.bg, Color::Indexed(0), "the hover band is explicit");
 }
 
 // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and
@@ -15146,6 +14721,7 @@ async fn move_pick_keys_pane_sends_cross_squad_move_pane() {
     v.layout.squads[1].tabs[0].panes.push(PaneMeta {
         id: 200,
         label: "dst".into(),
+        ..Default::default()
     });
     v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
     let mut buf: Vec<u8> = Vec::new();
@@ -16898,6 +16474,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
                 .map(|p| crate::proto::PaneMeta {
                     id: (t * 10 + p) as u64,
                     label: String::new(),
+                    ..Default::default()
                 })
                 .collect();
         }
@@ -16936,6 +16513,7 @@ fn a_strip_full_of_grouped_tabs_still_condenses() {
         .map(|p| crate::proto::PaneMeta {
             id: p,
             label: String::new(),
+            ..Default::default()
         })
         .collect();
     let view = shot_view((24, 100), vec![squad], vec![]);

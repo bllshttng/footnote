@@ -36,3 +36,21 @@ fn node_from_argv_is_none_for_ad_hoc_pane() {
     // No `env` wrapper at all -> never scanned, even with a bare token.
     assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
 }
+
+#[test]
+fn portal_hold_from_argv_reads_the_held_row_past_the_env_wrapper() {
+    let argv: Vec<String> = ["env", "FNO_PORTAL_HELD=deadbee1", "/bin/zsh"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(portal_hold_from_argv(&argv), Some("deadbee1".to_string()));
+    // A plain shell carries no held-portal provenance.
+    assert_eq!(portal_hold_from_argv(&["/bin/zsh".to_string()]), None);
+    // The marker must sit in the wrapper's assignment run, not in a
+    // command's own args.
+    let mention: Vec<String> = ["grep", "FNO_PORTAL_HELD=x", "file"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(portal_hold_from_argv(&mention), None);
+}

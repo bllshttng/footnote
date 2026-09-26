@@ -13,18 +13,18 @@
 # removed and a changed file alike.
 #
 # Verbs:
-#   plant      write a marker graph and the two .canary files, then snapshot a
+#   plant      write the two .canary files, then snapshot a
 #              hash of every file under $HOME/.fno and <checkout>/.fno.
 #   verify     recompute and refuse on any added, removed or changed file,
 #              naming each path. On success print the file count checked, so a
 #              green is a positive marker rather than an absence.
 #   self-test  the positive control. Plant into a fresh HOME, write ONE BYTE
-#              into the planted graph.json, and require the inner verify to
+#              into the graph.db anchor sibling, and require the inner verify to
 #              exit non-zero naming that file. An inner verify that PASSES
 #              makes self-test exit 1.
 #
-# The dev-box guard is not optional. When $HOME/.fno/graph.json already holds
-# entries, that is a live operator root: print the skip receipt and do nothing.
+# The dev-box guard is not optional. A graph.db larger than the measured empty
+# schema is a live operator root: print the skip receipt and do nothing.
 # No dev box ever has its graph planted over. On CI the runner HOME is empty,
 # so the canary runs on every shard.
 #
@@ -167,25 +167,15 @@ print("\n".join(f"{h}  {p}" for h, p in sorted(rows, key=lambda r: r[1])))
 PY
 }
 
-# A live operator root is any graph.json carrying at least one entry.
+# A live operator root has rows beyond the measured empty SQLite schema.
+EMPTY_GRAPH_DB_BYTES=184320
 graph_has_entries() {
-  local graph="$1"
-  [[ -f "$graph" ]] || return 1
-  require_python
-  python3 - "$graph" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        data = json.load(fh)
-except (OSError, ValueError):
-    # Unreadable or corrupt is NOT "empty". Treat it as live so a dev box with
-    # a damaged graph is never planted over on top of the damage.
-    raise SystemExit(0)
-entries = data.get("entries", []) if isinstance(data, dict) else data
-raise SystemExit(0 if entries else 1)
-PY
+  local db="$1" bytes
+  [[ -f "$db" ]] || return 1
+  bytes=$(wc -c <"$db") || return 0
+  bytes="${bytes//[[:space:]]/}"
+  [[ "$bytes" =~ ^[0-9]+$ ]] || return 0
+  ((bytes > EMPTY_GRAPH_DB_BYTES))
 }
 
 cmd_plant() {
@@ -196,7 +186,7 @@ cmd_plant() {
   # defect: the header's motivating specimen is a run that truncated a
   # 2297-node graph, and a 2297-node graph IS a live root, so the instrument
   # stood down on precisely the machine class it was written for.
-  if graph_has_entries "$home_fno/graph.json"; then
+  if graph_has_entries "$home_fno/graph.db"; then
     live=1
     header="WATCHING"
     floor=1
@@ -206,14 +196,6 @@ cmd_plant() {
     return 2
   fi
   if [[ -z "$live" ]]; then
-    # Only when the file is ABSENT, which is the CI runner. An existing
-    # graph.json is the operator's file even with an empty entries list, and
-    # plant does not restore what it overwrites. The walk watches it either
-    # way. `entries` is empty on purpose: a re-plant must not read its own
-    # marker as a live operator root.
-    if [[ ! -e "$home_fno/graph.json" ]]; then
-      printf '%s\n' '{"entries": []}' >"$home_fno/graph.json"
-    fi
     printf 'fno-state-canary\n' >"$home_fno/.canary"
     printf 'fno-state-canary\n' >"$ROOT/.fno/.canary"
   fi
@@ -404,7 +386,7 @@ PY
 
 # One lane of the positive control. `mode` is the shape of the HOME it builds:
 # `fresh` is the CI runner, `live` is a developer box whose graph already has
-# entries. Both must end red on a one-byte write to graph.json.
+# rows. Both must end red on a one-byte write to graph.db.
 #
 # Running BOTH is the point. The old control only ever built a fresh HOME, so
 # it passed identically whether the production lane measured a dev box or stood
@@ -418,23 +400,23 @@ self_test_lane() {
   inner_out="$(mktemp)" || return 2
 
   mkdir -p "$tmp_home/.fno"
+  if [[ "$mode" == "fresh" ]]; then
+    : >"$tmp_home/.fno/graph.db"
+  fi
   if [[ "$mode" == "live" ]]; then
-    # An operator root with real work in it. plant must watch, never write.
-    # Sized like a real graph on purpose: the truncation check below is a
-    # PROPORTIONAL collapse, and a two-line fixture cannot collapse. The first
-    # version of this control used one entry, so the truncation never tripped
-    # the threshold and the control passed on a graph that had not collapsed.
+    # A synthetic SQLite root sized above the empty-schema watermark.
     require_python
-    python3 - "$tmp_home/.fno/graph.json" <<'PY'
-import json
+    python3 - "$tmp_home/.fno/graph.db" <<'PY'
+import sqlite3
 import sys
-
-entries = [
-    {"id": f"x-{i:04x}", "title": f"real work {i}", "details": "x" * 200}
-    for i in range(500)
-]
-with open(sys.argv[1], "w", encoding="utf-8") as fh:
-    json.dump({"entries": entries}, fh)
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("CREATE TABLE nodes (id TEXT, title TEXT, details TEXT)")
+connection.executemany(
+    "INSERT INTO nodes VALUES (?, ?, ?)",
+    [(f"x-{i:04x}", f"real work {i}", "x" * 1024) for i in range(500)],
+)
+connection.commit()
+connection.close()
 PY
     want="watching a live operator root"
   else
@@ -468,8 +450,8 @@ PY
       rm -rf "$tmp_home" "$tmp_root" "$inner_out"
       return 1
     fi
-    if ! grep -q 'real work 499' "$tmp_home/.fno/graph.json"; then
-      report "self-test[live] FAILED: plant overwrote a live operator graph"
+    if ! grep -q 'real work 499' "$tmp_home/.fno/graph.db"; then
+      report "self-test[live] FAILED: plant overwrote a live operator store"
       rm -rf "$tmp_home" "$tmp_root" "$inner_out"
       return 1
     fi
@@ -477,13 +459,13 @@ PY
 
   # One byte. Not a rewrite: the control must be the smallest change the
   # instrument claims to catch.
-  printf ' ' >>"$tmp_home/.fno/graph.json"
+  printf ' ' >>"$tmp_home/.fno/graph.db"
 
   env "${env_pins[@]}" bash "${BASH_SOURCE[0]}" verify >"$inner_out" 2>&1
   inner_rc=$?
 
-  if ! grep -q "CHANGED .*graph\.json" "$inner_out"; then
-    report "self-test[$mode] FAILED: the inner verify never named the changed graph.json"
+  if ! grep -q "CHANGED .*graph\.db" "$inner_out"; then
+    report "self-test[$mode] FAILED: the inner verify never named the changed graph.db"
     cat "$inner_out" >&2
     rm -rf "$tmp_home" "$tmp_root" "$inner_out"
     return 1
@@ -502,7 +484,7 @@ PY
     fi
     # The incident shape MUST gate, live root or not. This is the 2026-09-06
     # specimen: a 2297-node graph cut to a single 64-byte entry.
-    printf '{"entries": []}' >"$tmp_home/.fno/graph.json"
+    printf '{"entries": []}' >"$tmp_home/.fno/graph.db"
     env "${env_pins[@]}" bash "${BASH_SOURCE[0]}" verify >"$inner_out" 2>&1
     inner_rc=$?
     if ((inner_rc == 0)); then
@@ -512,7 +494,7 @@ PY
       rm -rf "$tmp_home" "$tmp_root" "$inner_out"
       return 1
     fi
-    if ! grep -q "TRUNCATED .*graph\.json" "$inner_out"; then
+    if ! grep -q "TRUNCATED .*graph\.db" "$inner_out"; then
       report "self-test[live] FAILED: the refusal never named the truncation"
       cat "$inner_out" >&2
       rm -rf "$tmp_home" "$tmp_root" "$inner_out"
@@ -532,13 +514,13 @@ PY
     return 1
   fi
   local named
-  named="$(grep -o 'CHANGED .*graph\.json' "$inner_out" | head -1 | sed 's/^CHANGED //')"
+  named="$(grep -o 'CHANGED .*graph\.db' "$inner_out" | head -1 | sed 's/^CHANGED //')"
   echo "state-canary: self-test[$mode] ok, inner verify exited $inner_rc naming $named"
   rm -rf "$tmp_home" "$tmp_root" "$inner_out"
 }
 
 # The positive control, drawn from the measured population: a raw write to the
-# real graph path is the exact write the 2026-09-06 specimen made.
+# SQLite file is the same shape as the 2026-09-06 collapse.
 cmd_self_test() {
   local mode
   for mode in fresh live; do

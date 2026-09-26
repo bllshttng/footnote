@@ -2078,9 +2078,10 @@ def cmd_spawn(
     # fail-closed, like the guards above, before anything spawns: silently
     # launching a worker nothing can bind to the node does not survive
     #.
-    from fno.graph.types import SESSION_PHASES
+    from fno.graph.types import SESSION_PHASES, normalize_phase
 
     if session_phase:
+        session_phase = normalize_phase(session_phase)
         if session_phase not in SESSION_PHASES:
             print(
                 f"--session-phase must be one of {sorted(SESSION_PHASES)} "
@@ -2311,6 +2312,9 @@ def cmd_spawn(
                 no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
                 account=account or dispatch_account,
+                seed=message,
+                session_phase=session_phase,
+                succession_scope=crown_scope if succeed else None,
             )
             break
         except GateRefused as exc:
@@ -2327,7 +2331,7 @@ def cmd_spawn(
                 raise
             if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
                 sys.stderr.write(
-                    f"spawn-gate: {reason}; --wait retries for "
+                    f"spawn-gate note: {reason}; --wait retries for "
                     f"{int(wait_deadline - now)}s more\n"
                 )
                 last_wait_note = now
@@ -2862,7 +2866,8 @@ def cmd_name(
 
 
 # `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
-# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
+# entry resolves it). The retask transaction is native too: the empty-argv rename payload door
+# in fno-agents runs it, and run_retask is the thin front that builds the payload.
 
 
 @agents_app.command("retask", hidden=True)
@@ -4894,38 +4899,16 @@ harness_app = typer.Typer(
 
 @harness_app.command("probe")
 def harness_probe(
-    harness: str = typer.Argument(..., help="Harness name to probe."),
-    live: bool = typer.Option(
-        False, "--live", help="Allow behavioral probes (they spawn a scratch session)."
-    ),
-    write: bool = typer.Option(
-        False, "--write", help="Emit the config stanza for each disagreement, evidence + date beside it."
-    ),
-    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
+    harness: str = typer.Argument(...),
+    live: bool = typer.Option(False, "--live"),
+    write: bool = typer.Option(False, "--write"),
+    as_json: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    import json as _json
-
-    from fno.agents.capability_probe import probe_harness
-
-    report = probe_harness(harness, live=live, write=write)
-    if as_json:
-        typer.echo(_json.dumps(report, indent=2))
-    else:
-        if "error" in report:
-            typer.secho(f"probe refused: {report['error']}", err=True)
-            raise typer.Exit(code=1)
-        typer.echo(f"probe {harness} (map_version {report['map_version']})")
-        for field in report["fields"]:
-            typer.echo(
-                f"{field['verdict']:<11} {field['field']}: {field['detail']}"
-            )
-        for warning in report["warnings"]:
-            typer.secho(f"override warning: {warning}", fg=typer.colors.YELLOW, err=True)
-        if report["stanza"]:
-            typer.echo("")
-            typer.echo(report["stanza"])
-    if any(field["verdict"] == "DISAGREES" for field in report["fields"]):
-        raise typer.Exit(code=1)
+    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
+    from fno.rust_binary import resolve_installed_binary
+    binary = resolve_installed_binary() or refuse_without_binary("harness probe")
+    argv = ["harness-probe", "fields", harness] + ["--live"] * live + ["--write"] * write + ["--json"] * as_json
+    route_to_rust(argv, binary=binary)
 
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
@@ -4946,7 +4929,8 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
+    No --hold holds all three scopes; status prints each scope as holds or admits.
     """
     import subprocess
 

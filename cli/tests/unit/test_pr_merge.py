@@ -6,8 +6,11 @@ to reproduce against a live PR). Pins the JSON-line schema, the exit codes,
 and the stdout-vs-stderr routing the bash used.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,6 +71,7 @@ class FakeRun:
         self.base_move_files = base_move_files
         self.pr_files = pr_files
         self.compare_truncated = compare_truncated
+        self.cwd_calls: list[str | None] = []
         # require_checks_pass is enforced in-process now (x-9d11), so the
         # default fake serves a GREEN rollup; tests exercising refusal paths
         # pass their own.
@@ -83,6 +87,7 @@ class FakeRun:
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
         self.calls.append(cmd)
+        self.cwd_calls.append(cwd)
         tool = cmd[0]
         if tool == "git":
             if cmd[1:3] == ["rev-parse", "--show-toplevel"]:
@@ -164,11 +169,21 @@ class FakeRun:
                 )
             if cmd[1] == "api":
                 endpoint = cmd[-1]
-                if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
-                    # The overlap probe's PR-side read (paginated REST, jq
-                    # emits one filename per line); None serves an empty
-                    # diff, which proves no overlap rather than a miss.
-                    return Result(0, "\n".join(self.pr_files or []) + "\n", "")
+                if any(
+                    a.startswith("repos/")
+                    and a.split("?", 1)[0].endswith("/files")
+                    for a in cmd
+                ):
+                    # The PR-side changed-path read (paginated REST, one page
+                    # of file objects); None serves an empty diff, which
+                    # proves no overlap rather than a miss.
+                    return Result(
+                        0,
+                        json.dumps(
+                            [{"filename": name} for name in (self.pr_files or [])]
+                        ),
+                        "",
+                    )
                 if (
                     "/pulls/" in endpoint
                     and "/comments" not in endpoint
@@ -274,6 +289,9 @@ class FakeRun:
 
 @pytest.fixture
 def enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
     # The posture floor (merge step 1b) reads live settings; hermetic tests
@@ -319,14 +337,53 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
     # Same hermeticity for the flake hold: no merge case here is about rerun
-    # recovery, so the probe answers never-recovered (tests about it override).
+    # recovery, so the probe is UNAVAILABLE (flake None, hold skipped); the
+    # rerun tests override with their own answer.
     monkeypatch.setattr(
-        "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
+        "fno.rust_binary.verb_call",
+        _door_stub(None),
     )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
     # tests/conftest.py defaults hold_for_pr to no hold for every test.
+
+
+def _door_stub(answer):
+    """A verb_call fake answering only the status-rerun ask (None = the
+    probe is unavailable, the fail-open old default); every other ask rides
+    the real transport."""
+    import fno.rust_binary as rust_binary
+
+    real = rust_binary.verb_call
+
+    def _fake(verb, payload, unavailable=None, **kw):
+        if isinstance(payload, dict) and payload.get("op") == "status-rerun":
+            if answer is None:
+                raise (unavailable or rust_binary.VerbUnavailable)(
+                    "status-rerun unavailable in tests"
+                )
+            return answer
+        return real(verb, payload, unavailable=unavailable, **kw)
+
+    return _fake
+
+
+_real_lane_configured = _merge._review_lane_configured
+
+
+@pytest.fixture(autouse=True)
+def _real_review_lane(monkeypatch):
+    """These tests exercise the lane predicate itself; restore it over the
+    conftest hermetic default (which suites that merely traverse a merge need)."""
+    monkeypatch.setattr(_merge, "_review_lane_configured", _real_lane_configured)
+
+
+@pytest.fixture(autouse=True)
+def _stub_pr_worktree_resolution(monkeypatch):
+    """Keep merge tests hermetic; the resolver has its own real-worktree test."""
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -414,8 +471,13 @@ def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
 # ---- classification ----
 
 
-def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
-    (tmp_path / ".fno").mkdir()
+def test_merge_immediate_exit_0_uses_pr_worktree(enabled, monkeypatch, capsys, tmp_path):
+    feature = tmp_path / "feature-worktree"
+    (feature / ".fno").mkdir(parents=True)
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree",
+        lambda pr, repo: str(feature),
+    )
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
@@ -423,6 +485,7 @@ def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
     assert obj["outcome"] == "merged"
     assert obj["strategy"] == "merge"
     assert "invoker" not in obj
+    assert str(feature) in fake.cwd_calls
 
 
 def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tmp_path):
@@ -488,8 +551,8 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
 
 def _flake_recovered(monkeypatch, failed=None):
     monkeypatch.setattr(
-        "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
+        "fno.rust_binary.verb_call",
+        _door_stub({"recovered": True, "failed": failed or ["smoke-pytest (7)"]}),
     )
 
 
@@ -868,6 +931,56 @@ def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_pat
     assert _last_json(capsys)["outcome"] == "merged"
 
 
+def test_merge_lock_holder_names_the_pr(monkeypatch, tmp_path):
+    # Hermetic: stub the claims seam (the real acquire_claim rides the event
+    # store, which the `enabled` fixture's gh stub breaks on machines without
+    # /usr/bin/gh). The holder format is what this pins.
+    seen = {}
+
+    def _spy(key, holder, reason=None, **_kw):
+        seen["holder"] = holder
+        seen["key"] = key
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", _spy)
+    monkeypatch.setattr(
+        "fno.paths.resolve_canonical_repo_root", lambda: str(tmp_path)
+    )
+    with _merge._merge_lock(2464) as (state, release_now, held_detail):
+        assert state == "acquired" and release_now is not None
+        assert held_detail is None
+    assert seen["holder"].startswith("pr-merge:pr2464:")
+    assert seen["key"] == f"merge:{tmp_path}"
+
+
+def test_held_receipt_names_holder_age_and_wait(monkeypatch, capsys, tmp_path):
+    from fno.claims.core import ClaimHeldByOther
+
+    def _held(*_a, **_k):
+        raise ClaimHeldByOther(
+            holder="pr-merge:pr2049:999", pid=999, host="h", key="merge:x"
+        )
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", _held)
+    monkeypatch.setattr(
+        "fno.paths.resolve_canonical_repo_root", lambda: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        "fno.claims.io.read_claim_file",
+        lambda _p: SimpleNamespace(acquired_at=int(time.time() * 1000) - 94_000),
+    )
+    monkeypatch.setattr("fno.claims.io.claim_path", lambda _k, root=None: tmp_path / "x.lock")
+    monkeypatch.setattr(_merge, "_MERGE_LOCK_WAIT_S", 0)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["2049"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "held by pr-merge:pr2049:999" in obj["reason"]
+    assert "(live at last poll, held 94s; waited 0s)" in obj["reason"]
+    # the gh merge was never attempted while a peer holds the lock
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
 def _point_lane_read_at(monkeypatch, **fields):
     # _review_lane_configured imports load_settings_for_repo at call time, so
     # patching the module attribute is seen by the local import.
@@ -1140,15 +1253,16 @@ def test_floor_verbless_set_stays_locked_to_the_rust_twin():
         / "crates"
         / "fno-agents"
         / "src"
-        / "loopcheck.rs"
+        / "loopcheck"
+        / "self_review_floor.rs"
     ).read_text(encoding="utf-8")
     m = re.search(r"KNOWN_VERBLESS_HARNESSES: &\[&str\] = &\[([^\]]*)\]", rust)
-    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck.rs"
+    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck/self_review_floor.rs"
     rust_set = {v.strip().strip('"') for v in m.group(1).split(",") if v.strip()}
     derived = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
     assert rust_set == derived, (
         f"Rust floor releases {sorted(rust_set)}, Python releases "
-        f"{sorted(derived)}: update both together (loopcheck.rs "
+        f"{sorted(derived)}: update both together (loopcheck/self_review_floor.rs "
         "KNOWN_VERBLESS_HARNESSES and review_capability's verb table)"
     )
 
@@ -1926,6 +2040,11 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     # Fresh coverage: the live PR head IS the covered head, so the gate passes
     # and the covered head reaches the merge command.
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
+    # The gate's chain read scopes by the PR's refs; an unstubbed probe here
+    # answered UNANSWERED off the real transport and wiped the pin.
+    monkeypatch.setattr(
+        _merge, "_pr_base_head_refs", lambda pr, repo: ("main", "feature/x")
+    )
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
     )
@@ -1976,9 +2095,7 @@ def test_populated_graph_closure_fetch_does_not_hold_the_merge(
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
     # One cwd-less entry: _cwd_in_this_repo passes cwd-less entries, so by_id
     # is non-empty and hold_for_pr pays the closure fetch instead of skipping.
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]})
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
@@ -2887,7 +3004,7 @@ def test_a_merged_additional_pr_is_stamped_merged(monkeypatch, tmp_path):
     do rows of a done, merged node. Unrecorded stays open everywhere -
     this is the recorder, never the assertion."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ba96",
         "status": "done",
         "merge_status": "merged",
@@ -2914,7 +3031,7 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
     url resolves to a different repo is never stamped, and neither is one
     whose slug cannot be resolved at all - unrecorded stays open."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-other",
         "status": "done",
         "merge_status": "merged",
@@ -2945,7 +3062,7 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
 def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_path):
     """A primary PR number collision skips the foreign node and stamps ours."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {
             "id": "x-other",
             "pr_number": 1060,
@@ -2972,7 +3089,7 @@ def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_p
 
 def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_path):
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ours",
         "pr_number": 1060,
         "pr_url": "https://github.com/o/r/pull/1060",
@@ -2991,7 +3108,7 @@ def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_p
 
 def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ours",
         "pr_number": 1060,
     }]}))
@@ -3011,7 +3128,7 @@ def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path)
     """A number matching no primary and no additional ref is a no-op: the
     sync never guesses a node."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ba96",
         "status": "done",
         "merge_status": "merged",
@@ -3039,7 +3156,7 @@ def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_pat
     race the lock closes ended at the merged receipt."""
     seen = {}
 
-    def fake_on_confirmed(pr, cwd=""):
+    def fake_on_confirmed(pr, cwd="", **kwargs):
         from fno.claims.core import acquire_claim
 
         # Raises CLAIM_UNAVAILABLE (and fails the merge) if the first merge
@@ -3055,6 +3172,39 @@ def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_pat
     assert seen.get("second_acquired"), "the lock must free before post-merge work runs"
 
 
+def test_do_merge_defers_close_only_on_the_durable_grant_path(
+    enabled, monkeypatch, tmp_path
+):
+    """x-3bee: the watcher's merge phase (authority="durable_grant") cannot
+    hold the inline reconcile inside its slice, so _do_merge defers the
+    node-close there and only there; a manifest merge closes inline as
+    before."""
+    seen = {}
+
+    def recorder(pr, cwd="", *, defer_close=False):
+        seen["defer_close"] = defer_close
+        return []
+
+    def fake_authorized(pr_number, repo, **kw):
+        if kw.get("decide_only"):
+            return {"outcome": "authorized"}
+        return {"outcome": "merged"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", fake_authorized)
+    monkeypatch.setattr(_merge, "_on_confirmed_merge", recorder)
+    monkeypatch.setattr(_merge, "_post_merge_remote_delete", lambda *a, **k: "")
+    monkeypatch.setattr(_merge, "_run_post_merge_followups", lambda *a, **k: None)
+    block = AutoMergeBlock(enabled=True)
+
+    _merge._do_merge(
+        42, block, str(tmp_path), covered_head="deadbeef", authority="durable_grant"
+    )
+    assert seen["defer_close"] is True
+
+    _merge._do_merge(42, block, str(tmp_path), covered_head="deadbeef")
+    assert seen["defer_close"] is False
+
+
 def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_path):
     """AC2-ERR: after the early fire, a successor takes the lock, and the
     with-block's finally release (the same holder-checked call) leaves the
@@ -3063,8 +3213,9 @@ def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_
     from fno.claims.core import acquire_claim
     from fno.claims.io import claim_path
 
-    with _merge._merge_lock() as (state, release_now):
+    with _merge._merge_lock(42) as (state, release_now, held_detail):
         assert state == "acquired" and release_now is not None
+        assert held_detail is None
         release_now()
         # the freed lock is takeable right now, before the merge verb returns
         acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
@@ -3104,7 +3255,7 @@ def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_p
         view_url="https://github.com/owner/repo/pull/42",
     )
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}))
+    seed_graph(graph, json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
     def fake(cmd, **kwargs):
@@ -3128,7 +3279,7 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
     import subprocess
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}))
+    seed_graph(graph, json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 

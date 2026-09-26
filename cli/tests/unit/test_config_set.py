@@ -38,6 +38,28 @@ def test_set_int_coercion(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
+def test_set_max_open_ideas_round_trips(tmp_path):
+    """The Rust idea cap's key sets through the setter and stores an int."""
+    res = set_config_value(
+        "config.backlog.max_open_ideas", "400", scope="project", repo_root=tmp_path
+    )
+    assert res.value == 400
+    assert _read(tmp_path)["backlog"]["max_open_ideas"] == 400
+
+
+def test_set_max_open_ideas_rejects_negative(tmp_path, monkeypatch):
+    """0 is cap-off; a negative is refused and writes nothing (ge=0)."""
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(app, ["set", "config.backlog.max_open_ideas", "--", "-1"])
+    assert res.exit_code != 0, res.output
+    assert "error:" in res.output
+    target = tmp_path / ".fno" / "config.toml"
+    written = tomllib.loads(target.read_text()) if target.exists() else {}
+    assert "max_open_ideas" not in written.get("backlog", {})
+
+
 def test_set_repairs_stored_quoted_bool_in_union_field(tmp_path):
     # `enabled: bool | dict[str, bool]` stored a hand-quoted "true"; setting
     # the same logical value must rewrite it as a bare bool, not no-op on

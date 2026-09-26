@@ -484,7 +484,7 @@ def test_blueprint_dispatch_retasks_a_finished_planner_and_spawns_nothing(
     )
     ev = tmp_path / "events.jsonl"
     got = advance._spawn_worker(
-        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"),
+        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev, node=_node_row("x-bbbb", difficulty="high"),
     )
     assert got == "1a2b3c4d-1111-2222-3333-444455556666"
     assert "cmd" not in captured, "a reuse dispatch must not spawn"
@@ -516,7 +516,7 @@ def test_retask_refused_before_clear_falls_through_to_one_cold_spawn(
         },
     )
     ev = tmp_path / "events.jsonl"
-    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"))
+    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="high"))
     assert "cmd" in captured, "the refusal falls through to one cold spawn"
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert data["retask_fallthrough"] == "ac-bp-x-aaaa-slug: thread_view_unavailable"
@@ -550,7 +550,7 @@ def test_retask_refused_after_clear_reaps_and_falls_through_to_one_cold_spawn(
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
         "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-        node=_node_row("x-bbbb", difficulty="medium"),
+        node=_node_row("x-bbbb", difficulty="high"),
     )
     assert reap_calls == [(candidate.name, str(tmp_path))]
     assert "cmd" in captured
@@ -583,7 +583,7 @@ def test_retask_refused_after_clear_reap_failure_raises_and_spawns_nothing(
     with pytest.raises(advance.SpawnError) as exc:
         advance._spawn_worker(
             "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-            node=_node_row("x-bbbb", difficulty="medium"),
+            node=_node_row("x-bbbb", difficulty="high"),
         )
     message = str(exc.value)
     assert "ac-bp-x-aaaa-slug" in message
@@ -623,7 +623,7 @@ def test_retask_refused_after_clear_reaps_renamed_registry_row(monkeypatch, tmp_
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
         "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-        node=_node_row("x-bbbb", difficulty="medium"),
+        node=_node_row("x-bbbb", difficulty="high"),
     )
     assert reap_calls == [("ac-bp-x-bbbb-renamed", str(tmp_path))]
     assert "cmd" in captured
@@ -643,7 +643,7 @@ def test_guard_refusal_skips_as_already_running_without_retask(monkeypatch, tmp_
         verdict="already-running",
     )
     with pytest.raises(advance.SpawnAlreadyRunning) as exc:
-        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", node=_node_row("x-bbbb", difficulty="medium"))
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", node=_node_row("x-bbbb", difficulty="high"))
     assert "reservation-held" in str(exc.value)
     assert not seen["retask_calls"]
     assert "cmd" not in captured

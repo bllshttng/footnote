@@ -6,6 +6,7 @@ carriage, line echo, exit passthrough, the VerbUnavailable fallbacks, and the
 two caller contracts (reconcile --json, doctor health).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -139,7 +140,7 @@ def test_staleness_verb_unavailable_reads_unknown(monkeypatch):
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 

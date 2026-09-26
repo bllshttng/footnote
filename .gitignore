@@ -189,3 +189,6 @@ graphify-out/
 # YYYY-MM-DD-HHMMSS-<slug>.txt. The repo tracks no root-level .txt, so the
 # dated glob is narrow enough that it cannot hide an intentional one.
 /20??-??-??-*.txt
+
+# claude plugin eval writes one timestamped run per invocation here.
+/evals/claude-plugin/results/

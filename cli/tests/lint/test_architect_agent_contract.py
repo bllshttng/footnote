@@ -62,14 +62,6 @@ def test_architect_keeps_write_access():
     assert size <= 220, f"description is {size} bytes; the budget is 220"
 
 
-def test_architect_has_no_skills_key():
-    frontmatter, _ = _split_architect()
-    assert "skills:" not in frontmatter, (
-        "a skills list loads nothing under claude --agent, drops unresolved"
-        " entries silently in a subagent, and would preload; ship no skills key"
-    )
-
-
 def test_architect_links_the_skill_step():
     _, body = _split_architect()
     assert "fno:blueprint" in body

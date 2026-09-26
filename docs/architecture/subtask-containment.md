@@ -19,7 +19,7 @@ Two verbs stamp the field, both through the shared guards in `cli/src/fno/graph/
 - `fno backlog decompose <epic> --groups '[{adopt: [...]}]'` folds named nodes into a group child while authoring its plan fragment. A plan-less epic is refused there and pointed at the direct verb.
 - `fno backlog contain <owner> <id>...` folds existing nodes into any not-done, live owner, with no plan and no group scaffolding. It stamps `contained_in` and `parent` in one locked mutation, atomically across the batch. The verb name matches the field: `contain` stamps `contained_in`. An earlier `adopt` verb was a retired alias for `backlog intake`, so the name stays retired.
 
-The inverse is `fno backlog update <id> --parent null`, which un-contains a node as it moves it away.
+The inverse is `fno backlog update <id> --parent null`, which un-contains a node as it moves it away. The release also drops the PR refs the containment bind inherited from the owner and records `released_from`. The owner's `Fixes` line then no longer closes the node. Containing it again clears the marker.
 
 ## Guards
 

@@ -249,6 +249,92 @@ fn scanner_catches_a_planted_violation() {
     println!("table ownership self-test: PASS");
 }
 
+/// Every non-test site under `root` that opens the graph.db path: a
+/// `Connection::open(` or `open_with_flags(` whose next lines name
+/// `database_path(` or `graph.db`. Only `backlog::open` sets
+/// `foreign_keys=ON`, so any other writer skips the schema's keys. Allowed:
+/// the store module itself and the migration's read-only snapshot reader.
+/// Returns the violations as `file:line` and the count of allowed sites.
+fn graph_db_opens(root: &Path) -> (Vec<String>, usize) {
+    let mut files = Vec::new();
+    collect_rs_files(root, &mut files);
+    let mut violations = Vec::new();
+    let mut allowed = 0;
+    for path in files {
+        let rel = path
+            .strip_prefix(root)
+            .expect("every walked file sits under the scan root")
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        if rel.ends_with("tests.rs") || rel.split('/').any(|part| part == "tests") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).expect("read source file");
+        let lines: Vec<&str> = text.lines().collect();
+        let test_module = (1..lines.len())
+            .find(|&index| {
+                lines[index].trim_start().starts_with("mod tests")
+                    && lines[index - 1].trim() == "#[cfg(test)]"
+            })
+            .unwrap_or(lines.len());
+        for index in 0..test_module {
+            let line = lines[index];
+            if !line.contains("Connection::open(") && !line.contains("open_with_flags(") {
+                continue;
+            }
+            let window = lines[index..(index + 3).min(test_module)].join("\n");
+            if !window.contains("database_path(") && !window.contains("graph.db") {
+                continue;
+            }
+            if rel == "backlog/mod.rs"
+                || (rel == "backlog/schema_v4.rs" && window.contains("READ_ONLY"))
+            {
+                allowed += 1;
+            } else {
+                violations.push(format!("{rel}:{}", index + 1));
+            }
+        }
+    }
+    (violations, allowed)
+}
+
+#[test]
+fn a_planted_graph_db_open_is_named_by_file_and_line() {
+    let root = std::env::temp_dir().join(format!("graph-db-open-selftest-{}", std::process::id()));
+    fs::create_dir_all(&root).expect("create the self-test temp root");
+    fs::write(
+        root.join("rogue.rs"),
+        "fn f(graph: &Path) {\n    let c = Connection::open(backlog::database_path(graph));\n}\n",
+    )
+    .expect("write the planted file");
+    let (violations, _) = graph_db_opens(&root);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(violations, vec!["rogue.rs:2".to_string()]);
+}
+
+#[test]
+fn only_the_store_opens_graph_db() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut violations = Vec::new();
+    let mut allowed = 0;
+    for root in [manifest.join("src"), manifest.join("../fno/src")] {
+        let (found, ok) = graph_db_opens(&root);
+        violations.extend(found);
+        allowed += ok;
+    }
+    assert!(
+        allowed > 0,
+        "the audit found zero store opens; the scanner or the walk is broken"
+    );
+    assert!(
+        violations.is_empty(),
+        "graph.db opened outside backlog::open:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn src_tree_writes_only_in_owning_modules() {
     let owners = fno_agents::backlog::TABLE_OWNERS;

@@ -14,11 +14,11 @@ use crate::codex_thread::stop_settle_bound;
 /// drop it from the map. Shared by the stop verb and rm: the caller that
 /// keeps the row stamps and emits around the answer.
 ///
-/// `Ok(report)` names the settled outcome (`no-turn`, an interrupted-turn
-/// receipt status) and leaves a torn-down thread behind: the caller may
-/// proceed to drop the row. `Err(report)` says the turn is still running:
-/// the handle stays in the map, and the caller keeps the row
-/// non-terminal, or refuses, for rm.
+/// `Ok(report)` names the settled outcome (`no-turn`, `actor-gone`, an
+/// interrupted-turn receipt status) and leaves a torn-down thread behind:
+/// the caller may proceed to drop the row. `Err(report)` says the turn is
+/// still running: the handle stays in the map, and the caller keeps the
+/// row non-terminal, or refuses, for rm.
 pub(crate) async fn end_codex_thread(ctx: &Ctx, name: &str) -> Result<String, String> {
     let handle = ctx.codex_threads.lock().await.get(name).cloned();
     let mut interrupt_report = "no-turn".to_string();
@@ -31,9 +31,12 @@ pub(crate) async fn end_codex_thread(ctx: &Ctx, name: &str) -> Result<String, St
                 settled = false;
                 "timeout-turn-still-running".to_string()
             }
-            Ok(Err(error)) => {
-                settled = false;
-                format!("interrupt-failed-turn-still-running: {error}")
+            Ok(Err(_)) => {
+                // The only Err interrupt() produces is a dead actor task
+                // (send fails or the ack sender was dropped): no turn can
+                // still be running and the interrupt handle died with it,
+                // so teardown is already done.
+                "actor-gone".to_string()
             }
             Err(_) => {
                 settled = false;
@@ -50,6 +53,26 @@ pub(crate) async fn end_codex_thread(ctx: &Ctx, name: &str) -> Result<String, St
     }
     ctx.codex_threads.lock().await.remove(name);
     Ok(interrupt_report)
+}
+
+/// rm's codex-thread arm: end the thread, then refuse unless `--force` was
+/// passed. `Some` carries the Busy refusal text that keeps the row; `None`
+/// means rm proceeds to drop the row (teardown done, or the force override).
+pub(crate) async fn codex_rm_refusal(ctx: &Ctx, name: &str, force: bool) -> Option<String> {
+    if let Err(interrupt_report) = end_codex_thread(ctx, name).await {
+        if !force {
+            return Some(format!(
+                "agent {name}: the codex thread's turn did not settle \
+                 ({interrupt_report}); the registry row and the codex index \
+                 entry are kept"
+            ));
+        }
+        // The row drops without a settled teardown, so the map entry goes
+        // with it: ensure_codex_thread_handle hands a respawned row the
+        // stale actor when the name matches.
+        ctx.codex_threads.lock().await.remove(name);
+    }
+    None
 }
 
 /// The production claude stop rm runs itself (law d-81c6da7e): one bounded

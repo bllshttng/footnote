@@ -29,6 +29,15 @@ pub(super) fn refused_worker_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_REFUSED_WORKER=")
 }
 
+/// The held portal row a placeholder seat stands in for, from the same
+/// `env(1)` wrapper (`FNO_PORTAL_HELD=<row>`). The marker is what keeps a
+/// keeper-re-adopted placeholder from reading as a live viewer: adoption
+/// re-derives `cmd` from the pane's own argv, and a bare shell yields
+/// `Some`, so command presence alone cannot classify a seat.
+pub(super) fn portal_hold_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_PORTAL_HELD=")
+}
+
 /// The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
 /// spawn was routed with `--account`). `None` for a default-account or ad-hoc

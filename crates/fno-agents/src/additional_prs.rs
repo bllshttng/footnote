@@ -523,7 +523,7 @@ mod tests {
             json!({
                 "id": "x-hold", "status": "done", "merge_status": "merged",
                 "cwd": "/repo/wt",
-                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+                "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s1",
                               "started_at": "2026-09-01T01:00:00Z"}],
                 "additional_prs": [
                     {"number": 1523, "url": "https://github.com/o/r/pull/1523"}
@@ -556,14 +556,14 @@ mod tests {
         let entries = vec![
             json!({
                 "id": "x-nocwd", "status": "done", "merge_status": "merged",
-                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+                "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s1",
                               "started_at": "2026-09-01T01:00:00Z"}],
                 "additional_prs": [{"number": 5}]
             }),
             json!({
                 "id": "x-nonum", "status": "done", "merge_status": "merged",
                 "cwd": "/repo/wt",
-                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s2",
+                "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s2",
                               "started_at": "2026-09-01T01:00:00Z"}],
                 "additional_prs": [{"note": "no number"}]
             }),
@@ -583,7 +583,7 @@ mod tests {
         let entries = vec![json!({
             "id": "x-diverge", "status": "done", "merge_status": "merged",
             "cwd": "/repo/wt",
-            "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+            "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s1",
                           "started_at": "2026-09-01T01:00:00Z"}],
             "additional_prs": [
                 {"number": 1523, "url": "https://github.com/o/r/pull/999"}
@@ -603,7 +603,7 @@ mod tests {
         let held = json!({
             "id": "x-hold", "status": "done", "merge_status": "merged",
             "cwd": "/repo/wt",
-            "sessions": [{"phase": "do", "harness": "claude",
+            "sessions": [{"phase": "execute", "harness": "claude",
                           "session_id": "s1", "started_at": "2026-09-01T01:00:00Z"}],
             "additional_prs": [
                 {"number": 7, "url": "https://github.com/o/r/pull/7"},

@@ -193,18 +193,6 @@ def probe_capacity() -> dict:
     return _probe()
 
 
-def _cpu_row_refused(probe_answer: dict) -> bool:
-    """The probe answer's cpu-share row refused (refuse/undecidable render as
-    the row's ``refuse`` verdict, exactly what the real gate refuses on)."""
-    rows = probe_answer.get("rows") if isinstance(probe_answer, dict) else None
-    for row in rows or []:
-        if isinstance(row, dict) and row.get("name") == "cpu-share":
-            return row.get("verdict") == "refuse"
-    return False
-
-
-
-
 def routing_for(node: Optional[dict]) -> dict:
     """What the slot resolver picks for ``node``, and from which inputs.
 
@@ -586,13 +574,7 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
-    # The CPU axis refuses machine-wide; a preview that left stop empty
-    # would promise a dispatch the real spawn refuses. ONE probe answer feeds
-    # both this stop and the gates rows below, so the report pays one
-    # footprint read and cannot disagree with the gate that refused.
     probe_answer = probe_capacity()
-    if stop is None and _cpu_row_refused(probe_answer):
-        stop = "load-refused"
 
     ordered_names = [
         "no-project",

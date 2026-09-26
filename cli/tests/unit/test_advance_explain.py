@@ -11,6 +11,7 @@ sets FNO_EVENTS_PATH to a per-test tmp journal anyway, so a future emitter
 cannot reach the live file from here.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph.store import read_graph_strict
 
 # ---------------------------------------------------------------------------
@@ -281,30 +282,39 @@ def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
 
 
-def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
-    """The dry run passes no gate the real spawn would refuse on. The
-    preview reads the ONE gate's probe answer."""
-    _lane_fill_world(monkeypatch, [_ready_node("x-win")])
+def test_preview_keeps_gate_refusal_visible_without_axis_stop(monkeypatch):
     from fno.agents import spawn_gate
     from fno.backlog.explain import build_lane_fill_report
 
-    answer = {
-        "verdict": "accepted",
-        "rows": [
-            {
-                "name": "cpu-share",
-                "measured": "2.10/12.00 cores",
-                "threshold": "50%",
-                "verdict": "refuse",
-                "key": "agents.max_fleet_cpu_share",
-                "note": "spawn-gate: cannot decide",
-            }
-        ],
+    gate_row = {
+        "name": "gate-verdict",
+        "measured": "fleet-stop",
+        "threshold": "accepted",
+        "verdict": "refuse",
+        "note": "fleet incident stop is active",
     }
-    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: answer)
-    report = build_lane_fill_report(epic="x-epic")
-    assert report["selection"]["stop"] == "load-refused"
-    assert report["decision"]["would_dispatch"] == ["x-win"]
+    cpu_row = {
+        "name": "cpu-share", "measured": "2.10/12.00 cores", "threshold": "50%",
+        "verdict": "refuse", "key": "agents.max_fleet_cpu_share",
+        "note": "spawn-gate: cannot decide",
+    }
+    cases = [
+        ([_ready_node("x-win")], gate_row, "cap-full"),
+        ([], gate_row, None),
+        ([], cpu_row, None),
+    ]
+    for ready, row, expected_stop in cases:
+        _lane_fill_world(monkeypatch, ready, max_lanes=0)
+        monkeypatch.setattr(
+            spawn_gate,
+            "probe_capacity",
+            lambda *a, **k: {"verdict": "refused", "rows": [row]},
+        )
+        report = build_lane_fill_report(epic="x-epic")
+        assert report["selection"]["stop"] == expected_stop
+        rendered = next(g for g in report["gates"] if g["name"] == row["name"])
+        assert rendered["measured"] == row["measured"]
+        assert rendered["verdict"] == "refuse"
 
 # ---------------------------------------------------------------------------
 # ROUTING derives the slot from the node's verb (x-4890)
@@ -430,7 +440,7 @@ _AB_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
 def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
     """A hermetic graph with ONE node whose only open do row names `sid`."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -463,11 +473,11 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
     monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
 
     started_at = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    g.write_text(_json.dumps({"entries": [{
+    seed_graph(g, _json.dumps({"entries": [{
         "id": node_id, "title": "abandoned arm", "priority": "p2",
         "project": "fno", "domain": "code", "cwd": "/some/worktree",
         "status": "in_progress",
-        "sessions": [{"phase": "do", "harness": "claude", "session_id": sid,
+        "sessions": [{"phase": "execute", "harness": "claude", "session_id": sid,
                       "started_at": started_at}],
     }]}))
     return g
@@ -532,7 +542,7 @@ def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
 def _in_review_world(tmp_path, monkeypatch, node_id="x-inrev001"):
     """Hermetic graph with ONE in_review node carrying a PR link."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -547,7 +557,7 @@ def _in_review_world(tmp_path, monkeypatch, node_id="x-inrev001"):
     monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
 
-    g.write_text(_json.dumps({"entries": [{
+    seed_graph(g, _json.dumps({"entries": [{
         "id": node_id, "title": "conflicting pr", "priority": "p1",
         "project": "fno", "domain": "code",
         "status": "in_review", "pr_number": 1545,

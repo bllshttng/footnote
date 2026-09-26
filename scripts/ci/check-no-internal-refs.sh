@@ -145,6 +145,9 @@ NODE_ID_ALLOWLIST=(
     "ab-77777777"
     "ab-88888888"
     "ab-99999999"
+    # The question-id twin, same contract: a minted id is random hex, never
+    # one hex digit repeated. Backs the question-page name examples.
+    "q-aaaaaaaa"
 )
 
 # Echo the line with every allowlisted token removed. A line carrying ONLY

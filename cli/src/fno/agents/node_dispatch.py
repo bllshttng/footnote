@@ -425,8 +425,23 @@ def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple
     from fno.agents.harness_map import DispatchResolveError
     from fno.graph.store import GRAPH_JSON, _client_for
     payload = dict(row or {}, id=(row or {}).get("id") or node_id)
+    params: dict = {"entries": [payload]}
+    # The blueprint floor rides with the row so the lifecycle table answers
+    # from config; an unreadable config leaves the lean default in force.
     try:
-        answer = _client_for(GRAPH_JSON).request("effective_verb", {"entries": [payload]})
+        from pathlib import Path as _Path
+
+        from fno.config import load_settings, load_settings_for_repo
+
+        node_cwd = (row or {}).get("cwd")
+        settings_obj = (
+            load_settings_for_repo(_Path(node_cwd)) if node_cwd else load_settings()
+        )
+        params["blueprint_floor"] = settings_obj.dispatch.blueprint_floor
+    except Exception:  # noqa: BLE001 - unreadable config -> the lean default
+        pass
+    try:
+        answer = _client_for(GRAPH_JSON).request("effective_verb", params)
         return answer["verb"], answer["note"]
     except RuntimeError as exc:
         raise DispatchResolveError(str(exc).replace("store error (invalid): ", "")) from exc

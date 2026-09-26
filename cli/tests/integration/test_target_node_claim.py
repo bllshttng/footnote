@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from tests._init_space import install_state_path_stub
+from tests.fixtures.graph_seed import seed_graph
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
@@ -72,9 +73,10 @@ exit 0
 def _sandbox(tmp_path: Path):
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
-    (home / ".fno" / "graph.json").write_text(
-        '{"entries":[{"id":"%s","title":"t","status":"idea","priority":"p2",'
-        '"project":"fno","plan_path":null}]}' % NODE_ID
+    seed_graph(
+        home / ".fno" / "graph.json",
+        [{"id": NODE_ID, "title": "t", "status": "idea", "priority": "p2",
+          "project": "fno", "plan_path": None}],
     )
     repo = tmp_path / "repo"
     repo.mkdir()

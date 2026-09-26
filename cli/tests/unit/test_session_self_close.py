@@ -1,5 +1,6 @@
 """`session add --ended-at` self-close: honest receipt, foreign-row guard."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ OWNER = "sess-owner"
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
     return g
 
 
@@ -35,7 +36,7 @@ def _node_with_open_do_row(session_id: str) -> dict:
         "status": "in_progress",
         "sessions": [
             {
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": session_id,
                 "started_at": "2026-09-12T00:00:00Z",
@@ -115,7 +116,7 @@ def test_ac2_edge_a_backfill_with_no_prior_row_records(tmp_path, monkeypatch):
         "--ended-at", "2026-09-13T12:00:00Z",
     )
     assert r.exit_code == 0, r.output
-    assert "recorded do claude:s-old" in r.output
+    assert "recorded execute claude:s-old" in r.output
     assert r.output.count("ended") == 0
     assert _row(g)["ended_at"] == "2026-09-13T12:00:00Z"
 
@@ -131,7 +132,7 @@ def test_a_reclose_of_an_already_closed_row_still_reads_duplicate(
         monkeypatch, g, "--phase", "do", "--ended-at", "2026-09-13T12:00:00Z"
     )
     assert first.exit_code == 0, first.output
-    assert "ended do" in first.output
+    assert "ended execute" in first.output
 
     second = _invoke(
         monkeypatch, g, "--phase", "do", "--ended-at", "2026-09-13T13:00:00Z"

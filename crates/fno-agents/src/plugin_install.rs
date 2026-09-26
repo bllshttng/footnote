@@ -32,15 +32,8 @@ pub(crate) fn state_root() -> PathBuf {
 }
 
 fn build_dir_value() -> String {
-    // Through the one base resolver, so an operator's
-    // `paths.cargo_targets_base` reaches the exported rc env too (it was
-    // ignored here); the FNO_RECLAIM_STATE_ROOT test seam still lands via the
-    // state fallback inside fno_build_base.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    format!(
-        "{}/{{workspace-path-hash}}",
-        crate::cargo_build_dirs::fno_build_base(&cwd).display()
-    )
+    crate::cargo_build_dirs::build_dir_env_value(&cwd)
 }
 
 fn run_checked(cmd: &[String], cwd: Option<&Path>) -> Result<String, String> {
@@ -156,6 +149,43 @@ fn carry_referenced_scripts(old_stage: &Path, new_stage: &Path) -> usize {
     carried
 }
 
+/// The marketplace manifest path, relative to the stage root.
+const MARKETPLACE_REL: &str = ".claude-plugin/marketplace.json";
+
+/// The stage serves its own copy of the public manifest with the fno entry
+/// pointed at the stage root (`source: "./"`), so `claude plugin install
+/// fno@footnote` resolves in place and never clones a GitHub ref: the public
+/// pins (`stable`, `nightly`) are release-side refs a dev machine cannot rely
+/// on. The repo file stays verbatim. Anything that would leave the fno entry
+/// unserved is Err: a verbatim copy would silently resurrect the clone trap.
+fn staged_marketplace_bytes(source_bytes: &str) -> Result<String, String> {
+    let mut manifest: Value =
+        serde_json::from_str(source_bytes).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))?;
+    let Some(entries) = manifest.get_mut("plugins").and_then(Value::as_array_mut) else {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no plugins array; cannot serve the fno entry locally"
+        ));
+    };
+    let mut rewritten = false;
+    for entry in entries.iter_mut() {
+        if entry.get("name").and_then(Value::as_str) == Some("fno") {
+            if !entry.is_object() {
+                return Err(format!(
+                    "{MARKETPLACE_REL}: the fno entry is not an object; cannot serve it locally"
+                ));
+            }
+            entry["source"] = json!("./");
+            rewritten = true;
+        }
+    }
+    if !rewritten {
+        return Err(format!(
+            "{MARKETPLACE_REL}: no fno entry; cannot serve the plugin locally"
+        ));
+    }
+    serde_json::to_string_pretty(&manifest).map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+}
+
 /// Rebuild `<stage_parent>/fno` from `source_root` (git-tracked +
 /// untracked-but-not-ignored files). Builds into a sibling temp dir and swaps
 /// by rename so live sessions execing hooks from the stage never see a
@@ -207,6 +237,15 @@ fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usiz
             return Err(e);
         }
     };
+
+    let manifest = new_dir.join(MARKETPLACE_REL);
+    if manifest.is_file() {
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("stage: {MARKETPLACE_REL}: {e}"))?;
+        let rewritten = staged_marketplace_bytes(&text).map_err(|e| format!("stage: {e}"))?;
+        std::fs::write(&manifest, rewritten)
+            .map_err(|e| format!("stage: {MARKETPLACE_REL}: {e}"))?;
+    }
 
     if dest.exists() {
         carry_referenced_scripts(&dest, &new_dir);
@@ -323,7 +362,14 @@ fn check_stage_report(stage: &Path, source_dir: &Path) -> StageCheck {
 
     let mut missing: Vec<String> = Vec::new();
     let mut to_hash: Vec<(&str, &str)> = Vec::new(); // (stage path, HEAD sha)
+    let mut has_manifest = false;
     for (path, sha) in &tracked {
+        if *path == MARKETPLACE_REL {
+            // The stage serves a rewritten copy of this file
+            // (staged_marketplace_bytes), so no HEAD sha can match it.
+            has_manifest = true;
+            continue;
+        }
         if stage.join(path).is_file() {
             to_hash.push((path, sha));
         } else {
@@ -359,6 +405,27 @@ fn check_stage_report(stage: &Path, source_dir: &Path) -> StageCheck {
                 }
             }
             Err(e) => return unknown_check(stage, source_dir, e),
+        }
+    }
+
+    if has_manifest {
+        let stage_manifest = stage.join(MARKETPLACE_REL);
+        if !stage_manifest.is_file() {
+            missing.push(MARKETPLACE_REL.to_string());
+        } else {
+            let verdict = std::fs::read_to_string(root.join(MARKETPLACE_REL))
+                .map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+                .and_then(|t| staged_marketplace_bytes(&t))
+                .and_then(|expected| {
+                    std::fs::read_to_string(&stage_manifest)
+                        .map(|actual| actual == expected)
+                        .map_err(|e| format!("{MARKETPLACE_REL}: {e}"))
+                });
+            match verdict {
+                Err(e) => return unknown_check(stage, source_dir, e),
+                Ok(false) => differing.push(MARKETPLACE_REL.to_string()),
+                Ok(true) => {}
+            }
         }
     }
 
@@ -418,6 +485,31 @@ fn push_root(
     }
     seen.push(key);
     roots.push(PluginRoot { path, origin, live });
+}
+
+/// The installPath strings installed_plugins.json registers for fno@footnote,
+/// existence unchecked: the sweep's guard must fire on the registry's word
+/// alone, since a registered-but-deleted path is exactly the lie the sweep
+/// must never create.
+fn registry_install_paths(home: &Path) -> Vec<PathBuf> {
+    let text = match std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json")) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    v.get("plugins")
+        .and_then(|p| p.get("fno@footnote"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| e.get("installPath").and_then(Value::as_str))
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The footnote marketplace's `source.source` kind ("directory", "file",
@@ -897,6 +989,22 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
     if !cache.exists() {
         return (removed, refused);
     }
+    // installed_plugins.json is Claude's own registry: a tree it registers
+    // inside is never the sweep's to delete, whatever its staleness. Install
+    // registered cache/footnote/fno/<ver> here and this sweep deleted it in
+    // the same run, leaving the registry pointing at a missing tree and the
+    // review preflight's plugin-file check reading unknown.
+    if let Some(registered) = registry_install_paths(home)
+        .into_iter()
+        .find(|p| p.starts_with(&cache))
+    {
+        refused.push(format!(
+            "claude cache {} kept: installed_plugins.json registers {} inside it",
+            cache.display(),
+            registered.display()
+        ));
+        return (removed, refused);
+    }
     let live_roots: Vec<&PluginRoot> = roots.iter().filter(|r| r.live).collect();
     let cache_is_live = live_roots.iter().any(|r| paths_equal(&r.path, &cache));
     match marketplace_source_kind(home) {
@@ -917,6 +1025,18 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
             cache.display()
         )),
         _ => {
+            // A bare removed-path line reads as an install failure, so the
+            // receipt names the live root the harness loads instead. Rides
+            // the second channel: call sites print its lines verbatim.
+            let live = live_roots
+                .iter()
+                .map(|r| r.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            refused.push(format!(
+                "claude loads fno in place from {live}; removed the unused cache copy {}",
+                cache.display()
+            ));
             let _ = std::fs::remove_dir_all(&cache);
             removed.push(cache);
         }
@@ -1690,11 +1810,18 @@ fn run_agy_hooks(
 
 /// Read whether footnote's hooks reach grok on THIS machine: run
 /// `grok inspect --json` (no auth needed) and look for an enabled fno plugin
-/// with hooks. Reports `reachable` (naming the plugin path), `absent`, or
+/// with hooks. Trust is read from the plugin's location, because grok's
+/// inspect exposes no trust field: a plugin under `<grok_home>/plugins` or
+/// `<grok_home>/installed-plugins` is trusted, anything else (the
+/// Claude-compat scan) is not. Reports `reachable` (naming the plugin path),
+/// `untrusted` (naming the path with the fix command), `absent`, or
 /// `unknown` (grok missing, inspect failed, or unparseable output).
 fn grok_status_receipt() -> String {
     match grok_reachability() {
         GrokReachability::Reachable { path } => format!("reachable: {path}"),
+        GrokReachability::Untrusted { path } => format!(
+            "untrusted: {path} (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)"
+        ),
         GrokReachability::Absent => "absent: no enabled fno plugin with hooks".to_string(),
         GrokReachability::Unknown { reason } => format!("unknown: {reason}"),
     }
@@ -1703,6 +1830,7 @@ fn grok_status_receipt() -> String {
 #[derive(Debug)]
 enum GrokReachability {
     Reachable { path: String },
+    Untrusted { path: String },
     Absent,
     Unknown { reason: String },
 }
@@ -1714,7 +1842,7 @@ fn grok_reachability() -> GrokReachability {
             reason: "grok not found on PATH".to_string(),
         },
         Some(_) => match run_grok_inspect() {
-            Some(text) => parse_grok_inspect(&text),
+            Some(text) => parse_grok_inspect(&text, &crate::grok_store::grok_home()),
             None => GrokReachability::Unknown {
                 reason: "grok inspect --json failed or timed out".to_string(),
             },
@@ -1741,9 +1869,15 @@ fn run_grok_inspect() -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// Classify recorded `grok inspect --json` text. `Absent` when no enabled fno
-/// plugin carries hooks; `Unknown` on unparseable JSON.
-fn parse_grok_inspect(text: &str) -> GrokReachability {
+/// Classify recorded `grok inspect --json` text. grok exposes no trust
+/// field, so trust is read from the plugin's location: only a path under
+/// `<grok_home>/plugins` or `<grok_home>/installed-plugins` loads hooks
+/// (vendor guide 09-plugins.md). The linked stage is discovered under the
+/// root manifest's name ("footnote"), so entries match by either name.
+/// `Untrusted` when an enabled hooks-bearing fno entry sits outside those
+/// roots (the Claude-compat scan); `Absent` when no such entry exists;
+/// `Unknown` on unparseable JSON.
+fn parse_grok_inspect(text: &str, grok_home: &Path) -> GrokReachability {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return GrokReachability::Unknown {
             reason: "inspect output did not parse as JSON".to_string(),
@@ -1754,50 +1888,158 @@ fn parse_grok_inspect(text: &str) -> GrokReachability {
             reason: "inspect output has no plugins array".to_string(),
         };
     };
+    let trusted_roots = [
+        grok_home.join("plugins"),
+        grok_home.join("installed-plugins"),
+    ];
+    let mut untrusted: Option<GrokReachability> = None;
     for plugin in plugins {
-        let name_ok = plugin.get("name").and_then(Value::as_str) == Some("fno");
+        let name = plugin
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name_ok = name == "fno" || name == "footnote";
         let enabled = plugin.get("enabled").and_then(Value::as_bool) == Some(true);
         let hooks = plugin
             .get("provides")
             .and_then(|p| p.get("hooks"))
             .and_then(Value::as_bool)
             == Some(true);
-        if name_ok && enabled && hooks {
-            let path = plugin
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+        if !(name_ok && enabled && hooks) {
+            continue;
+        }
+        let path = plugin
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let trusted = trusted_roots
+            .iter()
+            .any(|root| lexically_normalized(&path).starts_with(root));
+        if trusted {
             return GrokReachability::Reachable { path };
         }
-    }
-    GrokReachability::Absent
-}
-
-/// grok's own installer, then a second status read: `installed` prints only
-/// when the second read is reachable. grok dedupes plugins by name, so a
-/// Claude-compat copy and a grok-installed copy never both load.
-fn install_grok(stage: &Path, _force: bool) -> Result<String, String> {
-    match grok_reachability() {
-        GrokReachability::Reachable { path } => Ok(format!("already installed, reachable: {path}")),
-        GrokReachability::Unknown { reason } => Err(format!("unknown: {reason}")),
-        GrokReachability::Absent => {
-            run_checked(
-                &[
-                    "grok".into(),
-                    "plugin".into(),
-                    "install".into(),
-                    stage.display().to_string(),
-                    "--trust".into(),
-                ],
-                None,
-            )?;
-            match grok_reachability() {
-                GrokReachability::Reachable { path } => Ok(format!("installed, reachable: {path}")),
-                _ => Err("installed but post-install status read is not reachable".into()),
-            }
+        if untrusted.is_none() {
+            untrusted = Some(GrokReachability::Untrusted { path });
         }
     }
+    untrusted.unwrap_or(GrokReachability::Absent)
+}
+
+/// The plugin entry name the install links under `<grok_home>/plugins`; the
+/// name constant also keeps the link-name join out of the seam linter's
+/// porcelain-path scan, which ratchets on the literal `join("fno")`.
+const GROK_PLUGIN_LINK_NAME: &str = "fno";
+
+/// Link the stage into `<grok_home>/plugins/fno`, then a second status
+/// read: the `linked` receipt prints only when that read is reachable. Why
+/// a link and not `grok plugin install --trust`: the plugins directory is
+/// trusted automatically (vendor guide 09-plugins.md), and the link
+/// follows every `fno doctor update` restage of the 186 MB stage where a
+/// copied install would go stale. Measured 2026-09-26 (grok 1.0.34): the
+/// linked copy reads under the root manifest's name ("footnote"), so the
+/// compat copy is NOT deduped away, and grok still auto-disabled the
+/// unlisted plugin; the stop-contract fixture carries the readings.
+fn install_grok(stage: &Path, _force: bool) -> Result<String, String> {
+    let home = crate::grok_store::grok_home();
+    let read = grok_reachability();
+    let read_is_copy = trusted_path_is_copy(&read, &home);
+    match read {
+        GrokReachability::Reachable { path } if !read_is_copy => {
+            Ok(format!("already installed, reachable: {path}"))
+        }
+        GrokReachability::Unknown { reason } => Err(format!("unknown: {reason}")),
+        // Absent, untrusted, or a reachable read through the pre-link
+        // installed-plugins copy (stale on every restage): link, then
+        // verify with a second read.
+        _ => migrate_grok_to_link(&home, stage),
+    }
+}
+
+/// Whether a reachable read names a copied install (anywhere but the
+/// plugins-dir link) that the install must migrate to the link.
+fn trusted_path_is_copy(read: &GrokReachability, home: &Path) -> bool {
+    match read {
+        GrokReachability::Reachable { path } => !Path::new(path).starts_with(home.join("plugins")),
+        _ => false,
+    }
+}
+
+fn migrate_grok_to_link(home: &Path, stage: &Path) -> Result<String, String> {
+    let receipt = link_grok_plugin(home, stage)?;
+    match grok_reachability() {
+        GrokReachability::Reachable { path } => Ok(format!("{receipt}, reachable: {path}")),
+        GrokReachability::Absent => {
+            Err("linked but the post-link status read is absent".to_string())
+        }
+        GrokReachability::Untrusted { .. } => {
+            Err("linked but the post-link status read is untrusted".to_string())
+        }
+        GrokReachability::Unknown { reason } => Err(format!(
+            "linked but the post-link status read is unknown: {reason}"
+        )),
+    }
+}
+
+/// Link `<grok_home>/plugins/fno` to the stage. A real file or directory at
+/// the link path is refused, never deleted. The swap builds the new link as
+/// `plugins/.fno.new-<pid>` and renames it over the link path, so a reader
+/// never sees a half-made link.
+fn link_grok_plugin(grok_home: &Path, stage: &Path) -> Result<String, String> {
+    let plugins = grok_home.join("plugins");
+    std::fs::create_dir_all(&plugins)
+        .map_err(|e| format!("cannot create {}: {e}", plugins.display()))?;
+    let link = plugins.join(GROK_PLUGIN_LINK_NAME);
+    let link_str = link.display().to_string();
+    let stage_str = stage.display().to_string();
+    match std::fs::read_link(&link) {
+        Ok(old) if old == stage => Ok(format!("already linked {link_str} -> {stage_str}")),
+        Ok(old) => {
+            swap_grok_symlink(&plugins, &link, stage)?;
+            Ok(format!(
+                "relinked {link_str} -> {stage_str} from {}",
+                old.display()
+            ))
+        }
+        Err(_) if link.symlink_metadata().is_ok() => Err(format!(
+            "refused: {link_str} is not a symlink; move it aside, then rerun fno config plugin install grok"
+        )),
+        Err(_) => {
+            swap_grok_symlink(&plugins, &link, stage)?;
+            Ok(format!("linked {link_str} -> {stage_str}"))
+        }
+    }
+}
+
+/// Resolve `.` and `..` lexically so a reported path cannot name a parent
+/// directory while a raw-component prefix check still matches a trusted root.
+fn lexically_normalized(path: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn swap_grok_symlink(plugins: &Path, link: &Path, stage: &Path) -> Result<(), String> {
+    let tmp = plugins.join(format!(".fno.new-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(stage, &tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, link).map_err(|e| {
+        format!(
+            "cannot rename {} over {}: {e}",
+            tmp.display(),
+            link.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1823,9 +2065,10 @@ mod tests {
         );
     }
 
-    /// A repo with one commit carrying a hook config and one script.
+    /// A repo with one commit carrying a hook config, one script, and the
+    /// public marketplace manifest with its GitHub release pins.
     fn new_repo(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
+        fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
         git_in(dir, &["init", "-b", "main", "-q"]);
         fs::create_dir_all(dir.join("hooks")).unwrap();
         fs::write(
@@ -1834,6 +2077,11 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("hooks/live.sh"), "live\n").unwrap();
+        fs::write(
+            dir.join(MARKETPLACE_REL),
+            r#"{"name":"footnote","plugins":[{"name":"fno","source":{"source":"github","repo":"bllshttng/footnote","ref":"stable"}},{"name":"fno-nightly","source":{"source":"github","repo":"bllshttng/footnote","ref":"nightly"}}]}"#,
+        )
+        .unwrap();
         git_in(dir, &["add", "-A"]);
         git_in(dir, &["commit", "-q", "-m", "c1"]);
     }
@@ -1937,6 +2185,66 @@ mod tests {
         assert_eq!(report.differing_count, 1);
         assert_eq!(report.sample, vec!["hooks/live.sh".to_string()]);
         assert!(report.remedy.contains("fno config plugin install claude"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The staged manifest serves the fno entry from the stage itself while
+    /// the source checkout keeps the public GitHub pins, and the rewrite is
+    /// not reported as drift.
+    #[test]
+    fn stage_serves_fno_entry_locally_without_drift() {
+        let base = std::env::temp_dir().join(format!("pi-mkt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        let staged: Value =
+            serde_json::from_str(&fs::read_to_string(stage.join(MARKETPLACE_REL)).unwrap())
+                .unwrap();
+        let entries = staged["plugins"].as_array().unwrap();
+        let fno = entries.iter().find(|p| p["name"] == "fno").unwrap();
+        assert_eq!(fno["source"], json!("./"));
+        let nightly = entries.iter().find(|p| p["name"] == "fno-nightly").unwrap();
+        assert_eq!(nightly["source"]["ref"], json!("nightly"));
+        let public: Value =
+            serde_json::from_str(&fs::read_to_string(source.join(MARKETPLACE_REL)).unwrap())
+                .unwrap();
+        assert_eq!(public["plugins"][0]["source"]["ref"], json!("stable"));
+        assert_eq!(check_stage_report(&stage, &source).status, "fresh");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A hand-tampered staged manifest still reads stale with a named sample:
+    /// the served copy is checked, not exempt.
+    #[test]
+    fn tampered_staged_manifest_reads_stale() {
+        let base = std::env::temp_dir().join(format!("pi-mkt2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        fs::write(stage.join(MARKETPLACE_REL), "{\"tampered\":true}").unwrap();
+        let report = check_stage_report(&stage, &source);
+        assert_eq!(report.status, "stale");
+        assert_eq!(report.sample, vec![MARKETPLACE_REL.to_string()]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A manifest that cannot serve the fno entry (entry renamed away) fails
+    /// the build loud instead of silently shipping the github pin back.
+    #[test]
+    fn build_refuses_manifest_without_fno_entry() {
+        let base = std::env::temp_dir().join(format!("pi-mkt3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("source");
+        new_repo(&source);
+        fs::write(
+            source.join(MARKETPLACE_REL),
+            r#"{"name":"footnote","plugins":[{"name":"fno-nightly","source":{"source":"github","repo":"bllshttng/footnote","ref":"nightly"}}]}"#,
+        )
+        .unwrap();
+        git_in(&source, &["add", "-A"]);
+        git_in(&source, &["commit", "-q", "-m", "c2"]);
+        let stage_parent = base.join("stage-parent");
+        fs::create_dir_all(&stage_parent).unwrap();
+        let err = build_stage(&source, &stage_parent).unwrap_err();
+        assert!(err.contains("no fno entry"), "err: {err}");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2088,41 +2396,151 @@ mod tests {
 
     #[test]
     fn grok_parse_reachable_absent_disabled_and_malformed() {
-        // Reachable: the recorded sample names fno enabled with hooks.
-        match parse_grok_inspect(&grok_inspect_sample()) {
-            GrokReachability::Reachable { path } => {
+        // The recorded sample names fno enabled with hooks, but grok found it
+        // only through the Claude-compat scan, which grok does not trust: the
+        // reading is untrusted, naming the path it would load nothing from.
+        match parse_grok_inspect(&grok_inspect_sample(), Path::new("/gh")) {
+            GrokReachability::Untrusted { path } => {
                 assert!(path.ends_with("fno/0.3.2"), "{path}");
             }
-            other => panic!("want Reachable, got {other:?}"),
+            other => panic!("want Untrusted, got {other:?}"),
         }
         // Absent: fno missing entirely.
         let no_fno =
             r#"{"plugins":[{"name":"feature-dev","enabled":true,"provides":{"hooks":false}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(no_fno),
+            parse_grok_inspect(no_fno, Path::new("/gh")),
             GrokReachability::Absent
         ));
         // Disabled, hooks false: both read as absent.
         let disabled = r#"{"plugins":[{"name":"fno","enabled":false,"provides":{"hooks":true}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(disabled),
+            parse_grok_inspect(disabled, Path::new("/gh")),
             GrokReachability::Absent
         ));
         let no_hooks = r#"{"plugins":[{"name":"fno","enabled":true,"provides":{"hooks":false}}]}"#;
         assert!(matches!(
-            parse_grok_inspect(no_hooks),
+            parse_grok_inspect(no_hooks, Path::new("/gh")),
             GrokReachability::Absent
         ));
         // Malformed: unknown, never reads as installed.
         assert!(matches!(
-            parse_grok_inspect("not json {"),
+            parse_grok_inspect("not json {", Path::new("/gh")),
             GrokReachability::Unknown { .. }
         ));
         let no_array = r#"{"plugins":{}}"#;
         assert!(matches!(
-            parse_grok_inspect(no_array),
+            parse_grok_inspect(no_array, Path::new("/gh")),
             GrokReachability::Unknown { .. }
         ));
+    }
+
+    /// AC2-HP: trust reads from the location, not from the name alone.
+    #[test]
+    fn grok_parse_trust_comes_from_location() {
+        let gh = Path::new("/gh");
+        let linked = serde_json::json!({
+            "name": "footnote", "scope": "user", "enabled": true,
+            "path": "/gh/plugins/fno",
+            "provides": {"skills": 25, "agents": 1, "hooks": true, "mcpServers": 0}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [linked] })).unwrap();
+        match parse_grok_inspect(&text, gh) {
+            GrokReachability::Reachable { path } => assert_eq!(path, "/gh/plugins/fno"),
+            other => panic!("want Reachable, got {other:?}"),
+        }
+        // grok's own installer path is trusted too.
+        let installed = serde_json::json!({
+            "name": "fno", "scope": "user", "enabled": true,
+            "path": "/gh/installed-plugins/fno-1a2b",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [installed] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Reachable { .. }
+        ));
+        // Both a compat copy and a linked copy: the trusted one wins.
+        let both = {
+            let compat = serde_json::json!({
+                "name": "fno", "enabled": true,
+                "path": "/claude/plugins/cache/footnote/fno/0.3.2",
+                "provides": {"hooks": true}
+            });
+            let linked_copy = serde_json::json!({
+                "name": "footnote", "enabled": true,
+                "path": "/gh/plugins/fno",
+                "provides": {"hooks": true}
+            });
+            serde_json::json!({ "plugins": [compat, linked_copy] })
+        };
+        let text = serde_json::to_string(&both).unwrap();
+        match parse_grok_inspect(&text, gh) {
+            GrokReachability::Reachable { path } => assert_eq!(path, "/gh/plugins/fno"),
+            other => panic!("want the trusted entry, got {other:?}"),
+        }
+        // A .. inside the reported path resolves outside the trusted root,
+        // so the raw prefix must not match.
+        let escape = serde_json::json!({
+            "name": "fno", "enabled": true,
+            "path": "/gh/plugins/../evil/fno",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [escape] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Untrusted { .. }
+        ));
+        // A .. that stays inside the trusted root still reads trusted.
+        let inner = serde_json::json!({
+            "name": "fno", "enabled": true,
+            "path": "/gh/plugins/sub/../fno",
+            "provides": {"hooks": true}
+        });
+        let text = serde_json::to_string(&serde_json::json!({ "plugins": [inner] })).unwrap();
+        assert!(matches!(
+            parse_grok_inspect(&text, gh),
+            GrokReachability::Reachable { .. }
+        ));
+    }
+
+    /// AC4-HP/AC5-EDGE/AC6-ERR: the link installs, relinks, and refuses a
+    /// real directory without deleting it.
+    #[test]
+    fn grok_link_installs_relinks_and_refuses_a_real_dir() {
+        let base = std::env::temp_dir().join(format!("grok-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let gh = base.join("grok-home");
+        let stage = base.join("stage");
+        let other = base.join("other");
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&other).unwrap();
+
+        let receipt = link_grok_plugin(&gh, &stage).unwrap();
+        assert!(receipt.starts_with("linked "), "{receipt}");
+        assert_eq!(fs::read_link(gh.join("plugins/fno")).unwrap(), stage);
+
+        let receipt = link_grok_plugin(&gh, &stage).unwrap();
+        assert!(receipt.starts_with("already linked "), "{receipt}");
+
+        let receipt = link_grok_plugin(&gh, &other).unwrap();
+        assert!(receipt.starts_with("relinked "), "{receipt}");
+        assert!(receipt.contains(" from "), "{receipt}");
+        assert!(receipt.contains(&stage.display().to_string()), "{receipt}");
+        assert_eq!(fs::read_link(gh.join("plugins/fno")).unwrap(), other);
+
+        // A real directory at the link path is refused, contents intact.
+        let real = gh.join("plugins/fno");
+        fs::remove_file(&real).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("keep.txt"), "keep").unwrap();
+        let err = link_grok_plugin(&gh, &stage).unwrap_err();
+        assert!(err.starts_with("refused: "), "{err}");
+        assert!(
+            real.join("keep.txt").exists(),
+            "refused dir must be untouched"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// AC1-HP: with no --stage, the check runs once per enumerated root. A
@@ -2160,7 +2578,14 @@ mod tests {
         let second = &report.roots[1];
         assert!(!second.live);
         assert_eq!(second.check.status, "stale");
-        assert_eq!(second.check.sample, vec!["hooks/live.sh".to_string()]);
+        // The registry copy also lacks the manifest HEAD tracks.
+        assert_eq!(
+            second.check.sample,
+            vec![
+                ".claude-plugin/marketplace.json".to_string(),
+                "hooks/live.sh".to_string()
+            ]
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -2266,7 +2691,10 @@ mod tests {
         assert_eq!(report.roots[0].check.status, "stale");
         assert_eq!(
             report.roots[0].check.sample,
-            vec!["hooks/live.sh".to_string()]
+            vec![
+                ".claude-plugin/marketplace.json".to_string(),
+                "hooks/live.sh".to_string()
+            ]
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -2290,11 +2718,18 @@ mod tests {
             origin: "marketplace",
         }];
 
-        // HP: directory marketplace + live stage + existing cache -> removed.
+        // HP: directory marketplace + live stage + existing cache -> removed,
+        // and the receipt names the live root so a removed copy does not
+        // read as a failure.
         write_marketplace(&home, "directory", &stage, &stage);
         let (removed, refused) = remove_stale_copies(&home, &live_stage);
         assert_eq!(removed, vec![cache.clone()], "removed: {removed:?}");
-        assert!(refused.is_empty());
+        assert!(
+            refused.iter().any(|l| l.contains("in place from")
+                && l.contains(stage.display().to_string().as_str())
+                && l.contains("unused cache copy")),
+            "{refused:?}"
+        );
         assert!(!cache.exists());
         fs::create_dir_all(&cache).unwrap();
 
@@ -2323,6 +2758,42 @@ mod tests {
             "{refused:?}"
         );
         assert!(cache.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The sweep must never delete a tree installed_plugins.json registers
+    /// inside: install registers cache/footnote/fno/<ver> and the same run's
+    /// sweep once deleted cache/footnote, leaving the registry pointing at a
+    /// missing tree and the review preflight's plugin-file check reading
+    /// unknown. The registry's word outranks the copy's staleness.
+    #[test]
+    fn sweep_keeps_the_cache_the_registry_registers_inside() {
+        let base = std::env::temp_dir().join(format!("pi-rm-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = fixture_home(&base);
+        let stage = base.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let cache = home.join(".claude/plugins/cache/footnote");
+        let install_path = cache.join("fno/0.4.0");
+        fs::create_dir_all(&install_path).unwrap();
+        write_registry(&home, &install_path);
+        write_marketplace(&home, "directory", &stage, &stage);
+        let live_stage = vec![PluginRoot {
+            path: stage.clone(),
+            live: true,
+            origin: "marketplace",
+        }];
+
+        let (removed, refused) = remove_stale_copies(&home, &live_stage);
+        assert!(removed.is_empty(), "removed: {removed:?}");
+        assert!(
+            refused.iter().any(|l| l.contains("installed_plugins.json")),
+            "{refused:?}"
+        );
+        assert!(
+            install_path.exists(),
+            "the registered installPath must survive the sweep"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

@@ -25,7 +25,7 @@ def test_max_and_high_share_a_model_and_differ_in_effort():
     hi = resolve_review_level("high", provider="openai")
     mx = resolve_review_level("max", provider="openai")
     assert mx.model is not None and hi.model is not None
-    assert mx.model == hi.model == "gpt-5.6-sol"
+    assert mx.model == hi.model == "sol"
     assert hi.effort == "high"
     assert mx.effort == "max"
     assert hi.effort != mx.effort
@@ -34,8 +34,8 @@ def test_max_and_high_share_a_model_and_differ_in_effort():
 def test_claude_keeps_distinct_models_per_band_and_max_is_not_degraded():
     mx = resolve_review_level("max", provider="anthropic")
     hi = resolve_review_level("high", provider="anthropic")
-    assert mx.model == "claude-fable-5"
-    assert hi.model == "claude-opus-5"
+    assert mx.model == "fable"
+    assert hi.model == "opus"
     assert mx.model != hi.model
     assert mx.degraded_max is False
 
@@ -62,7 +62,7 @@ def test_xhigh_shares_the_high_band_at_max_effort():
     xh = resolve_review_level("xhigh", provider="openai")
     assert xh.band == "high"
     assert xh.effort == "max"
-    assert xh.model == "gpt-5.6-sol"
+    assert xh.model == "sol"
 
 
 def test_level_source_explicit_diff_sized_and_fallback(monkeypatch, tmp_path):
@@ -153,7 +153,7 @@ def test_the_cli_seam_prints_the_resolved_record(tmp_path, monkeypatch):
     assert record["level_source"] == "explicit"
     assert record["band"] == "max"
     assert record["effort"] == "max"
-    assert record["model"] == "gpt-5.6-sol"
+    assert record["model"] == "sol"
     assert record["provider"] == "openai"
     assert record["degraded_max"] is False
 

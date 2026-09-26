@@ -6,6 +6,7 @@ is registered (and the deprecated `adopt` alias is gone), the `done` verb
 works, and the nested `triage` sub-app surface is present.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -22,7 +23,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json routed to tmp_path via monkeypatch."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -33,7 +34,28 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # Seam readers resolve fno.paths.graph_json at call time; pin the
     # resolver to the same hermetic file (module-attr pins do not reach it).
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native read-backs resolve the store through FNO_CONFIG's state_dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
+
+
+def _native_backlog(*args: str) -> tuple[int, str, str]:
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def _invoke(*args, input=None):
@@ -57,7 +79,7 @@ def test_ac1_hp_backlog_help_lists_verbs():
     """
     r = _invoke("backlog", "--help")
     assert r.exit_code == 0, r.output
-    for verb in ("add", "next", "get", "find", "done"):
+    for verb in ("add", "next", "get", "done"):
         assert verb in r.output, f"verb {verb!r} missing from backlog help"
 
 
@@ -156,13 +178,13 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "done", node_id)
+    r = _invoke("backlog", "done", node_id, "--note", "marks the node completed")
     assert r.exit_code == 0, r.output
 
-    # Fetch and assert completed_at is set
-    get = _invoke("--json", "backlog", "get", node_id)
-    assert get.exit_code == 0
-    node = json.loads(get.stdout)
+    # Fetch and assert completed_at is set (the native read the door serves).
+    get_code, get_out, get_err = _native_backlog("get", node_id)
+    assert get_code == 0, get_err
+    node = json.loads(get_out)
     assert node.get("completed_at"), "completed_at must be set"
     # status is derived by recompute_statuses; it may not be in the JSON
     # serialization but the completed_at presence is the canonical signal.
@@ -172,7 +194,7 @@ def test_ac3_edge_done_is_idempotent(tmp_graph):
     """Running `done` on an already-done node is a safe no-op (exit 0)."""
     add = _invoke("--json", "backlog", "add", "IdemTest")
     node_id = json.loads(add.stdout)["id"]
-    _invoke("backlog", "done", node_id)
+    _invoke("backlog", "done", node_id, "--note", "idempotency fixture")
     r2 = _invoke("backlog", "done", node_id)
     assert r2.exit_code == 0, r2.output
     assert "already" in r2.output.lower() or "done" in r2.output.lower()
@@ -231,7 +253,7 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
 # ---------------------------------------------------------------------------
 
 _ADVERTISED_BACKLOG_VERBS = {
-    "add", "idea", "get", "update", "view", "find", "next", "done", "defer",
+    "add", "idea", "get", "update", "view", "next", "done", "defer",
     "rank", "triage", "note",
 }
 

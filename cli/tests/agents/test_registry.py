@@ -2863,30 +2863,6 @@ def test_update_registry_reports_a_stale_binary_and_writes_nothing(
     assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
 
 
-def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
-    """A rename keeps the session; the accounting must not announce one."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, rename_agent
-
-    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
-    _seed_rows(
-        registry_path,
-        [
-            AgentEntry(
-                name="before-rename",
-                harness="claude",
-                harness_session_id="rn-s",
-                cwd="/tmp",
-                log_path="/tmp/r.log",
-            )
-        ],
-    )
-
-    rename_agent("before-rename", "after-rename", registry_path=registry_path)
-
-    assert not events_path.exists(), "a rename must not read as a removal"
-
 
 def test_a_failed_write_announces_nothing(tmp_path: Path, monkeypatch) -> None:
     """When the registry write fails, the row stayed: no removal is announced."""

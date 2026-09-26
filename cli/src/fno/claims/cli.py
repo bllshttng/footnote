@@ -344,7 +344,7 @@ def acquire(
         typer.echo(f"contention error: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    # do provenance opens at acquire - the one choke point a session killed
+    # execute provenance opens at acquire - the one choke point a session killed
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
     # started_at from this claim's own acquire time; ended_at stays open for the
     # release path to fill. Best-effort and node-keyed, mirroring the release
@@ -391,7 +391,7 @@ def release(
     stamp_do: bool = typer.Option(
         False,
         "--stamp-do",
-        help="Stamp a do provenance row (started_at from this claim's acquire time, "
+        help="Stamp a execute provenance row (started_at from this claim's acquire time, "
         "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
         "finished terminal - never a handoff, which runs under a successor's "
         "identity and would mis-attribute the predecessor's window.",
@@ -399,7 +399,7 @@ def release(
     rollback_do: bool = typer.Option(
         False,
         "--rollback-do",
-        help="Remove the open do provenance row this claim's acquire opened. Set "
+        help="Remove the open execute provenance row this claim's acquire opened. Set "
         "by a releaser whose POST-ACQUIRE validation refused it: it took the "
         "claim only to serialize, did no work, and must not leave the node "
         "reading as in progress. Only an open row (no ended_at) whose "
@@ -495,7 +495,7 @@ def release(
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
 
-    # do provenance: the third choke point (ship=pr_number, blueprint=plan_path,
+    # execute provenance: the third choke point (ship=pr_number, blueprint=plan_path,
     # do=claim release). started_at from the claim's own acquire time, ended_at
     # at the release instant - a true per-session hold window, not the
     # stamp-fire time. The --stamp-do gate means only a session releasing its
@@ -542,7 +542,7 @@ def release(
 
 
 def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
-    """Resolve the (harness, session_id) a do provenance row should be written
+    """Resolve the (harness, session_id) a execute provenance row should be written
     under: the OWNED identity, not the ambient env.
 
     The harness the claim was pinned to (init passes the proven --harness;
@@ -579,7 +579,7 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
     harness, session_id, effort = _owned_do_identity(claim, holder)
     if not harness or not session_id:
         typer.echo(
-            f"claim {action}: no owned identity for the do provenance row of "
+            f"claim {action}: no owned identity for the execute provenance row of "
             f"{node_id}; the row is skipped. Skipped.",
             err=True,
         )
@@ -634,13 +634,13 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, effort = coords
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim acquire: do provenance open skipped for {node_id}: {exc}",
+            f"claim acquire: execute provenance open skipped for {node_id}: {exc}",
             err=True,
         )
         return
@@ -650,7 +650,7 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     # the operator knows provenance was not opened, not silently dropped.
     if not found:
         typer.echo(
-            f"claim acquire: do provenance open skipped for {node_id} "
+            f"claim acquire: execute provenance open skipped for {node_id} "
             f"(node not in graph); the row was not written. Skipped.",
             err=True,
         )
@@ -675,13 +675,13 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started, ended_at=ended, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim release: do provenance stamp skipped for {node_id}: {exc}",
+            f"claim release: execute provenance stamp skipped for {node_id}: {exc}",
             err=True,
         )
         return
@@ -691,7 +691,7 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     # so the operator knows provenance was lost, not silently dropped.
     if not found:
         typer.echo(
-            f"claim release: do provenance stamp skipped for {node_id} "
+            f"claim release: execute provenance stamp skipped for {node_id} "
             f"(node not in graph); the row was not written. Skipped.",
             err=True,
         )
@@ -721,19 +721,19 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim release: do provenance rollback skipped for {node_id}: {exc}",
+            f"claim release: execute provenance rollback skipped for {node_id}: {exc}",
             err=True,
         )
         return
     if not found:
         typer.echo(
-            f"claim release: do provenance rollback skipped for {node_id} "
+            f"claim release: execute provenance rollback skipped for {node_id} "
             f"(node not in graph); nothing was removed. Skipped.",
             err=True,
         )
@@ -743,7 +743,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
         # rollback must not touch. Say which outcome happened rather than let
         # silence read as "the open row was removed".
         typer.echo(
-            f"claim release: no open do row to roll back for {node_id} "
+            f"claim release: no open execute row to roll back for {node_id} "
             f"(none was opened, or the row is already closed).",
             err=True,
         )

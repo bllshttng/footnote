@@ -108,18 +108,9 @@ def cmd_version() -> None:
 
 
 def wire_rows(*, path: Path = GRAPH_JSON, include_archived: bool = False) -> list[dict]:
-    """Wire rows; absent store reads empty; unrepresentable rows ride
-    verbatim; the dumped status IS the stored status. Archived residents
-    answer only when asked for."""
-    from fno.graph.store import StoreUnavailable
     from pydantic import ValidationError
 
-    try:
-        reply = _api("rows", {"include_archived": include_archived}, path=path)
-    except StoreUnavailable:
-        if not path.exists():
-            return []
-        raise
+    reply = _api("rows", {"include_archived": include_archived}, path=path)
     out: list[dict] = []
     for row in reply.get("rows") or []:
         # The rows op serves archived residents raw (only the nodes op

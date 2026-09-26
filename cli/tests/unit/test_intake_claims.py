@@ -10,6 +10,7 @@ claim resolves; appends a fresh node when no claim is declared. The
 similarity scan runs only on the append path.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import re
@@ -90,7 +91,7 @@ def fixture_graph(tmp_path: Path):
         ),
     ]
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(graph_file, json.dumps({"entries": entries}) + "\n")
 
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
          patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
@@ -1084,7 +1085,7 @@ def test_claim_lane_flows_declared_type_doc_to_graph(tmp_path, monkeypatch):
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [_node("ab-1dea1234", title="Idea", status="idea")]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [_node("ab-1dea1234", title="Idea", status="idea")]}) + "\n")
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1191,7 +1192,7 @@ def test_claim_lane_leaves_type_alone_when_doc_declares_none(tmp_path, monkeypat
     g = tmp_path / "graph.json"
     seeded = _node("ab-1dea1234", title="Idea", status="idea")
     seeded["type"] = "epic"  # an operator set this explicitly
-    g.write_text(json.dumps({"entries": [seeded]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [seeded]}) + "\n")
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1252,7 +1253,7 @@ def test_cli_runner_intake_unknown_claim_exits_nonzero(tmp_path, monkeypatch):
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1465,7 +1466,7 @@ def test_backlog_add_records_canonical_cwd(tmp_path):
     canonical.mkdir()
     worktree.mkdir()
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(graph_file, json.dumps({"entries": []}) + "\n")
 
     runner = CliRunner()
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
@@ -1494,7 +1495,7 @@ def test_backlog_idea_has_add_flag_parity(tmp_path):
     from fno.graph.cli import cli
 
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(graph_file, json.dumps({"entries": []}) + "\n")
 
     runner = CliRunner()
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
@@ -1888,7 +1889,7 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(g, json.dumps({"entries": []}) + "\n")
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1917,16 +1918,14 @@ def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsy
     from fno.graph.store import _worker_binary
 
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
             _node(
                 "arch1", title="dedup gate for backlog filings", status="done",
                 completed_at="2026-07-01T00:00:00Z",
                 pr_number=99, archived_at="2026-08-01T00:00:00Z",
             ),
         ]})
-        + "\n"
-    )
+        + "\n")
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     # Working graph is empty; the only candidate is an archived resident.
@@ -1947,12 +1946,10 @@ def test_new_birth_path_warns_on_near_duplicate(tmp_path, monkeypatch):
     import fno.graph._constants as gc
 
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
             _node("ab-d0ne5678", title="Already shipped feature", status="done"),
         ]})
-        + "\n"
-    )
+        + "\n")
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     result = CliRunner().invoke(
         cli, ["new", "Already shipped feature refactor", "--unscoped", "--force-domain"],

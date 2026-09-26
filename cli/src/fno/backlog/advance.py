@@ -255,14 +255,18 @@ class SpawnQueueRefused(SpawnError):
 
 
 #: spawn exit -> machine verdict. 75-80 are capacity conditions true for every caller equally;
-#: 81 and 86 are registries/gates no spawn on this machine can pass; 82 and 83 are the fleet
-#: incident pair; 84 is the state-root refusal: permanent, a human grants, never capacity;
-#: 85 is the sandbox probe. Constants are read off the module so a rename breaks loudly.
+#: 81 is a registry no spawn on this machine can pass; 82 and 83 are the fleet incident pair:
+#: no spawn passes while the stop stands, so they read gate-unavailable; 84 is the state-root
+#: refusal: permanent, a human grants, never capacity; 85 is the sandbox probe; 86 and 88 are
+#: the territory and blueprint caps, which free up when a slot frees; 87 is an unanswered gate.
+#: Constants are read off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
     _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
+    _spawn_gate.EXIT_TERRITORY_CAP: "capacity-refused", _spawn_gate.EXIT_BLUEPRINT_CAP: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+    _spawn_gate.EXIT_FLEET_STOP: "gate-unavailable", _spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE: "gate-unavailable",
     _spawn_gate.EXIT_STATE_ROOT_UNGRANTED: "state-root-ungranted",
     _spawn_gate.EXIT_GATE_UNAVAILABLE: "gate-unavailable",
     EXIT_SANDBOX_UNREACHABLE: "sandbox-unreachable",
@@ -385,6 +389,9 @@ def selection_guards(
         return hold.guard_reason
 
     try:
+        if qid := _held_questions().get(entry.get("id")):
+            return f"held:{qid}"
+
         owner = entry.get("contained_in")
         if isinstance(owner, str) and owner:
             return f"contained:{owner}"
@@ -471,6 +478,21 @@ def _select_read(kind: str, args: list[str]) -> Any:
     if receipt.get("status") != "ok":
         raise RuntimeError(str(receipt.get("detail")))
     return receipt.get("answer")
+
+_held_cache: tuple[float, dict] = (0.0, {})
+
+
+def _held_questions() -> dict:
+    """node -> open question id via select-read held; fail-open, 30s cache."""
+    global _held_cache
+    try:
+        if time.monotonic() - _held_cache[0] < 30:
+            return _held_cache[1]
+        _held_cache = (time.monotonic(), _select_read("held", []) or {})
+    except Exception:  # noqa: BLE001 - a held read never starves selection
+        _held_cache = (time.monotonic(), {})
+    return _held_cache[1]
+    return _held_cache[1]
 
 
 def _next_node(project: Optional[str]) -> Optional[dict]:

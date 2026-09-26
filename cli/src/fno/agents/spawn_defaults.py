@@ -866,9 +866,11 @@ def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
     return None
 
 
-def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> Optional[dict]:
-    """Read the node's difficulty and priority for the dispatch grid."""
-    node_id = _flag_value(toks, "--node") or (env or {}).get("FNO_NODE")
+def _grid_node(node_id: Optional[str] = None) -> Optional[dict]:
+    """Read the node's difficulty and priority for the dispatch grid.
+
+    The id is the one answer inject_spawn_defaults resolved.
+    """
     if not node_id:
         return None
     try:
@@ -1207,9 +1209,23 @@ def inject_spawn_defaults(
         # --yolo/-Y are the same knob as --permission-mode; the filter must
         # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
-    node_id_present = (
-        _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
-    )
+    _flag_node = _flag_value(out[1:], "--node")
+    _env_node = (env or {}).get("FNO_NODE") or None
+    node_id_present = _flag_node is not None or _env_node is not None
+    node = _flag_node or None
+    if _flag_node is None:
+        try:
+            from fno.rust_binary import VerbUnavailable, verb_call
+            _slot = _seed_slot(list(out[1:]))
+            _answer = verb_call("spawn-axes", {"spawn_node": {
+                "argv": list(out), "seed_index": (_slot[0] + 1) if _slot else None,
+                "seed_form": _slot[1] if _slot else None,
+                "flag_node": None, "env_node": _env_node,
+            }}, VerbUnavailable)
+            node = _answer.get("node") or None
+        except Exception:  # noqa: BLE001 - the grid is advisory, as _grid_node
+            node = None
+    node_id_present = node_id_present or node is not None
 
     def _above_defaults(rung: Optional[str]) -> bool:
         return bool(rung) and rung != "agents.defaults"
@@ -1246,7 +1262,7 @@ def inject_spawn_defaults(
     enforced = routing_enforcement_state(settings) == "enforced"
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:
-            grid_node_entry = _grid_node(out[1:], env)
+            grid_node_entry = _grid_node(node)
         _slot_inventory = None
         slot_walk_armed = lanes_present or grid_node_entry or enforced
         capacity_refresh = False

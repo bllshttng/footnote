@@ -60,5 +60,3 @@ def test_decision_record_round_trips_and_joins_to_subject_node(tmp_path: Path) -
     assert [row["decision_id"] for row in api.decisions("x-decision-node", path=graph)] == [
         "d-wave12"
     ]
-
-

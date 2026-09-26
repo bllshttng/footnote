@@ -7,6 +7,9 @@
 //! owning target dir, because a path-shape match alone is a name match:
 //! `cli/src/fno/target` is a source tree. This module owns the whole question
 //! natively so the Python compatibility shell does not grow it.
+//!
+//! The daemon tick's whole arm lives here because its waitpid sweep sees only
+//! daemon children; this sweep catches wedged test binaries with ppid 1.
 
 use crate::events::EventEmitter;
 use regex::Regex;

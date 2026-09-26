@@ -42,11 +42,12 @@ fi
 
 # Argument is an ab-id. Resolve title + details from the graph. Capture
 # stdout and stderr separately so a broken `fno` install (rc!=0 with a
-# real error message) doesn't masquerade as "id not found".
+# real error message) doesn't masquerade as "id not found". The &&/|| keeps
+# a failed lookup from tripping `set -e` before the graceful error path
+# can print the eval-able failure for the caller.
 ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/parse-claims-arg.XXXXXX")"
 trap 'rm -f "$ERR_FILE"' EXIT
-NODE_JSON="$(fno backlog get "$ARG" 2>"$ERR_FILE")"
-RC=$?
+NODE_JSON="$(fno backlog get "$ARG" 2>"$ERR_FILE")" && RC=0 || RC=$?
 if [[ $RC -ne 0 || -z "$NODE_JSON" ]]; then
     ERR_TEXT="$(<"$ERR_FILE")"
     if [[ -n "$ERR_TEXT" ]]; then

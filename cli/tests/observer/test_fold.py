@@ -10,8 +10,10 @@ corrupt-line tolerance, and the isolation-violation detective scan.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fno.observer import fold, isolation
+from tests.fixtures.graph_seed import seed_graph
 
 NOW = datetime(2026, 7, 4, 12, 0, 0)
 
@@ -343,3 +345,19 @@ def test_isolation_violation_detected(tmp_path):
     assert result.violations[0].session_id == leaked
     # a clean scan (id absent) -> clean
     assert isolation.check_isolation({"not-present"}, {"ledger_json": real_ledger}).verdict == "clean"
+
+
+def test_default_real_state_paths_tracks_sqlite_graph_store(tmp_path):
+    paths = isolation.default_real_state_paths(Path("/repo"))
+    assert paths["graph_json"] == Path.home() / ".fno" / "graph.json"
+    db = tmp_path / "graph.json"
+    seed_graph(db, [{"id": "x-isolate1", "title": "sandbox", "session_id": "eval-leak"}])
+    result = isolation.check_isolation({"eval-leak"}, {"graph_json": db})
+    assert result.verdict == "violated"
+
+
+def test_unreadable_graph_store_fails_isolation_closed(monkeypatch, tmp_path):
+    from fno.graph import store
+    monkeypatch.setattr(store, "read_graph_strict", lambda _path: (_ for _ in ()).throw(RuntimeError()))
+    result = isolation.check_isolation({"eval-leak"}, {"graph_json": tmp_path / "graph.json"})
+    assert result.verdict == "violated"

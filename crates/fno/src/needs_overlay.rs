@@ -13,6 +13,9 @@ use std::time::Duration;
 /// Same 800ms cap as the digest overlay: a fold slower than this degrades the
 /// queue to its live badge leg with a visible notice, never blocks the UI.
 const SHELLOUT_TIMEOUT: Duration = Duration::from_millis(800);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(45);
+const ANSWER_TIMEOUT_MESSAGE: &str =
+    "timed out after 45s; the answer may have landed - rerun it, a rerun resumes";
 
 /// One event-derived need, as emitted by `fno-agents needs --json`. The `live`
 /// bit is the claim-liveness stamp (1.4): the client renders an item
@@ -213,9 +216,9 @@ pub async fn mine_mutate(mutation: MineMutation) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
+    let output = tokio::time::timeout(WRITE_TIMEOUT, fut)
         .await
-        .map_err(|_| "timed out".to_string())?
+        .map_err(|_| "timed out after 45s; the change may have landed - rerun it".to_string())?
         .map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
@@ -268,9 +271,9 @@ pub async fn answer_question(question_id: &str, answer: &str) -> Result<(), Stri
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
+    let output = tokio::time::timeout(WRITE_TIMEOUT, fut)
         .await
-        .map_err(|_| "timed out".to_string())?
+        .map_err(|_| ANSWER_TIMEOUT_MESSAGE.to_string())?
         .map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
@@ -349,5 +352,12 @@ mod tests {
     #[test]
     fn torn_questions_json_fails_quiet() {
         assert!(parse_questions(br#"{"questions":[{"id":"q-1""#).is_none());
+    }
+
+    #[test]
+    fn write_wait_and_timeout_receipt_match_the_clear_bound() {
+        assert_eq!(WRITE_TIMEOUT, Duration::from_secs(45));
+        assert!(ANSWER_TIMEOUT_MESSAGE.contains("the answer may have landed"));
+        assert!(ANSWER_TIMEOUT_MESSAGE.contains("a rerun resumes"));
     }
 }

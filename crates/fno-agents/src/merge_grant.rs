@@ -143,7 +143,7 @@ fn do_row_receipts(node: &Value) -> Result<Vec<&Value>, String> {
         if !row.is_object() {
             continue;
         }
-        if row.get("phase").and_then(Value::as_str) != Some("do") {
+        if row.get("phase").and_then(Value::as_str) != Some("execute") {
             continue;
         }
         let grant = match row.get("merge_grant") {
@@ -413,7 +413,7 @@ pub fn queue_from_entries(
             .iter()
             .any(|row| {
                 row.is_object()
-                    && row.get("phase").and_then(Value::as_str) == Some("do")
+                    && row.get("phase").and_then(Value::as_str) == Some("execute")
                     && !matches!(row.get("merge_grant"), None | Some(Value::Null))
             });
         if !has_grant {

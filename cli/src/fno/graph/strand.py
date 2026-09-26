@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from fno.graph._contain import release_contained
 # Deeper than any real epic nesting; mirrors _MAX_ANCESTOR_WALK in advance.py.
 _MAX_ANCESTOR_WALK = 64
 
@@ -65,7 +66,7 @@ def _release_contained_children(entries: list[dict], owner_id: Optional[str]) ->
     freed: list[str] = []
     for e in entries:
         if isinstance(e, dict) and e.get("contained_in") == owner_id:
-            e.pop("contained_in", None)
+            release_contained(entries, e)
             nid = e.get("id")
             if isinstance(nid, str) and nid:
                 freed.append(nid)

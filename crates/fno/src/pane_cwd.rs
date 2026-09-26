@@ -138,6 +138,28 @@ impl crate::server::Core {
         if let Some(notice) = notice {
             self.notice_all(notice);
         }
+        // A portal slot's placeholder carries its held identity in its own
+        // argv: a later server re-adopts the shell and re-derives `cmd`
+        // from argv, and without the marker the placeholder would read as
+        // a live viewer of the row.
+        if let Some(portal) = slot.portal.as_ref() {
+            let spawned = self.spawn_env_placeholder(
+                format!("FNO_PORTAL_HELD={}", portal.row),
+                rows,
+                cols,
+                &spawn_cwd,
+                "held portal placeholder",
+            );
+            return match spawned {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.notice_all(format!(
+                        "restore: tab {tab_name}: could not open shell: {e}"
+                    ));
+                    None
+                }
+            };
+        }
         match self.spawn_pane(rows, cols, &spawn_cwd) {
             Ok(p) => Some(p),
             Err(e) => {

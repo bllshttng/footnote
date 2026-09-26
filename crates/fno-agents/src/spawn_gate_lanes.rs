@@ -37,19 +37,6 @@ const UNKNOWN_RESET_HOLD_S: i64 = 5 * 3600;
 /// (mux_spawn._MUX_SUBPROCESS_TIMEOUT_S).
 const PANE_PROBE_BUDGET: Duration = Duration::from_secs(30);
 
-/// The registry statuses that can never hold a crown
-/// (mirrors registry.TERMINAL_STATUSES; the crowned_sessions divisor skips
-/// them exactly as Python's court reader does).
-fn status_is_terminal(s: &AgentStatus) -> bool {
-    matches!(
-        s,
-        AgentStatus::Orphaned
-            | AgentStatus::Failed
-            | AgentStatus::Exited
-            | AgentStatus::PermanentDead
-    )
-}
-
 /// The `providers.provider_limits.<provider>.lanes` cap, or `None` when the
 /// provider is uncapped. A config that never named a provider_limits table
 /// falls back to the built-in budget table, exactly as the Python gate's
@@ -719,8 +706,15 @@ pub(crate) fn share_reading(
     let mut held_rows: Vec<String> = Vec::new();
     let mut unattributed: Vec<String> = Vec::new();
     for e in &registry.entries {
+        // A crown counts until it is cleared or its row is permanently dead.
+        // A reboot leaves every crowned row reading exited while the crown
+        // still stands, and dropping those crowns read kings=0 and a share
+        // of 1 for everyone.
         if let Some(session) = e.harness_session_id.as_deref() {
-            if e.crown_level.is_some() && !session.is_empty() && !status_is_terminal(&e.status) {
+            if e.crown_level.is_some()
+                && !session.is_empty()
+                && e.status != AgentStatus::PermanentDead
+            {
                 crowned.insert(session.to_string());
             }
         }
@@ -750,6 +744,42 @@ pub(crate) fn share_reading(
         held: Some(held_rows.len()),
         held_rows: Some(held_rows),
         unattributed_rows: Some(unattributed),
+    }
+}
+
+/// Return the caller's row only when crown settlement confirms it will be vacated.
+pub(crate) fn succession_replaces(
+    live: &[RegistryEntry],
+    caller: Option<&str>,
+    scope: &str,
+) -> Result<String, &'static str> {
+    let caller = caller
+        .filter(|session| !session.is_empty())
+        .ok_or("no_caller")?;
+    let mut rows = live.iter().filter(|row| {
+        row.harness_session_id.as_deref() == Some(caller)
+            || row.cc_session_id.as_deref() == Some(caller)
+    });
+    let row = rows.next().ok_or("caller_not_live")?;
+    if rows.next().is_some() {
+        return Err("caller_ambiguous");
+    }
+    let rows = serde_json::to_value(live).map_err(|_| "settle_unreadable")?;
+    let answer = crate::crown_settle::resolve(&serde_json::json!({
+        "scope": scope,
+        "rows": rows,
+        "succession": true,
+        "caller": {"kind": "agent", "name": row.name.clone()},
+    }))
+    .map_err(|_| "settle_unreadable")?;
+    let vacates_caller = answer
+        .get("vacate")
+        .and_then(Value::as_array)
+        .is_some_and(|vacate| vacate.len() == 1 && vacate[0].as_str() == Some(row.name.as_str()));
+    if answer.get("outcome").and_then(Value::as_str) == Some("succeeded") && vacates_caller {
+        Ok(row.name.clone())
+    } else {
+        Err("caller_not_sole_holder")
     }
 }
 
@@ -1713,6 +1743,39 @@ mod tests {
         let reading = share_reading(&reg, 6, Some("caller-uuid"));
         assert_eq!(reading.held, Some(1));
         assert_eq!(reading.held_rows, Some(vec!["live-one".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a reboot every crowned row reads exited, and the crowns still
+    /// stand: they divide the cap. A permanently dead crown row does not.
+    #[test]
+    fn share_reading_counts_crowns_a_reboot_left_reading_exited() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-reboot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        let crown = |name: &str, status: &str, sid: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"{name}","harness_session_id":"{sid}"}}"#
+            )
+        };
+        write_registry(
+            &reg,
+            &[
+                crown("quill", "exited", "quill-session"),
+                crown("kestrel", "orphaned", "kestrel-session"),
+                crown("gone", "permanent_dead", "gone-session"),
+                format!(
+                    r#"{{"name":"w1","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"quill-session"}}"#
+                ),
+            ],
+        );
+        let reading = share_reading(&reg, 6, Some("quill-session"));
+        assert_eq!(reading.kings, Some(2));
+        assert_eq!(reading.share, Some(3));
+        assert_eq!(reading.held, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

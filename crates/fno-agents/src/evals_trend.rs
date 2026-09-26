@@ -18,7 +18,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 const EXIT_USAGE: i32 = 2;
-const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] [--planned <json>] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
+const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] [--planned <json>] [--qualification <manifest.json>] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
 
 /// One history row: the fields the folds read. Absent keys read as the
 /// Python fold read them (missing `variant` is baseline, missing `ts` is
@@ -552,6 +552,50 @@ fn print_summary(history: &str, stale_days: i64, now: DateTime<Utc>) -> i32 {
     0
 }
 
+/// The qualification projection surface, shared by the `--qualification`
+/// flag and the stdin `{"op": "qualification"}` payload. A missing history
+/// file folds over zero rows: every scenario reports missing, which is the
+/// honest answer, never an error.
+fn qualification_report(
+    history: &str,
+    manifest_path: &str,
+    json_out: bool,
+    since: Option<usize>,
+) -> i32 {
+    let text = match std::fs::read_to_string(manifest_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("evals-trend: cannot read qualification manifest {manifest_path}: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let manifest: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("evals-trend: qualification manifest {manifest_path} is not valid JSON: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let raw_rows: Vec<Value> = if PathBuf::from(history).exists() {
+        read_rows(history, Some("baseline"), since)
+            .into_iter()
+            .map(|r| r.raw)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let projection = crate::evals_qualification::projection(&raw_rows, &manifest);
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&projection).unwrap_or_default()
+        );
+    } else {
+        print!("{}", crate::evals_qualification::render_text(&projection));
+    }
+    crate::evals_qualification::exit_code(&projection)
+}
+
 pub fn run_evals_trend(args: &[String]) -> i32 {
     if args.is_empty() {
         // stdin summary: a JSON payload on stdin (the verb_call shape),
@@ -571,6 +615,23 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                     let stale_days = v.get("stale_days").and_then(Value::as_i64).unwrap_or(7);
                     return print_summary(&history, stale_days, Utc::now());
                 }
+                if v.get("op").and_then(Value::as_str) == Some("qualification") {
+                    let history = v
+                        .get("history")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let manifest = v
+                        .get("qualification")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if manifest.is_empty() {
+                        eprintln!("evals-trend: qualification op needs a manifest path");
+                        return EXIT_USAGE;
+                    }
+                    return qualification_report(&history, &manifest, true, None);
+                }
             }
         }
         eprintln!("{USAGE}");
@@ -585,6 +646,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let mut json_out = false;
     let mut compare: Option<String> = None;
     let mut planned: Option<BTreeMap<String, usize>> = None;
+    let mut qualification: Option<String> = None;
     let mut now: Option<DateTime<Utc>> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -672,6 +734,10 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                     return EXIT_USAGE;
                 }
             },
+            "--qualification" => match value("--qualification") {
+                Ok(v) => qualification = Some(v),
+                Err(()) => return EXIT_USAGE,
+            },
             "--now" => match value("--now").map(|v| DateTime::parse_from_rfc3339(&v)) {
                 Ok(Ok(dt)) => now = Some(dt.with_timezone(&Utc)),
                 _ => {
@@ -692,6 +758,11 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
     let now = now.unwrap_or_else(Utc::now);
+
+    if qualification.is_some() && mode != "report" {
+        eprintln!("evals-trend: --qualification requires --mode report (got '{mode}')");
+        return EXIT_USAGE;
+    }
 
     if mode == "summary" {
         return print_summary(&history, stale_days, now);
@@ -752,6 +823,9 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     }
 
     // --mode report
+    if let Some(qpath) = &qualification {
+        return qualification_report(&history, qpath, json_out, since);
+    }
     if let Some(v) = &compare {
         let ok = v == "baseline"
             || (v.starts_with('v') && v[1..].bytes().all(|b| b.is_ascii_digit()) && v.len() > 1);

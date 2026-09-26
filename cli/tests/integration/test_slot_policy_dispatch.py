@@ -8,6 +8,7 @@ PERSISTED deferred state through the landed backlog owners, and one controlled
 successful retry after the capacity observation changes.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import io
 import json
@@ -34,7 +35,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch):
     """A fresh empty graph.json; monkeypatches fno.graph constants to use it."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -185,7 +186,7 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     # Persisted queue state, through the backlog owner the amendment names:
     # the node lands deferred with the machine-stamped slot-queue reason.
     node_id = "ab-4f44feed"
-    tmp_graph.write_text(json.dumps({"entries": [{
+    seed_graph(tmp_graph, json.dumps({"entries": [{
         "id": node_id, "slug": "slot-queue-probe", "status": "ready",
         "priority": "p2",
     }]}) + "\n")

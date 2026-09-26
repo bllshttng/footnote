@@ -1,7 +1,15 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Explicit Capability Escalation
 
-Context pressure is a compaction trigger, never a succession trigger. Continue in this session across blueprint/do and wave boundaries. A fresh session is reserved for capability escalation after an external operator or supervising king selects a stronger destination.
+Context pressure is a compaction trigger, never a succession trigger. Continue in this session across blueprint/do and wave boundaries. A fresh session is reserved for capability escalation after an external user or supervising king selects a stronger destination.
+
+On Codex, provider goal continuation and Footnote `Stop` are separate
+capabilities. The verified provider goal is the primary continuation receipt;
+the Stop receipt independently proves that Footnote can drive the next turn.
+Quiet work parks by pausing the provider goal and preserving its objective. It
+does not clear the goal or authorize a replacement. Raw app-server `/compact`
+mail is not a compaction path; use the provider-backed receipt, with manual
+Escape plus `/compact` retained only for a measured mux pane.
 
 The current worker may signal that it is stuck. It may not select its own replacement or infer a destination from ambient harness, model, or account state. The external caller invokes `bash "${SKILL_DIR}/scripts/handoff.sh" --harness <harness> --model <model> [--account <id> | --dispatch-account <id>]` and obeys the decision line.
 

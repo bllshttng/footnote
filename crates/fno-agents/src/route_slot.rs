@@ -1147,8 +1147,19 @@ fn payload_fingerprint(payload: &Value) -> String {
 
 pub fn resolve_slot_payload(payload: &Value) -> Value {
     let mut judged: Option<Value> = None;
-    let mut out = resolve_slot_walk(payload, &mut judged);
+    let (resolved, family_lines) = crate::model_family::resolve_payload(payload);
+    let mut out = resolve_slot_walk(&resolved, &mut judged);
     if let Some(obj) = out.as_object_mut() {
+        // Family lines prepend; the walk's last chain entry stays terminal
+        // (spawn_defaults reads slot_chain[-1]).
+        if !family_lines.is_empty() {
+            if let Some(chain) = obj.get_mut("chain").and_then(Value::as_array_mut) {
+                let mut next = family_lines;
+                let existing = std::mem::take(chain);
+                next.extend(existing);
+                *chain = next;
+            }
+        }
         obj.insert("fingerprint".into(), json!(payload_fingerprint(payload)));
         // The summary explain used to build in Python, read straight off the
         // map the walk judged lanes with.
@@ -1181,6 +1192,9 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     if mode == "tier" {
         return tier_leg(payload);
+    }
+    if mode == "inventory" {
+        return crate::route_inventory::inventory_leg(payload);
     }
     if mode == "states" {
         return states_leg(payload);
@@ -1769,9 +1783,13 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 if current >= cap {
+                    // The count's only payload producer is the spawn-gate lane
+                    // probe, and the payload carries no per-vendor age, so the
+                    // suffix names the source alone.
                     chain.push(json!(format!(
-                        "slot skip {} provider {vendor} at {current} of {cap}",
+                        "slot skip {} provider {vendor} at {current} of {cap}{}; holders: fno agents provider-cap status; free one: fno agents stop <name>; queue: fno agents provider-cap decide <lane> --answer wait",
                         lane_label(rung, row_name),
+                        evidence_suffix("gate-probe", ""),
                     )));
                     continue;
                 }
@@ -3914,7 +3932,10 @@ mod tests {
         assert_eq!(out["candidate"]["lane"], "sonnet-x");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains(
-            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20"
+            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20 source=gate-probe"
+        )));
+        assert!(chain.iter().any(|l| l.contains(
+            "holders: fno agents provider-cap status; free one: fno agents stop <name>; queue: fno agents provider-cap decide <lane> --answer wait"
         )));
         assert!(chain.iter().any(|l| l.contains(
             "slot note agents.profiles.target.lanes[1] sonnet-x uncapped (no vendor declared)"
@@ -4772,19 +4793,16 @@ mod tests {
         body: &str,
         marker: &std::path::Path,
     ) -> String {
-        let script = dir.join("refresh-stub.sh");
-        std::fs::write(
-            &script,
-            format!(
+        let script = crate::write_exec_stub(
+            dir,
+            "refresh-stub.sh",
+            &format!(
                 "#!/bin/sh\nprintf '%s' '{}' > {}\nprintf '%s' '{}'\n",
                 body,
                 marker.display(),
                 body
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         script.display().to_string()
     }
 

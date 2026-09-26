@@ -9,6 +9,7 @@ exhaustively in tests/unit/test_spawn_think.py):
   (Failure Modes: node birth never fails because of the spawn leg).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ import fno.provenance.spawn_think as st
 def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Isolate the graph + render + lock under tmp_path."""
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": []}) + "\n")
+    seed_graph(g, json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(gc, "_graph_path", lambda: g)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     # Seam readers resolve fno.paths.graph_json at call time; pin the

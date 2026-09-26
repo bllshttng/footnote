@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import sys
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -59,6 +61,12 @@ def ensure_proxy(
         raise FileNotFoundError("real gh executable not found on PATH")
     root = directory or github_cli_proxy_dir()
     root.mkdir(parents=True, exist_ok=True)
+    link = root / "fno-gh-proxy"
+    helper = shutil.which("fno-gh-proxy") or str(Path(sys.executable).with_name("fno-gh-proxy"))
+    if not link.exists() and os.path.isfile(helper):
+        link.unlink(missing_ok=True)
+        with suppress(FileExistsError):
+            link.symlink_to(helper)
     proxy = root / "gh"
     resolved = resolved.resolve()
     if resolved == proxy.resolve():

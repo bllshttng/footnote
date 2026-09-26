@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Post-install hook for the fno Claude Code plugin.
 #
-# Lands a complete `fno` (CLI + all three Rust binaries) on PATH. Preference
-# order (US7, ab-18563bcc):
+# Lands a complete `fno` (CLI + all three Rust binaries) on PATH, routed by
+# the plugin channel this tree came from (the version in plugin.json, which
+# release.yml keeps distinct per channel):
 #
-#   1. `uv tool install fno` BY NAME - the published PyPI platform wheel, which
-#      is binary-complete in one step (no separate `fno doctor update --rust`). Guarded
-#      for name-collision safety (AC7-FR): we verify the installed package is
-#      OURS (its version matches this plugin's bundled cli/ source) and fall
-#      back to the source build on any mismatch, so the reserved 0.0.0
-#      placeholder or a squatted `fno` never runs in place of ours.
-#   2. `uv tool install` from the bundled cli/ source (Python-only; the Rust
-#      binaries then need a later `fno doctor update --rust`) when the PyPI wheel is
-#      unavailable, not yet published, or not ours (AC7-ERR).
-#   3. `pip install --user` from cli/ source.
-#   4. an actionable error if neither uv nor pip is present (AC7-EDGE, unchanged).
+#   stable (0.4.0)      1. `uv tool install fno` BY NAME - the published PyPI
+#                          platform wheel, binary-complete in one step.
+#   rc (0.4.0rcN)       1. `uv tool install fno==0.4.0rcN` - pinned, because a
+#                          plain by-name install skips pre-releases.
+#   nightly (0.4.0-dev.N) 1. the matching wheel from the nightly GitHub
+#                          Release (no registry holds a nightly). Any fallback
+#                          to the source build says so out loud - an rc or dev
+#                          install never silently downgrades.
+#
+# Guarded for name-collision safety (AC7-FR) on every channel: we verify the
+# installed package is OURS (its version matches this plugin's declared
+# version, comparing PEP 440 and semver spellings) and fall back to the
+# source build on any mismatch, so the reserved 0.0.0 placeholder or a
+# squatted `fno` never runs in place of ours. Last resort:
+# `uv tool install` / `pip install --user` from the bundled cli/ source
+# (Python-only; the Rust binaries then need `fno doctor update --rust`).
 #
 # Every path logs which one it took (AC7-UI), so the user knows whether the
 # daemon-backed verbs will work without a second step.
@@ -22,6 +28,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(dirname "$SCRIPT_DIR")/cli"
+FNO_RELEASE_REPO="${FNO_RELEASE_REPO:-bllshttng/footnote}"
+
+# Shared channel/version math (stable|rc|nightly detection, spelling-tolerant
+# version match, wheel-platform glob). Absent the helper, fall back to the
+# legacy exact-match behavior for the stable channel.
+PLUGIN_VERSION_LIB="$(dirname "$SCRIPT_DIR")/scripts/release/plugin-version.sh"
+if [[ -f "$PLUGIN_VERSION_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$PLUGIN_VERSION_LIB"
+else
+  plugin_channel() { echo stable; }
+  plugin_version_matches() { [ "$1" = "$2" ]; }
+  plugin_wheel_platform() { echo ""; }
+fi
 
 log() { printf "[fno postinstall] %s\n" "$*"; }
 err() { printf "[fno postinstall] ERROR: %s\n" "$*" >&2; }
@@ -34,16 +54,37 @@ if [[ ! -f "$CLI_DIR/pyproject.toml" ]]; then
   exit 1
 fi
 
-# Version this plugin's bundled source declares. A by-name PyPI install must
-# match it to count as "ours" (the name-collision / placeholder guard).
+# Version this plugin declares: plugin.json is the ONE version field, and
+# release.yml stamps it per channel on the nightly tag (stable's tree carries
+# the plain release version). An install must match it to count as "ours"
+# (the name-collision / placeholder guard).
 src_version() {
   local v
   # sed -n ... p: print ONLY a matched version; emit nothing (not the whole
   # line) if the format is unexpected, so SRC_VERSION is either clean or empty -
   # an empty SRC_VERSION fails the guard closed (falls back to source).
-  v="$(grep -E '^__version__' "$CLI_DIR/src/fno/__init__.py" 2>/dev/null \
-        | head -1 | sed -n -E 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p')" || true
+  v="$(grep '"version"' "$SCRIPT_DIR/plugin.json" 2>/dev/null \
+        | head -1 | sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')" || true
   printf '%s' "$v"
+}
+
+# The nightly release's wheel asset for this platform, when one exists.
+nightly_wheel_url() {
+  local plat json url
+  plat="$(plugin_wheel_platform "$(uname -s)" "$(uname -m)")"
+  [[ -n "$plat" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  json="$(curl -fsSL "https://api.github.com/repos/${FNO_RELEASE_REPO}/releases/tags/nightly" 2>/dev/null)" || return 1
+  url="$(FNO_WHEEL_PLATFORM="$plat" python3 -c '
+import json, os, re, sys
+plat = os.environ["FNO_WHEEL_PLATFORM"]
+data = json.load(sys.stdin)
+for a in data.get("assets", []):
+    if a.get("name", "").endswith(".whl") and re.search(plat, a["name"]):
+        print(a["browser_download_url"]); sys.exit(0)
+sys.exit(1)
+' 2>/dev/null)" || return 1
+  printf '%s' "$url"
 }
 
 # Version uv reports for an installed `fno` tool, normalized (no leading v).
@@ -192,13 +233,19 @@ install_source_via_uv() {
 
 if command -v uv >/dev/null 2>&1; then
   SRC_VERSION="$(src_version)"
+  CHANNEL="stable"
+  # Not a bare `[[ ]] &&` list: an empty SRC_VERSION would trip set -e there.
+  if [[ -n "$SRC_VERSION" ]]; then
+    CHANNEL="$(plugin_channel "$SRC_VERSION")"
+  fi
 
   # Idempotent: already binary-complete at our version -> nothing to do. Require
   # the front door and ALL THREE agent binaries, not just the client: a
   # same-version install missing the mux (e.g. a pre-x-538e wheel) must NOT take
   # this skip, or the advertised `fno` command stays missing - the exact
   # incomplete state this postinstall repairs.
-  if [[ -n "$SRC_VERSION" && "$(uv_installed_fno_version)" == "$SRC_VERSION" ]] \
+  if [[ -n "$SRC_VERSION" ]] \
+     && plugin_version_matches "$(uv_installed_fno_version)" "$SRC_VERSION" \
      && command -v fno >/dev/null 2>&1 \
      && command -v fno-agents >/dev/null 2>&1 \
      && command -v fno-agents-daemon >/dev/null 2>&1 \
@@ -208,31 +255,53 @@ if command -v uv >/dev/null 2>&1; then
     exit 0
   fi
 
-  log "preferring the published PyPI wheel: uv tool install fno (by name)..."
+  # Install the release matching THIS plugin's channel, then prove it is ours.
   # stdout only is silenced: the retry wrapper's stderr (uv's verbatim error,
   # the verify refusal, the three-attempts race message) is the diagnostic
   # surface and must reach the user.
-  if uv_tool_install_retry fno >/dev/null; then
-    INSTALLED="$(uv_installed_fno_version)"
-    if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
-      log "installed fno $INSTALLED from PyPI (front door + CLI + agent binaries on PATH)."
-      # The receipt proves the advertised command, not uv's exit code. A wheel
-      # that predates the complete payload stays installed (the Python CLI
-      # works) but the missing front door is named with its repair (AC2-EDGE).
-      verify_frontdoor || true
-      shim_sweep || exit 1
-      log "restart your shell (or source your env) to pick up PATH."
-      next_steps
-      exit 0
+  try_channel_install() { # try_channel_install <uv-spec> <origin-label>
+    if uv_tool_install_retry "$1" >/dev/null; then
+      INSTALLED="$(uv_installed_fno_version)"
+      if [[ -n "$SRC_VERSION" ]] && plugin_version_matches "$INSTALLED" "$SRC_VERSION"; then
+        log "installed fno $INSTALLED from $2 (front door + CLI + agent binaries on PATH)."
+        # The receipt proves the advertised command, not uv's exit code. A wheel
+        # that predates the complete payload stays installed (the Python CLI
+        # works) but the missing front door is named with its repair (AC2-EDGE).
+        verify_frontdoor || true
+        shim_sweep || exit 1
+        log "restart your shell (or source your env) to pick up PATH."
+        next_steps
+        exit 0
+      fi
+      # Not ours: the reserved 0.0.0 placeholder, a name collision, or a version
+      # that does not match this plugin's declared version. Remove it and build
+      # from source rather than run a foreign/empty fno (AC7-FR).
+      log "installed fno is ${INSTALLED:-unresolved}, not this plugin's ${SRC_VERSION:-version} - using the bundled source instead."
+      uv tool uninstall fno >/dev/null 2>&1 || true
+    else
+      log "$2 unavailable (offline, or not yet published) - using the bundled source."
     fi
-    # Not ours: the reserved 0.0.0 placeholder, a name collision, or a version
-    # that does not match this plugin's bundled source. Remove it and build from
-    # source rather than run a foreign/empty fno (AC7-FR).
-    log "PyPI 'fno' is ${INSTALLED:-unresolved}, not this plugin's ${SRC_VERSION:-version} - using the bundled source instead."
-    uv tool uninstall fno >/dev/null 2>&1 || true
-  else
-    log "PyPI 'fno' unavailable (offline or not yet published) - using the bundled source."
-  fi
+  }
+
+  case "$CHANNEL" in
+    rc)
+      log "channel rc: pinning the candidate from PyPI as fno==$SRC_VERSION (a plain by-name install skips pre-releases)..."
+      try_channel_install "fno==$SRC_VERSION" "PyPI"
+      ;;
+    nightly)
+      NIGHTLY_WHEEL="$(nightly_wheel_url || true)"
+      if [[ -n "$NIGHTLY_WHEEL" ]]; then
+        log "channel nightly: installing this platform's wheel from the nightly GitHub Release: $NIGHTLY_WHEEL"
+        try_channel_install "$NIGHTLY_WHEEL" "the nightly GitHub Release"
+      else
+        log "channel nightly: no wheel for this platform on the nightly GitHub Release (offline, rate-limited, or an unsupported platform) - using the bundled source."
+      fi
+      ;;
+    *)
+      log "preferring the published PyPI wheel: uv tool install fno (by name)..."
+      try_channel_install "fno" "PyPI"
+      ;;
+  esac
 
   if install_source_via_uv; then
     exit 0

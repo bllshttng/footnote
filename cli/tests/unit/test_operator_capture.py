@@ -5,6 +5,7 @@ ledger) and the ``--source-kind operator_request`` writer surface on the
 graph side (``idea``, ``new``, ``capture promote``, ``find``).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -29,7 +30,28 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    # The native read-backs resolve the store through FNO_CONFIG's state_dir.
+    (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
     return g
+
+
+def _native_backlog(*args: str) -> tuple[int, str, str]:
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", *args],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 @pytest.fixture
@@ -43,6 +65,18 @@ def _transcript(tmp_path: Path, rows: list[dict]) -> Path:
     p = tmp_path / "transcript.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     return p
+
+
+@pytest.fixture
+def operator_turn(tmp_path: Path, monkeypatch, native_backlog_door):
+    transcript = _transcript(tmp_path, [{
+        "type": "user", "uuid": "turn-1", "timestamp": "2026-09-24T00:00:00Z",
+        "message": {"role": "user", "content": "status on your nodes?"},
+    }])
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(transcript))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
 
 
 def _pin(monkeypatch, tmp_path: Path, rows: list[dict], session: str = "s-test") -> None:
@@ -114,7 +148,7 @@ def _entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
-def test_idea_operator_request_reads_back(tmp_graph):
+def test_idea_operator_request_reads_back(tmp_graph, operator_turn):
     """AC: idea --source-kind operator_request lands a node the field reads operator_request."""
     result = runner.invoke(
         app,
@@ -124,11 +158,12 @@ def test_idea_operator_request_reads_back(tmp_graph):
     assert result.exit_code == 0, result.output
     (node,) = _entries(tmp_graph)
     assert node["source_kind"] == "operator_request"
+    assert node["request_origin"] == "operator_request"
     nid = node["id"]
 
-    read = runner.invoke(app, ["backlog", "get", nid, "--field", "source_kind"])
-    assert read.exit_code == 0, read.output
-    assert "operator_request" in read.stdout
+    read_code, read_out, read_err = _native_backlog("get", nid, "--field", "source_kind")
+    assert read_code == 0, read_err
+    assert "operator_request" in read_out
 
 
 def test_idea_rejects_unknown_source_kind(tmp_graph):
@@ -156,7 +191,7 @@ def test_new_operator_request_via_shared_builder(tmp_graph):
     assert node["source"] == "fno-new"
 
 
-def test_capture_promote_carries_source_kind(tmp_graph, tmp_path, monkeypatch):
+def test_capture_promote_carries_source_kind(tmp_graph, tmp_path, monkeypatch, operator_turn):
     """AC: capture promote --source-kind keeps the item's origin on the minted node."""
     inbox = tmp_path / "inbox.md"
     inbox.write_text("- [ ] fu-aa11bb - widen the review gate (p2)\n", encoding="utf-8")
@@ -171,6 +206,67 @@ def test_capture_promote_carries_source_kind(tmp_graph, tmp_path, monkeypatch):
     assert node["source_kind"] == "operator_request"
 
 
+def test_operator_request_refuses_unreadable_queue(
+    tmp_graph, tmp_path, monkeypatch, native_backlog_door
+):
+    absent = tmp_path / "missing-transcript.jsonl"
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(absent))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
+    refused = runner.invoke(
+        app,
+        ["backlog", "idea", "rejected ask", "--source-kind", "operator_request", "--difficulty", "low"],
+    )
+    assert refused.exit_code == 1
+    assert str(absent) in refused.output
+    assert _entries(tmp_graph) == []
+    organic = runner.invoke(
+        app, ["backlog", "idea", "organic idea", "--source-kind", "organic", "--difficulty", "low"]
+    )
+    assert organic.exit_code == 0, organic.output
+    assert _entries(tmp_graph)[0]["request_origin"] == "unknown"
+
+
+def test_operator_request_refuses_empty_queue(
+    tmp_graph, tmp_path, monkeypatch, native_backlog_door
+):
+    empty = tmp_path / "empty-transcript.jsonl"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(empty))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
+    refused = runner.invoke(
+        app,
+        [
+            "backlog", "idea", "rejected ask", "--source-kind", "operator_request",
+            "--difficulty", "low",
+        ],
+    )
+    assert refused.exit_code == 1
+    assert "queue is empty" in refused.output
+    assert "as organic" in refused.output
+    assert _entries(tmp_graph) == []
+
+
+def test_operator_request_refuses_when_native_binary_is_unavailable(
+    tmp_graph, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "fixture-session")
+    monkeypatch.setenv("FNO_OPERATOR_HARNESS", "claude")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tmp_path / "planted-transcript.jsonl"))
+    monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(tmp_path / "operator-capture"))
+    refused = runner.invoke(
+        app,
+        ["backlog", "idea", "unverified ask", "--source-kind", "operator_request", "--difficulty", "low"],
+    )
+    assert refused.exit_code == 1
+    assert "could not be verified" in refused.output
+    assert _entries(tmp_graph) == []
+
+
 def test_find_filters_by_source_kind(tmp_graph):
     """AC: find --source-kind operator_request returns only nodes carrying that value."""
     import fno.graph.store as gs
@@ -183,12 +279,11 @@ def test_find_filters_by_source_kind(tmp_graph):
 
     gs.commit_rows_via_store(tmp_graph, seed)
 
-    result = runner.invoke(
-        app,
-        ["backlog", "find", "ask", "--source-kind", "operator_request", "--json"],
+    find_code, find_out, find_err = _native_backlog(
+        "find", "ask", "--source-kind", "operator_request", "--json",
     )
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
+    assert find_code == 0, find_err
+    rows = json.loads(find_out)
     assert [r["id"] for r in rows] == ["ab-opr000001"]
 
 

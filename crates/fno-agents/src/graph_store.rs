@@ -24,7 +24,6 @@
 //!   is no unbounded acquire to call.
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -132,6 +131,9 @@ const PRIORITY_MIGRATION: &[(&str, &str)] = &[("high", "p1"), ("medium", "p2"), 
 
 /// Legacy `status` vocabulary -> current (statuses.STATUS_MIGRATION).
 const STATUS_MIGRATION: &[(&str, &str)] = &[("claimed", "in_progress")];
+
+/// Legacy session `phase` vocabulary -> current (2026-09-25 rename).
+const PHASE_MIGRATION: &[(&str, &str)] = &[("do", "execute")];
 
 /// Derived `status` vocabulary that outranks the blocked read-time overlay.
 const OVERLAY_TERMINAL_STATUSES: &[&str] = &["done", "superseded", "deferred", "in_review"];
@@ -489,15 +491,23 @@ fn defuse_nonfinite(text: &str) -> String {
     out
 }
 
-/// Raw read of the entries file. Raises nothing; callers map [`RawRead`] onto
-/// their own strictness (read_graph swallows Corrupt to empty; the strict
-/// read surfaces it).
-pub fn read_raw(path: &Path) -> Result<RawRead, StoreError> {
+/// Parse an archived graph file without applying store defaults.
+pub(crate) fn read_archive_raw(path: &Path) -> Result<RawRead, StoreError> {
     if !path.exists() {
         return Ok(RawRead::Empty);
     }
-    let raw = std::fs::read(path)
-        .map_err(|e| StoreError::Unreadable(path.display().to_string(), format!("{e}")))?;
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RawRead::Empty);
+        }
+        Err(error) => {
+            return Err(StoreError::Unreadable(
+                path.display().to_string(),
+                format!("{error}"),
+            ));
+        }
+    };
     let text = String::from_utf8(raw).map_err(|e| {
         StoreError::Unreadable(path.display().to_string(), format!("not UTF-8: {e}"))
     })?;
@@ -1168,6 +1178,18 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
                 obj.insert("status".to_string(), Value::String(to.to_string()));
             }
         }
+        if let Some(rows) = obj.get_mut("sessions").and_then(Value::as_array_mut) {
+            for row in rows.iter_mut() {
+                let Some(row_obj) = row.as_object_mut() else {
+                    continue;
+                };
+                if let Some(old) = row_obj.get("phase").and_then(Value::as_str) {
+                    if let Some((_, to)) = PHASE_MIGRATION.iter().find(|(from, _)| *from == old) {
+                        row_obj.insert("phase".to_string(), Value::String(to.to_string()));
+                    }
+                }
+            }
+        }
     }
     for e in entries.iter_mut() {
         if !is_dict(e) {
@@ -1379,9 +1401,9 @@ pub fn is_open_phase_row(row: &Value, phase: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether a session row is a valid, unfinished `do` window.
+/// Whether a session row is a valid, unfinished `execute` window.
 pub fn is_open_do_row(row: &Value) -> bool {
-    is_open_phase_row(row, "do")
+    is_open_phase_row(row, "execute")
 }
 
 /// The WORK-done verdict for one session, read through the reverse join over
@@ -1549,27 +1571,7 @@ pub fn recompute_statuses_with_plan_rungs(
         }
     }
 
-    // One-shot defer-vocabulary backfill: `completed_at: "deferred:<ts>"`.
-    for e in entries.iter_mut() {
-        if !is_dict(e) {
-            continue;
-        }
-        let obj = e.as_object_mut().unwrap();
-        let legacy = obj
-            .get("completed_at")
-            .and_then(Value::as_str)
-            .filter(|c| c.starts_with(LEGACY_DEFER_PREFIX))
-            .map(str::to_string);
-        if let Some(completed) = legacy {
-            obj.insert(
-                "deferred_at".to_string(),
-                Value::String(completed[LEGACY_DEFER_PREFIX.len()..].to_string()),
-            );
-            obj.insert("completed_at".to_string(), Value::Null);
-            obj.entry("deferred_reason".to_string())
-                .or_insert(Value::String(String::new()));
-        }
-    }
+    normalize_legacy_deferred(entries);
 
     for e in entries.iter_mut() {
         if entry_id(e).is_none() {
@@ -1810,6 +1812,31 @@ pub fn recompute_statuses_with_plan_rungs(
     }
 }
 
+/// Move the pre-migration defer sentinel out of the terminal completion field
+/// before rows are materialized into the schema-constrained store.
+pub(crate) fn normalize_legacy_deferred(entries: &mut [Value]) {
+    for e in entries {
+        if !is_dict(e) {
+            continue;
+        }
+        let obj = e.as_object_mut().unwrap();
+        let legacy = obj
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .filter(|c| c.starts_with(LEGACY_DEFER_PREFIX))
+            .map(str::to_string);
+        if let Some(completed) = legacy {
+            obj.insert(
+                "deferred_at".to_string(),
+                Value::String(completed[LEGACY_DEFER_PREFIX.len()..].to_string()),
+            );
+            obj.insert("completed_at".to_string(), Value::Null);
+            obj.entry("deferred_reason".to_string())
+                .or_insert(Value::String(String::new()));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical ordering + slugs
 // ---------------------------------------------------------------------------
@@ -2028,50 +2055,6 @@ impl Drop for BoundedLock {
 // Atomic publish: backup, write
 // ---------------------------------------------------------------------------
 
-/// Backups live in a `backups/` sibling of the graph file, never beside it:
-/// a rotation family at the state-root top level is exactly what
-/// docs/state-root-inventory.md forbids.
-fn backup_dir(path: &Path) -> Option<PathBuf> {
-    let dir = path.parent()?.join("backups");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
-}
-
-/// Copy the current file to a timestamped backup, prune to
-/// GRAPH_BACKUP_KEEP, and return the backup path (store._create_backup).
-/// None when the file does not yet exist or the copy failed (warned, never
-/// fatal: the mutation proceeds).
-pub fn create_backup(path: &Path) -> Option<PathBuf> {
-    if !path.exists() {
-        return None;
-    }
-    let name = path.file_name()?.to_string_lossy().to_string();
-    let dir = backup_dir(path)?;
-    let backup = dir.join(format!("{}.bak.{}", name, backup_stamp()));
-    if std::fs::copy(path, &backup).is_err() {
-        return None;
-    }
-    let prefix = format!("{}.bak.", name);
-    if let Some(parent) = path.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for legacy in entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
-            {
-                let source = legacy.path();
-                let target = dir.join(legacy.file_name());
-                if std::fs::rename(&source, &target).is_err()
-                    && std::fs::copy(&source, &target).is_ok()
-                {
-                    let _ = std::fs::remove_file(source);
-                }
-            }
-        }
-    }
-    let _ = rotate_backups(&dir, &prefix);
-    Some(backup)
-}
-
 /// Shared backup-rotation prune: keep the newest GRAPH_BACKUP_KEEP files
 /// matching `prefix` in `dir`, and on a collapse (newest at most a tenth of
 /// its predecessor, the state canary's threshold) rename that predecessor to
@@ -2159,29 +2142,24 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
 
 /// What the store-side mutate cycle reports to its caller, so the client can
 /// run its post-lock duties (claim releases, renders, nudge) on the same
-/// facts the file-leg implementation produced.
+/// facts the store produced.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MutateOutcome {
-    /// The final, canonicalized entries (the published bytes' content).
+    /// The final, canonicalized entries.
     pub entries: Vec<Value>,
-    /// Entries dropped because they were not JSON objects, with the backup
-    /// that preserves them named.
+    /// Entries dropped because they were not JSON objects.
     pub dropped: usize,
     pub backup: Option<String>,
-    /// Best-effort shadow failures are visible without failing the JSON publish.
+    /// Kept empty for clients that still decode the legacy response field.
     pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
     pub closure_releases: Vec<(String, String)>,
-    /// True when this graph file is the configured canonical graph
+    /// True when this path is the configured canonical graph anchor
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
-    /// The content digest of the published bytes, computed from the same
-    /// `body` the atomic replace wrote and verified by the under-lock
-    /// read-back: when the cycle answers Ok the file holds
-    /// these bytes. A caller that pairs this digest with a file stat can
-    /// PROVE the file still holds this publish before caching against it.
+    /// The store content digest stamped with the published rows.
     pub version: String,
 }
 
@@ -2197,9 +2175,9 @@ pub struct MutateInput {
     /// closure-release and board-render gates key on it.
     pub canonical_path: Option<PathBuf>,
     /// The snapshot version ([`base_version`] at the caller's read time).
-    /// Required, never optional: a whole-file publish is only safe when the
-    /// bytes it replaces are the bytes the caller read. The cycle refuses to
-    /// publish over a changed file, so a caller whose read ran outside the
+    /// Required, never optional: a whole-store publish is only safe when the
+    /// version is the one the caller read. The cycle refuses to publish over
+    /// a changed store, so a caller whose read ran outside the
     /// lock retries on [`StoreError::Conflict`] instead of silently
     /// clobbering an interleaved writer (`None` let four writers
     /// publish stale snapshots that dropped every row landed in between).
@@ -2212,31 +2190,12 @@ pub struct MutateInput {
     pub plan_rungs: Option<BTreeMap<String, String>>,
 }
 
-/// The content digest a begin/commit pair compares (the wire "version").
-pub fn file_content_version(path: &Path) -> String {
-    use std::io::Read;
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return "absent".to_string(),
-    };
-    let mut buf = Vec::new();
-    let _ = file.read_to_end(&mut buf);
-    let mut h = Sha256::new();
-    h.update(&buf);
-    format!("sha256:{:x}", h.finalize())
-}
-
-/// The stamp [`MutateInput::base_version`] carries: the same value
-/// `locked_mutate` re-derives under the lock, resolved by the same backend
-/// switch. A caller snapshots it before its read and holds it to the
-/// publish, so an interleaved writer surfaces as
+/// The stamp [`MutateInput::base_version`] carries: the store version
+/// `locked_mutate` re-derives under the lock. A caller snapshots it before
+/// its read and holds it to publish, so an interleaved writer surfaces as
 /// [`StoreError::Conflict`] instead of a lost write.
 pub fn base_version(path: &Path) -> Result<String, StoreError> {
-    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)
-    } else {
-        Ok(file_content_version(path))
-    }
+    crate::backlog::version(path).map_err(StoreError::Sqlite)
 }
 
 /// The store-side half of the locked read-modify-write cycle. Holds the
@@ -2322,31 +2281,11 @@ pub fn locked_mutate_with_hook(
         std::fs::create_dir_all(parent)?;
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
-    // The store names its own backend in graph_meta; this cycle reads it
-    // under the lock, so every caller (keeper, daemon settle, direct) agrees
-    // by construction and a mid-flight flip lands on the next mutation.
-    let sqlite_backend = crate::backlog::backend(path) == crate::backlog::Backend::Sqlite;
-    let current = if sqlite_backend {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)?
-    } else {
-        file_content_version(path)
-    };
+    let current = crate::backlog::version(path).map_err(StoreError::Sqlite)?;
     if current != input.base_version {
         return Err(StoreError::Conflict);
     }
-    let raw_read = if sqlite_backend {
-        RawRead::Entries(crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?)
-    } else {
-        read_raw(path)?
-    };
-    let raw = match raw_read {
-        RawRead::Entries(v) => v,
-        RawRead::Empty => vec![],
-        RawRead::MalformedRoot => {
-            return Err(StoreError::MalformedRoot(path.display().to_string()))
-        }
-        RawRead::Corrupt(reason) => return Err(StoreError::Corrupt(reason)),
-    };
+    let raw = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
 
     // Pre-image defaults for the curation snapshot, re-derived through the
     // same pipeline (store.py's _status_normalized + _pre_curation).
@@ -2354,13 +2293,12 @@ pub fn locked_mutate_with_hook(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
-    // The shadow baseline is the rows AS READ: the db holds the last
-    // publish, so `raw` IS that publish. A change normalization alone makes
+    // The baseline is the rows as read: the db holds the last publish, so
+    // `raw` is that publish. A change normalization alone makes
     // (defaults, settles, ownership stamps, children) must compare unequal
     // against this baseline to reach the store. Deriving the baseline from
     // the normalized pre-image instead hid exactly those changes, and the
     // db row stayed stale for good.
-    let shadow_before = raw.clone();
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2428,16 +2366,29 @@ pub fn locked_mutate_with_hook(
     ensure_slugs(&mut entries);
     recompute_statuses_with_plan_rungs(&mut entries, input.plan_rungs.as_ref());
 
-    // touched_at stamp: a curation-field change vs the pre-image.
+    // touched_at stamp: a curation-field change vs the pre-image. The
+    // pre-image is defaulted, so the compare reads the defaulted view too:
+    // a caller that ships raw untouched rows (commit_rows merges the raw
+    // export) would otherwise re-stamp every row missing a defaulted field.
+    // Status stays the row's own: the pre-image carries the recomputed
+    // status, not the readiness overlay the defaults pass applies.
     let now_iso = now_isoformat();
-    for e in entries.iter_mut() {
+    let mut defaulted = entries.clone();
+    apply_defaults(&mut defaulted, true);
+    for (e, view) in entries.iter_mut().zip(defaulted.iter_mut()) {
         let (Some(id), true) = (entry_id(e).map(str::to_string), is_dict(e)) else {
             continue;
         };
         let Some(before) = pre_curation.get(&id) else {
             continue; // absent from the pre-image: new node, created_at carries it
         };
-        if curation_key(e) != *before {
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert(
+                "status".to_string(),
+                e.get("status").cloned().unwrap_or(Value::Null),
+            );
+        }
+        if curation_key(view) != *before {
             e.as_object_mut()
                 .unwrap()
                 .insert("touched_at".to_string(), Value::String(now_iso.clone()));
@@ -2500,46 +2451,28 @@ pub fn locked_mutate_with_hook(
         crate::backlog::idea_cap::configured_cap(path).0,
     )
     .map_err(StoreError::Invalid)?;
+    // The close-evidence rule holds at this seam too: a write that sets
+    // completed_at on an existing open row must leave the row a record of
+    // why, or the whole publish refuses and nothing lands.
+    crate::backlog::done_evidence::enforce(&raw, &entries).map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
 
-    let (backup, shadow_warning, version) = if sqlite_backend {
-        let (version, _retries) = crate::backlog::retry_on_busy(|| {
-            crate::backlog::authoritative_sync(path, &shadow_before, &entries)
-        })
-        .map_err(StoreError::Sqlite)?;
-        // graph.json is frozen under sqlite: the readers moved onto the
-        // backend switch, so a publish rewrites only graph.db. The file
-        // comes back on demand via `fno doctor graph export --now`.
-        (None, None, version)
-    } else {
-        let backup = create_backup(path);
-        let body = serialize_graph_file(&entries);
-        write_atomic(path, &body)?;
-        let version = {
-            use sha2::Digest as _;
-            format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
-        };
-        let warning = crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
-            .err()
-            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
-        (backup, warning, version)
-    };
-
-    // The JSON backend still reads the published bytes back and compares
-    // digests. The sqlite backend already confirmed its stored ids in
-    // authoritative_sync. Every receipt rides this Ok, so a publish that
-    // silently failed to land refuses instead of claiming success.
-    if !sqlite_backend {
-        let readback = file_content_version(path);
-        if readback != version {
-            return Err(StoreError::Invalid(format!(
-                "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
-                path.display()
-            )));
-        }
-    }
+    // The store diff runs against the baseline in the same canonical shape
+    // the publish itself carries: canonicalize injects default keys
+    // (children, lock mirrors) into every row, so a raw-baseline diff would
+    // rewrite every row and bump every version on every publish, defeating
+    // row-level conflict detection for untouched rows.
+    let mut baseline = raw.clone();
+    canonicalize_entries(&mut baseline);
+    let (version, _retries) = crate::backlog::retry_on_busy(|| {
+        crate::backlog::authoritative_sync(path, &baseline, &entries)
+    })
+    .map_err(StoreError::Sqlite)?;
+    crate::backlog::snapshot_db(path, crate::backlog::now_ms()).map_err(StoreError::Sqlite)?;
+    let backup: Option<PathBuf> = None;
+    let shadow_warning = None;
 
     Ok(MutateOutcome {
         entries,
@@ -2559,49 +2492,38 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// One rows reader for every writer: the backend switch plus the default
-/// pass. `api::read_rows` and `node_state::read_rows_for` were this same
+/// One rows reader for every writer plus the default pass. `api::read_rows`
+/// and `node_state::read_rows_for` were this same
 /// shape twice; both delegate here now.
 pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
-    let mut rows = match crate::backlog::backend(path) {
-        crate::backlog::Backend::Sqlite => {
-            crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
-        }
-        crate::backlog::Backend::Json => read_json_leg(path, false, true)?,
-    };
+    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
     Ok(rows)
 }
 
-/// The narrowed read the merge-grant ops pay for: on the sqlite backend,
-/// only the nodes a grant op can use (a PR's carriers, or the queue's grant
-/// candidates plus every carrier of their PR numbers). Any other backend
-/// keeps the full [`read_rows`] switch.
+#[doc(hidden)]
+pub fn seed_rows(path: &Path, rows: &[Value]) -> Result<(), StoreError> {
+    let _lock = BoundedLock::acquire(path, Duration::from_secs(10))?;
+    crate::backlog::authoritative_sync(path, &[], rows)
+        .map(|_| ())
+        .map_err(StoreError::Sqlite)
+}
+
+/// The narrowed read the merge-grant ops pay for: only the nodes a grant op
+/// can use (a PR's carriers, or the queue's grant candidates plus every
+/// carrier of their PR numbers).
 pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreError> {
-    if crate::backlog::backend(path) != crate::backlog::Backend::Sqlite {
-        return read_rows(path);
-    }
     let mut rows = crate::backlog::read_pr_entries(path, pr).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
     Ok(rows)
 }
 
-/// The strict rows read: an absent json store is `Err`, never an empty
-/// answer. Territory's boundary contract reads through it ("an unreadable
-/// graph is unknown, never an empty list"); the soft [`read_rows`] would
-/// turn a missing file into zero rows and let resolve assert territory no
-/// store recognizes. Under sqlite the store's own errors surface unchanged.
+/// A strict rows read for consumers whose boundary contract needs unreadable
+/// stores to remain unknown, never an empty list.
 pub fn read_rows_strict(path: &Path) -> Result<Vec<Value>, StoreError> {
-    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
-        return crate::backlog::read_entries(path).map_err(StoreError::Sqlite);
-    }
-    if !path.exists() {
-        return Err(StoreError::Unreadable(
-            path.display().to_string(),
-            "no such file".to_string(),
-        ));
-    }
-    read_json_leg(path, false, false)
+    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
+    apply_defaults(&mut rows, true);
+    Ok(rows)
 }
 
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
@@ -2665,81 +2587,13 @@ pub fn mutate_rows(
 // Read path with defaults (read_graph / read_graph_strict, store-side)
 // ---------------------------------------------------------------------------
 
-/// Serialize the defaulted entries a read returns, byte-identical to the
-/// Python leg's `json.dumps` of its own result (the differential parity
-/// contract). Applies defaults; junk rows are kept only when `keep_malformed`
-/// (load_graph's discovery caller needs them; ordinary reads filter).
-///
-/// The strict read: an unreadable store is `Err`, never an empty answer, so
-/// a caller that misses on `Ok(vec![])` can only be reporting a genuinely
-/// absent node, never a read it could not make.
-///
-/// The soft read that degrades `MalformedRoot` to empty and copies the
-/// corrupt bytes to a `.json.bak` sibling first is the explicit
-/// `read_defaulted_opts(path, keep_malformed, true)` spelling.
-///
-/// Both refuse under `graph_meta.backend=sqlite`: there the file is the
-/// frozen mirror, and answering from it turns a stale read into a wrong
-/// one. The guard names the switch (`read_rows`) to call instead.
-pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
-    read_defaulted_opts(path, keep_malformed, false)
-}
-
-/// `backup_on_corrupt = true` is the soft read, the deliberate exception:
-/// a root with no entries key reads EMPTY, and corrupt bytes are copied to a
-/// `.json.bak` before the error surfaces. `false` is strict and read-only:
-/// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
-pub fn read_defaulted_opts(
-    path: &Path,
-    keep_malformed: bool,
-    backup_on_corrupt: bool,
-) -> Result<Vec<Value>, StoreError> {
-    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
-        return Err(StoreError::Invalid(format!(
-            "{} is the frozen json mirror (graph_meta.backend=sqlite); read through graph_store::read_rows",
-            path.display()
-        )));
-    }
-    read_json_leg(path, keep_malformed, backup_on_corrupt)
-}
-
-/// The json leg itself: the file parse under the soft/strict spellings, no
-/// backend awareness. In-crate callers reach it through the switch
-/// (`read_rows`' Json arm) or the guarded public pair; a direct call from
-/// production code elsewhere is a census finding.
-pub(crate) fn read_json_leg(
-    path: &Path,
-    keep_malformed: bool,
-    backup_on_corrupt: bool,
-) -> Result<Vec<Value>, StoreError> {
-    match read_raw(path) {
+/// Read graph-archive.json and apply the default view. The live store is read
+/// through [`read_rows`].
+pub fn read_archive(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
+    match read_archive_raw(path) {
         Ok(RawRead::Empty) => Ok(vec![]),
-        Ok(RawRead::MalformedRoot) => {
-            if backup_on_corrupt {
-                // Soft read: a root with no entries key reads EMPTY, never an
-                // error, exactly as the Python soft reader answered.
-                Ok(vec![])
-            } else {
-                Err(StoreError::MalformedRoot(path.display().to_string()))
-            }
-        }
-        Ok(RawRead::Corrupt(reason)) => {
-            if backup_on_corrupt {
-                // path.with_suffix(".json.bak") in Python; the file-name form
-                // keeps "graph.json" -> "graph.json.bak" for the same effect,
-                // inside backups/ rather than at the state root.
-                if let Some(dir) = backup_dir(path) {
-                    let backup = dir.join(format!(
-                        "{}.bak",
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default()
-                    ));
-                    let _ = std::fs::copy(path, &backup);
-                }
-            }
-            Err(StoreError::Corrupt(reason))
-        }
+        Ok(RawRead::MalformedRoot) => Err(StoreError::MalformedRoot(path.display().to_string())),
+        Ok(RawRead::Corrupt(reason)) => Err(StoreError::Corrupt(reason)),
         Ok(RawRead::Entries(mut v)) => {
             apply_defaults(&mut v, keep_malformed);
             Ok(v)
@@ -2755,7 +2609,7 @@ pub fn entries_with_archive(entries: &[Value], archive_path: &Path) -> Vec<Value
     if !archive_path.exists() {
         return entries.to_vec();
     }
-    let archived = match read_defaulted(archive_path, false) {
+    let archived = match read_archive(archive_path, false) {
         Ok(v) => v,
         Err(_) => return entries.to_vec(),
     };
@@ -2890,92 +2744,37 @@ mod tests {
     }
 
     #[test]
-    fn a_sqlite_publish_leaves_the_json_file_frozen() {
-        // The readers moved onto the backend switch, so a sqlite publish
-        // rewrites only graph.db. graph.json keeps its pre-publish bytes:
-        // it is frozen, and comes back on demand via the doctor export.
+    fn an_evidence_less_close_is_refused_at_the_publication_seam() {
+        // The whole-graph seam refuses the write outright and the store keeps
+        // its rows: a refusal leaves no trace.
         let root = tempfile::tempdir().unwrap();
         let graph = root.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            json!({"entries": [json!({
-                "id": "x-old", "title": "pre-flip", "slug": "pre-flip",
-                "type": "feature", "status": "ready", "priority": "p2",
-            })]})
-            .to_string(),
-        )
-        .unwrap();
-        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
-        let frozen_bytes = std::fs::read(&graph).unwrap();
-
-        let mut entries = crate::backlog::read_entries(&graph).unwrap();
-        assert_eq!(entries.len(), 1, "positive control: the fixture imported");
-        entries.push(json!({
-            "id": "x-new", "title": "post-flip", "slug": "post-flip",
-            "type": "feature", "status": "idea", "priority": "p2",
-        }));
+        let original = json!({
+            "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+            "type": "feature", "status": "ready", "priority": "p2",
+        });
+        seed_rows(&graph, &[original]).unwrap();
+        let before = read_rows(&graph).unwrap();
+        let entries = vec![json!({
+            "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+            "type": "feature", "status": "done", "priority": "p2",
+            "completed_at": "2026-09-23T00:00:00+00:00",
+        })];
         let input = MutateInput {
             entries,
             canonical_path: None,
             base_version: crate::backlog::version(&graph).unwrap(),
             plan_rungs: None,
         };
-        locked_mutate(&graph, input, std::time::Duration::from_secs(5)).unwrap();
-
-        // The store carries x-new; the file is byte-identical to pre-publish.
-        let rows = read_rows(&graph).unwrap();
+        let err = locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .err()
+            .expect("an evidence-less close must refuse");
         assert!(
-            rows.iter().any(|e| entry_id(e) == Some("x-new")),
-            "the store must carry the post-flip node"
+            matches!(&err, StoreError::Invalid(text) if text.contains("ab-evid0001")),
+            "expected an Invalid naming the id, got {err:?}"
         );
-        assert_eq!(
-            std::fs::read(&graph).unwrap(),
-            frozen_bytes,
-            "graph.json must stay frozen across a sqlite publish"
-        );
+        assert_eq!(read_rows(&graph).unwrap(), before);
     }
-
-    #[test]
-    fn create_backup_prunes_legacy_siblings() {
-        let root = tempfile::tempdir().unwrap();
-        let graph = root.path().join("graph.json");
-        std::fs::write(&graph, b"current graph").unwrap();
-
-        let legacy_one = root.path().join("graph.json.bak.20240101T000000000000");
-        let legacy_two = root.path().join("graph.json.bak.20240102T000000000000");
-        std::fs::write(&legacy_one, b"legacy one").unwrap();
-        std::fs::write(&legacy_two, b"legacy two").unwrap();
-
-        let retained_dir = root.path().join("backups");
-        std::fs::create_dir(&retained_dir).unwrap();
-        let retained = retained_dir.join("graph.json.bak.retained");
-        std::fs::write(&retained, b"retained bytes").unwrap();
-        let unrelated = root.path().join("other.json.bak.20240101T000000000000");
-        std::fs::write(&unrelated, b"unrelated bytes").unwrap();
-
-        let legacy_count = || {
-            std::fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("graph.json.bak.")
-                })
-                .count()
-        };
-        assert_eq!(legacy_count(), 2, "positive control for legacy siblings");
-
-        let created = create_backup(&graph).expect("new retained backup");
-
-        assert_eq!(legacy_count(), 0);
-        assert_eq!(created.parent(), Some(retained_dir.as_path()));
-        assert_eq!(std::fs::read(&created).unwrap(), b"current graph");
-        assert_eq!(std::fs::read(&retained).unwrap(), b"retained bytes");
-        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated bytes");
-    }
-
     fn count_prefixed(dir: &Path, prefix: &str) -> usize {
         std::fs::read_dir(dir)
             .unwrap()
@@ -2992,30 +2791,26 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("backups");
         std::fs::create_dir(&dir).unwrap();
-        let good = dir.join("graph.json.bak.20260914T000000000000");
+        let good = dir.join("graph.db.20260914T000000000000");
         std::fs::write(&good, vec![b'x'; 10_000]).unwrap();
-        std::fs::write(
-            dir.join("graph.json.bak.20260914T000001000000"),
-            vec![b'y'; 64],
-        )
-        .unwrap();
+        std::fs::write(dir.join("graph.db.20260914T000001000000"), vec![b'y'; 64]).unwrap();
 
-        let pin = rotate_backups(&dir, "graph.json.bak.").expect("pin on collapse");
+        let pin = rotate_backups(&dir, "graph.db.").expect("pin on collapse");
 
-        let expected = dir.join("pre-shrink.graph.json.bak.20260914T000000000000");
+        let expected = dir.join("pre-shrink.graph.db.20260914T000000000000");
         assert_eq!(pin, expected);
         assert_eq!(std::fs::read(&expected).unwrap().len(), 10_000);
         assert!(!good.exists(), "good copy moved out of rotation");
 
         for i in 2..14 {
             std::fs::write(
-                dir.join(format!("graph.json.bak.20260914T0000{i:02}000000")),
+                dir.join(format!("graph.db.20260914T0000{i:02}000000")),
                 vec![b'z'; 64],
             )
             .unwrap();
-            rotate_backups(&dir, "graph.json.bak.");
+            rotate_backups(&dir, "graph.db.");
         }
-        assert_eq!(count_prefixed(&dir, "graph.json.bak."), 10);
+        assert_eq!(count_prefixed(&dir, "graph.db."), 10);
         assert_eq!(std::fs::read(&expected).unwrap().len(), 10_000);
 
         // AC1-EDGE: exactly one tenth is the collapse boundary (now <= was/10).
@@ -3023,16 +2818,16 @@ mod tests {
         let dir = root.path().join("backups");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
-            dir.join("graph.json.bak.20260914T100000000000"),
+            dir.join("graph.db.20260914T100000000000"),
             vec![b'x'; 10_000],
         )
         .unwrap();
         std::fs::write(
-            dir.join("graph.json.bak.20260914T100001000000"),
+            dir.join("graph.db.20260914T100001000000"),
             vec![b'y'; 1_000],
         )
         .unwrap();
-        assert!(rotate_backups(&dir, "graph.json.bak.").is_some());
+        assert!(rotate_backups(&dir, "graph.db.").is_some());
         assert_eq!(count_prefixed(&dir, "pre-shrink."), 1);
     }
 
@@ -3044,23 +2839,23 @@ mod tests {
         let dir = root.path().join("backups");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
-            dir.join("graph.json.bak.20260914T200000000000"),
+            dir.join("graph.db.20260914T200000000000"),
             vec![b'x'; 10_000],
         )
         .unwrap();
         std::fs::write(
-            dir.join("graph.json.bak.20260914T200001000000"),
+            dir.join("graph.db.20260914T200001000000"),
             vec![b'y'; 1_001],
         )
         .unwrap();
 
-        assert!(rotate_backups(&dir, "graph.json.bak.").is_none());
+        assert!(rotate_backups(&dir, "graph.db.").is_none());
         assert_eq!(count_prefixed(&dir, "pre-shrink."), 0);
-        assert_eq!(count_prefixed(&dir, "graph.json.bak."), 2);
+        assert_eq!(count_prefixed(&dir, "graph.db."), 2);
 
-        std::fs::write(dir.join("graph.json.bak.20260914T200000000000"), b"").unwrap();
-        std::fs::write(dir.join("graph.json.bak.20260914T200001000000"), b"").unwrap();
-        assert!(rotate_backups(&dir, "graph.json.bak.").is_none());
+        std::fs::write(dir.join("graph.db.20260914T200000000000"), b"").unwrap();
+        std::fs::write(dir.join("graph.db.20260914T200001000000"), b"").unwrap();
+        assert!(rotate_backups(&dir, "graph.db.").is_none());
         assert_eq!(count_prefixed(&dir, "pre-shrink."), 0);
     }
 
@@ -3087,7 +2882,7 @@ mod tests {
         let entries = vec![
             json!({
                 "id": "N1", "status": "done",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
             json!({
                 "id": "N2", "status": "done",
@@ -3116,7 +2911,7 @@ mod tests {
         let entries = vec![
             json!({
                 "id": "N2", "status": "done",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
             json!({
                 "id": "N3", "status": "in_review",
@@ -3135,7 +2930,7 @@ mod tests {
         assert_eq!(work_state(&index, "unknown-id"), WorkState::NoProvenance);
         let opencode = vec![json!({
             "id": "N4", "status": "done",
-            "sessions": [{"session_id": "ses_CaseKept", "phase": "do", "harness": "opencode"}],
+            "sessions": [{"session_id": "ses_CaseKept", "phase": "execute", "harness": "opencode"}],
         })];
         let index = work_index(&opencode);
         assert_eq!(
@@ -3159,7 +2954,7 @@ mod tests {
             }),
             json!({
                 "id": "N2", "status": "in_progress",
-                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+                "sessions": [{"session_id": "S", "phase": "execute", "harness": "claude"}],
             }),
         ];
         let work = work_index(&entries);
@@ -3315,7 +3110,7 @@ mod tests {
         let fresh = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-fresh",
                 "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
@@ -3326,7 +3121,7 @@ mod tests {
         let old = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-old",
                 "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
@@ -3337,7 +3132,7 @@ mod tests {
         let bad = json!({
             "id": "n",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-bad",
                 "started_at": "not-a-date",
@@ -3351,7 +3146,7 @@ mod tests {
         // An 11-day-old open do row carries the diagnostic and the node is
         // STILL in_progress: age records uncertainty, it never clears an owner.
         let old_row = json!({
-            "phase": "do",
+            "phase": "execute",
             "harness": "claude",
             "session_id": "s-old",
             "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
@@ -3371,7 +3166,7 @@ mod tests {
         // Positive control: a 17-minute row gets NO marker and no status
         // change - youth is not strandedness.
         let fresh_row = json!({
-            "phase": "do",
+            "phase": "execute",
             "harness": "claude",
             "session_id": "s-fresh",
             "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
@@ -3405,7 +3200,7 @@ mod tests {
             "id": "n-bad",
             "status": "in_progress",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-bad",
                 "started_at": "not-a-date",
@@ -3489,35 +3284,13 @@ mod tests {
     }
 
     #[test]
-    fn mutate_pipeline_publishes_bytes_the_python_shape_produces() {
-        let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        let entries = vec![json!({"id": "ab-1", "title": "t"})];
-        let out = locked_mutate(
-            &graph,
-            MutateInput {
-                entries,
-                canonical_path: None,
-                base_version: base_version(&graph).unwrap(),
-                plan_rungs: None,
-            },
-            Duration::from_secs(2),
-        )
-        .unwrap();
-        let body = std::fs::read_to_string(&graph).unwrap();
-        assert!(body.starts_with("{\n  \"entries\": [\n    {"));
-        assert!(body.ends_with("\n"));
-        assert!(out.dropped == 0);
-    }
-
-    #[test]
     fn mutate_rows_retries_when_a_row_lands_between_read_and_publish() {
         // First acceptance line: a concurrent writer lands
         // between the cycle's read and publish; the loop conflicts, re-reads,
         // and both rows persist.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        seed_rows(&graph, &[]).unwrap();
         let mut apply_runs = 0usize;
         let outcome = mutate_rows(&graph, Duration::from_secs(5), None, None, |rows| {
             apply_runs += 1;
@@ -3556,29 +3329,30 @@ mod tests {
 
     #[test]
     fn mutate_rows_no_change_publishes_nothing() {
-        // Second acceptance line: apply's Ok(false) is a
-        // domain refusal; the file digest must not move.
+        // apply's Ok(false) is a domain refusal; the store version must not move.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
-        let before = file_content_version(&graph);
+        seed_rows(&graph, &[]).unwrap();
+        let before = crate::backlog::version(&graph).unwrap();
         let landed = mutate_rows(&graph, Duration::from_secs(5), None, None, |_rows| {
             Ok(false)
         })
         .unwrap();
         assert!(landed.is_none(), "no publish on a domain refusal");
-        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
     }
 
     #[test]
     fn the_whole_graph_seam_refuses_a_child_past_the_epic_cap() {
-        // AC2-ERR, whole-graph side: a 16th-child write through
-        // locked_mutate is refused, the digest is unchanged, and the same
+        // A 16th-child write through locked_mutate is refused, the version
+        // is unchanged, and the same
         // child aimed at a fresh epic lands.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        // Built through serde, never string concatenation: a hand-joined
-        // array leaves a trailing comma and the fixture stops being JSON.
         let mut rows = vec![json!({"id": "e-1", "slug": "e-1", "title": "the full epic",
                                    "type": "epic", "status": "in_progress",
                                    "priority": "p1", "domain": "code"})];
@@ -3590,13 +3364,13 @@ mod tests {
                              "parent": "e-1"}),
             );
         }
-        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
+        seed_rows(&graph, &rows).unwrap();
         std::fs::write(
             dir.path().join("config.toml"),
             "[backlog]\nepic_max_open_children = 15\n",
         )
         .unwrap();
-        let before = file_content_version(&graph);
+        let before = crate::backlog::version(&graph).unwrap();
         let pre = read_rows(&graph).unwrap();
         let mut entries = pre.clone();
         entries.push(json!({"id": "c-16", "slug": "c-16", "title": "child 16",
@@ -3621,7 +3395,11 @@ mod tests {
             message.contains("backlog.epic_max_open_children"),
             "{message}"
         );
-        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
         // The same child under a fresh epic lands.
         let pre = read_rows(&graph).unwrap();
         let mut entries = pre.clone();
@@ -3662,13 +3440,13 @@ mod tests {
                        "created_at": format!("2026-01-{i:02}T00:00:00Z")})
             })
             .collect();
-        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
+        seed_rows(&graph, &rows).unwrap();
         std::fs::write(
             dir.path().join("config.toml"),
             "[backlog]\nmax_open_ideas = 25\n",
         )
         .unwrap();
-        let before = file_content_version(&graph);
+        let before = crate::backlog::version(&graph).unwrap();
         let mut entries = read_rows(&graph).unwrap();
         entries.push(json!({"id": "i-26", "slug": "i-26", "title": "idea 26",
                             "type": "feature", "status": "idea", "priority": "p2",
@@ -3689,7 +3467,11 @@ mod tests {
         };
         assert!(message.contains("idea cap:"), "{message}");
         assert!(message.contains("i-01, i-02, i-03"), "{message}");
-        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        assert_eq!(
+            crate::backlog::version(&graph).unwrap(),
+            before,
+            "version unchanged"
+        );
         assert!(!read_rows(&graph)
             .unwrap()
             .iter()
@@ -3697,12 +3479,10 @@ mod tests {
     }
 
     #[test]
-    fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
-        // First acceptance line: the returned version equals
-        // the file's content digest and no graph.json.tmp-* sibling remains.
+    fn a_landed_publish_version_matches_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        seed_rows(&graph, &[]).unwrap();
         let outcome = locked_mutate(
             &graph,
             MutateInput {
@@ -3716,8 +3496,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             outcome.version,
-            file_content_version(&graph),
-            "the Ok version names the bytes the file actually holds"
+            crate::backlog::version(&graph).unwrap(),
+            "the returned version names the published store rows"
         );
         let tmp_siblings: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -3740,10 +3520,8 @@ mod tests {
     }
 
     #[test]
-    fn python_nonfinite_floats_defuse_to_null_and_strings_survive() {
-        // json.dumps(float("inf")) writes the bare token; the old Python
-        // store read it and its rank math treated non-finite as unranked.
-        // The port reads it as null (unranked) instead of refusing the file.
+    fn archived_nonfinite_floats_defuse_to_null_and_strings_survive() {
+        // Archived Python JSON may contain bare non-finite float tokens.
         let raw = "{\"entries\": [{\"rank\": Infinity, \"neg\": -Infinity, \"nan\": NaN, \
                    \"keep\": \"Infinity and NaN stay\", \"esc\": \"escaped \\\"Infinity\\\"\"}]}";
         let defused = defuse_nonfinite(raw);
@@ -3754,11 +3532,14 @@ mod tests {
         assert!(e["nan"].is_null());
         assert_eq!(e["keep"], "Infinity and NaN stay");
         assert_eq!(e["esc"], "escaped \"Infinity\"");
-        // A full file with a poisoned rank reads Entries, never Corrupt.
+        // An archive with a poisoned rank reads entries, never corruption.
         let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, raw).unwrap();
-        assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
+        let archive = dir.path().join("graph-archive.json");
+        std::fs::write(&archive, raw).unwrap();
+        assert!(matches!(
+            read_archive_raw(&archive),
+            Ok(RawRead::Entries(_))
+        ));
     }
 
     fn readiness_fixture(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {

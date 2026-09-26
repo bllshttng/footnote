@@ -27,9 +27,9 @@ The `attach` lane has two destinations. The lane alone cannot pick between them.
 | Harness | `interactive_attach` | Who owns the live session |
 |---|---|---|
 | codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
-| claude | no `pre_exec`, `claude attach {short_id}` | the detached client process itself |
+| claude | no `pre_exec`, `claude attach {short_id}` | the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`), which hosts each session in its own `bg-pty-host` |
 
-A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the session lives in the spawned client. The daemon does not host that client. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
+A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the harness starts its own supervisor on demand, so fno ensures nothing. The spawning client exits once the session is backgrounded. The daemon does not host that session. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
 
 That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
 
@@ -38,6 +38,18 @@ That refusing arm is the reason the split is written down. A route that tested t
 One invariant governs the daemon's role, because the epic prose once said otherwise: the daemon does not HOST keepers, it DISCOVERS and REBINDS them. The keeper is a separate process whose parent is launchd, never the daemon; `handle_spawn` in `crates/fno-agents/src/daemon.rs` still states that the daemon hosts no agent PTYs, and the daemon-start sweep only walks existing keeper sockets and re-binds survivors to their registry rows.
 
 A `keeper` harness with no built lane still gets an honest refusal naming what is missing, never a verdict that the harness cannot thread.
+
+## What a thread survives
+
+Measured 2026-09-21, on the question of who owns a claude thread. The owner is the claude harness supervisor (`claude daemon run`, one per `CLAUDE_CONFIG_DIR`). It hosts each session in its own `bg-pty-host`. The fno daemon hosts none. The spawning `fno agents spawn` client parents nothing and exits once the session is backgrounded.
+
+| Event | The thread | Evidence |
+|---|---|---|
+| Its spawner exits | survives | an isolated probe: a `claude daemon run --origin transient` whose spawner was killed kept running at ppid 1 (2026-09-21) |
+| A supervisor restart | survives | all 10 logged restarts from 2026-09-15 to 2026-09-19 read `dead=0` and adopted every worker |
+| Host power loss | dies | the 2026-09-20 outage: every claude session on the host stopped within three minutes, the next supervisor start read `dead=19`; the 2026-09-21 outage read `dead=17` |
+
+After a host restart the harness relaunches only some sessions. fno covers the rest. The daemon retire arm keeps a worker whose node reads `in_progress` and whose roster row lost its process under `dead open work`. The nudge ladder's Resume rung resumes it with the commit-your-work order. The law: a node that lost its worker is always resumed, never left stranded.
 
 ## Where each harness sits
 
@@ -82,7 +94,7 @@ A spawn never refuses a flag because of the substrate. The carrier facts live in
 |---|---|---|---|---|---|
 | `--effort` | `turn/start.effort` | argv | argv where `carries` names it | no token | argv |
 | `--add-dir` | `state_dirs`, which becomes `turn/start.sandboxPolicy.writableRoots` | argv | argv where `carries` names it, else pane | pane | argv |
-| `--permission-mode` | `thread/start.sandbox` through `resolve_thread_posture` | argv | argv where `carries` names it, else pane | pane | claude only |
+| `--permission-mode` | `thread/start.sandbox` through `resolve_thread_posture` | argv | argv where `carries` names it, else pane | pane | claude, grok |
 | `--role` | pane (a route needs env the shared daemon cannot see) | carried | pane | pane | claude only |
 | `--agent`, `--tools`, `--deny-tools` | pane, which refuses (codex has no spelling) | argv | pane | pane | claude only |
 | `-- <tokens>` | `-c`/`--config key=value` to `thread/start.config`, `--add-dir dir` to `state_dirs`, any other token to pane | appended to the argv | appended to the keeper launch argv | pane | appended to the one-shot argv |
@@ -111,11 +123,19 @@ Ordering is the safety argument on every strategy. Every refusal is raised befor
 
 A hand-off can land while its row flip fails. Re-run the same command. It reclassifies from what is true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
 
-The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`. That starts a second writer over a child that never stopped.
+The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`, which probes the row's keeper before anything launches: a keeper already holding the session answers Identify and nothing relaunches.
 
 Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process. `fno mux thread reseat` is that operation. Here the server stops hosting anything. Open a view on the converted thread with `fno mux thread <name>`.
 
 Thread-to-pane is not built. `--substrate` takes only `thread`, and any other value refuses by name.
+
+## Reviving an exited thread
+
+A keeper thread whose keeper died (a reboot, a crash, a kill) reads `exited` and keeps its session id. `fno agents resume <name>` brings the same conversation back on a fresh keeper. The contract decides which harnesses revive, never a name list: only a `[harness.<name>.keeper]` row that carries `resume_session_id` revives. Today that is agy and cursor-agent. pi and grok keep a refusal that names their keeper row and the hand form until each passes its restart journey. Flipping one later is a one-line data change made with its journey, under the gate rule below.
+
+The revival (`crates/fno-agents/src/keeper_revival.rs`) asks the spawn gate first. The charge goes to the row's own parent, exactly as a fresh spawn is charged, and the revival waits at the slot cap like one. It probes the row's thread socket: a keeper already answering the same session id is already live, and nothing launches. A keeper that stays silent under the probe also refuses the launch, because silence never proves death. Then it starts `fno-agents-worker --keeper` on the row's own `interactive_resume` form with the recorded session id. The keeper's Identify must name BOTH that id and that keeper pid. The revival holds the proof window before it flips the SAME registry row live through a compare-and-set. If the row carries a recorded permission mode, the revival replays it. With no recorded mode, it uses the lane default. The receipt prints the posture. Every refusal lands before the first mutation, so a failed revival leaves the row as it was and names keeper.log for the autopsy. `--message <text>` rides the keeper mail lane once the row is live.
+
+The revival is the second launcher of a thread keeper. The first is the Python spawn lane (`_lane_b_thread_spawn`). They share the worker binary, the socket path and the Identify contract, so they cannot disagree on where a keeper lives. Revival skips folder trust because the row's cwd was trusted at spawn. When the keeper spawn lane ports to Rust, port it through this module's launch step and delete the Python leg.
 
 ## The gate rule
 

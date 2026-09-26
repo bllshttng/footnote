@@ -166,7 +166,7 @@ def test_spawn_once_codex_happy_path(workdir, fake_codex_create_once, monkeypatc
 
 
 def test_spawn_once_codex_normalizes_direct_plugin_command(
-    workdir, fake_codex_create_once
+    workdir, fake_codex_create_once, loop_admission_ready
 ) -> None:
     """The Python headless fallback is a direct-spawn choke point too."""
     from fno.agents.cli import agents_app

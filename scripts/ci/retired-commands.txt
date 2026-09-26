@@ -48,3 +48,13 @@ king-for-a-day|/fno:reign --once <scope>|the one-king-skill fold
 
 # Never shipped: step 2a-bis of the blueprint skill named it for the question door.
 fno inbox ask|fno inbox outstanding ask "<question>" --node <id>|never shipped: the question door is fno inbox outstanding ask
+
+# d-4b39ad4c: the annotate verb retired; note --blocking / notes findings / note
+# --resolve are the only spellings that touch the findings gate.
+backlog annotate add|fno backlog note <node> "<text>" --blocking|d-4b39ad4c one finding store
+backlog annotate list|fno backlog notes findings [<node>]|d-4b39ad4c one finding store
+backlog annotate resolve|fno backlog note --resolve <finding-id>|d-4b39ad4c one finding store
+fno backlog annotate add|fno backlog note <node> "<text>" --blocking|d-4b39ad4c one finding store
+fno backlog annotate list|fno backlog notes findings [<node>]|d-4b39ad4c one finding store
+fno backlog annotate resolve|fno backlog note --resolve <finding-id>|d-4b39ad4c one finding store
+fno mux block annotate|fno mux block annotate still shells note --blocking (internal)|d-4b39ad4c one finding store

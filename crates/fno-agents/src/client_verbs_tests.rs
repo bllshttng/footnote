@@ -5,7 +5,7 @@
 use super::*;
 
 #[test]
-fn session_id_field_and_resume_argv_match_python() {
+fn session_id_field_and_resume_argv_contract() {
     // Pin ambient dispatch dirs empty; they fold into the codex grant and
     // break the byte-identity argv pinned below.
     std::env::remove_var("FNO_WORKER_ADD_DIRS");
@@ -18,14 +18,18 @@ fn session_id_field_and_resume_argv_match_python() {
     assert_eq!(session_id_field("unknown"), None);
 
     // --cd lands the resume in the row's own tree instead of the session
-    // directory codex defaults to. It sits with the -c grant BEFORE the
-    // subcommand, where codex's globals go. The raw spliced argv then
-    // composes with the declared pre_exec (the shared-daemon ownership
-    // assertion), so the rendered shape is one `sh -c` whose script runs
-    // the daemon start and execs the filled resume. The grant folds
-    // FNO_WORKER_ADD_DIRS when the invoking environment carries one, so
-    // the expectation reads the same ambient var instead of pinning a
-    // roots list the machine is free to extend.
+    // directory codex defaults to. It sits BEFORE the subcommand, where
+    // codex's globals go. The raw spliced argv then composes with the
+    // declared pre_exec (the shared-daemon ownership assertion), so the
+    // rendered shape is one `sh -c` whose script runs the daemon start and
+    // execs the filled resume.
+    //
+    // The `-c sandbox_workspace_write.writable_roots` grant is GONE from
+    // this argv on purpose: codex 0.156.1 refuses that override paired with
+    // `--remote` ("Configure additional workspace roots on the server"),
+    // and the declared codex resume form carries `--remote unix://`, so the
+    // pair failed every interactive resume of a reaped row. The roots still
+    // reach the thread through the turn carrier (pinned below).
     let composed = |argv: &[&str]| -> Vec<String> {
         let script = format!(
             "'codex' 'app-server' 'daemon' 'start'; exec {}",
@@ -36,20 +40,10 @@ fn session_id_field_and_resume_argv_match_python() {
         );
         vec!["sh".into(), "-c".into(), script]
     };
-    let mut roots = vec!["/path/that/does/not/exist/.fno/plans".to_string()];
-    for extra in crate::claude_ask::state_dirs_from_env() {
-        if !extra.is_empty() && !roots.contains(&extra) {
-            roots.push(extra);
-        }
-    }
-    let encoded = serde_json::to_string(&roots).unwrap();
-    let grant = format!("sandbox_workspace_write.writable_roots={encoded}");
     assert_eq!(
         build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
         Some(composed(&[
             "codex",
-            "-c",
-            grant.as_str(),
             "--cd",
             "/path/that/does/not/exist",
             "resume",
@@ -58,6 +52,22 @@ fn session_id_field_and_resume_argv_match_python() {
             "unix://",
         ]))
     );
+    // The roots the dropped override would have carried still resolve, and
+    // the delivery lane widens a resolved workspaceWrite posture with them
+    // on every turn (`codex_inject::inject` -> `sandbox_policy_with_roots`)
+    // - that is how they reach the thread without the refused argv pair.
+    let roots = crate::provider::codex_writable_roots(Path::new("/path/that/does/not/exist"));
+    assert!(
+        roots
+            .iter()
+            .any(|r| r == "/path/that/does/not/exist/.fno/plans"),
+        "plan root resolves for the turn carrier: {roots:?}"
+    );
+    let policy = crate::codex_thread::sandbox_policy_with_roots(
+        &serde_json::json!({"type": "workspaceWrite", "writableRoots": []}),
+        &roots,
+    );
+    assert_eq!(policy["writableRoots"], serde_json::json!(roots));
     // No cwd means no --cd: a bare flag fails parsing, and inventing a
     // directory is the wrong-tree failure this exists to prevent.
     assert_eq!(

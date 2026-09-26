@@ -1,49 +1,14 @@
 """Tests for `fno agents king history` - the crown-scope reign readback.
 
-Scope resolution and the native-read relay are Python; the journal scan
-itself is the Rust king-history verb and is tested there. Covers explicit
-and caller-derived scope, the refusal taxonomy, and the relay wiring.
+The journal scan and the caller-crown scope resolution are the Rust
+king-history verb (tested there); Python is the relay. Covers the relay
+wiring and the refusal taxonomy.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from fno.king.history import HistoryUnreadable, canonicalize_scope, resolve_scope
-
 SCOPE = "x-a792/fleet"
-
-
-def _patch_caller(monkeypatch, row) -> None:
-    from fno.agents import crown
-
-    monkeypatch.setattr(crown, "calling_agent_row", lambda: row)
-
-
-def test_canonicalize_passes_through_a_plain_scope() -> None:
-    assert canonicalize_scope("x-a792") == "x-a792"
-
-
-def test_caller_crown_resolves_when_no_scope_given(monkeypatch) -> None:
-    _patch_caller(monkeypatch, SimpleNamespace(crown_scope=SCOPE))
-
-    assert resolve_scope("") == SCOPE
-
-
-def test_unresolvable_caller_crown_refuses(monkeypatch) -> None:
-    from fno.agents.crown import AGENT_UNREGISTERED, REGISTRY_UNREADABLE
-
-    for bad in (REGISTRY_UNREADABLE, AGENT_UNREGISTERED, SimpleNamespace(crown_scope="")):
-        _patch_caller(monkeypatch, bad)
-        with pytest.raises(HistoryUnreadable, match="--scope"):
-            resolve_scope("")
-
-
-def test_explicit_scope_beats_the_caller(monkeypatch) -> None:
-    _patch_caller(monkeypatch, SimpleNamespace(crown_scope="other/epic"))
-
-    assert resolve_scope(SCOPE) == SCOPE
 
 
 def _patch_binary(monkeypatch, path) -> None:

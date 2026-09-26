@@ -721,12 +721,15 @@ pub fn run_intel(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--fleet") {
         return crate::fleet_load::run_fleet_cli(args);
     }
+    if args.iter().any(|a| a == "--render") {
+        return crate::intel_html::run_render(args);
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!(
             "fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]\n\
              [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]\n\
              [--project NAME]... [--all-projects] [--sample N|all]\n\
-             [--categories <run> --fold <saved fold JSON>]\n\n\
+             [--categories <run> --fold <saved fold JSON>] [--render <report.md>]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
              row addressed to the session. Tokens, lines, tool errors, languages,\n\
@@ -736,7 +739,9 @@ pub fn run_intel(args: &[String]) -> i32 {
              skill's run file and prints it with per-category metrics; it reads no\n\
              transcript. Default window 30 days (--period 1m); the period words map to\n\
              --days 14, 30, 60, 90 and 0 (--days 0 means every transcript, and --days\n\
-             beside --period is refused). Default scope is this project including its\n\
+             beside --period is refused). --render <report.md> reads the report and the\n\
+             fold JSON its frontmatter names in fold:, and writes <report stem>.html\n\
+             beside it plus latest.html, scrubbed and self-contained. Default scope is this project including its\n\
              worktrees; --project NAME (repeatable, comma-separated) names other\n\
              projects, --all-projects reads the machine, -H/--harness narrows the\n\
              sources. Exit 3 when the window holds no sessions.\n"

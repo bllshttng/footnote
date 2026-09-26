@@ -46,7 +46,7 @@ fn rename_agent_grammar_and_resolver_refusals_send_notice_spawn_nothing() {
         1,
         Command::RenameAgent {
             name: "no-such-row".into(),
-            new_name: "fine-label".into(),
+            new_name: "o'brien".into(),
         },
     );
     assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));

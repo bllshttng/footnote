@@ -13,6 +13,7 @@ the stop hook's staleness check (check_session_satisfied) can match it.
 Covers AC1-HP and AC1-ERR.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -244,7 +245,7 @@ def test_cli_reconcile_emits_session_satisfied_for_owner(tmp_path, monkeypatch):
     expected_hash = _md5(state)
 
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": [{
+    seed_graph(graph_path, json.dumps({"entries": [{
         "id": "ab-hp", "title": "t", "pr_number": 100,
         "pr_url": "https://github.com/test-owner/test-repo/pull/100",
         "additional_prs": [], "completed_at": None, "superseded_by": None,
@@ -276,7 +277,7 @@ def test_cli_reconcile_no_emit_when_query_fails(tmp_path, monkeypatch):
     _write_state(owner_cwd, session_id="owner-sid")
 
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": [{
+    seed_graph(graph_path, json.dumps({"entries": [{
         "id": "ab-fail", "title": "t", "pr_number": 800,
         "pr_url": "https://github.com/test-owner/test-repo/pull/800",
         "additional_prs": [], "completed_at": None, "superseded_by": None,

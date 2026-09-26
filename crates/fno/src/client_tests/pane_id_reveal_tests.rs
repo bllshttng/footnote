@@ -15,19 +15,21 @@ fn pane_id_reveal_labels_each_id_inside_its_own_rectangle() {
     let cols = view.term.1 as usize;
     for (pid, rect) in &view.layout.panes {
         let label = format!("pane {pid}");
-        let start =
-            view.panel_w() as usize + rect.x as usize + rect.cols as usize - label.chars().count();
-        let row = TAB_BAR_ROWS as usize + rect.y as usize;
+        // A framed pane anchors the label inside its CONTENT rect, one cell
+        // in from the rect's ring on every side.
+        let start = view.panel_w() as usize + rect.x as usize + 1 + (rect.cols as usize - 2)
+            - label.chars().count();
+        let row = TAB_BAR_ROWS as usize + rect.y as usize + 1;
         let painted: String = label
             .chars()
             .enumerate()
             .map(|(offset, _)| frame.cells[row * cols + start + offset].c)
             .collect();
         assert_eq!(painted, label, "pane {pid} label is not in its rectangle");
-        assert!(start >= view.panel_w() as usize + rect.x as usize);
+        assert!(start >= view.panel_w() as usize + rect.x as usize + 1);
         assert!(
             start + label.chars().count()
-                <= view.panel_w() as usize + rect.x as usize + rect.cols as usize
+                <= view.panel_w() as usize + rect.x as usize + rect.cols as usize - 1
         );
     }
 }

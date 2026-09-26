@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -119,6 +120,7 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
     assert all(
         name.startswith("graph")
         or name == "spaces"
+        or name == "backups"
         or name.endswith(".lock")
         or name.endswith(".bak")
         for name in created
@@ -127,16 +129,14 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
 
 def test_ac1_refuses_when_parenting_under_a_nested_epic(tmp_path: Path) -> None:
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {"id": "x-epic0", "parent": None, "title": "e0", "type": "epic"},
                     {"id": "x-epic1", "parent": "x-epic0", "title": "e1", "type": "epic"},
                 ]
             }
-        )
-    )
+        ))
     proposal = _proposal()
     result = commit(proposal, graph_path=graph, parent_id="x-epic1", project="fno", now=NOW)
     assert isinstance(result, CoordinatorRefusal)

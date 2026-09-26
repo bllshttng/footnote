@@ -10,6 +10,7 @@ not find it. So every recall assertion names a POSITIVE marker - the returned
 ``decision_id`` - never the absence of an error.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -488,9 +489,7 @@ def _seed_projection(tmp_graph: Path, rows: list[dict]) -> None:
 @pytest.fixture
 def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n"
-    )
+    seed_graph(g, json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -513,7 +512,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-    import fno.paths as paths_mod
 
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
@@ -543,12 +541,19 @@ def _write_decision_index(index: Path, *rows: dict) -> None:
     )
 
 
+def _graph_entries(graph: Path) -> list[dict]:
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(graph)
+
+
 def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
     root: Path, tmp_graph: Path, index: Path
 ):
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
-    tmp_graph.write_text(json.dumps(entries) + "\n")
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -587,8 +592,10 @@ def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
 ):
     from fno.decide import list_decisions
 
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -606,7 +613,7 @@ def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
     )
 
     _, rows, _ = list_decisions(
-        "x-7d94", state="all", entries=entries["entries"]
+        "x-7d94", state="all", entries=entries
     )
     assert rows[0]["lifecycle"] == "expired"
 
@@ -840,9 +847,10 @@ def test_default_decision_read_retains_history_for_replay(
     from fno.events import decision_retracted
     from fno.decide import list_decisions
 
-    entries = json.loads(tmp_graph.read_text())
-    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
-    tmp_graph.write_text(json.dumps(entries) + "\n")
+    entries = _graph_entries(tmp_graph)
+    entries[0]["completed_at"] = "2026-08-25T00:00:00Z"
+    entries[0]["completion_note"] = "fixture closure evidence"
+    seed_graph(tmp_graph, entries)
     _write_decision_index(
         index,
         {
@@ -1055,7 +1063,7 @@ def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
 ):
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?", "--ask", "finish the lane"])
     question_id = asked.stdout.strip().splitlines()[-1]
     cleared = runner.invoke(
         outstanding_app,
@@ -1206,9 +1214,9 @@ def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, ind
     archived row stays in the same store, stamped, so the read needs no
     sidecar."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = _graph_entries(tmp_graph)
     entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1609,7 +1617,7 @@ def test_a_subjectless_decision_is_reachable_only_without_a_subject(
     decision with subject=None. A subject-less list is the only way to it."""
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -1924,9 +1932,9 @@ def test_reindex_folds_every_project_root_the_graph_names(
 
     sibling = tmp_path / "other-repo"
     (sibling / ".fno").mkdir(parents=True)
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = _graph_entries(tmp_graph)
     entries.append(_node("x-9999", cwd=str(sibling)))
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     from fno.decide import record_decision
 
@@ -2148,30 +2156,23 @@ def test_an_unreachable_index_is_a_failed_read_not_an_empty_one(
     assert "cannot read the decision index" in listed.output
 
 
-def test_the_second_producer_also_refuses_to_ask_for_a_retry(
-    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_second_producer_surfaces_decision_index_failure(
+    root: Path, tmp_graph: Path, index: Path
 ):
     """`fno outstanding clear --answer` is the other operator_decision writer.
-    A guard on one of two producer paths is decorative."""
-    import fno.events as events_mod
+    Its store failure must be reported with the safe retry path."""
     from fno.outstanding.cli import outstanding_app
+    from fno.events.store_client import store_db_path
 
     qid = runner.invoke(
-        outstanding_app, ["ask", "which lane owns the retry?"]
+        outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"]
     ).stdout.strip().splitlines()[-1]
 
-    real = events_mod.append_event
-
-    def boom(event, events_path=None, **kw):
-        if events_path is not None and Path(events_path) == index:
-            raise OSError("read-only file system")
-        return real(event, events_path=events_path, **kw)
-
-    monkeypatch.setattr(events_mod, "append_event", boom)
+    store_db_path(index).mkdir(parents=True)
     res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
     assert res.exit_code == 1
-    assert "fno backlog decide-reindex" in res.output
-    assert "records the same ruling a second time" in res.output
+    assert "decision index mirror failed" in res.output
+    assert "rerun the same clear to finish" in res.output
 
 
 def test_equal_timestamps_do_not_invert_newest_first(
@@ -2410,7 +2411,7 @@ def test_reindex_refuses_to_report_done_on_an_unreadable_graph(
 ):
     """A query can answer usefully without the graph. A backfill cannot: it
     would fold zero projection rows and still print "+0 decisions" on exit 0."""
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    tmp_graph.with_suffix(".db").write_bytes(b"not sqlite")
 
     res = runner.invoke(decide_app, ["reindex"])
     assert res.exit_code == 1, res.output
@@ -2852,7 +2853,7 @@ def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
 ):
     """The write path's pre-check used the soft reader, so a real node read as
     "names no graph node" with no hint that the graph was unreadable."""
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    tmp_graph.with_suffix(".db").write_bytes(b"not sqlite")
 
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold"])
     assert res.exit_code == 0, res.output

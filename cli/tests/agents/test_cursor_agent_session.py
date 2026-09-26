@@ -144,6 +144,7 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     from fno.agents.harness_map import (
         DispatchResolveError,
         capabilities,
+        check_loop_participation,
         resolve_dispatch,
         thread_lane,
     )
@@ -160,7 +161,7 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
     with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
-        resolve_dispatch(harness="cursor-agent", substrate="thread")
+        check_loop_participation("cursor-agent", "/target")
 
 
 def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():

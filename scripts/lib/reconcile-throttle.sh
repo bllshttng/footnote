@@ -134,15 +134,14 @@ reconcile_maybe_fire() {
                 if [[ -x "$cand" ]]; then obin="$cand"; fi
             fi
         fi
-        # A project that relocates the graph store (paths.graph_json) makes
-        # the default-store write the WRONG store; the Python-owned resolver
-        # decides, the binder never parses config. Skip when a config file
-        # sets the key (the verb prints `source: default` only when unset).
-        oconf="$("$2" config get paths.graph_json 2>/dev/null || true)"
+        # The binder does not resolve state_dir, so run it only for the default
+        # state root. The graph_json path override has been retired.
+        state_root="$("$2" config get state_dir 2>/dev/null || true)"
+        state_root="${state_root%/}"
         odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
-        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]] \
-            && [[ "$oconf" == *"source: default"* ]]; then
-        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]]; then
+        default_state_root="${HOME:-}/.fno"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" \
+            && ( "$state_root" == "~/.fno" || "$state_root" == "$default_state_root" ) ]]; then
             "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
                 > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null || true
             [[ -s "$1/.fno/.orphan-plans-result.json.tmp" ]] \

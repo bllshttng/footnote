@@ -162,8 +162,8 @@ if [[ -z "$TOOL" ]]; then
     _block "graph-write-protect: payload references a protected state file but could not be parsed; blocking fail-closed."
 fi
 
-_GRAPH_REASON="graph.json must be mutated via \`fno backlog\` commands; direct write blocked. See \`fno backlog --help\` (add, idea, intake, update, done, defer, reconcile)."
-_DB_REASON="graph.db is the authoritative store once the backend flips; direct writes to it or its WAL files are blocked. Mutate via \`fno backlog\` commands."
+_GRAPH_REASON="graph.json is retired; do not recreate it. Mutate the graph.db store via \`fno backlog\` commands."
+_DB_REASON="graph.db is the authoritative store; direct writes to it or its WAL files are blocked. Mutate via \`fno backlog\` commands."
 _MANIFEST_REASON="target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via \`fno do state set --field plan_path\`. Use \`fno do state\` / \`fno do target\` verbs, not a hand edit."
 
 # ── 3. Tool-specific decision (keyed on the write TARGET) ──────────────────────

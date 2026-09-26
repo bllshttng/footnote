@@ -92,7 +92,9 @@ def cmd_session_add(
         None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
     phase: str = typer.Option(
-        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
+        ...,
+        "--phase",
+        help="Lifecycle phase: think|blueprint|execute|review|ship (do accepted for one release).",
     ),
     pr: Optional[int] = typer.Option(
         None,
@@ -156,6 +158,9 @@ def cmd_session_add(
         find_nodes_for_pr,
         stamp_session_for_pr,
     )
+    from fno.graph.types import normalize_phase
+
+    phase = normalize_phase(phase)
 
     def _open_row_to_end(node_id: str):
         """The open (phase, session) row an --ended-at append would close,
@@ -583,7 +588,11 @@ def cmd_session_close(
         claim.get("state") != "free" and claim.get("holder") == blueprint_holder
     )
     acquired_at = claim.get("acquired_at")
-    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+    # A planner that joined its spawn's handover claim started at that claim.
+    own_claim = blueprint_held or (
+        claim.get("state") != "free" and claim.get("holder") == _own_handover_holder(eff_session)
+    )
+    if own_claim and started_at is None and isinstance(acquired_at, int):
         started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -666,6 +675,27 @@ def cmd_session_close(
         typer.echo(f"launch: {launch}")
 
 
+@session_app.command(
+    "backfill",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def cmd_session_backfill(ctx: typer.Context) -> None:
+    """Fill missing session starts and ends from transcripts and merge commits. Never overwrites a stamp.
+
+    A dry run by default. --apply writes the fills; --json (-J) prints the per-phase counts as JSON.
+    """
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("session backfill: the fno-agents binary was not found.", err=True)
+        raise typer.Exit(code=2)
+    argv = [str(binary), "session-backfill", "--graph", str(_graph_path()), *ctx.args]
+    raise typer.Exit(code=subprocess.run(argv, check=False).returncode)
+
+
 @session_app.command("reap-open")
 def cmd_session_reap_open(
     node: "str | None" = typer.Argument(
@@ -678,10 +708,10 @@ def cmd_session_reap_open(
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
     phase: str = typer.Option(
-        "do",
+        "execute",
         "--phase",
         help=(
-            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
+            "Lifecycle phase of the open row. 'execute' removes the row (it wedges "
             "node status); any other phase (a spawn-opened review row) fills "
             "ended_at and keeps the provenance; 'all' settles every open row "
             "carrying the identity (the death-cascade spelling)."
@@ -689,13 +719,15 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open execute row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph import api as graph_api
     from fno.graph.api import wire_rows
     from fno.graph.store import reap_open_session_record
-    from fno.graph.types import SESSION_PHASES
+    from fno.graph.types import SESSION_PHASES, normalize_phase
+
+    phase = normalize_phase(phase)
 
     if node is None:
         try:

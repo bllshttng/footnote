@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sys
 
 import pytest
 
@@ -747,7 +748,9 @@ def test_resume_heals_an_unregistered_session(_registry_home):
     # form always appends: codex's globals all precede the subcommand, so
     # the positional stays right after "resume".
     assert result.exec_argv[-4:] == ["resume", CODEX_UUID, "--remote", "unix://"]
-    assert any("writable_roots=" in arg for arg in result.exec_argv)
+    # codex 0.156.1 refuses the writable_roots override on the form's
+    # --remote lane, so the grant is absent; the roots ride the turn carrier.
+    assert not any("writable_roots=" in arg for arg in result.exec_argv)
     assert result.exec_cwd == "/repo/two"
 
 
@@ -1094,3 +1097,22 @@ def test_adopt_stamps_the_newest_entry_not_the_mtime(tmp_path):
     # The entry's stamp, not the mtime an hour fresher: mtime would read
     # 2023-11-14T23:13:20Z.
     assert entry.last_message_at == "2023-11-14T22:13:20Z"
+
+
+def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch, tmp_path):
+    """A failing fno.inbox.store import degrades to pid=None; the verb completes.
+
+    The lazy import sat inside the try, so a raising import (module or dep
+    missing) made ``except ProjectIdentificationError:`` evaluate an unbound
+    local and the UnboundLocalError escaped the broad except, crashing stop.
+    """
+    monkeypatch.setitem(sys.modules, "fno.inbox.store", None)
+
+    assert store_fallback._project_identity("/tmp") == (None, None)
+
+    # Through the public path: an unresolvable scope identity skips
+    # confinement, so the store hit still heals instead of crashing.
+    _write_claude_session(tmp_path, CLAUDE_UUID)
+    entry = store_fallback.heal_from_harness_store("c655c326", scope_cwd=str(tmp_path))
+    assert entry is not None
+    assert entry.harness_session_id == CLAUDE_UUID

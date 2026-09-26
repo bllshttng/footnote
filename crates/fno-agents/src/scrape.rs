@@ -908,21 +908,15 @@ mod tests {
         // rewrites between sweeps.
         let ls_path = dir.join("ls.json");
         let read_path = dir.join("read.json");
-        let stub = dir.join("fno-stub.sh");
-        std::fs::write(
-            &stub,
-            format!(
+        let stub = crate::write_exec_stub(
+            &dir,
+            "fno-stub.sh",
+            &format!(
                 "#!/bin/sh\ncase \"$3\" in\nls) cat {} ;;\nread) cat {} ;;\nesac\n",
                 ls_path.display(),
                 read_path.display()
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         std::env::set_var("FNO_BIN", &stub);
 
         let live_pane =
@@ -1008,33 +1002,27 @@ mod tests {
         );
     }
 
-    fn write_script(path: &std::path::Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
     // the fallback must resolve with the wheel bin absent from PATH.
     // Neither leg consults PATH at all; the temp dir stands in for the uv
     // tools bin the measured failure could not reach.
     #[test]
     fn fno_py_beside_resolves_executable_sibling_without_path() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("fno-agents");
-        write_script(&exe, 0o755);
-        let script = dir.path().join("fno-py");
-        write_script(&script, 0o755);
+        let exe = crate::write_exec_stub(dir.path(), "fno-agents", "#!/bin/sh\n");
+        let script = crate::write_exec_stub(dir.path(), "fno-py", "#!/bin/sh\n");
         assert_eq!(fno_py_beside(&exe).as_deref(), Some(script.as_path()));
     }
 
     #[test]
     fn fno_py_beside_ignores_missing_or_non_executable_sibling() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("fno-agents");
-        write_script(&exe, 0o755);
+        let exe = crate::write_exec_stub(dir.path(), "fno-agents", "#!/bin/sh\n");
         assert_eq!(fno_py_beside(&exe), None, "no sibling");
+        // The non-executable case stays in-process: mode 0o644 is the point.
+        use std::os::unix::fs::PermissionsExt;
         let script = dir.path().join("fno-py");
-        write_script(&script, 0o644);
+        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(fno_py_beside(&exe), None, "sibling not executable");
     }
 
@@ -1043,7 +1031,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fno").join("bin").join("fno-py");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        write_script(&script, 0o755);
+        crate::write_exec_stub(script.parent().unwrap(), "fno-py", "#!/bin/sh\n");
         assert_eq!(
             fno_py_in_tools_dir(dir.path()).as_deref(),
             Some(script.as_path())

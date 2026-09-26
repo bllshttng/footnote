@@ -1,6 +1,6 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting};
-use super::queues::NODE_ID_BODY;
+use super::budget::{run_json, Budget};
+
 use super::{is_terminal, s_i64, s_str, SourceRead};
 use crate::graph_store::entry_id;
 use serde_json::{json, Value};
@@ -121,7 +121,7 @@ fn split_failed_listing(listing: &SourceRead) -> (SourceRead, SourceRead) {
 /// row is judged.
 pub(crate) fn read_prs(
     cwd: &Path,
-    slice: Duration,
+    deadline: Instant,
     max_pr_reads: usize,
     entries: Option<&[Value]>,
 ) -> (SourceRead, SourceRead, Vec<String>) {
@@ -136,7 +136,12 @@ pub(crate) fn read_prs(
         "--json".to_string(),
         "number,title,mergeable,statusCheckRollup,headRefName,url,body".to_string(),
     ];
-    let listing = run_json(cmd, cwd, slice);
+    let bound = Budget::spawn_bound(deadline);
+    let listing = if bound.is_zero() {
+        SourceRead::over_budget("not-read: board budget exhausted before the read".to_string())
+    } else {
+        run_json(cmd, cwd, bound)
+    };
     if !listing.is_ok() {
         let (mergeable, undriven) = split_failed_listing(&listing);
         return (mergeable, undriven, Vec::new());
@@ -222,18 +227,24 @@ pub(crate) fn read_prs(
 /// verdict, still not mergeable), while a crashed gate read renders
 /// not-actionable with a warning naming the exit.
 fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
-    let mut cmd = fno_py_cmd();
-    cmd.extend([
-        "do".to_string(),
-        "pr".to_string(),
-        "status".to_string(),
-        number.to_string(),
-    ]);
-    match run_with_timeout_accepting(&cmd, cwd, timeout, &[0, 1, 2, 3]).map(|o| o.stdout) {
-        Err(f) => Err(f.message().to_string()),
-        Ok(stdout) => serde_json::from_slice::<Value>(&stdout)
-            .map_err(|e| format!("unparseable status payload: {e}")),
+    // One owner: the status read answers in process through the door, so a
+    // board refresh pays no fno-py cold start per candidate.
+    let _ = timeout;
+    let payload = serde_json::json!({
+        "cwd": cwd.display().to_string(),
+        "pr": number.max(0) as u64,
+    });
+    let (code, stdout, stderr) = crate::pr_status::cache::run_door("status-read", &payload);
+    if code > 3 {
+        let why = stderr.trim();
+        return Err(if why.is_empty() {
+            format!("status read failed (exit {code})")
+        } else {
+            why.to_string()
+        });
     }
+    serde_json::from_str::<Value>(stdout.trim())
+        .map_err(|e| format!("unparseable status payload: {e}"))
 }
 
 /// Ask the merge gate about every candidate the listing called green
@@ -246,11 +257,13 @@ fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, Str
 pub(crate) fn read_pr_gates(
     cwd: &Path,
     numbers: &[i64],
-    slice: Option<Duration>,
+    deadline: Option<Instant>,
 ) -> (SourceRead, Vec<String>) {
-    let Some(slice) = slice else {
+    let Some(deadline) = deadline else {
         return (
-            SourceRead::err("merge gate not read: board budget exhausted before the source"),
+            SourceRead::over_budget(
+                "merge gate not read: board budget exhausted before the source",
+            ),
             Vec::new(),
         );
     };
@@ -258,7 +271,6 @@ pub(crate) fn read_pr_gates(
     // asking the gate, but every candidate at once would spend the fleet's
     // shared gh quota faster than any slice can police.
     const GATE_FANOUT: usize = 4;
-    let deadline = Instant::now() + slice;
     let mut rows: Vec<Value> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -383,31 +395,11 @@ fn normalized_pr_url(url: &str) -> String {
         .to_lowercase()
 }
 
-/// Well-formed node ids named on the LAST exact `Backlog-Closure:` line of a
-/// body, order-preserved, deduplicated (mirrors closure.parse_closure_trailer).
-/// Case-insensitive key, token split on whitespace and commas, malformed
-/// tokens dropped.
+/// Well-formed node ids named on the LAST closure line of a body,
+/// order-preserved, deduplicated. The line format lives in
+/// [`super::pr_closure`]; this wrapper keeps the board's one call shape.
 fn trailer_node_ids(body: &str) -> Vec<String> {
-    let id_re = regex::Regex::new(&format!("^{NODE_ID_BODY}$")).expect("static regex");
-    let mut last: Option<&str> = None;
-    for line in body.lines() {
-        let is_trailer = line
-            .get(..16)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Backlog-Closure:"));
-        if is_trailer {
-            last = Some(&line[16..]);
-        }
-    }
-    let Some(rest) = last else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = Vec::new();
-    for token in rest.split(|c: char| c == ',' || c.is_whitespace()) {
-        if !token.is_empty() && id_re.is_match(token) && !ids.iter().any(|i| i == token) {
-            ids.push(token.to_string());
-        }
-    }
-    ids
+    super::pr_closure::parse(body)
 }
 
 /// The three binding keys of one PR, filtered to real graph ids. Shared by
@@ -421,8 +413,7 @@ pub(crate) struct PrBinding {
     /// scoped by normalized URL because a pr_number is only unique within
     /// one repository. Sorted.
     pub backrefs: Vec<String>,
-    /// Node ids on the LAST exact `Backlog-Closure:` body line
-    /// (`trailer_node_ids`).
+    /// Node ids on the LAST closure body line (`trailer_node_ids`).
     pub trailer: Vec<String>,
 }
 
@@ -431,8 +422,8 @@ impl PrBinding {
     pub(crate) fn unbound_detail(&self) -> Option<String> {
         if self.branch.is_empty() && self.backrefs.is_empty() && self.trailer.is_empty() {
             Some(
-                "branch names no node; no node carries this PR; body carries no Backlog-Closure \
-                 trailer"
+                "branch names no node; no node carries this PR; body carries no closure \
+                 line"
                     .to_string(),
             )
         } else {
@@ -671,7 +662,11 @@ mod tests {
 
     #[test]
     fn no_candidates_reads_the_gate_ok_and_empty() {
-        let (read, warnings) = read_pr_gates(Path::new("."), &[], Some(Duration::from_secs(1)));
+        let (read, warnings) = read_pr_gates(
+            Path::new("."),
+            &[],
+            Some(Instant::now() + Duration::from_secs(1)),
+        );
         assert!(read.is_ok());
         assert!(read.rows().is_empty());
         assert!(warnings.is_empty());
@@ -991,7 +986,7 @@ mod tests {
                 keys.unbound_detail().as_deref(),
                 Some(
                     "branch names no node; no node carries this PR; body carries no \
-                     Backlog-Closure trailer"
+                     closure line"
                 ),
                 "body {body:?}"
             );

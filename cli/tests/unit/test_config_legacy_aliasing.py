@@ -60,8 +60,9 @@ def test_legacy_scalar_aliases_to_list(tmp_path):
     assert s.review.external_reviewers == ["gemini"]
 
 
-def test_attention_legacy_rows_survive_a_half_migrated_config(tmp_path, caplog):
-    """Both keys present: the legacy rows merge in, they are never dropped."""
+def test_retired_attention_rows_load_and_are_ignored(tmp_path):
+    """The md sink is retired: `[[attention]]` / `[[reach_me]]` rows in a
+    config still load, and the model carries no `attention` field."""
     from fno.config import settings_from_files
 
     f = _write(
@@ -71,9 +72,8 @@ def test_attention_legacy_rows_survive_a_half_migrated_config(tmp_path, caplog):
         "  reach_me:\n    - name: old\n      path: p-old.md\n",
     )
     s = settings_from_files([f])
-    names = [row.name for row in s.attention]
-    assert names == ["new", "old"]
-    assert "[[reach_me]] is now [[attention]]" in caplog.text
+    assert not hasattr(s, "attention")
+    assert not hasattr(s, "reach_me")
 
 
 def test_top_level_project_aliases_id_and_vision(tmp_path):

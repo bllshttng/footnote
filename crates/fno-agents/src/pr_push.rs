@@ -9,6 +9,7 @@
 //! layer, heal calls [`guarded_push`] instead, and heal.rs shrinks under the
 //! file-budget ratchet. Exit codes are heal's, so one table covers both
 //! verbs:
+//! `--pr <N>` selects the local worktree on that PR's head branch.
 //!
 //! * `0` pushed
 //! * `1` preflight red (heal already uses 1 for escalations; the meanings
@@ -128,9 +129,32 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
         };
         for run in runs {
             raw.push(run.clone());
-            rows.push(json!({
+            let timeout = if run.get("conclusion").and_then(Value::as_str) == Some("cancelled")
+                && run
+                    .pointer("/output/annotations_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            {
+                run.get("id")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| {
+                        gh_api_pages(
+                            gh_bin,
+                            cwd,
+                            &format!("repos/{{owner}}/{{repo}}/check-runs/{id}/annotations"),
+                        )
+                        .ok()
+                    })
+                    .and_then(|pages| {
+                        crate::pr_status_facts::timeout_annotation(&Value::Array(pages))
+                    })
+            } else {
+                None
+            };
+            let mut row = json!({
                 "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                "bucket": rest_bucket(run),
+                "bucket": if timeout.is_some() { "fail" } else { rest_bucket(run) },
                 "link": run.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
                 "workflow": run
                     .pointer("/check_suite/id")
@@ -138,7 +162,11 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
                     .unwrap_or_default(),
                 "startedAt": run.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "completedAt": run.get("completed_at").and_then(|v| v.as_str()).unwrap_or(""),
-            }));
+            });
+            if let Some(timeout) = timeout {
+                row["timeout"] = json!(timeout);
+            }
+            rows.push(row);
         }
     }
     // A run that failed before minting a job owns no check run; the shared
@@ -588,6 +616,7 @@ fn current_branch_quoted(ctx: &PushCtx) -> String {
 /// Parsed verb arguments.
 struct VerbArgs {
     force: bool,
+    pr: Option<String>,
     in_flight: Option<String>,
     preflight: bool,
     git_bin: String,
@@ -600,6 +629,7 @@ struct VerbArgs {
 fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
     let mut a = VerbArgs {
         force: false,
+        pr: None,
         in_flight: None,
         preflight: false,
         git_bin: "git".to_string(),
@@ -622,6 +652,10 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         };
         match arg {
             "--force-ci-cancel" => a.force = true,
+            "--pr" => {
+                a.pr = Some(take("--pr")?);
+                i += 1;
+            }
             "--in-flight" => {
                 a.in_flight = Some(take("--in-flight")?);
                 i += 1;
@@ -654,6 +688,10 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         i += 1;
     }
     Ok(a)
+}
+
+fn resolve_pr_worktree_for_push(pr: &str, cwd: &Path, gh_bin: &str) -> Result<PathBuf, String> {
+    crate::pr_worktree::resolve_pr_with(cwd, pr, gh_bin)
 }
 
 fn unknown_flag(other: &str) -> String {
@@ -795,13 +833,22 @@ fn commit_citation_failures(log: &str) -> Vec<String> {
 /// when the branch was rebased), stamp, receipt. Exit codes: 0 pushed, 1
 /// preflight red, 2 in flight, 3 refusal, 4 read error.
 pub fn run_push(argv: &[String]) -> i32 {
-    let a = match parse_verb_args(argv) {
+    let mut a = match parse_verb_args(argv) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pr-push: {msg}");
             return 4;
         }
     };
+    if let Some(pr) = a.pr.as_deref() {
+        match resolve_pr_worktree_for_push(pr, &a.cwd, &a.gh_bin) {
+            Ok(worktree) => a.cwd = worktree,
+            Err(err) => {
+                eprintln!("pr-push: {err}; refusing to use the caller checkout");
+                return 4;
+            }
+        }
+    }
     let cwd = a.cwd.clone();
     let git = a.git_bin.clone();
 
@@ -1247,17 +1294,8 @@ pub fn run_push(argv: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write_exec(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
-    }
+    use crate::write_exec_stub as write_exec;
+    use std::process::Command;
 
     /// A fake gh: green rust-ci check runs, an empty status read, a failed
     /// cli-ci run with no check-run link, and a jobs read answering zero.
@@ -1269,7 +1307,22 @@ mod tests {
             r#"#!/bin/sh
 D="$(dirname "$0")"
 for a in "$@"; do case "$a" in
+  */check-runs/*/annotations)
+    if [ -f "$D/fail-timeout-annotations" ]; then
+      echo "gh: annotation read failed" >&2
+      exit 1
+    fi
+    echo '[{"annotation_level":"failure","message":"The job has exceeded the maximum execution time of 35m0s"}]'
+    exit 0 ;;
   */check-runs)
+    if [ -f "$D/timeout-run" ]; then
+      echo '{"check_runs":[{"id":123,"name":"stress","status":"completed","conclusion":"cancelled","output":{"annotations_count":1},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:40:00Z","html_url":"https://github.com/o/r/actions/runs/123/job/456","check_suite":{"id":88}}]}'
+      exit 0
+    fi
+    if [ -f "$D/cancel-run" ]; then
+      echo '{"check_runs":[{"id":124,"name":"cancelled","status":"completed","conclusion":"cancelled","output":{"annotations_count":0},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:10:00Z","html_url":"https://github.com/o/r/actions/runs/124/job/457","check_suite":{"id":89}}]}'
+      exit 0
+    fi
     echo '{"check_runs":[{"name":"rust-ci","status":"completed","conclusion":"success","started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:05:00Z","html_url":"https://github.com/o/r/actions/runs/35344488345/job/99","check_suite":{"id":7}}]}'
     exit 0 ;;
   */status)
@@ -1297,6 +1350,115 @@ exit 1
     }
 
     #[test]
+    fn pr_push_from_canonical_resolves_the_pr_branch_worktree() {
+        let parsed = parse_verb_args(&["--pr".into(), "42".into()]).unwrap();
+        assert_eq!(parsed.pr.as_deref(), Some("42"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical");
+        let feature = dir.path().join("feature-worktree");
+        std::fs::create_dir(&canonical).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&canonical)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/pr-42",
+            feature.to_str().unwrap(),
+        ]);
+        let gh = write_exec(
+            dir.path(),
+            "gh-pr",
+            "#!/bin/sh\nprintf '%s\\n' 'feature/pr-42'\n",
+        );
+
+        assert_eq!(
+            resolve_pr_worktree_for_push("42", &canonical, gh.to_str().unwrap()).unwrap(),
+            feature
+        );
+    }
+
+    #[test]
+    fn pr_push_guard_runs_in_the_pr_worktree_when_started_from_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical");
+        let feature = dir.path().join("feature-worktree");
+        std::fs::create_dir(&canonical).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&canonical)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/pr-42",
+            feature.to_str().unwrap(),
+        ]);
+        let gh = write_exec(
+            dir.path(),
+            "gh-pr",
+            "#!/bin/sh\nprintf '%s\\n' 'feature/pr-42'\n",
+        );
+        let git_bin = write_exec(
+            dir.path(),
+            "git-probe",
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >> \"$(dirname \"$0\")/cwd.txt\"\nexit 1\n",
+        );
+        let capture = dir.path().join("cwd.txt");
+        let argv = [
+            "--pr",
+            "42",
+            "--in-flight",
+            "feature/pr-42",
+            "--cwd",
+            canonical.to_str().unwrap(),
+            "--gh-bin",
+            gh.to_str().unwrap(),
+            "--git-bin",
+            git_bin.to_str().unwrap(),
+        ]
+        .map(str::to_string);
+
+        let exit = run_push(&argv);
+
+        assert_eq!(exit, 0);
+        assert_eq!(
+            std::fs::read_to_string(capture).unwrap().trim(),
+            feature.to_str().unwrap()
+        );
+    }
+
+    #[test]
     fn ac2_hp_the_zero_job_failure_reads_fail() {
         let dir = tempfile::tempdir().unwrap();
         let gh = stub_gh(dir.path());
@@ -1311,6 +1473,70 @@ exit 1
             "https://github.com/o/r/actions/runs/35366958901"
         );
         assert_eq!(hit["workflow"], ".github/workflows/cli-ci.yml");
+    }
+
+    #[test]
+    fn timeout_annotations_escalate_while_unannotated_and_unreadable_cancels_rerun() {
+        let message = "The job has exceeded the maximum execution time of 35m0s";
+        for (marker, check_name, expected_bucket, expected_signature, expected_run_id) in [
+            ("timeout-run", "stress", "fail", "timed_out", None),
+            (
+                "cancel-run",
+                "cancelled",
+                "cancel",
+                "cancelled",
+                Some("124"),
+            ),
+            (
+                "timeout-run fail-timeout-annotations",
+                "stress",
+                "cancel",
+                "cancelled",
+                Some("123"),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = stub_gh(dir.path());
+            for flag in marker.split_whitespace() {
+                std::fs::write(dir.path().join(flag), b"").unwrap();
+            }
+            let rows = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123").unwrap();
+            let row = rows
+                .iter()
+                .find(|row| row["name"] == check_name)
+                .expect("the check run row");
+            assert_eq!(row["bucket"], expected_bucket);
+            let log = row.get("timeout").and_then(Value::as_str).unwrap_or("");
+            if expected_signature == "timed_out" {
+                assert_eq!(row["timeout"], message);
+            } else {
+                assert!(row.get("timeout").is_none());
+            }
+            let check = row["name"].as_str().unwrap_or("");
+            let bucket = row["bucket"].as_str().unwrap_or("");
+            let link = row["link"].as_str().unwrap_or("");
+            let finding = crate::heal::classify(
+                &crate::heal::Ctx {
+                    check,
+                    log,
+                    bucket,
+                    link,
+                },
+                false,
+            );
+            assert_eq!(finding.signature, expected_signature);
+            if let Some(expected_run_id) = expected_run_id {
+                assert!(matches!(
+                    finding.remedy,
+                    crate::heal::Remedy::Rerun { ref run_id } if run_id == expected_run_id
+                ));
+            } else {
+                assert!(matches!(
+                    finding.remedy,
+                    crate::heal::Remedy::Escalate { .. }
+                ));
+            }
+        }
     }
 
     #[test]

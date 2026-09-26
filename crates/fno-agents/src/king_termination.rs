@@ -2,7 +2,7 @@
 
 use crate::loopcheck::TerminationReason;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default)]
 pub(crate) struct KingManifest {
@@ -100,10 +100,7 @@ pub(crate) fn stand_down_gate(
         .harness_session_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())?;
-    let capture_dir = std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))?;
+    let capture_dir = crate::operator_turns::capture_dir(cwd)?;
     let pending = match crate::operator_turns::pending_stand_down(
         session,
         transcript,
@@ -128,9 +125,11 @@ pub(crate) fn stand_down_gate(
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     pub(crate) top_row: Option<String>,
-    /// any queue on this board failed to read. The quiet branch
-    /// refuses to certify a quiet board while this is true, instead of
-    /// trusting a count that cannot see the blind queues.
+    /// any queue on this board failed to read beyond a budget kill. The
+    /// quiet branch refuses to certify a quiet board while this is true,
+    /// instead of trusting a count that cannot see the blind queues. A
+    /// starved queue is the board's own choice, not evidence, and never
+    /// blocks.
     pub(crate) unreadable_sources: bool,
     pub(crate) actionable_ids: Vec<String>,
     pub(crate) spawn_held_ids: Vec<String>,
@@ -162,10 +161,10 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let status = queue.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if crate::king_board::not_read_status(status) {
+            if crate::king_board::unreadable_status(status) {
                 unreadable_sources = true;
             }
-            if name == "operator_question" && crate::king_board::not_read_status(status) {
+            if name == "operator_question" && crate::king_board::unreadable_status(status) {
                 operator_questions_unreadable = true;
             }
             if crate::king_board::not_read_status(status) {
@@ -311,6 +310,12 @@ pub(crate) fn read_king_board(
     state_path: &Path,
 ) -> Result<KingBoard, String> {
     let _ = fno_bin;
+    // Past the reserve line the board refuses instead of reading at the 1ms
+    // bound: a board that never answered is the readable, bounded outcome a
+    // spent fire owes the king, and the drain's reserve stays untouched.
+    if crate::loopcheck::stopgate_pre_drain_spent() {
+        return Err("king board not read: the fire budget was spent before the board".to_string());
+    }
     let opts = crate::king_board::BoardOpts {
         budget_ms: crate::loopcheck::stopgate_read_timeout().as_millis() as u64,
         max_pr_reads: crate::king_board::DEFAULT_MAX_PR_READS,
@@ -579,6 +584,7 @@ pub(crate) fn bound_breached(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn a_null_harness_session_is_treated_as_legacy_missing_identity() {
@@ -681,6 +687,47 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_starved_questions_queue_on_a_clean_board_blocks_nothing() {
+        // The board chose not to read the queue to stay inside its budget;
+        // that is not evidence about the questions inside it, so neither
+        // completion flag may fire. The kill is still named.
+        let board = board_with_queues(json!([
+            {"name": "operator_question", "status": "over_budget",
+             "error": "not-read: board budget exhausted after ~/.fno/events.jsonl",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.operator_questions_unreadable);
+        assert!(!parsed.unreadable_sources);
+        assert_eq!(
+            parsed.blind_queues,
+            vec!["operator_question not read: not-read: board budget exhausted after ~/.fno/events.jsonl".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_questions_queue_still_blocks_completion() {
+        let board = board_with_queues(json!([
+            {"name": "operator_question", "status": "unreadable", "error": "exit 1: boom",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(parsed.operator_questions_unreadable);
+        assert!(parsed.unreadable_sources);
+    }
+
+    #[test]
+    fn a_budget_starved_queue_never_sets_the_unreadable_sources_flag() {
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "over_budget",
+             "error": "killed at its 28.5s slice of the board budget; the source did not fail",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.unreadable_sources);
+    }
+
+    #[test]
     fn a_fully_readable_board_leaves_the_flag_off() {
         let board = board_with_queues(json!([
             {"name": "undispatched", "status": "ok", "actionable": true,
@@ -759,19 +806,16 @@ mod tests {
     }
 
     fn gate_status_stub(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fno = dir.join("fno");
         let payload = json!({
             "verdict": "refused",
             "reason": "max_live",
             "message": "15 live worker slots >= max_live 15",
         });
-        std::fs::write(&fno, format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n")).unwrap();
-        let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fno, permissions).unwrap();
-        fno
+        crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
+        )
     }
 
     fn accepted_probe() -> GateProbe {

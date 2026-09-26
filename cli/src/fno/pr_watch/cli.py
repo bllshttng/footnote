@@ -1265,8 +1265,6 @@ def tick() -> None:
                     elif woke_n:
                         skip = None
                     elif wake_summary.get("budget_spent"):
-                        # The watchdog's own token: a pass that ran out of
-                        # slice before it could act is not a failure.
                         skip = "budget_spent"
                     else:
                         skip = "no_trigger"
@@ -1511,7 +1509,6 @@ def install(
     m.install(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=_interval,
         dry_run=dry_run,
         activate=not no_activate,
@@ -1543,7 +1540,6 @@ def refresh() -> None:
     msg, _rc = m.refresh_watcher(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=settings.pr_watch.interval_seconds,
         defer_when_ticking=True,
         caller="refresh",
@@ -1609,10 +1605,10 @@ def heal() -> None:
         msg, rc = m.refresh_watcher(
             launch_agents_dir=_LAUNCH_AGENTS_DIR,
             fno_binary=_resolve_fno_binary(),
-            install_path=os.environ.get("PATH", "/usr/bin:/bin"),
             interval=settings.pr_watch.interval_seconds,
             defer_when_ticking=True,
             caller="heal",
+            force_bounce=True,
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:
@@ -1638,7 +1634,6 @@ def ensure_watcher_activated() -> str:
     return m.ensure_activated(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=load_settings().pr_watch.interval_seconds,
     )
 

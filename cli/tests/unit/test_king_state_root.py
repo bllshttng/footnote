@@ -18,7 +18,9 @@ def _cancel(*args: str):
     return CliRunner().invoke(agents_king_app, ["cancel", *args])
 
 
-def test_king_state_root_from_linked_worktree_is_canonical(tmp_path: Path, monkeypatch) -> None:
+def test_king_state_root_from_linked_worktree_is_canonical(
+    tmp_path: Path, monkeypatch, loop_admission_ready
+) -> None:
     main = tmp_path / "main"
     main.mkdir()
     _git(main, "init", "-q")

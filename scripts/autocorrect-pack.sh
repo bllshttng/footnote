@@ -238,7 +238,7 @@ UNIQ_IMPLICATED="$TMPDIR_PACK/implicated-uniq.txt"
 { cat "$IMPLICATED_LIST"; cat "$SKILL_LIST"; } | sort -u > "$UNIQ_IMPLICATED"
 
 # -------------------------------------------------------------------
-# Backlog graph BLOCKED state, if a store exists.
+# Backlog graph BLOCKED state, if graph.db exists.
 # -------------------------------------------------------------------
 GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 : > "$GRAPH_BLOCKED"
@@ -246,9 +246,8 @@ GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 # packet's reader is a model. Rendering both as `[]` is what made the
 # .nodes/.entries bug read as good news for its whole life.
 GRAPH_BLOCKED_STATUS=unavailable
-if [[ -f "$GRAPH_PATH" ]]; then
-  # The read goes through the store api, never the file: the file froze as
-  # the readers moved onto the store. The raw `rows` op keeps fields the
+if [[ -f "${GRAPH_PATH%.json}.db" ]]; then
+  # The read goes through the store api. The raw `rows` op keeps fields the
   # typed nodes op drops, so the blocked_count arm stays live.
   if GRAPH_BLOCKED_REPORT="$(
     GRAPH_TARGET="$GRAPH_PATH" PACK_CLI_SRC="$SCRIPT_DIR/../cli/src" \

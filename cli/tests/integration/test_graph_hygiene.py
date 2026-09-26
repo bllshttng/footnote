@@ -6,6 +6,7 @@ Tests cover:
   - PreToolUse hook blocks/allows edits to graph.json
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -42,7 +43,7 @@ def test_load_graph_reads_entries_after_a_mutation(tmp_path):
     from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text('{"entries": []}\n')
+    seed_graph(graph_path, '{"entries": []}\n')
 
     def _add_entry(entries):
         entries.append({"id": "ab-test02", "title": "Test 02", "status": "ready"})
@@ -66,7 +67,7 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
     from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text('{"entries": []}\n')
+    seed_graph(graph_path, '{"entries": []}\n')
     sidecar_path = Path(str(graph_path) + ".sha256")
 
     def _add_entry(entries):

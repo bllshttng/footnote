@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.paths_testing import use_tmpdir
+from tests.fixtures.graph_seed import seed_graph
 
 
 @pytest.fixture
@@ -46,33 +47,21 @@ def isolate_mailbox(tmp_path, monkeypatch):
 def mailbox(tmp_path, monkeypatch):
     """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
     isolate_mailbox(tmp_path, monkeypatch)
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     return tmp_path
 
 
 @pytest.fixture
 def ruling_graph(mailbox, monkeypatch):
     graph_path = mailbox / ".fno" / "graph.json"
-    graph_path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-511a",
-                        "slug": "mailed-ruling",
-                        "title": "mailed ruling",
-                        "status": "ready",
-                        "type": "feature",
-                        "priority": "p2",
-                        "details": "Original node details.",
-                    }
-                ]
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    seed_graph(graph_path, [{
+        "id": "x-511a",
+        "slug": "mailed-ruling",
+        "title": "mailed ruling",
+        "status": "ready",
+        "type": "feature",
+        "priority": "p2",
+        "details": "Original node details.",
+    }])
     import fno.graph._constants as graph_constants
     import fno.graph.store as graph_store
 
@@ -82,6 +71,10 @@ def ruling_graph(mailbox, monkeypatch):
     monkeypatch.setitem(vars(graph_constants), "GRAPH_JSON", graph_path)
     monkeypatch.setattr(graph_store, "GRAPH_JSON", graph_path)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+    # The native read-backs resolve the store through FNO_CONFIG's state_dir.
+    fno_dir = mailbox / ".fno"
+    (fno_dir / "config.toml").write_text(f'state_dir = "{fno_dir}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(fno_dir / "config.toml"))
     return graph_path
 
 
@@ -127,8 +120,21 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
     assert sent.exit_code == 0, sent.output
     assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
     assert len(calls) == 1
-    fresh = runner.invoke(app, ["backlog", "get", "x-511a"])
-    assert fresh.exit_code == 0, fresh.output
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    fresh = _sp.run(
+        [str(binary), "backlog", "get", "x-511a"],
+        capture_output=True,
+        text=True,
+        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
+    )
+    assert fresh.returncode == 0, fresh.stderr
     assert marker in fresh.stdout
     assert re.search(r"### Ruling \(\d{4}-\d{2}-\d{2}\)", fresh.stdout)
 
@@ -139,31 +145,20 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
     foreign_repo = tmp_path / "foreign-répo"
     foreign_graph = foreign_repo / "state" / "graph.json"
     foreign_graph.parent.mkdir(parents=True)
-    foreign_graph.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-511a",
-                        "slug": "foreign-mailed-ruling",
-                        "title": "foreign mailed ruling",
-                        "status": "ready",
-                        "type": "feature",
-                        "priority": "p2",
-                        "details": "Foreign node details.",
-                    }
-                ]
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    seed_graph(foreign_graph, [{
+        "id": "x-511a",
+        "slug": "foreign-mailed-ruling",
+        "title": "foreign mailed ruling",
+        "status": "ready",
+        "type": "feature",
+        "priority": "p2",
+        "details": "Foreign node details.",
+    }])
     foreign_settings = foreign_repo / ".fno" / "settings.yaml"
     foreign_settings.parent.mkdir(parents=True)
     foreign_settings.write_text(
-        "schema_version: 1\nconfig:\n  paths:\n    graph_json: "
-        + json.dumps(str(foreign_graph))
+        "schema_version: 1\nconfig:\n  state_dir: "
+        + json.dumps(str(foreign_graph.parent))
         + "\n",
         encoding="utf-8",
     )
@@ -266,6 +261,19 @@ def test_inbox_namespace_is_retired(runner, mailbox):
 # ---------------------------------------------------------------------------
 # AC1-HP / AC2-HP: publish durable-first, cursor-consume, ack advances cursor
 # ---------------------------------------------------------------------------
+
+def test_machine_mail_lock_timeout_env_is_forwarded_to_agent_dispatch(
+    runner, mailbox, monkeypatch
+):
+    calls = _hosted_dispatch(monkeypatch)
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "sess-worker", "short note"],
+        env={"_FNO_MACHINE_MAIL_LOCK_TIMEOUT": "5"},
+    )
+    assert sent.exit_code == 0, sent.output
+    assert calls[0]["lock_timeout"] == 5.0
+
 
 def test_send_then_unread_then_ack(runner, mailbox):
     sent = runner.invoke(
@@ -1198,15 +1206,13 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    # D2: `from` IS the full session id; the model never renders, but
-    # the harness does (spelled through harness_for_provider). The model
-    # survives in the bus record, where audit reads it.
-    assert f'from="{sender_sid}"' in body
+    # Full sender identity travels with the message; model remains in bus record.
+    assert 'from="abcd1234"' in body
     assert 'model=' not in body
     assert 'harness="claude-code"' in body
     from fno.bus.log import iter_messages
 
-    row = next(m for m in iter_messages() if f'from="{sender_sid}"' in m.body)
+    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
     assert row.from_model == "claude-opus-4-8"
 
 

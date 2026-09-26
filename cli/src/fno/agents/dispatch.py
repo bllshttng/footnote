@@ -1439,6 +1439,7 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    parent_edge: Optional[tuple] = None,
     # the row this resume forks FROM (fork_lineage.lineage_row_for);
     # states every axis the caller left unstated.
     lineage_row: object | None = None,
@@ -1711,7 +1712,7 @@ def _claude_create_path(
 
     # Best-effort ambient capture; never raises. The
     # spawn_trigger was already popped before bg_create above.
-    spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+    spawned_by_session, spawned_by_harness, spawned_by_cwd = parent_edge or _capture_parent_edge()
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
@@ -1888,7 +1889,7 @@ def _claude_create_path(
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
             why = (
-                f": {king_unarmed_reason}"
+                f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                 if king_unarmed_reason
                 else "; king loop disabled, no scope manifest armed"
             )
@@ -2365,6 +2366,7 @@ def dispatch_spawn(
     succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    parent_edge: Optional[tuple] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
     # Recorded on the row (never the child argv) so a routed spawn's row
@@ -2927,6 +2929,7 @@ def dispatch_spawn(
                         route_provider=route_provider,
                         node=node,
                         route_model=route_model,
+                        parent_edge=parent_edge,
                     )
                     from fno.agents.harnesses._claude_session_registry import seed_unverified_reason
                     return SpawnResult(
@@ -6313,6 +6316,7 @@ def _delivery_policy_refusal(target) -> Optional[str]:
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
     """Run one ``mail-inject`` probe and classify its stdout verdict."""
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             argv,
@@ -6328,6 +6332,8 @@ def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> boo
         out = json.loads(proc.stdout.strip())
         delivered = bool(out.get("delivered"))
         _record(str(out.get("reason") or "unknown"))
+        if not delivered:
+            _record(f"waited-{round(time.monotonic() - started)}s")
         return delivered
     except (ValueError, AttributeError):
         _record("unreadable")
@@ -6653,24 +6659,8 @@ def wake_and_deliver(
     the second wake finds the first's row live and is refused as
     ``wake-already-in-flight``.
 
-    The uuid-scoped single-writer claim lives in ``_claude_create_path``,
-    not here: it is taken for every resume, pinned to the SPAWNED supervisor's
-    pid, and outlives this process. Holding it here instead would pin liveness to
-    the short-lived ``fno agents mail send`` process, so the claim would guard only the
-    probe->spawn window and go reclaimable the moment this command exits.
-
-    That claim is NOT redundant with the substrate's own fail-safe. That one
-    lives inside ``_is_revival``, which runs only when a same-name row ALREADY
-    exists -- and a wake derives a fresh name, so the FIRST wake of a session
-    would skip it entirely. This rung also fires whenever the inject probe
-    returned False, which happens for reasons unrelated to being asleep (the
-    runtime binary absent, a subprocess error, an unconfirmed poll budget), so
-    the target may well be live.
-
-    A claim is taken rather than a bare liveness probe because a probe is not
-    atomic: a daemon adoption or a differently-named ``--resume`` could acquire
-    ``session:<uuid>`` between the check and the spawn, and we would start a
-    second writer on one transcript anyway.
+    The single-writer claim lives in ``_claude_create_path`` (see there). Every
+    revival passes the spawn gate, charged to the revived row's parent, never the sender.
     """
     if not session_uuid:
         return False, "no-session-uuid"
@@ -6691,24 +6681,32 @@ def wake_and_deliver(
     spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
     route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
+    from fno.agents.launch_provenance import launch_account_for_session
 
+    parent = tuple(getattr(entry, f"spawned_by_{k}", None) for k in ("session", "harness", "cwd"))
     gate = None
     revived_reservation = False
     if route_provider is not None:
         # The revival launches work on the account the row pinned at mint, so
         # the gate reads that account's quota lock; an unattributed row skips.
-        from fno.agents.launch_provenance import launch_account_for_session
-
         try:
             gate = run_gate(
                 spawn_name, "bg", route_provider=route_provider,
-                account=launch_account_for_session(session_uuid),
+                account=launch_account_for_session(session_uuid), caller=parent[0],
+            )
+        except GateRefused as exc:
+            return False, f"spawn-exit-{exc.code}"
+    else:
+        try:
+            admit = run_gate(
+                spawn_name, "bg",
+                account=launch_account_for_session(session_uuid), caller=parent[0],
             )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 
     try:
-        if entry is not None and getattr(entry, "status", None) == "exited":
+        if entry is not None and entry.status == "exited" and fork_lineage.respawn_ok(entry):
             short = (
                 getattr(entry, "short_id", None)
                 or getattr(entry, "name", "")
@@ -6807,6 +6805,7 @@ def wake_and_deliver(
             route_provider=route_provider,
             route_env=route_env,
             provider_gate=gate,
+            parent_edge=parent,
         )
         short = (
             getattr(result, "short_id", None)
@@ -6845,6 +6844,8 @@ def wake_and_deliver(
                 gate.release_gate_mutex()
             else:
                 gate.release()
+        if route_provider is None:
+            admit.release()
 
 
 def wake_drain_agent(
@@ -6917,12 +6918,6 @@ def _mail_inject_codex(
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node).
 
-    ``thread_id`` is the codex threadId (full UUID). Returns True only when the
-    daemon accepts the turn; any miss (binary absent, no daemon socket, thread
-    not attached) returns False so the caller writes the durable fallback. The
-    codex app-server daemon only exists when the user runs it
-    (``codex app-server daemon start``); absent it this is a clean no-op.
-
     ``reason_out``, when a non-empty list, receives the live lane's
     cause on a miss -- the same side-channel contract as
     :func:`_mail_inject_claude`, so a bus-only refusal names itself in the
@@ -6931,8 +6926,6 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    # same injector-level gate as the claude lane; see
-    # _delivery_policy_refusal.
     if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
         if reason_out is not None:
             reason_out.append(BUS_ONLY_POLICY)
@@ -6955,7 +6948,10 @@ def _mail_inject_codex(
     except (OSError, subprocess.SubprocessError):
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+        receipt = json.loads(proc.stdout.strip())
+        if reason_out is not None and receipt.get("reason"):
+            reason_out.append(str(receipt["reason"]))
+        return bool(receipt.get("delivered"))
     except (ValueError, AttributeError):
         return False
 
@@ -7935,10 +7931,10 @@ def dispatch_send(
                     recipient_live=family1_live,
                     recipient_resumable=not family1_live,
                 ).value
-                # Unknown is hands-off, not dead. A registered peer still has a
-                # confirmable transport, so try it once and let delivery's ack
-                # decide; failure falls through to the durable bus.
-                family1_attemptable = family1_live or family1_state == "unknown"
+                # Unknown is hands-off, not dead. A claude row off any pane is always
+                # tried: mail-inject reads the daemon roster first, and the roster decides.
+                family1_attemptable = family1_live or family1_state == "unknown" or (
+                    existing.harness == "claude" and not existing.mux)
 
                 # W3 write-ahead: a recipient we will not attempt live is asleep,
                 # so it cannot drain during a live window, and there is no live
@@ -7957,12 +7953,10 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
-                # the row's own policy names the durable queue's cause
-                # even when no live rung was attemptable (an idle registered
-                # leader), so the receipt never reads as a live-miss.
-                _bus_only = (
-                    _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
-                )
+                # A skipped live lane names the reading that vetoed it. Bus-only outranks both.
+                _bus_only = _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
+                if not family1_attemptable:
+                    live_miss_reason = f"transcript-{family1_state}"
                 if family1_attemptable:
                     live_attempted = True
                     _live_delivered = _deliver_live(
@@ -8029,11 +8023,8 @@ def dispatch_send(
                     )
 
                 _emit_ev(
-                    "agent_send_done",
-                    name=name,
-                    provider=existing.harness,
-                    msg_id=msg_id,
-                    delivery=delivery,
+                    "agent_send_done", name=name, provider=existing.harness,
+                    msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 )
             finally:
                 _DISPATCH_CTX.reset(ctx_token)

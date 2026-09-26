@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import subprocess
@@ -182,7 +183,7 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     claims_root = graph_root / "claims"
     (graph_root / "nested").mkdir(parents=True)
     claims_root.mkdir()
-    (graph_root / "graph.json").write_bytes(b'{"entries":[]}\n')
+    seed_graph(graph_root / "graph.json", b'{"entries":[]}\n')
     (graph_root / "nested" / "receipt.bin").write_bytes(b"graph-sentinel\x00")
     (claims_root / "node.lock").write_bytes(b"claim-sentinel\n")
     before_graph = _snapshot_tree(graph_root)

@@ -98,28 +98,13 @@ def keeper_rss_bound_kb() -> int:
 
 
 def store_backend_of(graph: Optional[Path]) -> str:
-    """``graph_meta.backend``, the way ``crate::backlog::backend`` reads it;
-    absent db reads json. Asked through the keeper's ``export_status``: the
-    db is Rust-owned and Python is sealed off it (test_graph_db_sealed)."""
-    if graph is None:
-        return "json"
-    db = graph.with_suffix(".db")
-    if not db.exists():
-        return "json"
-    try:
-        from fno.graph.store import store_export_status
-
-        return str(store_export_status(graph).get("backend") or "json")
-    except Exception:  # noqa: BLE001 - unreadable meta reads json, never refuses
-        return "json"
+    from fno.graph.store import store_export_status
+    return "sqlite" if graph and store_export_status(graph).get("version") else "unknown"
 
 
 def graph_read_source() -> str:
-    """The backend the default graph actually reads through; an unanswered
-    store reads json, so a rollback leg never reads as a leak."""
-    from fno.graph.store import GRAPH_JSON, store_export_status
-
-    return str(store_export_status(GRAPH_JSON).get("backend") or "json")
+    from fno.graph.store import GRAPH_JSON
+    return store_backend_of(GRAPH_JSON)
 
 
 @dataclass(frozen=True)

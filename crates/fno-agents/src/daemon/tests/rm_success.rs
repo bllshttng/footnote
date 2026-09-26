@@ -694,6 +694,52 @@ async fn rm_removes_a_hosted_codex_thread_and_drops_its_actor() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// A codex thread row whose actor is gone (a daemon restart left the handle
+/// dead) is removed by rm without --force: nothing can be running in a dead
+/// actor, so teardown is already done. Before the fix this refused with
+/// `interrupt-failed-turn-still-running` and kept the dead row, which then
+/// blocked every dispatch on its node.
+#[tokio::test]
+async fn rm_drops_a_codex_thread_row_whose_actor_is_gone() {
+    let _guard = crate::path_test_guard();
+    let home = short_home("rmthreadgone");
+    let cwd = tempfile::tempdir().unwrap();
+    let mut row = thread_entry("t-rm-gone", AgentStatus::Live, None);
+    row.cwd = cwd.path().to_string_lossy().into_owned();
+    row.project_root = row.cwd.clone();
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    ctx.codex_threads.lock().await.insert(
+        "t-rm-gone".into(),
+        std::sync::Arc::new(crate::codex_thread::CodexThreadActor::with_dead_actor()),
+    );
+    let request = Request::new(1, "agent.rm", json!({"name": "t-rm-gone"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a codex row must not read the claude roster"),
+        &|_| panic!("rm must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a thread row has no mux ref to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "{:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 #[tokio::test]
 async fn rm_ends_a_live_non_thread_codex_row_with_no_stop_leg() {
     // Law d-81c6da7e: rm ends a live codex row itself (the widened

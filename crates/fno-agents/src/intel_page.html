@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --ink: #1c2430; --paper: #ffffff; --muted: #5b6675;
+  --line: #d9dee5; --track: #edf0f4; --accent: #3568b0;
+  --h-claude: #3568b0; --h-codex: #b06535; --h-other: #6b7f95;
+  --omitted-bg: #f4f5f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #d7dee8; --paper: #16191f; --muted: #93a0b1;
+    --line: #2c333d; --track: #232a34; --accent: #7aa7e0;
+    --h-claude: #7aa7e0; --h-codex: #e0a07a; --h-other: #8a99ad;
+    --omitted-bg: #1d222a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; max-width: 46rem; padding: 0 16px;
+  background: var(--paper); color: var(--ink);
+  font: 16px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
+h1 { font-size: 1.7rem; line-height: 1.25; }
+h2 { font-size: 1.3rem; margin-top: 2rem; break-after: avoid; }
+h3 { font-size: 1rem; }
+.meta { color: var(--muted); margin-bottom: 1rem; }
+.meta strong { color: var(--ink); }
+section { margin: 1.5rem 0; }
+a { color: var(--accent); text-decoration: none; }
+code { background: var(--track); padding: 0 .25em; border-radius: 3px; font-size: .9em; }
+p.omitted {
+  color: var(--muted); font-style: italic;
+  background: var(--omitted-bg); padding: .4rem .75rem; border-radius: 4px;
+}
+ul { padding-left: 1.25rem; }
+li { margin: .2rem 0; }
+details {
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: .5rem .75rem; margin: .6rem 0;
+}
+details > summary { cursor: pointer; font-weight: 600; }
+figure { margin: 1rem 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: .85rem; margin-top: .3rem; }
+.cat { margin: .4rem 0; }
+.cat .label { font-size: .9rem; }
+.cat svg { height: 8px; }
+.track { fill: var(--track); }
+.bar { fill: var(--accent); }
+.col-c { fill: var(--h-claude); }
+.col-x { fill: var(--h-codex); }
+.col-o { fill: var(--h-other); }
+.legend { color: var(--muted); font-size: .85rem; margin-bottom: .3rem; }
+.legend i { display: inline-block; width: .7em; height: .7em; border-radius: 2px; margin: 0 .3em 0 1em; }
+table { border-collapse: collapse; font-size: .85rem; margin-top: .5rem; }
+th, td { border: 1px solid var(--line); padding: .15rem .5rem; text-align: left; }
+footer {
+  margin: 2.5rem 0 1.5rem; color: var(--muted); font-size: .85rem;
+  border-top: 1px solid var(--line); padding-top: .75rem;
+}
+@media print {
+  @page { margin: 16mm; }
+  :root {
+    --ink: #1c2430; --paper: #ffffff; --muted: #5b6675; --line: #d9dee5;
+    --track: #edf0f4; --accent: #3568b0;
+    --h-claude: #3568b0; --h-codex: #b06535; --h-other: #6b7f95;
+    --omitted-bg: #f4f5f7;
+  }
+  body, .bar, .col-c, .col-x, .col-o { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  h2, h3 { break-after: avoid; }
+  li, details, details > summary, svg { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<p class="meta">__META__</p>
+__BODY__
+<footer>__FOOTER__</footer>
+</body>
+</html>

@@ -442,7 +442,7 @@ mod tests {
         // AC3-EDGE, last line: missing file, 0, -1 and "15" all read as None.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        crate::graph_store::seed_rows(&graph, &[]).unwrap();
         assert_eq!(
             configured_cap(&graph),
             None,

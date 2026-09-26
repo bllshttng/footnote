@@ -269,12 +269,15 @@ pub struct Territory {
     pub cwd: String,
 }
 
-/// One live crown row: the canonical scope, its rung, its holder's name.
+/// One live crown row: the canonical scope, its rung, its holder's name and
+/// the holder's harness session id (the crown-name store binds its record by
+/// session id, law d-e952ed19 - never by the mutable row name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Crown {
     pub scope: String,
     pub level: u8,
     pub holder: String,
+    pub holder_session: Option<String>,
 }
 
 /// The `active_backlog` config block, coerced with the Python validator's
@@ -446,6 +449,7 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
             scope: canon,
             level,
             holder: row.name.clone(),
+            holder_session: row.harness_session_id.clone(),
         });
     }
     out.sort_by(|a, b| a.scope.cmp(&b.scope));
@@ -963,9 +967,9 @@ mod resolve_tests {
     ) -> (PathBuf, PathBuf) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.toml"), config).unwrap();
-        std::fs::write(
-            dir.join("graph.json"),
-            serde_json::to_string(&graph).unwrap(),
+        crate::graph_store::seed_rows(
+            &dir.join("graph.json"),
+            graph["entries"].as_array().unwrap(),
         )
         .unwrap();
         let registry_path = dir.join("registry.json");
@@ -1047,7 +1051,10 @@ path = \"/repo/alpha\"
             json!({"entries": []}),
             registry_fixture(),
         );
-        std::fs::remove_file(tmp.path().join("graph.json")).unwrap();
+        // The store is graph.db beside the anchor name; absent reads as an
+        // empty store (open creates it), so unreadable = corrupt db file.
+        let db = crate::backlog::database_path(&tmp.path().join("graph.json"));
+        std::fs::write(&db, b"not a database").unwrap();
         let err = resolve_territories(&tmp.path().to_path_buf(), &registry).unwrap_err();
         assert!(err.0.contains("graph unreadable"), "{err}");
     }

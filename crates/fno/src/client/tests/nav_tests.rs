@@ -61,6 +61,7 @@ fn nav_filter_state_composes_with_text() {
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -98,6 +99,7 @@ fn nav_filter_matches_pane_id() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 307,
         label: "shell".into(),
+        ..Default::default()
     }];
     v.layout.agents = vec![agent_row("claude", 11, None, false)];
     let rows = |q: &str| {
@@ -221,6 +223,7 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -263,6 +266,7 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -314,6 +318,7 @@ fn nav_overlay_lines_show_the_matched_identity_token() {
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 307,
         label: "shell".into(),
+        ..Default::default()
     }];
     let unseen = NavView {
         query: "307".into(),

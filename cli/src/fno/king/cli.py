@@ -124,6 +124,12 @@ def init_cmd(
         )
         raise typer.Exit(2)
     scope = canonical_scope(list(_canonical_members(scope)))
+    from fno.rust_binary import call_binary_json
+    admit = ["readiness", "--scope", scope, "--session", harness_session_id, "--ensure-goal"]
+    error, _ = call_binary_json("loop", admit)
+    if error:
+        typer.echo(f"king: refusing crown admission for {scope!r}: {error}", err=True)
+        raise typer.Exit(2)
 
     try:
         manifest_path = king_manifest_path(scope)
@@ -151,6 +157,30 @@ def init_cmd(
     typer.echo(f"scope:  {fields['scope']}")
     _print_settled_children(scope)
     _warn_uncrowned_row(scope)
+    _reign_hold()
+
+
+def _reign_hold(argv: list[str] | None = None) -> None:
+    """Fire-and-forget the reign hold (the beat's `hold --off` drains it)."""
+    import re
+    import shutil
+    import subprocess
+
+    from fno.config import load_settings
+
+    if argv is None:
+        match = re.match(r"(\d+)([smhd])", str(load_settings().king.checkin_interval))
+        count, unit = match.groups() if match else ("55", "m")
+        minutes = max(1, int(count) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] // 60)
+        # The running binary first (cmd_hold's idiom): a PATH `fno` lags.
+        binary = sys.argv[0] if Path(sys.argv[0]).is_file() else shutil.which("fno")
+        argv = [binary or sys.argv[0], "agents", "mail", "hold", "--for", str(minutes)]
+    try:
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except (OSError, TypeError):
+        pass
 
 
 def _print_settled_children(scope: str) -> None:
@@ -280,6 +310,7 @@ def done_cmd(
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import load_registry, update_registry
     from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
+    from fno.king.state import _owner_state_root
 
     if scope.strip():
         # Rows store the canonical form, so the compares below must not
@@ -369,9 +400,12 @@ def done_cmd(
     # it under the manifest lock, so a successor crowned mid-vacate survives.
     # Read from the file, never the row, so a resumed king expires the manifest
     # it was armed with.
+    owner_root = _owner_state_root(getattr(caller, "cwd", None))
     try:
         expired_manifest_session = (
-            parse_manifest(king_manifest_path(scope)).get("harness_session_id") or None
+            parse_manifest(
+                king_manifest_path(scope, state_root=owner_root)
+            ).get("harness_session_id") or None
         )
     except (OSError, ValueError):
         expired_manifest_session = None
@@ -445,7 +479,7 @@ def done_cmd(
     # lock (ownership was proven by the locked vacate above). False means the
     # file is no longer the manifest this expiry targeted.
     if not remove_king_manifest(
-        scope, expected_harness_session_id=expired_manifest_session
+        scope, expected_harness_session_id=expired_manifest_session, state_root=owner_root
     ):
         typer.echo(
             f"king: row vacated, but the manifest for {scope!r} could not be "
@@ -476,7 +510,7 @@ def cancel_cmd(
     clear: bool = typer.Option(False, "--clear", help="Clear the king cancel signal."),
 ) -> None:
     """Set or clear the cancel signal beside a canonical crown manifest."""
-    from fno.king.state import king_manifest_path
+    from fno.king.state import king_manifest_path, parse_manifest
 
     manifest = king_manifest_path(scope)
     if not manifest.is_file():
@@ -495,6 +529,11 @@ def cancel_cmd(
             sentinel.touch()
             _emit_cancel_signal(sentinel, scope)
             typer.echo(f"king: cancel signal set: {sentinel}")
+            # The cancelled crown's hold lifts: clock and stamp both leave.
+            from fno.rust_binary import resolve_binary
+
+            session_id = parse_manifest(manifest).get("harness_session_id") or ""
+            _reign_hold([str(resolve_binary()), "mail-hold", "--session", session_id, "--off"])
     except OSError as exc:
         typer.echo(f"king: could not update cancel signal {sentinel}: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -548,7 +587,7 @@ def _own_crown_argv(verb: str, scope: str) -> tuple[list[str], str]:
             "there. Reinstall fno, run `fno doctor update --rust`, or set "
             "FNO_AGENTS_BIN."
         )
-    root = _owner_state_root(None)
+    root = _owner_state_root(getattr(caller, "cwd", None))
     argv = [str(binary), verb, "--scope", own,
             "--root", str(root.parent if root.name == ".fno" else root)]
     if session_id:
@@ -662,14 +701,10 @@ def history_cmd(
     ``fno agents court -n`` answers who rules NOW; this answers what
     happened across the reign. Contract: docs/architecture/reign.md.
     """
-    from fno.king.history import HistoryUnreadable, resolve_scope, run_native
+    from fno.king.history import run_native
     from fno.paths import event_journals
 
-    try:
-        crown = resolve_scope(scope)
-    except HistoryUnreadable as exc:
-        _refuse(f"king: {exc}")
-    code, out, err = run_native(event_journals(), crown, as_json)
+    code, out, err = run_native(event_journals(), scope, as_json)
     if out:
         typer.echo(out.rstrip("\n"))
     if err:
@@ -681,13 +716,13 @@ def checkin_cmd(ctx: typer.Context) -> None:
     """Run the reign check-in body: gather, print, diff, journal.
 
     Flags pass through to the native ``king-checkin`` beat: [--scope
-    <scope>] [--no-emit] [--json]. This shell resolves the caller's crown
-    and the paths Python owns; the beat never decides.
+    <scope>] [--no-emit] [--json]. The beat resolves the caller's crown
+    scope, level and board state natively; this shell supplies the paths
+    Python owns. The beat never decides.
     """
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
-    from fno.king.history import HistoryUnreadable, resolve_scope
     from fno.paths import (
         event_journals,
         graph_json,
@@ -698,13 +733,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
     from fno.rust_binary import resolve_binary
 
     passed = list(ctx.args)
-    explicit_scope = next(
-        (passed[i + 1] for i, t in enumerate(passed) if t == "--scope" and i + 1 < len(passed)), ""
-    )
-    try:
-        crown = resolve_scope(explicit_scope)
-    except HistoryUnreadable as exc:
-        _refuse(f"king: {exc}")
     binary = resolve_binary()
     if binary is None:
         _refuse(
@@ -716,8 +744,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
         str(binary),
         "king-checkin",
         *passed,
-        "--scope",
-        crown,
         "--graph",
         str(graph_json()),
         "--handoffs-dir",
@@ -729,30 +755,6 @@ def checkin_cmd(ctx: typer.Context) -> None:
     ]
     for path in event_journals():
         argv += ["--events-path", str(path)]
-    state = None
-    try:
-        from fno.agents.crown import calling_agent_row
-        from fno.king.state import resolve_king_manifest_path
-
-        caller = calling_agent_row()
-        sid = getattr(caller, "harness_session_id", None) or ""
-        if sid:
-            state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
-    except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
-        state = None
-    if state is not None:
-        argv += ["--board-state", str(state)]
-    try:
-        from fno.agents.registry import load_registry
-
-        level = next(
-            r.crown_level
-            for r in load_registry()
-            if getattr(r, "crown_scope", None) == crown and r.crown_level is not None
-        )
-        argv += ["--level", str(level)]
-    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
-        pass
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.stdout:
         typer.echo(proc.stdout.rstrip("\n"))

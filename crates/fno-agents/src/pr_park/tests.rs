@@ -243,11 +243,18 @@ fn resolve_follows_a_configured_state_dir() {
     // The store must follow the same `state_dir` the Python watcher reads,
     // or the king's parked board and the daemon sweep watch an empty file
     // while the parks live under the override.
+    // The default-home leg compares two HOME-derived paths, so the env is
+    // pinned for the body: a sibling test's leaked HOME or FNO_HOME makes
+    // the two reads disagree (seen on CI 2026-09-26).
+    let saved_home = std::env::var("HOME").ok();
+    let saved_fno_home = std::env::var("FNO_HOME").ok();
     let dir = std::env::temp_dir().join(format!(
         "pr-park-test-resolve-{}-{}",
         std::process::id(),
         now_secs()
     ));
+    std::env::set_var("HOME", &dir);
+    std::env::remove_var("FNO_HOME");
     let repo = dir.join("repo");
     write(
         &repo.join(".fno/config.toml"),
@@ -274,6 +281,14 @@ fn resolve_follows_a_configured_state_dir() {
     // test env) resolves exactly where the watcher already writes.
     write(&repo.join(".fno/config.toml"), "unrelated = true\n");
     assert_eq!(Paths::resolve(&repo).state, Paths::from_home().state);
+    match saved_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    match saved_fno_home {
+        Some(v) => std::env::set_var("FNO_HOME", v),
+        None => std::env::remove_var("FNO_HOME"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

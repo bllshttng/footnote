@@ -11,6 +11,7 @@ The registration core lives in ``fno.agents.registry`` and the
 fail-open SessionStart entry point in ``fno.agents.register_session``.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -42,7 +43,10 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     )
 
     assert entry.harness == "claude"
-    assert entry.short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
+    # The transport short id is claude's own 8-hex attach/job key (the uuid's
+    # leading segment), NOT the full uuid: `claude attach <short_id>` refuses a
+    # full uuid, so a row carrying one was unattachable from the mux tap.
+    assert entry.short_id == "ef9982cc"
     # Registered NON-live: a hand-started session has no live transport, so it
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
@@ -138,8 +142,10 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
     assert a.name != b.name
     rows = load_registry()
     assert len(rows) == 2
+    # The transport short id is the derived 8-hex job key, not the full
+    # session id: claude attach refuses a full uuid.
     ids = {r.short_id for r in rows}
-    assert ids == {"11111111-aaaa", "22222222-bbbb"}
+    assert ids == {"11111111", "22222222"}
 
 
 def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypatch) -> None:
@@ -1409,13 +1415,10 @@ def _seed_deferred_node() -> None:
 
     g = paths.graph_json()
     g.parent.mkdir(parents=True, exist_ok=True)
-    g.write_text(
-        json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
             "id": DEFER_NODE, "title": "deferred provenance target",
             "type": "feature", "project": "fno", "status": "ready",
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
 
 
 def _deferred_sessions() -> list[dict]:
@@ -1440,7 +1443,7 @@ def _parked_row(name: str = "target-x-def1"):
             pid_start_time=1_000,
             node=DEFER_NODE,
             effort="xhigh",
-            pending_session_row={"phase": "do", "merge_grant": None},
+            pending_session_row={"phase": "execute", "merge_grant": None},
             cwd="/proj",
             log_path="",
             status="spawning",
@@ -1467,7 +1470,7 @@ def test_session_start_first_fill_opens_the_parked_row(
     rows = _deferred_sessions()
     assert len(rows) == 1
     assert rows[0]["session_id"] == REMINT
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     assert rows[0]["effort"] == "xhigh"
     row = load_registry()[0]
     assert row.pending_session_row is None
@@ -1492,7 +1495,7 @@ def test_restamp_first_fill_opens_the_parked_row(
     rows = _deferred_sessions()
     assert len(rows) == 1
     assert rows[0]["session_id"] == REMINT
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     row = load_registry()[0]
     assert row.pending_session_row is None
 
@@ -1510,7 +1513,7 @@ def test_deferred_open_is_a_noop_after_the_claim_path_won(
     _seed_deferred_node()
     _parked_row()
     append_session_record(
-        paths.graph_json(), DEFER_NODE, phase="do", harness="claude",
+        paths.graph_json(), DEFER_NODE, phase="execute", harness="claude",
         session_id=REMINT, started_at="2026-09-22T00:00:00Z",
     )
     entry, outcome = record_session_observation(

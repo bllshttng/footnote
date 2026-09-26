@@ -7,6 +7,7 @@ sources, an unencoded node refuses before any peer exists, and a typed message
 wins over the node.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -86,7 +87,7 @@ def _invoke(runner, *args):
     return runner.invoke(agents_app, ["spawn", "--name", "w1", *args])
 
 
-def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner):
+def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner, loop_admission_ready):
     """AC1-HP: no typed message + encoded node -> the pane seed is the node's
     rendered verb command, the brief rides TARGET_BRIEF, and the receipt names
     both sources."""
@@ -130,7 +131,9 @@ def test_typed_message_without_a_node_is_never_consulted(monkeypatch, runner):
     assert "TARGET_BRIEF" not in received["provenance"]
 
 
-def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runner):
+def test_typed_message_with_a_node_composes_the_nodes_command(
+    monkeypatch, runner, loop_admission_ready
+):
     """with `--node`, a prose message gains the node's derived
     command in front; the node row is read and the brief rides along."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -140,7 +143,9 @@ def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runne
     assert "brief_source" not in result.output
 
 
-def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runner):
+def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(
+    monkeypatch, runner, loop_admission_ready
+):
     """The dispatch-next porcelain pins its lane: --mux-session reaches
     dispatch_spawn_bounded_pane as `session`, and a non-pane substrate refuses."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -155,7 +160,7 @@ def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runn
     assert "pane-only" in result.output
 
 
-def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
+def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner, loop_admission_ready):
     """(x-c914) The pane's birth account rides the provenance env so the mux
     reads it back for the sideline glyph; claude-gated like the row axis."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -176,7 +181,7 @@ def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
 # ---- x-3873 change 1: the door ensures the worktree (AC1-*) ----------------
 
 
-def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path):
+def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path, loop_admission_ready):
     """AC1-HP: no typed message and no explicit cwd source -> the ensure seam
     runs once with the node's recorded cwd, the NODE id and the resolved
     harness, and the worker launches in the path it printed."""
@@ -211,7 +216,7 @@ def test_ensure_refusal_holds_the_node(monkeypatch, runner):
     assert received == {}
 
 
-def test_typed_here_skips_the_ensure(monkeypatch, runner):
+def test_typed_here_skips_the_ensure(monkeypatch, runner, loop_admission_ready):
     """AC1-EDGE (--here): the caller opted in; the ensure is never consulted."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
@@ -227,7 +232,7 @@ def test_typed_here_skips_the_ensure(monkeypatch, runner):
     assert result.exit_code == 0, result.output
 
 
-def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path):
+def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path, loop_admission_ready):
     """AC1-EDGE (--cwd): the caller's explicit dir wins, unchanged."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
@@ -447,9 +452,7 @@ def _rust_graph(tmp_path, monkeypatch):
     """Point the binary's own store read (FNO_HOME -> graph.json) at a fixture
     naming x-1, so the nodeless derive arm resolves it without the machine."""
     monkeypatch.setenv("FNO_HOME", str(tmp_path))
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8"
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-1"}]}))
 
 
 def _stub_verb_seq(monkeypatch, answers):
@@ -550,7 +553,9 @@ def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row, _
 
 
 @requires_rust
-def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _target_row, _rust_graph):
+def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
+    monkeypatch, runner, _target_row, _rust_graph, loop_admission_ready
+):
     """x-8d88 Task 2: a /fno:target x-1 seed and no --node reaches the pane
     mint with the node resolved: provenance carries FNO_NODE and the seed
     passes through unchanged (agreement, so no compose rewrite)."""
@@ -582,3 +587,80 @@ def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _
     assert result.exit_code == 0, result.output
     assert received["provenance"]["FNO_NODE"] == "x-1"
     assert received["message"] == "/fno:target x-1"
+
+
+# ---- the payload names the node; the resolver answers with a source --------
+
+
+def test_seam_refuses_when_the_payload_names_an_unknown_node(monkeypatch, capsys):
+    """AC7-ERR: the payload names x-dead; the scan-arm compose carries the
+    payload source, and the row gate's refusal exits 2 before any peer."""
+    _stub_row(monkeypatch, None)
+    _stub_verb_seq(monkeypatch, [
+        {
+            "action": "compose",
+            "argv": ["spawn", "/fno:target x-dead", "--node", "x-dead"],
+            "source": "payload",
+        },
+        {
+            "action": "refuse",
+            "message": "the payload names x-dead, but no readable backlog row has that id; fix the id, or pass the work as prose",
+        },
+    ])
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-dead"))
+    assert exc.value.code == 2
+    assert "the payload names x-dead" in capsys.readouterr().err
+
+
+@requires_rust
+def test_seam_real_binary_binds_a_seed_named_after_a_modifier(monkeypatch, tmp_path):
+    """AC1/AC6: the id rides after a modifier token (`L x-1be2`); the strict
+    scan names it, the seam splices --node, and the full call re-decides with
+    the row facts."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    _stub_row(
+        monkeypatch,
+        _row(id="x-1be2", dispatch_verb="/target", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path)),
+    )
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target L x-1be2"))
+    assert args[-2:] == ["--node", "x-1be2"]
+    assert node_verb is None
+
+
+@requires_rust
+def test_seam_real_binary_refuses_a_payload_named_unknown_node(monkeypatch, capsys):
+    """AC7-ERR on the real transport: the compiled resolver names x-dead from
+    the payload, and the refusal names the payload, never --node."""
+    _stub_row(monkeypatch, None)
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-dead"))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "the payload names x-dead, but no readable backlog row" in err
+
+
+@requires_rust
+def test_seam_real_binary_payload_disagreement_names_the_payload(monkeypatch, tmp_path, capsys):
+    """AC4-ERR on the real transport: a payload-named node whose verb
+    disagrees refuses naming the payload and the spawn to run instead."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    _stub_row(
+        monkeypatch,
+        _row(id="x-1be2", dispatch_verb="/blueprint", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path)),
+    )
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-1be2"))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "the payload names /target x-1be2" in err
+    assert "spawn /fno:blueprint x-1be2" in err
+    assert "--node" not in err

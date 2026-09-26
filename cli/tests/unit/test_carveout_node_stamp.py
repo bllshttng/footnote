@@ -8,6 +8,7 @@ pin the capture shapes: claimed node, manifest-held node, foreign/stale
 manifest, ambiguous claims, ambient shell - plus legacy-row parsing.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -166,9 +167,9 @@ def test_add_carveout_raises_the_owning_nodes_difficulty_band(tmp_path, monkeypa
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID)
     _write_manifest(tmp_path, graph_node_id="x-out1")
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-out1", "title": "t", "status": "in_progress", "difficulty": "medium",
-    }]}), encoding="utf-8")
+    }]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     cv, _ = add_carveout(
         tmp_path, kind="deferred", description="left-out work", storage_root=tmp_path

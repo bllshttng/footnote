@@ -7,6 +7,7 @@ reason on an unreadable graph - never ``True``, never ``False`` - and the
 summary counts unknowns separately from disagreements.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -44,9 +45,7 @@ def _prepare(monkeypatch, tmp_path, rows, graph_entries=None) -> None:
     if graph_entries is not None:
         graph_path = paths.graph_json()
         graph_path.parent.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(
-            json.dumps({"entries": graph_entries}), encoding="utf-8"
-        )
+        seed_graph(graph_path, json.dumps({"entries": graph_entries}))
 
 
 def test_a_crown_over_a_real_live_epic_agrees(tmp_path: Path, monkeypatch) -> None:

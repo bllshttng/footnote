@@ -20,9 +20,14 @@ import { join, basename } from "node:path"
 // Fleet announcements at the system-prompt boundary. One bus line,
 // one per-session cursor; a session that already read the id hears silence.
 // Fail-open: any error or missing binary injects nothing.
+
+/** Where announcement text lands: the V1 arm passes a `string[]`, the V2 arm
+ * a sink that wraps each string as a `{ type: "text" }` part. */
+type SystemSink = { push(text: string): unknown }
+
 async function injectAnnouncements(
   input: unknown,
-  output: { system: string[] },
+  output: { system: SystemSink },
 ): Promise<void> {
   try {
     const session = input as { session?: { id?: string }; sessionID?: string } | null
@@ -718,6 +723,41 @@ function loadOrchestratorPrompt(projectDir: string): string {
   }
 }
 
+// One body for each side effect both plugin arms share; the V1 and V2 hooks
+// only differ in where the result lands.
+
+/** The canon-doc pointer text for one session, or "" when none. Compaction
+ * must never fail at the moment it fires. */
+async function canonDocPointer(projectDir: string, sessionID: string): Promise<string> {
+  try {
+    const root = resolvePluginRoot()
+    if (!root) return ""
+    const pointer = await runScript(
+      join(root, "hooks", "precompact-canon-doc.sh"),
+      JSON.stringify({ cwd: projectDir, session_id: sessionID }),
+      5_000,
+    )
+    return pointer.trim()
+  } catch {
+    return ""
+  }
+}
+
+/** One claim heartbeat for one session. Never blocks a completed tool call. */
+async function claimHeartbeat(projectDir: string, sessionID: string): Promise<void> {
+  try {
+    const root = resolvePluginRoot()
+    if (!root) return
+    await runScript(
+      join(root, "hooks", "claim-heartbeat.sh"),
+      JSON.stringify({ cwd: projectDir, session_id: sessionID }),
+      5_000,
+    )
+  } catch {
+    // never blocks a completed tool call
+  }
+}
+
 /**
  * Activation gate. The plugin auto-loads (opencode scans `.opencode/plugins/`),
  * but stays INERT unless explicitly opted in — so merely opening this repo in
@@ -789,34 +829,13 @@ const plugin: Plugin = async (input: PluginInput) => {
     },
     async "tool.execute.after"(input: { tool: string; sessionID: string; callID: string; args: any }) {
       // Claim heartbeat on the same payload the script's stdin reader parses.
-      try {
-        const root = resolvePluginRoot()
-        if (!root) return
-        await runScript(
-          join(root, "hooks", "claim-heartbeat.sh"),
-          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
-          5_000,
-        )
-      } catch {
-        // never blocks a completed tool call
-      }
+      await claimHeartbeat(projectDir, input.sessionID)
     },
     async "experimental.session.compacting"(input: { sessionID: string }, output: { context: string[] }) {
       // The mechanical canon-doc sections ride the compaction prompt, so
       // footnote's context survives a compaction without injected prompt text.
-      try {
-        const root = resolvePluginRoot()
-        if (!root) return
-        const pointer = await runScript(
-          join(root, "hooks", "precompact-canon-doc.sh"),
-          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
-          5_000,
-        )
-        const text = pointer.trim()
-        if (text) output.context.push(text)
-      } catch {
-        // compaction must never fail at the moment it fires
-      }
+      const text = await canonDocPointer(projectDir, input.sessionID)
+      if (text) output.context.push(text)
     },
     tool: {
       task: taskTool,
@@ -841,4 +860,101 @@ function runScript(script: string, payload: string, timeoutMs: number): Promise<
   })
 }
 
-export default { id: "fno", server: plugin }
+// ---------------------------------------------------------------------------
+// The opencode 2 arm. A V2 plugin is a plain `{ id, setup }` object: V2's
+// `define(plugin)` is the identity function, so no package import is needed
+// and the file stays loadable on 1.14.50, which has no V2 package installed
+// (AC1-NODEP). The context type is structural, like SessionClient.
+// ---------------------------------------------------------------------------
+
+type V2SystemPart = { type: "text"; text: string }
+
+/** The slice of the opencode 2 plugin context this plugin uses. */
+type V2Context = {
+  directory?: string
+  session: {
+    hook(
+      name: "context",
+      handler: (e: { system: V2SystemPart[]; sessionID?: string; session?: { id?: string } }) => void | Promise<void>,
+    ): void
+    hook(
+      name: "compaction",
+      handler: (e: { context: string[]; sessionID?: string }) => void | Promise<void>,
+    ): void
+  }
+  tool: {
+    hook(
+      name: "execute.before",
+      handler: (e: { tool: string; sessionID: string; input?: unknown }) => void | Promise<void>,
+    ): void
+    hook(
+      name: "execute.after",
+      handler: (e: { tool: string; sessionID: string }) => void | Promise<void>,
+    ): void
+  }
+}
+
+/** One V2 caller of injectAnnouncements: the same fetch and session read,
+ * with the text landing as `{ type: "text" }` parts instead of raw strings. */
+async function injectAnnouncementsV2(event: {
+  system: V2SystemPart[]
+  sessionID?: string
+  session?: { id?: string }
+}): Promise<void> {
+  const parts: V2SystemPart[] = []
+  await injectAnnouncements(event, {
+    system: {
+      push: (text: string) => {
+        parts.push({ type: "text", text })
+      },
+    },
+  })
+  for (const part of parts) event.system.push(part)
+}
+
+/** The opencode 2 entrypoint. Registers the same protections, prompt
+ * injection, compaction canon-doc and heartbeat the V1 arm does, through the
+ * V2 hook seam. Returns a cleanup function. */
+export function setupV2(ctx: V2Context): () => void {
+  if (!isActivated()) return () => {} // inert until opted in (AC1-INERT)
+  const projectDir = ctx.directory ?? process.cwd()
+
+  const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
+  const { agents: footnoteAgents } = loadFootnoteAgents(projectDir)
+
+  // opencode 2 registers agents from installed agent files, not from a
+  // config hook, so this arm attempts no add and names what it left out.
+  const names = Object.keys(footnoteAgents).sort()
+  if (names.length) {
+    console.error(
+      `[footnote] opencode 2: agents ${names.join(", ")} are not registered by this plugin; ` +
+        `install them as agent files with the Footnote OpenCode installer`,
+    )
+  }
+  // Admission reads the live child set through session.list, which the
+  // opencode 2 plugin session API does not expose. A tool that always
+  // refused as capacity unknown helps nobody, so neither is offered.
+  console.error(
+    "[footnote] opencode 2: task delegation is unavailable; it needs a live child count that the OpenCode 2 plugin session API does not expose",
+  )
+
+  ctx.session.hook("context", async (event) => {
+    event.system.push({ type: "text", text: orchestratorPrompt })
+    await injectAnnouncementsV2(event)
+  })
+  ctx.session.hook("compaction", async (event) => {
+    const text = await canonDocPointer(projectDir, event.sessionID ?? "")
+    if (text) event.context.push(text)
+  })
+  ctx.tool.hook("execute.before", async (event) => {
+    // The deny channel is a throw here, exactly as on the V1 hook.
+    const out = await runProtections(event.tool, event.sessionID, event.input, projectDir, runScript)
+    if (out.denied) throw new Error(out.reason)
+  })
+  ctx.tool.hook("execute.after", async (event) => {
+    await claimHeartbeat(projectDir, event.sessionID)
+  })
+  return () => {}
+}
+
+export default { id: "fno", server: plugin, setup: setupV2 }

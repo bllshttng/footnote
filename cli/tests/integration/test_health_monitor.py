@@ -11,6 +11,7 @@ Covers:
 - ``fno backlog triage trend`` history readout
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone, timedelta
@@ -85,7 +86,7 @@ def _write_idea_nodes(graph_path: Path, n: int) -> None:
             }
         )
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": entries}, indent=2))
+    seed_graph(graph_path, json.dumps({"entries": entries}, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -772,14 +773,12 @@ def _make_pending_node(
 
 def _write_nodes(graph_path: Path, nodes: list[dict]) -> None:
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": nodes}, indent=2))
+    seed_graph(graph_path, json.dumps({"entries": nodes}, indent=2))
 
 
 def test_health_mismatch_ac3_hp(tmp_graph, monkeypatch):
     """AC3-HP: pending node with mapped project and cwd != work-map root is
     counted in project_cwd_mismatch and listed in project_cwd_mismatch_nodes."""
-    import os
-
     mapped_root = "/real/project/root"
     wrong_cwd = "/wrong/cwd"
 
@@ -935,8 +934,6 @@ def test_health_mismatch_ac3_fr_evaluate_thresholds_breach():
 
 def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
     """--check exits 4 when project_cwd_mismatch breaches threshold=0."""
-    import os
-
     mapped_root = "/real/root"
     wrong_cwd = "/wrong/cwd"
 

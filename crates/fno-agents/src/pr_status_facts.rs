@@ -17,7 +17,6 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The gh probe seam, shaped like `authorized_merge::Probes::run_gh` but
 /// returning the streams SEPARATE: this module parses stdout as JSON, and a
@@ -29,17 +28,28 @@ pub(crate) trait GhProbe {
 
 pub(crate) struct RealGhProbe;
 
+/// One wall-clock bound per gh call: the status door serves callers (the
+/// king-board gate read, the nudge ladder) that each lost their own
+/// per-call bound when they moved in process, so the bound lives here where
+/// every door read passes. Generous by design - it stops a hang, it does
+/// not pace reads (the fleet budget ledger owns that).
+const GH_CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl GhProbe for RealGhProbe {
     fn run_gh(&self, cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
-        let out = Command::new("gh")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = crate::loopcheck::bounded_read(
+            std::ffi::OsStr::new("gh"),
+            &refs,
+            cwd,
+            "pr-status gh",
+            GH_CALL_BOUND,
+        )
+        .map_err(|error| crate::loopcheck::bounded_read_diagnostic("pr-status", &error))?;
         Ok((
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
+            String::from_utf8_lossy(&out.stderr_tail).into_owned(),
         ))
     }
 }
@@ -431,6 +441,30 @@ pub(crate) fn zero_job_failures(
     Ok(out)
 }
 
+/// The GitHub annotation that distinguishes an Actions timeout from a run
+/// cancelled before it reached a verdict.
+pub(crate) fn timeout_annotation(annotations: &Value) -> Option<String> {
+    fn timeout_message(annotation: &Value) -> Option<String> {
+        if annotation.get("annotation_level").and_then(Value::as_str) != Some("failure") {
+            return None;
+        }
+        let message = annotation.get("message").and_then(Value::as_str)?;
+        message
+            .contains("exceeded the maximum execution time")
+            .then(|| message.to_string())
+    }
+
+    let rows = annotations.as_array()?;
+    if rows.first().is_some_and(Value::is_array) {
+        rows.iter()
+            .filter_map(Value::as_array)
+            .flatten()
+            .find_map(timeout_message)
+    } else {
+        rows.iter().find_map(timeout_message)
+    }
+}
+
 /// The `status-zero-job-runs` op: `slug` + the raw runs/check-runs arrays
 /// in, the Python rollup rows out. `jobs_total` rides the gh probe seam.
 fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
@@ -445,9 +479,6 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     let Some(check_runs) = payload.get("check_runs").and_then(Value::as_array) else {
         return json!({"error": "status-zero-job-runs needs a check_runs array"});
     };
-    // The op owns the runs listing: paginated, because a busy head carries
-    // more runs than one page and a zero-job failure past page 1 must still
-    // read red. No caller passes a pre-read page - one listing, one reader.
     let Some(sha) = payload
         .get("sha")
         .and_then(Value::as_str)
@@ -455,10 +486,40 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     else {
         return json!({"error": "status-zero-job-runs needs a non-empty sha"});
     };
+    match zero_job_scan(probes, &cwd, slug, sha, check_runs) {
+        Err(err) => json!({"error": err}),
+        Ok(scan) => json!({
+            "rows": scan.rows,
+            // The same listing, for the caller's workflow-name mapping.
+            "listing": scan.listing,
+            "check_runs": scan.check_runs,
+        }),
+    }
+}
+
+/// The zero-job scan's probe-generic core: the paginated runs listing, the
+/// timed-out relabel, and the shared rule. `zero_job_runs_op` shapes it as a
+/// JSON receipt; the pr_status reader calls it in process.
+pub(crate) struct ZeroJobScan {
+    pub rows: Vec<Value>,
+    pub listing: Vec<Value>,
+    pub check_runs: Vec<Value>,
+}
+
+pub(crate) fn zero_job_scan<P: GhProbe>(
+    probes: &P,
+    cwd: &Path,
+    slug: &str,
+    sha: &str,
+    check_runs: &[Value],
+) -> Result<ZeroJobScan, String> {
+    // The op owns the runs listing: paginated, because a busy head carries
+    // more runs than one page and a zero-job failure past page 1 must still
+    // read red. No caller passes a pre-read page - one listing, one reader.
     let path = format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100");
-    let runs: Vec<Value> = match probes
+    let runs: Vec<Value> = probes
         .run_gh(
-            &cwd,
+            cwd,
             &[
                 "api".to_string(),
                 path,
@@ -489,16 +550,47 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
                 }
             }
             runs
-        }) {
-        Ok(runs) => runs,
-        Err(err) => return json!({ "error": err }),
-    };
+        })?;
+    let mut check_runs = check_runs.to_vec();
+    for run in &mut check_runs {
+        let timed_out = run.get("conclusion").and_then(Value::as_str) == Some("cancelled")
+            && run
+                .pointer("/output/annotations_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0;
+        if !timed_out {
+            continue;
+        }
+        let Some(id) = run.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let path = format!("repos/{slug}/check-runs/{id}/annotations");
+        let timeout = probes
+            .run_gh(
+                cwd,
+                &[
+                    "api".to_string(),
+                    "--paginate".to_string(),
+                    "--slurp".to_string(),
+                    path,
+                ],
+            )
+            .ok()
+            .and_then(|(ok, stdout, _stderr)| ok.then_some(stdout))
+            .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+            .and_then(|annotations| timeout_annotation(&annotations));
+        if let (Some(timeout), Some(run)) = (timeout, run.as_object_mut()) {
+            run.insert("conclusion".to_string(), json!("timed_out"));
+            run.insert("timeout".to_string(), json!(timeout));
+        }
+    }
     let jobs_total = |id: u64| -> Result<u64, String> {
         let args = vec![
             "api".to_string(),
             format!("repos/{slug}/actions/runs/{id}/jobs?per_page=1"),
         ];
-        let (ok, stdout, _stderr) = probes.run_gh(&cwd, &args)?;
+        let (ok, stdout, _stderr) = probes.run_gh(cwd, &args)?;
         if !ok {
             return Err(format!("the jobs read for run {id} failed"));
         }
@@ -508,26 +600,24 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
     };
-    match zero_job_failures(&runs, check_runs, &jobs_total) {
-        Err(err) => json!({"error": err}),
-        Ok(rows) => json!({
-            "rows": rows
-                .iter()
-                .map(|r| {
-                    json!({
-                        "name": r.path,
-                        "status": "completed",
-                        "conclusion": r.conclusion,
-                        "startedAt": r.created_at,
-                        "detailsUrl": r.url,
-                        "workflow": r.path,
-                    })
-                })
-                .collect::<Vec<_>>(),
-            // The same listing, for the caller's workflow-name mapping.
-            "listing": runs,
-        }),
-    }
+    let rows = zero_job_failures(&runs, &check_runs, &jobs_total)?
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.path,
+                "status": "completed",
+                "conclusion": r.conclusion,
+                "startedAt": r.created_at,
+                "detailsUrl": r.url,
+                "workflow": r.path,
+            })
+        })
+        .collect();
+    Ok(ZeroJobScan {
+        rows,
+        listing: runs,
+        check_runs,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -543,16 +633,24 @@ fn window_pair(window: Option<&Vec<Value>>) -> Option<(u64, u64)> {
     let window = window?;
     let first = window.first()?;
     if first.is_object() {
-        let failed = window
+        let failed_index = window
             .iter()
-            .find(|step| step.get("conclusion").and_then(Value::as_str) == Some("failure"))?;
+            .position(|step| step.get("conclusion").and_then(Value::as_str) == Some("failure"))?;
+        let failed = &window[failed_index];
         let start = parse_rfc3339_unix(failed.get("started_at").and_then(Value::as_str)?)?;
-        let end = parse_rfc3339_unix(failed.get("completed_at").and_then(Value::as_str)?)?;
+        let completed = parse_rfc3339_unix(failed.get("completed_at").and_then(Value::as_str)?)?;
+        let slack_end = completed.saturating_add(1);
+        let successor_start = window
+            .iter()
+            .skip(failed_index + 1)
+            .filter_map(|step| parse_rfc3339_unix(step.get("started_at").and_then(Value::as_str)?))
+            .find(|started| *started >= start);
+        let end = successor_start.map_or(slack_end, |started| slack_end.min(started));
         return Some((start, end));
     }
     let start = parse_rfc3339_unix(first.as_str()?)?;
     let end = parse_rfc3339_unix(window.get(1).and_then(Value::as_str)?)?;
-    Some((start, end))
+    Some((start, end.saturating_add(1)))
 }
 
 /// The cause of a failed job, from its own log: the harness verdict names
@@ -590,14 +688,14 @@ pub(crate) fn failure_cause(payload: &Value) -> Value {
         .position(|(_, content)| step_failed.is_match(content))
         .unwrap_or(lines.len());
     let block_range = if let Some((w_start, w_end)) = window {
-        // Timestamped-window scope. The steps API has second precision, so
-        // the end gets one second of slack; a line with no parseable
-        // timestamp cannot prove it belongs and is dropped.
+        // The steps API has second precision, so `window_pair` adds one
+        // second of slack unless the next step starts sooner. A line with no
+        // parseable timestamp cannot prove it belongs and is dropped.
         let mut block_start = lines.len();
         let mut block_end = 0;
         for (i, (ts, _)) in lines.iter().enumerate() {
             match ts {
-                Some(ts) if *ts >= w_start && *ts <= w_end + 1 => {
+                Some(ts) if *ts >= w_start && *ts <= w_end => {
                     block_start = block_start.min(i);
                     block_end = block_end.max(i + 1);
                 }
@@ -631,8 +729,19 @@ pub(crate) fn failure_cause(payload: &Value) -> Value {
     let block: Vec<String> = lines[block_range.start..block_range.end]
         .iter()
         .map(|(_, content)| content.clone())
+        .take_while(|content| {
+            !content.starts_with("##[error]Process completed with exit code")
+                && !content.starts_with("##[error]The operation was canceled.")
+        })
         .filter(|content| {
-            !content.is_empty() && !content.starts_with("::") && !content.starts_with("smoke: ")
+            !content.is_empty()
+                && !content.starts_with("::")
+                && !content.starts_with("smoke: ")
+                && !content.starts_with("##[group]")
+                && !content.starts_with("##[endgroup]")
+                && !content.starts_with("##[warning]")
+                && !content.starts_with("##[notice]")
+                && !content.starts_with("##[debug]")
         })
         .collect();
     let block_text = block.join("\n");

@@ -144,11 +144,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Deprecated decision shim; use fno inbox decide / fno inbox decisions.",
         {"hidden": True},
     ),
-    "law": (
-        "fno.law:law_app",
-        "Record durable project law in one call (now `fno inbox law`).",
-        {"hidden": True},
-    ),
     "resume": (
         "fno.resume.cli:cli",
         "Durable typed resume receipts (evidence, never write authority)",
@@ -921,6 +916,12 @@ def main() -> None:
         ):
             exc.msg = f"{exc.msg or ''}{_reinstall_hint(exc.name)}"
         raise
+    except (RuntimeError, ValueError) as exc:
+        refusal = getattr(exc, "fno_refusal", None)
+        if refusal is None:
+            raise
+        print(f"Error: {refusal}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

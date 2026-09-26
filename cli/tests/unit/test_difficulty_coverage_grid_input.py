@@ -1,5 +1,6 @@
 """Acceptance tests for difficulty on every graph-node birth path."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -16,7 +17,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}\n')
+    seed_graph(graph, '{"entries": []}\n')
     import fno.graph._constants as constants
     import fno.graph.store as store
 

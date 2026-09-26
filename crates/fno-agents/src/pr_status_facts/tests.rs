@@ -26,6 +26,29 @@ impl GhProbe for FakeGh {
     }
 }
 
+struct AnnotationGh {
+    ok: bool,
+    annotations: String,
+    calls: RefCell<Vec<Vec<String>>>,
+}
+
+impl GhProbe for AnnotationGh {
+    fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
+        self.calls.borrow_mut().push(args.to_vec());
+        let path = args.join(" ");
+        if path.contains("actions/runs?head_sha=") {
+            return Ok((true, r#"[{"workflow_runs":[]}]"#.to_string(), String::new()));
+        }
+        if path.contains("/check-runs/123/annotations") {
+            return Ok((self.ok, self.annotations.clone(), String::new()));
+        }
+        if path.contains("jobs?per_page=1") {
+            return Ok((true, r#"{"total_count":0}"#.to_string(), String::new()));
+        }
+        Ok((true, String::new(), String::new()))
+    }
+}
+
 fn rules_output(rules: Value) -> String {
     rules.to_string()
 }
@@ -437,6 +460,49 @@ fn the_steps_array_derives_the_failed_step_window() {
 }
 
 #[test]
+fn the_failed_step_window_stops_at_the_successor_even_within_the_same_second() {
+    let steps = json!([
+        {"name": "check-file-budget", "conclusion": "failure",
+         "started_at": "2026-09-18T00:54:28Z", "completed_at": "2026-09-18T00:54:29Z"},
+        {"name": "Both shards passed", "conclusion": "success",
+         "started_at": "2026-09-18T00:54:29Z", "completed_at": "2026-09-18T00:54:31Z"},
+    ]);
+    let log = [
+        "2026-09-18T00:54:29Z check-file-budget: cli/src/fno added +346 lines",
+        "2026-09-18T00:54:30.9958Z 20 passed, 0 failed",
+    ]
+    .join("\n");
+    let out = failure_cause(&json!({"log": log, "window": steps}));
+    assert!(out["cause"].as_str().unwrap().contains("check-file-budget"));
+    assert!(!out["cause"].as_str().unwrap().contains("20 passed"));
+}
+
+#[test]
+fn fan_in_failure_cause_ends_before_runner_teardown() {
+    let log = [
+        "test-agents=failure test-mux=success",
+        "##[error]Process completed with exit code 1.",
+        "Cleaning up orphan processes",
+    ]
+    .join("\n");
+    let out = failure_cause(&json!({"log": log}));
+    assert_eq!(out["cause"], "test-agents=failure test-mux=success");
+}
+
+#[test]
+fn runner_chrome_is_removed_before_the_failure_tail_is_chosen() {
+    let log = [
+        "the policy check found the defect",
+        "##[group]Post job cleanup",
+        "##[endgroup]",
+        "##[warning]Node.js 20 is deprecated",
+    ]
+    .join("\n");
+    let out = failure_cause(&json!({"log": log}));
+    assert_eq!(out["cause"], "the policy check found the defect");
+}
+
+#[test]
 fn unknown_ops_are_refused_by_name() {
     let out = run_op("status-nonsense", &json!({}));
     assert!(out.contains("unknown op status-nonsense"));
@@ -610,4 +676,65 @@ fn the_op_answers_rows_in_the_python_rollup_shape() {
     assert!(calls.iter().any(|argv| argv
         .iter()
         .any(|a| a.contains("repos/o/r/actions/runs/35366958901/jobs"))));
+}
+
+#[test]
+fn timeout_annotation_selects_failure_annotations_with_the_timeout_message() {
+    let annotations = json!([
+        {"annotation_level": "notice", "message": "some notice"},
+        {"annotation_level": "failure", "message": "The job has exceeded the maximum execution time of 35m0s"},
+        {"annotation_level": "failure", "message": "later timeout"},
+    ]);
+    assert_eq!(
+        timeout_annotation(&annotations),
+        Some("The job has exceeded the maximum execution time of 35m0s".to_string())
+    );
+}
+
+#[test]
+fn the_op_relabels_cancelled_check_runs_with_timeout_annotations() {
+    let message = "The job has exceeded the maximum execution time of 35m0s";
+    let probes = AnnotationGh {
+        ok: true,
+        annotations: json!([{"annotation_level": "failure", "message": message}]).to_string(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let payload = json!({
+        "slug": "o/r", "cwd": "/repo", "sha": "abc123",
+        "check_runs": [{"id": 123, "name": "stress", "status": "completed",
+            "conclusion": "cancelled", "output": {"annotations_count": 1}}],
+    });
+    let out = zero_job_runs_op(&probes, &payload);
+    assert!(out.get("error").is_none(), "{out}");
+    assert_eq!(out["check_runs"][0]["conclusion"], "timed_out");
+    assert_eq!(out["check_runs"][0]["timeout"], message);
+    assert!(probes.calls.borrow().iter().any(|args| args
+        .iter()
+        .any(|arg| arg.contains("repos/o/r/check-runs/123/annotations"))));
+}
+
+#[test]
+fn the_op_keeps_cancelled_when_the_annotation_read_fails_or_names_preemption() {
+    for (ok, annotations) in [
+        (false, "annotation read failed"),
+        (
+            true,
+            r#"[{"annotation_level":"failure","message":"Canceling since a higher priority waiting request exists"}]"#,
+        ),
+    ] {
+        let probes = AnnotationGh {
+            ok,
+            annotations: annotations.to_string(),
+            calls: RefCell::new(Vec::new()),
+        };
+        let payload = json!({
+            "slug": "o/r", "cwd": "/repo", "sha": "abc123",
+            "check_runs": [{"id": 123, "name": "stress", "status": "completed",
+                "conclusion": "cancelled", "output": {"annotations_count": 1}}],
+        });
+        let out = zero_job_runs_op(&probes, &payload);
+        assert!(out.get("error").is_none(), "{out}");
+        assert_eq!(out["check_runs"][0]["conclusion"], "cancelled");
+        assert!(out["check_runs"][0].get("timeout").is_none());
+    }
 }

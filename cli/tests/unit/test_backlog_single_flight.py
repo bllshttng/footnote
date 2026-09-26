@@ -424,6 +424,49 @@ time.sleep(120)
 """
 
 
+# The holder's own once() spawns a worker: the grandchild must inherit nothing.
+_CHILD_HOLDER_SPAWNS_GRANDCHILD = """
+import os, subprocess, sys
+from fno.backlog.single_flight import reconcile_gate
+
+def once():
+    subprocess.run(
+        [sys.executable, "-c",
+         "import os, sys; open(sys.argv[1], 'w').write(os.environ.get('FNO_DIE_WITH_PARENT', '<unset>'))",
+         sys.argv[1]],
+        check=False,
+    )
+    open(sys.argv[2], "w").write("done")
+
+reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+"""
+
+# A holder that finishes on its own a few seconds in; its "sock" slot carries
+# the done-file path (the child's argv[1] is whatever the caller passes).
+_CHILD_SLEEP_THEN_FINISH = """
+import sys, time
+from fno.backlog.single_flight import reconcile_gate
+
+def once():
+    time.sleep(4)
+    open(sys.argv[1], "w").write("finished")
+
+reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+"""
+
+# A bound holder whose named parent is ALREADY gone at arm time (ppid 1).
+_CHILD_ORPHANED_BEFORE_ARM = """
+import os, sys, time
+os.getppid = lambda: 1
+from fno.backlog.single_flight import reconcile_gate
+
+def once():
+    time.sleep(3)  # the watchdog's first tick must land while the work runs
+
+reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+"""
+
+
 def _child_env(iso: Path, extra: dict) -> dict:
     env = dict(
         os.environ,
@@ -543,12 +586,12 @@ def test_die_with_parent_unset_keeps_the_orphan_running(iso):
             proc.kill()
 
 
-def _stranger_env_child(iso: Path, sock: Path, extra: dict):
+def _stranger_env_child(iso: Path, sock: Path, extra: dict, child_src: str = _CHILD_BLOCK_ON_SOCKET):
     """A grandchild whose FNO_DIE_WITH_PARENT names a live stranger pid."""
     pidfile = iso / "child.pid"
     intermediate = subprocess.Popen(
         [sys.executable, "-c", _STRANGER_PARENT, str(os.getpid()),
-         _CHILD_BLOCK_ON_SOCKET, str(sock), str(pidfile)],
+         child_src, str(sock), str(pidfile)],
         env=_child_env(iso, extra),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -613,6 +656,88 @@ def test_the_stranger_disarm_keeps_the_budget_watch_armed(iso):
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_a_holders_grandchild_does_not_inherit_the_var(iso):
+    """AC1-HP: the reader consumes the var when it arms, so a holder's
+    grandchild inherits nothing; before the fix it read the setter's pid.
+    The grandchild's env is the oracle: only an armed holder pops the var."""
+    envfile = iso / "grandchild-env.txt"
+    donefile = iso / "holder-done.txt"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_HOLDER_SPAWNS_GRANDCHILD, str(envfile), str(donefile)],
+        env=_child_env(iso, {"FNO_DIE_WITH_PARENT": str(os.getpid())}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not donefile.exists():
+            time.sleep(0.2)
+        assert donefile.exists(), f"holder never finished: {proc.stderr.read()[:400]}"
+        assert envfile.read_text() == "<unset>", (
+            "the grandchild must not inherit FNO_DIE_WITH_PARENT"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_a_stale_var_survives_its_launcher_exiting(iso):
+    """AC1-ERR: a holder whose var names a pid that is not its parent (the
+    test's) finishes its sweep even after its real parent is killed; before
+    the fix it watched the launcher and died parent-gone."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    donefile = iso / "holder-done.txt"
+    intermediate, pidfile = _stranger_env_child(
+        iso, donefile, {}, child_src=_CHILD_SLEEP_THEN_FINISH
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        child_pid = int(pidfile.read_text())
+        _wait_for_flight_held(key, iso)
+        os.kill(intermediate.pid, signal.SIGKILL)
+        intermediate.wait(timeout=5)
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and not donefile.exists():
+            time.sleep(0.2)
+        assert donefile.exists() and donefile.read_text() == "finished", (
+            f"the holder must finish its sweep after its launcher exits "
+            f"(child {'alive' if child_pid and not _pid_gone(child_pid) else 'gone'})"
+        )
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if intermediate.poll() is None:
+            intermediate.kill()
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_bound_child_orphaned_before_arm_exits_129(iso):
+    """AC1-EDGE: the named parent is already gone at arm (ppid 1); the holder
+    releases the flight and exits 129, not the timeout code, and the label
+    carries no doubled `backlog` prefix."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_ORPHANED_BEFORE_ARM],
+        env=_child_env(iso, {"FNO_DIE_WITH_PARENT": str(os.getpid())}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        rc = proc.wait(timeout=8)
+        stderr = proc.stderr.read().decode()
+        assert rc == 129, f"orphaned holder must exit 129 (rc={rc}); stderr: {stderr[:400]}"
+        assert "backlog reconcile: parent-gone" in stderr
+        assert "backlog backlog" not in stderr
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_budget_takes_the_subtree_when_session_leader(iso):

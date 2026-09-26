@@ -110,6 +110,8 @@ enum Role {
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
+    /// `mux command <selector> ...`: one identity-pinned native action.
+    MuxCommand(fno::cli_args::MuxCommandArgs),
     /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
     /// read-only web bridge. Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
@@ -135,6 +137,14 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
+    /// binary's grouped dispatcher. The argv passes through byte-verbatim
+    /// (the sibling's catalog owns grouped and legacy spellings).
+    Backlog,
+    /// `fno inbox law set|stage|match`: the native law-door verbs, classified
+    /// lexically the way `fno doctor event` is, because the Python CLI owns
+    /// the rest of the `inbox` tree.
+    InboxLaw(Vec<OsString>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -169,10 +179,12 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
+            "--attention-api" => args.attention_api = true,
+            "--attention-port" => args.attention_port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
         }
     }
-    (web || args.stop || args.status).then_some(args)
+    (web || args.stop || args.status || args.attention_api).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -182,6 +194,16 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    // The backlog namespace claims itself lexically, like doctor-event: the
+    // sibling dispatcher owns the whole namespace's spelling (grouped and
+    // legacy), and anything it does not own yet it forwards to Python
+    // itself, so the front door hands over the argv byte-verbatim.
+    if args.first().and_then(|a| a.to_str()) == Some("backlog") {
+        return Role::Backlog;
+    }
+    if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
+        return Role::InboxLaw(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -242,6 +264,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 all,
             }),
             cli_args::MuxCmd::ShellInit { shell, json } => Role::MuxShellInit(shell, json.json),
+            cli_args::MuxCmd::Command(args) => Role::MuxCommand(args),
             cli_args::MuxCmd::Attach { name } => {
                 if is_tty {
                     Role::Client(Some(name))
@@ -293,6 +316,7 @@ fn main() {
     let env_session = mux_cli::env_server();
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
+        Role::Backlog => bootstrap::forward_backlog(&args),
         Role::NotTty => {
             // AC1-EDGE: piped/CI bare `fno` gets a notice, not a TUI. Exit 0 -
             // this is a gate, not a failure.
@@ -335,8 +359,10 @@ fn main() {
         Role::MuxShellInit(shell, json) => {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
+        Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
@@ -637,7 +663,9 @@ mod tests {
 
     #[test]
     fn proto_role_subcommands_forward_to_python_cli() {
-        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Forward);
+        // `backlog` claims itself natively now; every other unclaimed root
+        // still forwards.
+        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Backlog);
         assert_eq!(decide_role(&os(&["--help"]), false), Role::Forward);
         // `fno --version` is a Python-forwarded callback, NOT the mux self-report.
         assert_eq!(decide_role(&os(&["--version"]), false), Role::Forward);

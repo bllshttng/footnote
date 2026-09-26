@@ -65,6 +65,10 @@
 #      Claude Code's own file store, so the memory carveout must name that
 #      root to allow exactly it and nothing wider. Comparison only; no
 #      footnote state lands there.
+#      scripts/metrics/port-order.sh reads the same transcripts: a 30-day
+#      scan counts `fno <verb-group>` occurrences for the port-order
+#      table's use column. Read-only; footnote stores nothing there, and a
+#      missing root leaves use at zero rather than creating anything.
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
 #      The inherited-model-env remedy strings (model_routing.py,
@@ -88,6 +92,9 @@
 #      because a worker pinned to another account exports that variable and
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
+#      slot_cutover.rs compares `accounts.records[].config_dir` to the exact
+#      `~/.claude` config value to distinguish shared-slot records from
+#      per-config-dir accounts. It constructs and reads no path from the value.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
 #      binding.py is the shared effective-account read those callers now go
 #      through, and test_account_binding.py is its test: it builds a canonical
@@ -135,7 +142,12 @@
 #      contract: to decide whether an untracked path is one of those links,
 #      it has to name the `.claude` segment setup wrote. It never constructs
 #      a path to store anything - the only `.claude` it forms is a link
-#      target it compares. archive-worktree.sh's salvage step skips the same
+#      target it compares. law_match.rs detects the same harness-native
+#      layout for the same reason: a law recorded from a worktree session
+#      attributes to the parent repo's project, and naming the `.claude`
+#      segment is how it tells that layout from the fno-managed and conductor
+#      ones. Comparison only; footnote stores nothing there.
+#      archive-worktree.sh's salvage step skips the same
 #      shape for the same reason: copying a setup-written link would copy a
 #      slice of the canonical checkout through it.
 #   3. autocorrect's OWN remaining ~/.claude/ files that this wave
@@ -236,6 +248,8 @@ cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
+crates/fno-agents/src/claude_vault.rs
+crates/fno-agents/src/slot_cutover.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
 cli/src/fno/claims/session_pid.py
@@ -282,6 +296,7 @@ crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
+crates/fno-agents/src/law_match.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/daemon_tests.rs
@@ -336,6 +351,7 @@ scripts/lib/worktree-lifecycle.sh
 scripts/lib/worktree-manager.sh
 scripts/lib/worktree_occupancy.py
 scripts/lint/no-invalid-events.sh
+scripts/metrics/port-order.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
 scripts/diagnostics/token-diagnose.py

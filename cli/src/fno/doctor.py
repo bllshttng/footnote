@@ -2485,9 +2485,6 @@ def _emit_human(
         )
 
 
-    export = result.get("graph_export") or {}
-    if export.get("stale"):
-        out(f"fno doctor: graph export STALE - SQLite {export.get('version')} is newer than graph.json {export.get('exported_version') or 'never exported'}; run `fno doctor graph export --now`.")
     pms = result.get("post_merge_sync") or {}
     if pms.get("stale"):
         out(
@@ -4159,8 +4156,6 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # changes status/exit.
     result["pre_push_hook"] = _pre_push_hook_report(src)
 
-    from fno.doctor_graph import export_health
-    result["graph_export"] = export_health()
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
@@ -4448,10 +4443,10 @@ def doctor_command(
                 rmsg, _ = refresh_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,
                     fno_binary=_resolve_fno_binary(),
-                    install_path=os.environ.get("PATH", "/usr/bin:/bin"),
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
                     caller="doctor-fix",
+                    force_bounce=True,
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:

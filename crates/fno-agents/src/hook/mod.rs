@@ -8,6 +8,7 @@
 //! before the tokio runtime builds, never in `run`, so the verb-surface
 //! ratchet never sees them (shrink law d-fe66560a).
 
+pub mod edit_integrity;
 pub mod king_guard;
 pub mod pipe_guard;
 pub mod prompt;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 /// calls this before the runtime builds, so a fire costs one process.
 pub fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
+        Some("edit-integrity") => edit_integrity::run(&args[1..]),
         Some("king-guard") => king_guard::run(&args[1..]),
         Some("pipe-guard") => pipe_guard::run(&args[1..]),
         Some("prompt") => prompt::run(&args[1..]),
@@ -29,7 +31,7 @@ pub fn dispatch(args: &[String]) -> i32 {
         Some("stop") => stop::run(&args[1..]),
         other => {
             eprintln!(
-                "fno-agents hook: unknown entry {other:?}; expected king-guard, pipe-guard, prompt, test-run-guard or stop"
+                "fno-agents hook: unknown entry {other:?}; expected edit-integrity, king-guard, pipe-guard, prompt, test-run-guard or stop"
             );
             2
         }
@@ -90,4 +92,50 @@ pub(crate) fn emit_block(reason: &str) -> i32 {
     });
     println!("{out}");
     0
+}
+
+/// One control-plane arm row for this fire. The row carries the fire's
+/// session id: `emit_tick` writes one row per SPACE with no session key of
+/// its own, so a reader of `fno agents status` sees only the space's newest
+/// fire and cannot tell a king's own row from a neighbor's - the misread
+/// that once sent a drain-reserve fix chasing a driver=target
+/// misclassification for days.
+pub(crate) fn global_events_path(fallback: &Path) -> PathBuf {
+    std::env::var_os("GLOBAL_EVENTS_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::paths::AgentsHome::from_env_opt()
+                .map(|home| crate::daemon::global_events_path(&home))
+        })
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+pub(crate) fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str, session: &str) {
+    let project_events = crate::paths::events_path(cwd);
+    let global_events = global_events_path(&project_events);
+    // A missing space root must drop nothing: this row is the one record
+    // that a fire ran, and the append below is best-effort, so the target
+    // dirs are created here rather than trusted to exist.
+    for events in [&project_events, &global_events] {
+        if let Some(parent) = events.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
+    let mut detail = format!(
+        "driver={driver} decision={decision} reason={}",
+        if reason.is_empty() { "live" } else { reason }
+    );
+    if !session.is_empty() {
+        let short: String = session.chars().take(8).collect();
+        detail.push_str(&format!(" session={short}"));
+    }
+    let data = serde_json::json!({
+        "arm": "stop_hook",
+        "scheduler": "hook:target-stop-hook",
+        "acted": 1,
+        "skip_reason": serde_json::Value::Null,
+        "detail": detail,
+        "interval_s": 0,
+    });
+    crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
 }

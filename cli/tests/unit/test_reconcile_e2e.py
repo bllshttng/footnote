@@ -16,6 +16,7 @@ import pytest
 
 from fno import stub_manifest as sm
 from fno.backlog import reconcile_dispatch as rd
+from fno.graph.store import commit_rows_via_store
 
 
 @pytest.fixture
@@ -39,14 +40,15 @@ def _manifest_holds(node: str, root: Path) -> bool:
 def test_full_reconcile_seam_held_to_unheld(iso, tmp_path, monkeypatch):
     # --- world: a merged blocker + a contract dependent with a draft PR #42 ---
     gp = tmp_path / "graph.json"
-    gp.write_text(json.dumps({"entries": [
+    entries = [
         {"id": "x-blk", "slug": "x-blk", "title": "x-blk", "type": "feature",
          "priority": "p2", "status": "done",
          "completed_at": "2026-06-26T00:00:00Z"},
         {"id": "x-dep", "dep": "contract", "blocked_by": ["x-blk"],
          "pr_number": 42, "project": None, "cwd": str(tmp_path), "slug": "dep",
          "title": "x-dep", "type": "feature", "priority": "p2", "status": "idea"},
-    ]}), encoding="utf-8")
+    ]
+    commit_rows_via_store(gp, lambda _: entries)
     # The router and the merge guard both read graph_json() internally.
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
 

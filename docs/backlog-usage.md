@@ -91,6 +91,8 @@ When a PR opens outside the Footnote PR path, repair its node with `fno backlog 
 
 Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno king escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
 
+A repeat `fno backlog note` on a node with no encounter from the same session ends its receipt with the encounter command. A note is prose nothing ranks. An encounter is the row `fno backlog demand` reads.
+
 ```bash
 fno backlog encounter <id> --evidence "cost two wrong diagnoses before I found the real seam."
 fno backlog encounter <id> --operator --evidence "the operator hit the same seam."
@@ -122,7 +124,11 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 `fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
-Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+Pass `--quiet` to note without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+
+### Blocking findings hold the gate
+
+`fno backlog note <id> "<finding>" --blocking` records the body as a review finding instead of a progress note. An open finding denies the session's terminal-allow until someone runs `fno backlog note --resolve <finding-id>`. With no live reader the finding still writes: the receipt says it gates the next worker. `fno backlog notes findings [<id>] [--open]` reads them back: one count line first, then one line per finding, and a store read error exits 1 instead of printing zero. The retired `fno backlog annotate` spellings refuse with one line naming these replacements.
 
 ## Moving cards
 
@@ -172,6 +178,8 @@ fno backlog update <id> --priority p1                        # the proposal
 Priority is bounded to four values, so two agents disagreeing about a node produce a visible split on `fno backlog demand` instead of a silent stack. The pin stays with the operator, and it outranks every vote.
 
 ## Lifecycle
+
+`fno backlog ready` accepts `--created-before`, `--created-after`, `--touched-before`, and `--touched-after` with values such as `30d` or an ISO date, plus `--sort created|touched` (oldest first); touched uses `touched_at`, falling back to `created_at`. Preview the 60-day stale-idea sweep with `fno backlog ready --ideas --touched-before 60d --sort touched --json`.
 
 `intake -> triage -> ready/next -> done`, with two reversible side states:
 
@@ -318,7 +326,7 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
 
-- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `operator_request`: a human asked, via `--source-kind operator_request`. Birth requires an unacked operator turn in the filing session (`fno inbox operator status` above 0). File the ask before you ack the turn.
 - `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
 - `automated_followup`: a machine follow-up. Retro landings and decomposed children.
 - `unknown`: everything else.

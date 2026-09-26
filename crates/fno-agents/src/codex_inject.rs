@@ -69,6 +69,7 @@ pub fn codex_app_server_socket_path() -> PathBuf {
 /// positive liveness signal.
 pub struct CodexDaemonAdapter {
     provider_state_path: PathBuf,
+    provider_state_fallback_path: Option<PathBuf>,
     state_path: PathBuf,
     lock_path: PathBuf,
     socket_path: PathBuf,
@@ -82,10 +83,22 @@ impl CodexDaemonAdapter {
             .unwrap_or_else(|| PathBuf::from("fno-harness-daemon.json"));
         Self {
             provider_state_path,
+            provider_state_fallback_path: None,
             state_path,
             lock_path,
             socket_path,
         }
+    }
+
+    fn with_provider_state_fallback(
+        provider_state_path: PathBuf,
+        fallback_path: PathBuf,
+        lock_path: PathBuf,
+        socket_path: PathBuf,
+    ) -> Self {
+        let mut adapter = Self::new(provider_state_path, lock_path, socket_path);
+        adapter.provider_state_fallback_path = Some(fallback_path);
+        adapter
     }
 
     pub fn from_environment() -> Self {
@@ -93,8 +106,10 @@ impl CodexDaemonAdapter {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
             .unwrap_or_else(|| PathBuf::from(".codex"));
-        Self::new(
-            home.join("app-server-daemon").join("app-server.pid"),
+        let daemon_dir = home.join("app-server-daemon");
+        Self::with_provider_state_fallback(
+            daemon_dir.join("daemon.pid"),
+            daemon_dir.join("app-server.pid"),
             home.join("app-server-daemon")
                 .join("fno-harness-daemon.lock"),
             home.join("app-server-control")
@@ -122,8 +137,18 @@ impl CodexDaemonAdapter {
     }
 
     fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
-        let raw = std::fs::read_to_string(&self.provider_state_path)
-            .map_err(|error| format!("read Codex daemon state: {error}"))?;
+        let raw = match std::fs::read_to_string(&self.provider_state_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(fallback) = &self.provider_state_fallback_path else {
+                    return Err(format!("read Codex daemon state: {error}"));
+                };
+                std::fs::read_to_string(fallback).map_err(|fallback_error| {
+                    format!("read Codex daemon state: {fallback_error}")
+                })?
+            }
+            Err(error) => return Err(format!("read Codex daemon state: {error}")),
+        };
         <Self as crate::harness_daemon::HarnessDaemonAdapter>::parse_state(self, &raw)
     }
 }
@@ -1344,7 +1369,39 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
 /// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
 /// daemon listening -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
+const CODEX_NATIVE_COMMAND_REFUSAL: &str =
+    "native-command: use fno mux command <selector> --text <verb> --proof <compact|goal-active|screen>";
+
+fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, String> {
+    let Some(verb) = text.trim().split_whitespace().next() else {
+        return Ok(None);
+    };
+    if !verb.starts_with('/') && !verb.starts_with('$') {
+        return Ok(None);
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged()
+        .map_err(|error| format!("capability contract unreadable: {error}"))?;
+    let capabilities = contract
+        .capabilities("codex")
+        .map_err(|error| format!("Codex capability row unreadable: {error}"))?;
+    let native = capabilities
+        .native_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    let review = capabilities
+        .review_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    Ok((native && !review).then_some(CODEX_NATIVE_COMMAND_REFUSAL))
+}
+
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    match codex_native_command_refusal(text).map_err(|error| {
+        ReviewStartError::Server(format!("native-command policy unreadable: {error}"))
+    })? {
+        Some(reason) => return Err(ReviewStartError::Reason(reason)),
+        None => {}
+    }
     let sock = codex_app_server_socket_path();
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
         Ok(r) => r,
@@ -1981,6 +2038,33 @@ mod tests {
     async fn next_request(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
         let raw = ws.next().await.unwrap().unwrap().into_text().unwrap();
         serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn mail_inject_refuses_declared_codex_native_commands_before_connecting() {
+        let result = deliver_via_codex_daemon("thread-1", "/compact").await;
+        assert_eq!(
+            result,
+            Err(ReviewStartError::Reason(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
+        assert_eq!(
+            codex_native_command_refusal("/goal status"),
+            Ok(Some(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
+    }
+
+    #[test]
+    fn codex_review_verbs_are_not_classified_as_native_non_review_commands() {
+        assert_eq!(codex_native_command_refusal("/review"), Ok(None));
+        assert_eq!(codex_native_command_refusal("/code-review"), Ok(None));
+    }
+
+    #[test]
+    fn codex_native_command_gate_leaves_ordinary_text_alone() {
+        assert_eq!(
+            codex_native_command_refusal("continue the review"),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -2673,6 +2757,22 @@ mod tests {
             .unwrap();
         assert_eq!(state.endpoint, "/tmp/codex.sock");
         assert_eq!(state.incarnation, "123:456");
+    }
+
+    #[test]
+    fn codex_daemon_state_reads_legacy_provider_file_when_current_file_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("daemon.pid");
+        let legacy = temp.path().join("app-server.pid");
+        std::fs::write(&legacy, r#"{"pid":123,"processStartTime":456}"#).unwrap();
+        let adapter = CodexDaemonAdapter::with_provider_state_fallback(
+            current,
+            legacy,
+            temp.path().join("fno.lock"),
+            temp.path().join("codex.sock"),
+        );
+
+        assert_eq!(adapter.provider_pid_start(), Some((123, 456)));
     }
 
     #[test]

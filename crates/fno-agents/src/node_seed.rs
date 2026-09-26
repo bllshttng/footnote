@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+use crate::law_match::matches_node_id_shape;
 use crate::provider::parse_verb_token;
 
 /// The node's verb as one canonical `/word`, reusing the seed parser so no
@@ -90,11 +91,40 @@ fn without_flag(mut argv: Vec<String>, flag: &str) -> Vec<String> {
     argv
 }
 
+/// The strict first-line scan: after a leading verb token, the first
+/// node-shaped token names the spawn's node even past a modifier (`L`).
+/// Reuses `resolve_node`'s scanner so no second spelling rule exists.
+fn scan_seed_node(text: &str) -> Option<String> {
+    let toks: Vec<&str> = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if !toks.first().is_some_and(|t| parse_verb_token(t).is_some()) {
+        return None;
+    }
+    // The node slot is the argument right after the verb, once past a
+    // single modifier token. A quoted token opens free-text prose: the
+    // slot is a title, and no node-shaped word inside it binds.
+    toks.iter()
+        .skip(1)
+        .take(2)
+        .take_while(|tok| !tok.starts_with(['"', '\'']))
+        .find_map(|tok| {
+            let word = tok
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            matches_node_id_shape(&word).then_some(word)
+        })
+}
+
 /// The nodeless arm: read the seed's verb argument as the node the
 /// spawn is FOR, and answer compose with the flag already inserted, so the
 /// Python side applies the answer generically and both lanes see an
 /// explicit node afterwards. A seed naming no node answers pass with a
-/// `derive_reason`. Pure over the payload.
+/// `derive_reason`. A strict-scan name binds unconditionally: the row gate
+/// on the Python side re-decides with real row facts. Pure over the payload.
 fn derive_from_seed(payload: &Value, seed: Option<String>, rows: &[Value]) -> Value {
     let pass = |reason: String| json!({"action": "pass", "derive_reason": reason});
     let Some(text) = seed.filter(|t| !t.trim().is_empty()) else {
@@ -120,9 +150,19 @@ fn derive_from_seed(payload: &Value, seed: Option<String>, rows: &[Value]) -> Va
     if !family.iter().any(|f| f == &format!("/{first}")) {
         return pass(format!("verb /{first} is outside the target family"));
     }
-    let arg = toks.get(1).map(|t| trim_sentence_punct(t));
+    let scanned = scan_seed_node(&text);
+    let arg = scanned
+        .as_deref()
+        .or_else(|| toks.get(1).map(|t| trim_sentence_punct(t)));
     match arg.filter(|a| looks_like_node_id(a)) {
         Some(id) => {
+            if scanned.as_deref() == Some(id) {
+                // A shape-valid scan name rides with its source so the seam
+                // marks the node payload-named and the row gate refuses a
+                // typo instead of degrading it onto the default lane.
+                let argv = with_flag_inserted(argv_of(payload), "--node", id);
+                return json!({"action": "compose", "argv": argv, "source": "payload"});
+            }
             let named = rows
                 .iter()
                 .any(|r| r.get("id").and_then(Value::as_str) == Some(id));
@@ -181,6 +221,9 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // A node the payload named (not the --node flag) gets refusals that
+    // point at the payload, so the remedy names what to fix.
+    let from_payload = payload.get("node_source").and_then(Value::as_str) == Some("payload");
 
     // 1. Crown and resume spawns pass unchanged: their flags already name
     //    the work profile, and the payload carries them as facts.
@@ -230,8 +273,17 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
     //    derivation error, or a node with no verb is not evidence of
     //    /target.
     if payload.get("row_found").and_then(Value::as_bool) != Some(true) {
-        return json!({"action": "refuse", "message": format!(
-            "--node {node} names no readable backlog row; an unknown node is not evidence of a verb")});
+        let message = if from_payload {
+            format!(
+                "the payload names {node}, but no readable backlog row has that id; \
+                 fix the id, or pass the work as prose"
+            )
+        } else {
+            format!(
+                "--node {node} names no readable backlog row; an unknown node is not evidence of a verb"
+            )
+        };
+        return json!({"action": "refuse", "message": message});
     }
     if let Some(err) = payload
         .get("derive_error")
@@ -275,9 +327,19 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
                 if format!("/{first}") == node_verb {
                     return json!({"action": "pass"});
                 }
-                return json!({"action": "refuse", "message": format!(
-                    "--node {node} derives {node_verb}; the payload names /{first}. \
-                     Drop the verb from the payload: --node supplies it.")});
+                let message = if from_payload {
+                    let word = node_verb.trim_start_matches('/');
+                    format!(
+                        "the payload names /{first} {node}, but {node} derives {node_verb}; \
+                         spawn /fno:{word} {node} instead"
+                    )
+                } else {
+                    format!(
+                        "--node {node} derives {node_verb}; the payload names /{first}. \
+                         Drop the verb from the payload: --node supplies it."
+                    )
+                };
+                return json!({"action": "refuse", "message": message});
             }
         }
     }
@@ -307,6 +369,33 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
         }
         _ => json!({"action": "profile", "verb": word}),
     }
+}
+
+/// Which node does this spawn work, answered with the source that named it:
+/// a non-empty `flag_node` wins, then the first node-shaped token on the
+/// seed's first line (modifier tokens such as `L` never match the shape),
+/// then a non-empty `env_node`. Pure over the payload: row resolution stays
+/// a graph lookup on the caller's side, so a null answer routes nothing.
+pub fn resolve_node(payload: &Value) -> Value {
+    let named = |key: &str| -> Option<String> {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(flag) = named("flag_node") {
+        return json!({"node": flag, "source": "flag"});
+    }
+    if let Some(text) = seed_text(payload) {
+        if let Some(word) = scan_seed_node(&text) {
+            return json!({"node": word, "source": "payload"});
+        }
+    }
+    if let Some(env) = named("env_node") {
+        return json!({"node": env, "source": "env"});
+    }
+    json!({"node": Value::Null, "source": Value::Null})
 }
 
 #[cfg(test)]
@@ -563,15 +652,39 @@ mod tests {
 
     #[test]
     fn derived_name_with_no_row_answers_the_receipt() {
-        let out = decide_map_rows(base_derive("/fno:target x-ffff", 1), &rows_named(&[]));
+        // A liberal-only id (x-gone is not hex) keeps the receipt arm; a
+        // shape-valid scan name binds instead and the row gate refuses it.
+        let out = decide_map_rows(base_derive("/fno:target x-gone", 1), &rows_named(&[]));
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 2], "--node-reason");
         assert_eq!(
             argv[argv.len() - 1],
-            "x-ffff names no readable backlog row (derived from the seed)"
+            "x-gone names no readable backlog row (derived from the seed)"
         );
         assert!(!argv.contains(&json!("--node")));
+    }
+
+    #[test]
+    fn a_modifier_seed_scans_to_the_node_and_marks_the_source() {
+        let out = decide_map_rows(base_derive("$fno:blueprint L x-1111", 1), &[]);
+        assert_eq!(out["action"], "compose");
+        assert_eq!(out["source"], "payload");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node");
+        assert_eq!(argv[argv.len() - 1], "x-1111");
+    }
+
+    #[test]
+    fn a_scanned_name_binds_without_a_row() {
+        // A shape-valid scan name skips the derive row check: the Python row
+        // gate re-decides with real rows and refuses the typo itself.
+        let out = decide_map_rows(base_derive("/fno:target x-2222", 1), &[]);
+        assert_eq!(out["action"], "compose");
+        assert_eq!(out["source"], "payload");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node");
+        assert_eq!(argv[argv.len() - 1], "x-2222");
     }
 
     #[test]
@@ -653,5 +766,163 @@ mod tests {
     fn slug_argument_is_not_a_node_id() {
         let out = decide_map(base_derive("/fno:target x-marks-the-spot", 1));
         assert_eq!(out["action"], "pass");
+    }
+
+    // --- resolve_node: which node, and who named it ---------------------- //
+
+    fn resolved(payload: Value) -> Map<String, Value> {
+        resolve_node(&payload)
+            .as_object()
+            .cloned()
+            .expect("answer is an object")
+    }
+
+    fn resolve_payload(seed: &str, flag: Value, env: Value) -> Value {
+        json!({
+            "argv": ["spawn", "--name", "w", seed],
+            "seed_index": 3,
+            "seed_form": "positional",
+            "flag_node": flag,
+            "env_node": env,
+        })
+    }
+
+    #[test]
+    fn a_seed_named_node_answers_with_source_payload() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-5555",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-5555");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn modifier_tokens_are_skipped_on_the_scan() {
+        let out = resolved(resolve_payload(
+            "$fno:blueprint L x-1111",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-1111");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn trailing_punctuation_is_trimmed_on_the_scan() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-3333,",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-3333");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn flag_wins_over_payload_and_env() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-2",
+            json!("x-1"),
+            json!("x-3"),
+        ));
+        assert_eq!(out["node"], "x-1");
+        assert_eq!(out["source"], "flag");
+    }
+
+    #[test]
+    fn payload_wins_over_env() {
+        // Shape-valid ids: a one-hex suffix like x-2 is not node-shaped, so
+        // the payload arm declines and env would answer.
+        let out = resolved(resolve_payload(
+            "/fno:target x-2222",
+            Value::Null,
+            json!("x-3333"),
+        ));
+        assert_eq!(out["node"], "x-2222");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn env_answers_when_the_seed_names_nothing() {
+        let out = resolved(resolve_payload("say hi", Value::Null, json!("x-3")));
+        assert_eq!(out["node"], "x-3");
+        assert_eq!(out["source"], "env");
+    }
+
+    #[test]
+    fn unshaped_seeds_answer_null() {
+        for seed in [
+            "/fno:target \"add a flag\"",
+            "work on x-3333",
+            "/fno:target\n\nx-3333 later",
+        ] {
+            let out = resolved(resolve_payload(seed, Value::Null, Value::Null));
+            assert_eq!(out["node"], Value::Null, "{seed}");
+            assert_eq!(out["source"], Value::Null, "{seed}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_title_never_binds_a_node_shaped_word() {
+        // Free text after the verb is a title, not a node slot: a
+        // node-shaped word inside it stays prose.
+        for seed in [
+            "/fno:target \"stop treating x-3333 as a node\"",
+            "/fno:target fix the x-3333 bug",
+            "/fno:target L \"add x-4444 later\"",
+        ] {
+            let out = resolved(resolve_payload(seed, Value::Null, Value::Null));
+            assert_eq!(out["node"], Value::Null, "{seed}");
+            assert_eq!(out["source"], Value::Null, "{seed}");
+        }
+    }
+
+    #[test]
+    fn the_scan_never_reaches_past_two_argument_slots() {
+        let out = resolved(resolve_payload(
+            "/fno:target ship the x-5555 change",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], Value::Null);
+        assert_eq!(out["source"], Value::Null);
+    }
+
+    // --- node_source: refusals name the payload -------------------------- //
+
+    #[test]
+    fn a_payload_sourced_disagreement_names_the_payload() {
+        let mut p = base();
+        p["node_source"] = json!("payload");
+        p["argv"] = json!(["spawn", "w", "/fno:target x-1", "--node", "x-1"]);
+        p["seed_index"] = json!(2);
+        p["seed_form"] = json!("positional");
+        let out = decide_map(p);
+        assert_eq!(out["action"], "refuse");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("the payload names /target x-1"), "{msg}");
+        assert!(msg.contains("spawn /fno:blueprint x-1"), "{msg}");
+        assert!(!msg.contains("--node"), "{msg}");
+    }
+
+    #[test]
+    fn a_payload_sourced_unknown_node_names_the_payload() {
+        let mut p = base();
+        p["node_source"] = json!("payload");
+        p["row_found"] = json!(false);
+        let msg = decide_map(p)["message"].as_str().unwrap().to_string();
+        assert!(msg.contains("the payload names x-1"), "{msg}");
+        assert!(!msg.contains("--node"), "{msg}");
+    }
+
+    #[test]
+    fn a_flag_sourced_node_keeps_the_flag_wording() {
+        let mut p = base();
+        p["node_source"] = json!("flag");
+        p["row_found"] = json!(false);
+        let msg = decide_map(p)["message"].as_str().unwrap().to_string();
+        assert!(msg.starts_with("--node x-1"), "{msg}");
     }
 }

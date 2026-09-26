@@ -351,6 +351,39 @@ fn inflight_hint_names_session_then_holder_then_default() {
 }
 
 #[test]
+fn plan_refusal_names_only_an_in_flight_node() {
+    // The plan spawn door accepts an idea node the feed has never
+    // heard of, and refuses ONLY a node in flight -
+    // a second blueprint for worked work is not asked twice.
+    let mut core = empty_core();
+    core.backlog = vec![BacklogCard {
+        id: "x-aaa".into(),
+        slug: "aaa-slug".into(),
+        priority: "p2".into(),
+        state: CardState::InFlight,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+    }];
+    // In flight: the refusal names the node and the hint.
+    let refusal = core.plan_refusal("x-aaa").expect("in flight refuses");
+    assert!(
+        refusal.contains("x-aaa is already being worked"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("open its session instead"), "{refusal}");
+    // An idea node absent from the feed: None - the door is open.
+    assert_eq!(core.plan_refusal("x-idea"), None);
+    // A READY card: still open (the dispatch door's own gate answers).
+    core.backlog[0].state = CardState::Ready;
+    assert_eq!(core.plan_refusal("x-aaa"), None, "ready is open");
+}
+
+#[test]
 fn classify_guard_registry_fails_closed_on_a_row_with_no_readable_pane_binding() {
     // AC4-ERR (x-0b40), the positive marker: the malformed row IS the
     // defect. A registry holding an agent whose pane cannot be read must

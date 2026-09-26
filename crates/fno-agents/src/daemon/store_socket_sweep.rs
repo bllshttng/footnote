@@ -90,7 +90,7 @@ pub(crate) fn store_socket_sweep_in(
                         })
                         .unwrap_or_default(),
                 );
-                if graph.exists() {
+                if crate::backlog::database_path(&graph).exists() {
                     continue;
                 }
             }

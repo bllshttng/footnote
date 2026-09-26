@@ -85,7 +85,7 @@ fn every_confirm_variant_renders_shared_chrome_and_controls() {
             .join("\n");
 
         assert!(
-            screen.contains('┌'),
+            screen.contains('╭'),
             "{label} has no shared top border: {screen}"
         );
         assert!(

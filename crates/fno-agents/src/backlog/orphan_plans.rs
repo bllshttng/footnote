@@ -502,7 +502,7 @@ fn claims_planning(node_id: &str, root: Option<&Path>) -> Option<Verdict> {
     let live = matches!(state, ClaimState::Live | ClaimState::Suspect);
     let planner = record
         .as_ref()
-        .map(|rec| rec.holder.starts_with("blueprint-session:"))
+        .map(|rec| rec.holder.starts_with(claims::BLUEPRINT_HOLDER_PREFIX))
         .unwrap_or(false);
     (live && planner).then_some(Verdict::Planning)
 }
@@ -570,11 +570,7 @@ mod tests {
     fn fixture(nodes: &[Value]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::to_string(&json!({ "entries": nodes })).unwrap(),
-        )
-        .unwrap();
+        crate::graph_store::seed_rows(&graph, nodes).unwrap();
         let plans = dir.path().join("plans");
         std::fs::create_dir(&plans).unwrap();
         let claims = tempfile::tempdir().unwrap();
@@ -627,7 +623,7 @@ mod tests {
         let fx = fixture(&[node("x-aaaa", json!({}))]);
         let plan = plan_file(&fx.plans, "p1.md", "x-aaaa", "ready", "2026-09-02");
         age_file(&plan, 3600);
-        let before = std::fs::read(&fx.graph).unwrap();
+        let before = graph_store::read_rows(&fx.graph).unwrap();
         let cfg = Config {
             plans_dir: fx.plans.clone(),
             graph: fx.graph.clone(),
@@ -638,7 +634,7 @@ mod tests {
         };
         assert_eq!(run(&cfg), 0);
         assert_eq!(
-            std::fs::read(&fx.graph).unwrap(),
+            graph_store::read_rows(&fx.graph).unwrap(),
             before,
             "dry run wrote nothing"
         );

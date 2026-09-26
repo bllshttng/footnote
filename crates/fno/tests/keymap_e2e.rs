@@ -72,8 +72,12 @@ fn keymap_e2e_config_moves_the_prefix_and_the_chord() {
     // line too - the prompt sits near the TOP of a fresh session, with blank
     // rows and the status row below it.
     h.wait_screen(15, |s| {
-        s.lines()
-            .any(|l| l.contains('$') && l.trim_end().ends_with('d'))
+        // A framed pane closes the row with its border rule, so the trailing
+        // `d` sits on the pane-content segment, not the physical row end.
+        s.lines().any(|l| {
+            l.split('│')
+                .any(|seg| seg.contains('$') && seg.trim_end().ends_with('d'))
+        })
     });
     assert!(
         h.child.try_wait().unwrap().is_none(),

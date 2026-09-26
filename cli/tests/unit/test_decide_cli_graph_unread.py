@@ -57,9 +57,8 @@ def test_backlog_decisions_does_not_name_an_unread_graph_for_live_rows(monkeypat
     monkeypatch.setattr(
         decide,
         "list_decisions",
-        lambda subject, limit=None, lane=None, state=None, entries=None: (
-            subject or "(all)", [row], 0
-        ),
+        lambda subject, limit=None, lane=None, state=None, entries=None,
+        scope="current": (subject or "(all)", [row], 0),
     )
     monkeypatch.setattr(decide, "_graph_entries", lambda *, required=False: [])
 

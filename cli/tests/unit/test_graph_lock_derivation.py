@@ -5,6 +5,7 @@ sibling lock, so concurrent writers to one graph serialize (no lost update)
 and a scratch graph never contends with the real ~/.fno/graph.json.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import threading
@@ -29,7 +30,7 @@ def test_lock_is_resolved_sibling(tmp_path):
 
 def test_aliased_paths_share_one_lock(tmp_path):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     rel = Path(str(g)).parent / "." / "graph.json"
     assert _graph_lock_path(g) == _graph_lock_path(rel)
 
@@ -53,7 +54,7 @@ def test_resolve_failure_degrades_to_raw(monkeypatch, exc):
 
 def test_concurrent_writers_serialize(tmp_path):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
 
     def append(node_id):
         def mutator(entries):

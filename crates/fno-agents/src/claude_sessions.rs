@@ -20,7 +20,7 @@ pub fn row_liveness(entry: &crate::state::RegistryEntry, claude_home: &ClaudeHom
     row_liveness_indexed(entry, &sockets)
 }
 
-/// One scan of claude's sessions dir: `jobId -> messagingSocketPath` for
+/// One scan of claude's session records: `jobId -> messagingSocketPath` for
 /// every live-shaped bg session file, first-sorted-wins (the same pick
 /// `locate_session` makes). The socket rung's cost is this walk, so a sweep
 /// probing N rows pays it once, not N times.
@@ -28,20 +28,7 @@ pub fn sessions_socket_index(
     claude_home: &ClaudeHome,
 ) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    let dir = claude_home.sessions_dir();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    let mut paths: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        // The dir holds the bg records this index wants plus the session
-        // transcript markdown (measured: 11k files, 99.6% of the walk's
-        // bytes in .md). The records are `.json`; skip everything else
-        // before reading.
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
+    for path in claude_home.session_records() {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -75,36 +62,10 @@ pub(crate) fn row_liveness_indexed(
     row_liveness_with_indexed(entry, sockets, None, family1_truth_state)
 }
 
-/// Every dir claude writes its per-process records to: the ambient home's
-/// `sessions` dir (see [`ClaudeHome::sessions_dir`]), then each isolated
-/// account's `sessions`, deduped. Dedup compares what the path IS
-/// (`fs::canonicalize`), because an account dir can be a symlink onto the
-/// ambient store.
-pub(crate) fn session_record_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![ClaudeHome::from_env().sessions_dir()];
-    for (_, dir) in crate::claude_roster::isolated_account_dirs() {
-        let sessions = dir.join("sessions");
-        if !dirs.contains(&sessions) {
-            dirs.push(sessions);
-        }
-    }
-    let mut seen: Vec<std::path::PathBuf> = Vec::new();
-    let mut out = Vec::new();
-    for dir in dirs {
-        let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.push(key);
-        out.push(dir);
-    }
-    out
-}
-
 /// Which live claude process holds `session_id`, read from claude's own
-/// per-process records (one `<pid>.json` per running process under the
-/// sessions dir, removed on clean exit). `create_ms` answers the pid's
-/// epoch create time, so a record's
+/// per-process records (one `<pid>.json` per running process under each
+/// root's sessions dir, removed on clean exit). `create_ms` answers the
+/// pid's epoch create time, so a record's
 /// `procStart` proves the incarnation: a pid whose create time disagrees
 /// with the record is a recycle, and a pid with no create time is a crash
 /// leftover. Both are skipped, never named as the holder.
@@ -239,6 +200,50 @@ pub(crate) fn session_record_holder(
     ))
 }
 
+/// The `reentry-plan holder <session-id>...` action body: one holder read
+/// per id over the ambient record dirs, one JSON object on stdout keyed by
+/// session id. Exit 0 whenever it printed; the caller reads `held`, never
+/// the exit code.
+pub fn run_holder_action(session_ids: &[String]) -> i32 {
+    let dirs = ClaudeHome::from_env().sessions_dirs();
+    let mut out = serde_json::Map::new();
+    for sid in session_ids {
+        let answer = session_record_holder(&dirs, sid, &|pid| {
+            crate::claims::process_create_time_ms(pid as i32)
+        });
+        out.insert(sid.clone(), holder_json(&answer));
+    }
+    println!("{}", Value::Object(out));
+    0
+}
+
+/// The wire shape one holder read prints: `held` maps Held|NotHeld|Unmeasured
+/// to true|false|null, `proven` rides only a verified match, and `pid` is
+/// named when the read knows one. Pure so tests pin it without a filesystem.
+fn holder_json(holder: &crate::pane_stop::SessionHolder) -> Value {
+    let (held, proven, pid, why) = match holder {
+        crate::pane_stop::SessionHolder::Held { pid, proven, why } => (
+            Value::from(true),
+            Value::from(*proven),
+            pid.map(|p| Value::from(p)).unwrap_or(Value::Null),
+            Value::from(why.as_str()),
+        ),
+        crate::pane_stop::SessionHolder::NotHeld(why) => (
+            Value::from(false),
+            Value::from(false),
+            Value::Null,
+            Value::from(why.as_str()),
+        ),
+        crate::pane_stop::SessionHolder::Unmeasured(why) => (
+            Value::Null,
+            Value::from(false),
+            Value::Null,
+            Value::from(why.as_str()),
+        ),
+    };
+    serde_json::json!({"held": held, "proven": proven, "pid": pid, "why": why})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +348,49 @@ mod tests {
                 "{why}"
             ),
             other => panic!("expected Held pid 24896, got {other:?}"),
+        }
+    }
+
+    /// A live bg record under an account root feeds the socket index from a
+    /// ClaudeHome carrying that root, and the holder read walks the same
+    /// root's sessions dir.
+    #[test]
+    fn x1530_ac8_socket_index_and_holder_read_account_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let acct = tempfile::tempdir().unwrap();
+        let sessions = acct.path().join("sessions");
+        stage(
+            &sessions,
+            "4242.json",
+            r#"{"jobId":"feedc0de","kind":"bg","messagingSocketPath":"/tmp/acct-live.sock","sessionId":"bbbb2222-1111-2222-3333-444444444444","pid":4242}"#,
+        );
+        stage(
+            &sessions,
+            "24896.json",
+            &record_json(24896, SID, T0, "interactive"),
+        );
+        let ch = ClaudeHome::at(home.path()).with_extra_roots([acct.path().to_path_buf()]);
+
+        let sockets = sessions_socket_index(&ch);
+        assert_eq!(
+            sockets.get("feedc0de").map(String::as_str),
+            Some("/tmp/acct-live.sock")
+        );
+
+        let answer = session_record_holder(&ch.sessions_dirs(), SID, &|pid| {
+            if pid == 24896 {
+                Some(T0_MS)
+            } else {
+                None
+            }
+        });
+        match answer {
+            SessionHolder::Held {
+                pid: Some(24896),
+                proven: true,
+                ..
+            } => {}
+            other => panic!("expected Held pid 24896 via account root, got {other:?}"),
         }
     }
 
@@ -524,5 +572,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Specimen measured 2026-09-23: a claude thread killed -9 and stopped
+    /// in fno, then resumed outside fno with `claude --resume`. The resumed
+    /// process's own record (cwd and display fields dropped) proves the
+    /// authority the registry falsifier must ask: kind interactive,
+    /// procStart equal to that pid's create time.
+    #[test]
+    fn a_session_resumed_outside_fno_is_held_by_its_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        stage(
+            &sessions,
+            "65491.json",
+            r#"{"pid":65491,"sessionId":"bb2731c9-ad46-4303-a80d-152c68e91a4e","startedAt":1790199219816,"procStart":"Wed Sep 23 21:33:39 2026","version":"2.1.281","kind":"interactive","entrypoint":"cli","pidDomain":"darwin"}"#,
+        );
+        let dirs = vec![sessions];
+        let answer = session_record_holder(&dirs, "bb2731c9-ad46-4303-a80d-152c68e91a4e", &|pid| {
+            if pid == 65491 {
+                Some(1_790_199_219_000)
+            } else {
+                None
+            }
+        });
+        assert!(
+            matches!(answer, SessionHolder::Held { proven: true, .. }),
+            "{answer:?}"
+        );
+    }
+
+    /// holder_json: Held prints held true with the proven flag and the pid
+    /// when the read knows one.
+    #[test]
+    fn holder_json_maps_held_to_true_with_proven_and_pid() {
+        let v = holder_json(&SessionHolder::Held {
+            pid: Some(65491),
+            proven: true,
+            why: "pid 65491 holds claude session bb2731c9".into(),
+        });
+        assert_eq!(v["held"], serde_json::json!(true));
+        assert_eq!(v["proven"], serde_json::json!(true));
+        assert_eq!(v["pid"], serde_json::json!(65491));
+        assert!(v["why"].as_str().unwrap().contains("65491"));
+    }
+
+    /// holder_json: a Held bg read carries no pid and still reads held true.
+    #[test]
+    fn holder_json_maps_a_bg_held_without_a_pid() {
+        let v = holder_json(&SessionHolder::Held {
+            pid: None,
+            proven: true,
+            why: "bg job".into(),
+        });
+        assert_eq!(v["held"], serde_json::json!(true));
+        assert_eq!(v["proven"], serde_json::json!(true));
+        assert!(v["pid"].is_null());
+    }
+
+    /// holder_json: NotHeld and Unmeasured never read held true - Unmeasured
+    /// prints held null, and neither is a cancellation.
+    #[test]
+    fn holder_json_never_reads_unmeasured_or_not_held_as_held() {
+        let not_held = holder_json(&SessionHolder::NotHeld("no record".into()));
+        assert_eq!(not_held["held"], serde_json::json!(false));
+        assert_eq!(not_held["proven"], serde_json::json!(false));
+        assert!(not_held["pid"].is_null());
+
+        let unmeasured = holder_json(&SessionHolder::Unmeasured("procStart bad".into()));
+        assert_eq!(unmeasured["held"], serde_json::json!(null));
+        assert_eq!(unmeasured["proven"], serde_json::json!(false));
+        assert!(unmeasured["pid"].is_null());
     }
 }

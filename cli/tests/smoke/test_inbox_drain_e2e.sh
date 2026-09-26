@@ -24,7 +24,7 @@ YAML
 # ahead of anything we set. Redirect HOME instead so `state_dir()` resolves
 # here and not to the developer's ~/.fno.
 export HOME="$WORK"
-echo '{"_lock_version": 1, "entries": []}' > "$WORK/.fno/graph.json"
+printf '{"entries": []}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$WORK/.fno/graph.json"
 
 # Triage stub returning a deterministic create_node plan.
 STUB="$WORK/triage_stub.sh"

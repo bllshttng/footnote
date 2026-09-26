@@ -4,6 +4,7 @@ Covers the two-tier normalization map, in-place status rewrite (body
 byte-intact), signal-gated archiving, and idempotency / never-downgrade.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -315,7 +316,7 @@ def _write_graphs(tmp_path: Path, live: list, archived: list) -> Path:
     # One store, one seed: archive residents are rows carrying archived_at,
     # not a second file.
     rows = list(live) + [dict(row, archived_at=row.get("archived_at", "2026-01-01T00:00:00Z")) for row in archived]
-    (home / "graph.json").write_text(json.dumps({"entries": rows}))
+    seed_graph(home / "graph.json", json.dumps({"entries": rows}))
     return home / "graph.json"
 
 
@@ -350,7 +351,7 @@ def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
 
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text(json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
+    seed_graph(home / "graph.json", json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
     rs._node_status_map.cache_clear()
 
@@ -442,7 +443,7 @@ def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
     assert 'status: "done"' in p.read_text()
 
 
-def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
+def test_a_corrupt_working_store_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
     """The stand-down keys on an EMPTY map, so the corrupt working graph must not
     be topped up into a non-empty one by the archive read-through.
 
@@ -456,7 +457,7 @@ def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_pat
 
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text("{ not json at all")
+    (home / "graph.db").write_text("not sqlite")
     (home / "graph-archive.json").write_text(
         json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
     )

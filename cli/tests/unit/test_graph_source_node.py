@@ -6,6 +6,7 @@ assertion that does not resolve must refuse the command rather than file a node
 that looks organically captured.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -22,8 +23,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps(
+    seed_graph(g, json.dumps(
             {
                 "entries": [
                     {
@@ -38,8 +38,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
             },
             indent=2,
         )
-        + "\n"
-    )
+        + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 

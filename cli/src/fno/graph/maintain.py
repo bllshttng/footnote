@@ -826,7 +826,7 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
 
     An encounter inside the window is somebody saying this node cost them time
     recently. Unwindowed it would be a permanent exemption any agent could
-    switch on with no undo, so the drain reads the vote's own ``ts``.
+    switch on with no undo, so the drain reads the vote's own ``created_at``.
 
     The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
     "no freshness signal from the plan" (not movement), never an error.
@@ -2178,7 +2178,7 @@ def abandoned_leg(entries, claimed, graph_path, apply):
                         cand.ended_epoch, tz=timezone.utc
                     ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 rep = reap_open_session_record(
-                    graph_path, cand.node, phase="do",
+                    graph_path, cand.node, phase="execute",
                     harness=cand.harness, session_id=cand.session_id,
                     ended_at=ended_at,
                 )

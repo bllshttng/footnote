@@ -23,6 +23,7 @@ from fno.claims.core import reap_dead_claims, sweep_verdict
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.graph.store import commit_rows_via_store, read_graph_strict, release_node_claim_at_closure
+from tests.fixtures.graph_seed import seed_graph
 
 
 HOLDER = "target-session:sid-a"
@@ -63,7 +64,7 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": complete}) + "\n")
+    seed_graph(p, complete)
     return p
 
 
@@ -86,6 +87,7 @@ class TestClosureReleaseHook:
                     "locked_by": HOLDER,
                     "claimed_at": "2026-08-21T00:00:00Z",
                     "session_id": HOLDER,
+                    "completion_note": "fixture close",
                 }
             ],
         )
@@ -103,7 +105,7 @@ class TestClosureReleaseHook:
         return graph, global_root
 
 
-    
+
 
     def test_scratch_graph_closure_does_not_release(self, tmp_path, monkeypatch):
         """A non-configured graph (tests, capture flows) owns no global claim:
@@ -123,7 +125,7 @@ class TestClosureReleaseHook:
         assert claim_path("node:x-doen", root=global_root).exists()
 
 
-    
+
 
     def test_done_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
         graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
@@ -147,7 +149,7 @@ class TestClosureReleaseHook:
         assert expired, "the released claim must be archived, not vanished"
 
 
-    
+
 
     def test_supersede_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
         graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
@@ -166,7 +168,7 @@ class TestClosureReleaseHook:
         assert not claim_path("node:x-doen", root=global_root).exists()
 
 
-    
+
 
     def test_no_terminal_transition_no_release(self, tmp_path, monkeypatch):
         """A claim planted on an ALREADY-terminal node survives an unrelated
@@ -525,7 +527,7 @@ class TestReapMirrorClear:
         return graph, claims_root
 
 
-    
+
 
     def test_apply_clears_the_mirror(self, tmp_path, monkeypatch):
         graph, _root = self._dead_claim_and_graph(tmp_path, monkeypatch)

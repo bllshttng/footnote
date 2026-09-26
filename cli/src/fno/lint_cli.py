@@ -534,8 +534,6 @@ def _zero_arg_root_cache_violations(repo_root: Path) -> list[tuple[str, str, str
                     "      @lru_cache(maxsize=8)\n"
                     f"      def {node.name}_at(root: Path): ...\n"
                     f"      def {node.name}(): return {node.name}_at(default_root())\n"
-                    "    Two working precedents in this repo: fleet_has_crown_at\n"
-                    "    (cli/src/fno/mail/envelope.py) and claim_events_path_with.\n"
                     "    An autouse cache_clear fixture is containment, not a fix.",
                 )
             )

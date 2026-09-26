@@ -121,6 +121,7 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             changed_at: "2026-09-13T01:07:00Z".into(),
             changed_by: "op".into(),
             reason: "load 385".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         })
         .unwrap(),
@@ -191,6 +192,7 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             changed_at: "2026-09-13T01:08:00Z".into(),
             changed_by: "op".into(),
             reason: "resolved".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         })
         .unwrap(),
@@ -263,6 +265,7 @@ fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             changed_at: "2026-09-16T01:07:00Z".into(),
             changed_by: "op".into(),
             reason: "load 385".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         })
         .unwrap(),
@@ -302,6 +305,7 @@ fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             changed_at: "2026-09-16T01:08:00Z".into(),
             changed_by: "op".into(),
             reason: "resolved".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         })
         .unwrap(),

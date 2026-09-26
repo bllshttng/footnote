@@ -72,9 +72,9 @@ EOF
 then
   mismatch "the ruleset data does not require exactly '$py_ctx'"
 fi
-expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" \
   "const COVERAGE_STATUS_CONTEXT: &str = \"$py_ctx\";" "the Rust publisher"
-expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" \
   "const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = \"$py_unavailable_ctx\";" "the Rust diagnostic publisher"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   "^[[:space:]]*ctx=$py_ctx\$" "the refresher workflow"
@@ -101,7 +101,7 @@ fi
 # The override label: the 3am release valve, spelled by every writer. The Rust
 # needle includes the jq quoting because that inline string is the label's only
 # Rust spelling.
-expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" \
   "index(\\\"$py_label\\\")" "the Rust publisher (override label)"
 expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
   '"$LABEL" = "'"$py_label"'"' "the refresher workflow (override label)"
@@ -122,7 +122,7 @@ expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
   'f"covered' "the Python publisher (covered description prefix)"
 expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
   '"no review lane configured; merge ungated"' "the Python publisher (no-lane description)"
-expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck/coverage_status.rs" \
   'format!("covered' "the Rust publisher (covered description prefix)"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   'covered\*\|"no review lane"\*' "the refresher preserve list"

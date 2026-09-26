@@ -22,8 +22,8 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 :: $2"; FAIL=$((FAIL + 1)); }
 
-# Seed a tiny sandbox graph.json that maps ab-12345678 -> plans/test.md.
-cat > "$HOME/.fno/graph.json" <<'JSON'
+# Seed graph.db through the anchor that the resolver passes to the keeper.
+cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$HOME/.fno/graph.json"
 {"entries": [
   {"id": "ab-12345678", "title": "Test", "plan_path": "plans/test.md", "status": "ready"}
 ]}

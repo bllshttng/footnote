@@ -126,16 +126,3 @@ class StatusSinkConfig(BaseModel):
                     f"one of url / url_env"
                 )
         return self
-
-
-class ReachMeRow(BaseModel):
-    """One ``[[attention]]`` row: where questions reach the user. The Rust attention arm reads the same key (the retired ``[[reach_me]]`` name reads for one release)."""
-
-    model_config = ConfigDict(extra="allow")
-
-    name: str = ""
-    type: str = "md"
-    path: str
-    tag: str = "#fno"
-    settle_secs: int = 120
-    ready_only: bool = False

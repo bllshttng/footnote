@@ -301,7 +301,7 @@ def test_a_missing_manifest_without_the_flag_skips_the_flag_advice(monkeypatch, 
     stops there instead of advising a flag the caller never used."""
     import fno.king.state as state
 
-    monkeypatch.setattr(state, "king_state_root", lambda: tmp_path)
+    monkeypatch.setattr(state, "king_state_root", lambda cwd=None: tmp_path)
     row = SimpleNamespace(
         status="live",
         crown_scope="x-f3d0",
@@ -476,14 +476,51 @@ def test_an_unparseable_window_is_refused():
 # --- the two refusals that make a crown real -------------------------------
 
 
-def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1", scopes=("drain",)):
+def _init(
+    monkeypatch,
+    tmp_path,
+    *,
+    enabled=True,
+    harness_id="sess-1",
+    scopes=("drain",),
+    readiness_error=None,
+    readiness_calls=None,
+    popen_calls=None,
+):
     """Run `fno agents king init` in tmp_path and return (exit_code, stderr)."""
     import fno.king.state as state
     from typer.testing import CliRunner
 
     from fno.king.cli import king_app
 
+    def readiness(verb, args):
+        if readiness_calls is not None:
+            readiness_calls.append((verb, args))
+        if readiness_error:
+            return readiness_error, None
+        return None, {"ready": True}
+
+    class recording_popen:
+        # Records only the reign-hold arm; every other Popen (the graph
+        # store's unstubbed primitive, store.py:568) delegates to the real
+        # thing so init's settled-children read keeps working.
+        def __new__(cls, argv, *args, **kwargs):
+            argv = [str(a) for a in argv]
+            if popen_calls is not None and argv[1:4] == ["agents", "mail", "hold"]:
+                popen_calls.append(argv)
+                import subprocess as _sp
+
+                return _sp.Popen(
+                    ["true"],
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                )
+            return real_popen(argv, *args, **kwargs)
+
+    real_popen = __import__("subprocess").Popen
+    monkeypatch.setattr("subprocess.Popen", recording_popen)
     monkeypatch.setattr(state, "king_loop_enabled", lambda: enabled)
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", readiness)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".fno").mkdir(exist_ok=True)
     result = CliRunner().invoke(
@@ -534,6 +571,29 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     assert "harness_session_id: sess-1" in manifest.read_text()
 
 
+def test_rust_readiness_refusal_writes_no_crown_manifest(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    calls = []
+    monkeypatch.setenv("FNO_HARNESS", "codex")
+    code, out = _init(
+        monkeypatch,
+        tmp_path,
+        readiness_error="Stop readiness is blocked: session-refresh-unverified",
+        readiness_calls=calls,
+    )
+
+    assert code == 2
+    assert "session-refresh-unverified" in out
+    assert calls == [
+        (
+            "loop",
+            ["readiness", "--scope", "drain", "--session", "sess-1", "--ensure-goal"],
+        )
+    ]
+    assert not state.king_manifest_path("drain", state_root=tmp_path / ".fno").exists()
+
+
 def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):
     code, out = _init(monkeypatch, tmp_path, scopes=("x-4d9b", "x-119e"))
 
@@ -542,3 +602,68 @@ def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):
 
     assert state.king_manifest_path("x-119e,x-4d9b").exists()
     assert "scope:  x-119e,x-4d9b" in out
+
+
+def test_init_arms_a_wall_hold_for_one_checkin_interval(monkeypatch, tmp_path):
+    """The crown holds delivery between beats (x-0e09): init shells the hold
+    verb once with a wall clock for the reign interval, and the beat's
+    `hold --off` is the drain."""
+    popen_calls = []
+    code, out = _init(monkeypatch, tmp_path, popen_calls=popen_calls)
+
+    assert code == 0, out
+    holds = [
+        argv
+        for argv in popen_calls
+        if argv[1:4] == ["agents", "mail", "hold"]
+    ]
+    assert holds, f"init armed no hold: {popen_calls}"
+    argv = holds[0]
+    assert "--for" in argv, f"the crown hold must be a wall clock: {argv}"
+    assert int(argv[argv.index("--for") + 1]) >= 1
+    assert "--off" not in argv
+
+
+def test_cancel_clears_the_crowns_hold(monkeypatch, tmp_path):
+    """A cancelled crown's mail must deliver normally again: the clock and
+    the bus-only stamp both leave (the never-lapses state holds forever)."""
+    import fno.king.state as state
+    from typer.testing import CliRunner
+
+    from fno.king.cli import king_app
+
+    session = "22222222-2222-4222-8222-222222222222"
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+    state.arm_king_manifest("drain", session, state_root=tmp_path / ".fno")
+    # cancel resolves the manifest under the ambient state root; pin it.
+    real_path = state.king_manifest_path
+    monkeypatch.setattr(
+        state,
+        "king_manifest_path",
+        lambda scope, **kw: real_path(scope, **{**kw, "state_root": tmp_path / ".fno"}),
+    )
+    popen_calls = []
+    real_popen = __import__("subprocess").Popen
+
+    class recording_popen:
+        # Same split as _init: the mail-hold arm is recorded and stubbed;
+        # every other Popen runs for real.
+        def __new__(cls, argv, *args, **kwargs):
+            argv = [str(a) for a in argv]
+            if popen_calls is not None and argv[1:2] == ["mail-hold"]:
+                popen_calls.append(argv)
+                import subprocess as _sp
+
+                return _sp.Popen(["true"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.Popen", recording_popen)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: tmp_path / "fno-agents"
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(king_app, ["cancel", "--scope", "drain"])
+
+    assert result.exit_code == 0, result.output
+    offs = [argv for argv in popen_calls if argv[1:] == ["mail-hold", "--session", session, "--off"]]
+    assert offs, f"cancel cleared no hold: {popen_calls}"

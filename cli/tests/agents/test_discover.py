@@ -10,6 +10,7 @@ host-independent.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import builtins
 import fcntl
@@ -100,6 +101,42 @@ def _run(sdir, alive, tmp_path, **kw):
         project_resolver=kw.pop("project_resolver", lambda c: None),
         **kw,
     )
+
+
+def test_discover_walks_a_registered_account_root(tmp_path, monkeypatch):
+    """With no FNO_CLAUDE_SESSIONS_DIR, discovery walks every root: a record
+    under a registered claude account's sessions dir is a candidate. The env
+    override still wins, so the test seam stays hermetic."""
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv(discover.SESSIONS_DIR_ENV, raising=False)
+    acct = tmp_path / "acct"
+    acct.mkdir()
+    config = tmp_path / "accounts-config.toml"
+    config.write_text(
+        "[[accounts.records]]\n"
+        'id = "makers"\n'
+        'name = "makers"\n'
+        'harness = "claude"\n'
+        'auth = "managed"\n'
+        f'config_dir = "{acct}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+    sdir = acct / "sessions"
+    ct = _write_session(sdir, 4242, session_id="uuid-acct", job_id="feedc0de", cwd="/tmp")
+    kwargs = dict(
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil({4242: ct}),
+        project_resolver=lambda c: None,
+        registry_path=tmp_path / "registry.json",
+    )
+    sessions = discover.discover_live_sessions(**kwargs)
+    assert "feedc0de" in [s.short_id for s in sessions]
+
+    override = tmp_path / "override"
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(override))
+    assert discover.discover_live_sessions(**kwargs) == []
 
 
 def test_ac1_hp_three_live_sessions(tmp_path, monkeypatch):
@@ -2766,8 +2803,7 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
 
     sid = "ccdd1122-3344-5566-7788-99aabbccddee"
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {
@@ -2776,9 +2812,7 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
                     }
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
 
     empty_projects = tmp_path / "no-projects"
@@ -3153,7 +3187,7 @@ def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch)
     # marks the path as existing, so the wire read raises instead of
     # answering an empty (absence-proven) store.
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{"id": "x-0001", "sessions": []}]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [{"id": "x-0001", "sessions": []}]}))
     graph.with_suffix(".db").write_bytes(b"{broken")
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
     daemon = tmp_path / "daemon"

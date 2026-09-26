@@ -424,7 +424,6 @@ def test_x6233_root_fold_move_table():
     expected = {
         "decide": "inbox decide",
         "done": "backlog done",
-        "law": "inbox law",
         "mail": "agents mail",
         "project": "config project",
         "test": "doctor test",
@@ -432,6 +431,10 @@ def test_x6233_root_fold_move_table():
         "yard": "agents yard",
     }
     assert {name: VERB_MOVES[name].to for name in expected} == expected
+    assert "law" not in VERB_MOVES, (
+        "law is the Rust front's nested group; a Python move would point at "
+        "a mount that no longer exists"
+    )
 
 
 def test_help_all_renders_no_moved_spellings_block():

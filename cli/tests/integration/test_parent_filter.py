@@ -4,6 +4,7 @@
 candidates to the transitive children of an epic so a walk can drain one
 epic's subtree. Mirrors the existing --roadmap-id filter.
 """
+from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
@@ -17,7 +18,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)

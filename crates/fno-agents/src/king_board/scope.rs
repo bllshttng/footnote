@@ -22,20 +22,8 @@ pub(crate) fn home_dot_fno() -> PathBuf {
         .join(".fno")
 }
 
-/// `paths.graph_json()`: a `paths.graph_json` override wins (a relative one
-/// anchors under `~/.fno`, the same treatment the ledger override gets);
-/// otherwise the state dir's `graph.json`. The default lands at
-/// `~/.fno/graph.json`, which is also what `FNO_HOME` redirects.
-pub(crate) fn graph_json_path(cwd: &Path) -> PathBuf {
-    if let Some(v) = crate::agents_config::config_lookup(cwd, &["paths", "graph_json"])
-        .and_then(|v| v.as_str().map(str::to_string))
-    {
-        let expanded = expand_home(&v);
-        if expanded.is_absolute() {
-            return expanded;
-        }
-        return home_dot_fno().join(expanded);
-    }
+/// The graph store path is rooted under the configured state directory.
+pub(crate) fn graph_json_path(_cwd: &Path) -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_HOME") {
         return PathBuf::from(home).join("graph.json");
     }

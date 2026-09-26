@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 20
+map_version = 22
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -56,8 +56,14 @@ slash_prefix = ""
 # installed CLI's palette and the vendor docs. The verb normalizer skips
 # a leading-slash token naming one of these, so a native verb driven
 # through dispatch reaches the TUI verb instead of a footnote skill that
-# does not exist.
-native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status"]
+# does not exist. /clear and /loop were measured 2026-09-25 from the same
+# vendor commands doc (both ship; the palette scan had missed them).
+native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status", "/clear", "/loop"]
+# Per-verb teaching metadata: when to reach for the verb, and the risk
+# class the raw-mail guard enforces. claude use_when/risk are measured
+# from the vendor commands doc; risk vocabulary is the mail guard's
+# (safe | context-destroying | session-ending).
+native_verb_meta = { "/agents" = { use_when = "manage or create subagent configs", risk = "safe" }, "/code-review" = { use_when = "review the current diff or a PR for correctness bugs", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/doctor" = { use_when = "diagnose installation and settings health", risk = "safe" }, "/memory" = { use_when = "edit CLAUDE.md memory files", risk = "safe" }, "/model" = { use_when = "switch the AI model", risk = "safe" }, "/rename" = { use_when = "rename the current session", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id or name", risk = "context-destroying" }, "/status" = { use_when = "show version, model, account, connectivity", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/loop" = { use_when = "run a prompt on a repeat until the session ends", risk = "safe" } }
 ready_marker = "live_prompt_box"
 ready_rule_ids = ["live_prompt_box", "osc_title_idle"]
 manifest_rules = [
@@ -203,7 +209,13 @@ command_surface = "codex-skill"
 # spawn or dispatch reaches the TUI verb instead of a footnote skill that does
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
-native_verbs = ["/review", "/code-review", "/model", "/status", "/compact"]
+native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
+# Per-verb teaching metadata: the roster is palette-measured
+# (2026-09-01) and compact/goal corroborated by the provider_actions
+# rows below; use_when lines are name-derived from that measurement,
+# risk classes all safe (compact is a driven provider action, goal is
+# a structured set/get - neither ends the session nor discards it).
+native_verb_meta = { "/review" = { use_when = "run the native review skill", risk = "safe" }, "/code-review" = { use_when = "review the current diff for correctness bugs", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/status" = { use_when = "show session status", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/goal" = { use_when = "set or show the session goal", risk = "safe" } }
 # The subset the shared app-server daemon maps to its review/start RPC. Every
 # other native verb has no prompt line on a daemon thread, and the mail lane
 # refuses it by name.
@@ -472,6 +484,11 @@ slash_prefix = ""
 # reference's slash-command table (aliases folded into their canonical
 # name; argument-taking verbs listed by name).
 native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config", "/context", "/copy", "/credits", "/diff", "/exit", "/fast", "/feedback", "/fork", "/help", "/hooks", "/keybindings", "/logout", "/mcp", "/model", "/open", "/permissions", "/planning", "/rename", "/resume", "/rewind", "/skills", "/statusline", "/tasks", "/title", "/usage"]
+# Per-verb teaching metadata. agy is claude-shaped (the same
+# hook-event names and a Gemini-family core), so use_when lines are
+# name-derived, not vendor-measured; the dangerous classes follow the
+# claude semantics of the shared verbs.
+native_verb_meta = { "/add-dir" = { use_when = "add a working directory for this session", risk = "safe" }, "/agents" = { use_when = "manage or create subagent configs", risk = "safe" }, "/artifact" = { use_when = "open or manage an artifact", risk = "safe" }, "/btw" = { use_when = "ask a side question without adding to the conversation", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/config" = { use_when = "open settings", risk = "safe" }, "/context" = { use_when = "show context-window usage", risk = "safe" }, "/copy" = { use_when = "copy the last response to the clipboard", risk = "safe" }, "/credits" = { use_when = "show credit usage", risk = "safe" }, "/diff" = { use_when = "review working-tree changes", risk = "safe" }, "/exit" = { use_when = "exit the CLI", risk = "session-ending" }, "/fast" = { use_when = "toggle fast mode", risk = "safe" }, "/feedback" = { use_when = "send product feedback", risk = "safe" }, "/fork" = { use_when = "copy the conversation into a new session", risk = "safe" }, "/help" = { use_when = "show help and commands", risk = "safe" }, "/hooks" = { use_when = "view hook configuration", risk = "safe" }, "/keybindings" = { use_when = "open the keyboard shortcuts file", risk = "safe" }, "/logout" = { use_when = "sign out of the account", risk = "session-ending" }, "/mcp" = { use_when = "manage MCP server connections", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/open" = { use_when = "open a file or URL", risk = "safe" }, "/permissions" = { use_when = "manage tool permission rules", risk = "safe" }, "/planning" = { use_when = "enter plan mode", risk = "safe" }, "/rename" = { use_when = "rename the current session", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id or name", risk = "context-destroying" }, "/rewind" = { use_when = "rewind the conversation or code to an earlier point", risk = "context-destroying" }, "/skills" = { use_when = "list available skills", risk = "safe" }, "/statusline" = { use_when = "configure the status line", risk = "safe" }, "/tasks" = { use_when = "view background work in this session", risk = "safe" }, "/title" = { use_when = "set the session title", risk = "safe" }, "/usage" = { use_when = "show usage and limits", risk = "safe" } }
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -493,7 +510,7 @@ remove_strategy = "registry-only"
 # whole-row claim, and only the THREAD lane binds an id today. The pane arm
 # still launches a bare `agy` and mints nothing, so `true` would assert a
 # binding for a lane that makes none - and would add agy to
-# `_SESSION_BINDING_HARNESSES` (harness_probe._required_registrations), where
+# `_SESSION_BINDING_HARNESSES` (the live rubric's registration sweep), where
 # its pane receipts would then report `bound: false` for healthy workers.
 # Minting on the pane lane too is what makes this `true`.
 session_binding = { strategy = "callee-minted-read-back", required = false, timeout_ms = 60000 }
@@ -564,6 +581,7 @@ status_pattern = ""
 # conversation interactively with its transcript restored.
 [harness.agy.features.spawn]
 state = "native"
+measured_by = { reader = "agy spawn journey", version = "1.1.24", date = "2026-09-03" }
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). state_root_grant
 # above records a write-access MECHANISM per lane, never whether a lane was
@@ -619,6 +637,11 @@ slash_prefix = "fno:"
 # commands doc: five built-ins ship, and a custom command can override a
 # built-in by name.
 native_verbs = ["/help", "/init", "/redo", "/share", "/undo"]
+# Per-verb teaching metadata, measured from the same vendor
+# commands doc as the roster. Every opencode row carries built_in = true
+# because a user-defined command can override a built-in by name; a
+# custom override is invisible to this table by construction.
+native_verb_meta = { "/help" = { use_when = "show help and built-in commands", risk = "safe", built_in = true }, "/init" = { use_when = "write the project AGENTS.md guide", risk = "safe", built_in = true }, "/redo" = { use_when = "re-apply the last undone change", risk = "safe", built_in = true }, "/share" = { use_when = "create a share link for this session", risk = "safe", built_in = true }, "/undo" = { use_when = "undo the agent's last file change", risk = "safe", built_in = true } }
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = [{ id = "permission_required", state = "blocked" }]
@@ -705,6 +728,7 @@ state = "native"
 # verb inventory no: the split this key exists to record.
 [harness.opencode.features.attach]
 state = "native"
+measured_by = { reader = "daemon-kept attach journey", date = "2026-09-03" }
 
 # pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
 # a session gets is a choice fno makes at exec, never a property of pi:
@@ -784,6 +808,8 @@ slash_prefix = "skill:"
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
 native_verbs = ["/name"]
+# Per-verb teaching metadata; pi's single measured verb.
+native_verb_meta = { "/name" = { use_when = "rename the pi session", risk = "safe" } }
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
 # the cost, the subscription tag, the context percentage and the compaction
 # tag, and it is the lowest-priority rule in manifests/pi.toml precisely
@@ -917,6 +943,7 @@ status_pattern = ""
 # that seats pi in the spawn roster.
 [harness.pi.features.spawn]
 state = "native"
+measured_by = { reader = "thread keeper journey", version = "0.84.2", date = "2026-09-01" }
 
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
@@ -957,6 +984,12 @@ slash_prefix = ""
 # vendor slash-commands reference (aliases folded into their canonical
 # name).
 native_verbs = ["/about", "/ask", "/bedrock", "/clear", "/config", "/copy", "/copy-conversation-id", "/copy-request-id", "/debug", "/exit", "/feedback", "/fork", "/help", "/line-numbers", "/logs", "/max-mode", "/mcp", "/model", "/open", "/plan", "/plugin", "/quit", "/rename", "/resume", "/rewind", "/run-everything", "/sandbox", "/setup-terminal", "/shell", "/show-thinking", "/status-indicators", "/summarize", "/update", "/vim"]
+# Per-verb teaching metadata; cursor-agent ships no vault doc in
+# the measurement set, so use_when lines are name-derived. The chat id is
+# CALLEE-minted and the store is remote (see the conversion row and
+# docs/HARNESSES.md), which is why /resume and /rewind read
+# context-destroying: they swap or roll back the live conversation.
+native_verb_meta = { "/about" = { use_when = "show version and build info", risk = "safe" }, "/ask" = { use_when = "ask a question in the current chat", risk = "safe" }, "/bedrock" = { use_when = "configure Amazon Bedrock access", risk = "safe" }, "/clear" = { use_when = "start a new conversation with empty context", risk = "context-destroying" }, "/config" = { use_when = "open settings", risk = "safe" }, "/copy" = { use_when = "copy the last response", risk = "safe" }, "/copy-conversation-id" = { use_when = "copy the conversation id", risk = "safe" }, "/copy-request-id" = { use_when = "copy the last request id", risk = "safe" }, "/debug" = { use_when = "toggle debug output", risk = "safe" }, "/exit" = { use_when = "exit the CLI", risk = "session-ending" }, "/feedback" = { use_when = "send product feedback", risk = "safe" }, "/fork" = { use_when = "copy the conversation into a new chat", risk = "safe" }, "/help" = { use_when = "show help and commands", risk = "safe" }, "/line-numbers" = { use_when = "toggle line numbers", risk = "safe" }, "/logs" = { use_when = "show recent logs", risk = "safe" }, "/max-mode" = { use_when = "toggle max mode", risk = "safe" }, "/mcp" = { use_when = "manage MCP servers", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/open" = { use_when = "open a file in the chat", risk = "safe" }, "/plan" = { use_when = "enter plan mode", risk = "safe" }, "/plugin" = { use_when = "manage plugins", risk = "safe" }, "/quit" = { use_when = "exit the CLI", risk = "session-ending" }, "/rename" = { use_when = "rename the chat", risk = "safe" }, "/resume" = { use_when = "resume a stored conversation by id", risk = "context-destroying" }, "/rewind" = { use_when = "rewind the conversation to an earlier point", risk = "context-destroying" }, "/run-everything" = { use_when = "run every queued item", risk = "safe" }, "/sandbox" = { use_when = "toggle the sandbox", risk = "safe" }, "/setup-terminal" = { use_when = "configure terminal keybindings", risk = "safe" }, "/shell" = { use_when = "open a shell escape", risk = "safe" }, "/show-thinking" = { use_when = "toggle thinking display", risk = "safe" }, "/status-indicators" = { use_when = "toggle status indicators", risk = "safe" }, "/summarize" = { use_when = "summarize the conversation", risk = "safe" }, "/update" = { use_when = "update the CLI", risk = "safe" }, "/vim" = { use_when = "toggle vim keybindings", risk = "safe" } }
 ready_marker = "idle_plan_build"
 ready_rule_ids = ["idle_plan_build"]
 manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
@@ -1064,6 +1097,11 @@ state = "native"
 kind = "declared"
 authority = "{bin} --help"
 pattern = '--effort\s+.*\((?P<vocab>[a-z|]+)\)'
+# The control is the text a correct reader must reject: a help line denying
+# the effort surface in ordinary words. The pattern needs the literal
+# --effort flag with a parenthesized choice list, which the denial lacks, so
+# the reader can tell presence from denial.
+control = "no reasoning effort options are available in this build"
 # What a match means: the binary declares a reasoning-effort surface, so a
 # row whose kind is "unsupported" understates the CLI (the live agy case).
 
@@ -1087,10 +1125,13 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
 # and never instead of them. Eleven keys, closed so a typo is a parse error:
 # review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
-# acp. A claim's only field is `state`: native, capable, absent, unmeasured -
+# acp. A claim's fields are `state` (native, capable, absent, unmeasured -
 # defined once in harness_capabilities.rs beside FEATURE_STATES, the parser
-# that enforces them; the per-row comments below cite the measurements,
-# never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# that enforces them) and the optional `measured_by` receipt naming the
+# reader, version and date that settled the state. A state without a receipt
+# keeps its row comment, and the matrix renders the cell unmeasured rather
+# than repeating a word nobody can point at a measurement for. The per-row
+# comments below cite the measurements, never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
 # the refusal lives in the consuming lane, which names the key, the state, and
 # the probe that settles it. Every key used on any row needs a
 # [probe.features.<key>] declaration below, or the table refuses to load: a
@@ -1112,51 +1153,108 @@ marker = "an unattended spawn on the harness's thread lane starts, drives a turn
 kind = "behavioral"
 marker = "a real attach to a live session lands in that session's own interface and returns its lines - the native verb where one ships, else the daemon-kept lane (mux-thread portal) against a session the keeper holds"
 
+# The eight keys below were help-word matches until this conversion: a
+# pattern like (?i)\bhooks?\b matches "no hook support in this build" just as
+# it matches real support, so the reader could not report absence and the
+# load now refuses such a declaration (a declared instrument must carry a
+# control it rejects). The rust regex engine has no lookaround, so no
+# one-pattern instrument can tell the word in a capability section from the
+# same word in a denial, and no harness ships a one-shot absence-capable
+# instrument for these keys. Each is honest unprobeable now: fewer honest
+# columns beat word matches that cannot fail. The renderer prints the first
+# three words of these reasons as the unmeasured reason.
 [probe."features.rpc"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\b(app-server|rpc|daemon)\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build has no app-server, rpc, or daemon support'; no one-shot instrument reports absence for this key"
 
 [probe."features.server"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\b(serve|server|listen)\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no serve mode: this binary neither serves nor listens'; no one-shot instrument reports absence for this key"
 
 [probe."features.plugins"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bplugins?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'plugins are not supported in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.hooks"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bhooks?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no hook support in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.skills_dir"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bskills?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no skills directory in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.subagent_dispatch"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bsubagents?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build cannot dispatch subagents'; no one-shot instrument reports absence for this key"
 
 [probe."features.mcp"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bmcp\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'MCP support is absent from this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.acp"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bacp\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build speaks no ACP'; no one-shot instrument reports absence for this key"
 
-# grok joins on the same keeper lane pi and cursor-agent use. Its
-# drive transports (leader daemon on a unix socket, WebSocket listener, ACP
-# stdio) are built and unit-tested in the Python driver
-# (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
-# keeper-hosted TUI, and the row is a statement about THAT lane.
+# THE JOURNEYS DIMENSION. The ten user-journey classes the cross-harness
+# audits name, keyed by the closed JOURNEY_KEYS set in
+# harness_capabilities.rs, each carrying either a runner (an instrument the
+# live tier can run) or an unprobeable reason. The live rubric's observed
+# lines are six of the ten runners. A journey cell renders unmeasured until a
+# live-tier run earns it; no live-tier cell is earned by a table edit. Two
+# journeys are settled by code that already refuses, and the renderer reads
+# that code rather than guessing: wait-for-ci reads the watch lease, whose
+# permit list is one harness wide today.
+
+[journeys.fresh-install]
+kind = "unprobeable"
+reason = "the fresh-install read is the OpenCode installation surface's filtered catalog reader, which has not landed; the unfiltered catalog read is refused as blind because another plugin's mirrored fno: registrations satisfy it with no footnote install"
+reader = "filtered catalog read (OpenCode installation surface)"
+
+[journeys.spawn-turn-resume]
+kind = "behavioral"
+marker = "an unattended spawn on the harness's thread lane starts, drives a turn to completion, ends in a clean stop, and a fresh process resumes the same session id"
+reader = "live rubric: SPAWN + IDENTITY lines"
+
+[journeys.parent-children]
+kind = "unprobeable"
+reason = "the behavior it measures, a parent worker holding children under a concurrency cap, is owned by the continuation-correctness work and has not landed; until then the cell reads unmeasured, never asserted"
+
+[journeys.send-during-active-work]
+kind = "behavioral"
+marker = "a message sent to a worker mid-turn changes the worker's output: PROBE_REPLY=<nonce> appears after PROBE_MAIL=<nonce> was sent and was absent before"
+reader = "live rubric: MAIL BOTH WAYS line"
+
+[journeys.wait-for-ci]
+kind = "behavioral"
+marker = "a session parked on a CI watch wakes when its watcher exits, on a harness whose watch lease permits idling"
+reader = "the watch lease (loopcheck): only a claude session may idle today; every other harness reads absent with its refusal quoted"
+
+[journeys.compact-reopen]
+kind = "behavioral"
+marker = "after the harness process is stopped, a fresh process resumes the session and the prior turn's planted token is visible again: PROBE_SURVIVE=<nonce>"
+reader = "live rubric: SURVIVE line"
+
+[journeys.restart-viewport]
+kind = "unprobeable"
+reason = "no live fleet restart is part of the work that declares this journey, so the viewport restart is unprobeable here; nobody looked is not measured absence, and the cell renders unmeasured"
+
+[journeys.review-ship]
+kind = "unprobeable"
+reason = "declared, never driven: the review-and-ship journey opens a review lane against a live PR, which no one-shot instrument reaches and no isolated run may open"
+
+[journeys.native-remote-view]
+kind = "behavioral"
+marker = "a portal view onto the session's own pane returns its live screen: the harness's pane read exits 0 with nonempty output on the row's pane reference"
+reader = "live rubric: VIEW line"
+
+[journeys.cleanup]
+kind = "behavioral"
+marker = "every fleet row the run minted is removed by name and the removal is recorded; a row that survives fails the journey"
+reader = "live rubric: row-removal check"
+
+# grok joins on the same keeper lane pi and cursor-agent use. The shared ACP
+# stdio client is in Rust at crates/fno-agents/src/acp_stdio.rs; this row still
+# describes the keeper-hosted TUI, not the separate ACP client.
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). `carries`
 # names the launch axes this lane has a measured spelling for; every other
@@ -1201,6 +1299,9 @@ slash_prefix = ""
 # user guide's slash-command sections. Skill-provided verbs (/commit and
 # the like) are excluded: they ride enabled skills, not the harness.
 native_verbs = ["/always-approve", "/compact", "/hooks-add", "/hooks-list", "/hooks-remove", "/hooks-trust", "/hooks-untrust", "/model", "/new"]
+# Per-verb teaching metadata; grok ships no vault doc in the
+# measurement set, so use_when lines are name-derived.
+native_verb_meta = { "/always-approve" = { use_when = "toggle the approval bypass", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/hooks-add" = { use_when = "add a hook rule", risk = "safe" }, "/hooks-list" = { use_when = "list hook rules", risk = "safe" }, "/hooks-remove" = { use_when = "remove a hook rule", risk = "safe" }, "/hooks-trust" = { use_when = "trust a hook", risk = "safe" }, "/hooks-untrust" = { use_when = "untrust a hook", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/new" = { use_when = "start a new conversation", risk = "context-destroying" } }
 # Read off a live grok TUI (2026-09-02): the idle composer carries the status
 # bar `Shift+Tab:mode | Ctrl+x:shortcuts` and the footer
 # `Grok 4.6 (high) · always-approve`; while a turn runs the mode hint is
@@ -1233,8 +1334,8 @@ session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, ti
 # bypass - a one-shot grok wrote a file outside its cwd. The --sandbox
 # <PROFILE> axis exists but is opt-in (env GROK_SANDBOX unset on this
 # machine), so the keeper child is an ordinary user process with the
-# operator's own reach. headless stays unmeasured: one -p probe ran, but no
-# fno one-shot lane is built and nothing has ever spawned there.
+# operator's own reach. Headless needs a signed-in live journey before it is
+# declared measured.
 pane = "unsandboxed"
 thread = "unsandboxed"
 headless = "unmeasured"
@@ -1282,9 +1383,8 @@ tokens = ["grok", "--resume", "{session_id}"]
 kind = "unsupported"
 tokens = []
 
-# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but
-# no fno one-shot lane is built on it; the forms stay unsupported until that
-# lane ships and state_root_grant.headless stops reading unmeasured.
+# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but the
+# live create-and-resume journey is unavailable until operator auth is present.
 [harness.grok.resume_strategy.forms.headless_create]
 kind = "unsupported"
 tokens = []
@@ -1309,16 +1409,18 @@ status_pattern = ""
 # seats grok in the spawn roster.
 [harness.grok.features.spawn]
 state = "native"
+measured_by = { reader = "session-id resume journey", version = "1.0.13", date = "2026-09-02" }
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). Re-using a
 # spent `--session-id` is a grok refusal, never a resume, so the arm refuses
 # `spawn --resume` rather than render a create form with a used id.
 [harness.grok.keeper]
-once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok has no one-shot lane - its headless stance is unmeasured"
+once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok's headless one-shot is unmeasured"
 carries = ["model", "yolo", "permission_mode", "effort"]
 passthrough = ["*"]
 ready_marker = "Shift+Tab:mode"
 resume_refusal = "is not supported on the grok thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than spawning a fresh session."
+headless_refusal = "grok's headless lane is unmeasured: a signed-in live create-and-resume journey is required before it can be enabled"
 bypass_flag = "--always-approve"
 takes_model = true
 takes_effort = true
@@ -1384,3 +1486,18 @@ preserves_id = true
 [harness.grok.conversion]
 strategy = "keeper-rebind"
 preserves_id = true
+
+[harness.codex.provider_actions.compact]
+transport = "app-server"
+method = "thread/compact/start"
+proof = "context-compaction"
+
+[harness.codex.provider_actions.goal_get]
+transport = "app-server"
+method = "thread/goal/get"
+proof = "goal-active"
+
+[harness.codex.provider_actions.goal_set]
+transport = "app-server"
+method = "thread/goal/set"
+proof = "goal-active"

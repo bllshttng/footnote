@@ -14,6 +14,7 @@ never hit - tests stub it.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from fno.graph._reconcile import (
     scan_merge_drift,
     write_retro_sentinel,
 )
+from tests.fixtures.graph_seed import seed_graph
 
 runner = CliRunner()
 
@@ -53,8 +55,17 @@ def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
 
 
 def _make_graph(path: Path, entries: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(path, entries)
+
+
+def _store_state(path: Path):
+    from fno.graph.store import store_export_status
+
+    return _read_entries(path), store_export_status(path)
+
+
+def _git_checkout(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
 
 
 @pytest.fixture(autouse=True)
@@ -231,9 +242,8 @@ def test_scan_passes_repo_from_url():
 
 @pytest.fixture
 def live_cwd(tmp_path) -> str:
-    """An existing dir standing in for a live worktree cwd. The reverse-map
-    dead-cwd guard (x-4114) skips any node whose cwd is not an existing dir, so
-    tests exercising the gh-query path must anchor on a real directory."""
+    """A real checkout for tests exercising a reverse-map listing call."""
+    _git_checkout(tmp_path)
     return str(tmp_path)
 
 
@@ -377,6 +387,8 @@ def test_reverse_map_budget_defers_remaining_repos_on_a_slow_gh(tmp_path, monkey
     cwd_b = tmp_path / "repo-b"
     cwd_a.mkdir()
     cwd_b.mkdir()
+    _git_checkout(cwd_a)
+    _git_checkout(cwd_b)
 
     calls: list[str] = []
 
@@ -407,6 +419,7 @@ def test_reverse_map_gone_cwd_falls_back_to_project_root(tmp_path, monkeypatch):
 
     root = tmp_path / "proj-root"
     root.mkdir()
+    _git_checkout(root)
     monkeypatch.setattr(
         intake, "project_root_from_settings",
         lambda project: str(root) if project == "myproj" else None,
@@ -457,6 +470,7 @@ def test_reverse_map_advisory_aggregates_and_is_silent_when_clean(tmp_path, monk
     """US2: N dead-cwd nodes -> exactly one advisory line naming all ids; a graph
     with no dead-cwd node prints nothing."""
     import fno.graph._intake as intake
+    _git_checkout(tmp_path)
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
 
     gone = str(tmp_path / "nope")
@@ -548,7 +562,7 @@ def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
 
     live_dir = tmp_path / "live-checkout"
     live_dir.mkdir()
-    (live_dir / ".git").mkdir()  # a checkout
+    _git_checkout(live_dir)
     live = str(live_dir)
     entries = [_node("ab-live", cwd=live, project="whatever")]
     records = scan_merge_drift(entries, list_merged=_spy)
@@ -563,7 +577,7 @@ def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monke
 
     root = tmp_path / "proj-root"
     root.mkdir()
-    (root / ".git").mkdir()  # a checkout
+    _git_checkout(root)
     monkeypatch.setattr(
         intake, "project_root_from_settings",
         lambda project: str(root) if project == "myproj" else None,
@@ -585,29 +599,26 @@ def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monke
     assert records[0].pr_number == 5
 
 
-def test_reverse_map_non_checkout_cwd_unresolvable_keeps_cwd(tmp_path, monkeypatch):
-    """AC2-ERR (x-b59f): a non-checkout cwd whose project maps to no root keeps
-    its cwd; the gh failure from it still lands as an error record."""
+def test_reverse_map_non_checkout_cwd_is_skipped(tmp_path, monkeypatch, capsys):
+    """A non-checkout cwd follows the same named skip path as a missing one."""
     import fno.graph._intake as intake
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
 
-    seen: dict = {}
+    seen = []
 
-    def _boom(**kw):
-        seen["cwd"] = kw.get("cwd")
-        raise rec.ReconcileError(
-            "gh pr list (merged) failed (rc=1): failed to run git: "
-            "fatal: not a git repository (or any of the parent directories)"
-        )
+    def _listed(**kw):
+        seen.append(kw.get("cwd"))
+        return []
 
     stray_dir = tmp_path / "stray"
     stray_dir.mkdir()
     entries = [_node("ab-stray2", cwd=str(stray_dir), project="nomap")]
-    records = scan_merge_drift(entries, list_merged=_boom)
-    assert seen["cwd"] == str(stray_dir)  # unmapped project: cwd unchanged
-    assert len(records) == 1
-    assert not records[0].closeable
-    assert "not a git repository" in records[0].error
+    records = scan_merge_drift(entries, list_merged=_listed)
+    stderr = capsys.readouterr().err
+    assert seen == []
+    assert records == []
+    assert "ab-stray2" in stderr
+    assert "non-checkout cwd" in stderr
 
 
 def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
@@ -616,6 +627,7 @@ def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
 
     root = tmp_path / "shared-root"
     root.mkdir()
+    _git_checkout(root)
     monkeypatch.setattr(intake, "project_root_from_settings", lambda project: str(root))
 
     calls = {"n": 0, "cwds": []}
@@ -697,6 +709,7 @@ def test_write_retro_sentinel(tmp_path):
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
     """Tmp graph + tmp retro sentinel dir + a no-op plan stamp."""
+    _git_checkout(tmp_path)
     graph_path = tmp_path / "graph.json"
     _patch_graph_path(monkeypatch, graph_path)
     # The reconcile single-flight gate locks on the claims root, which
@@ -775,13 +788,13 @@ def test_reconcile_dry_run_reports_status_reclaim_without_writing(cli_env):
         ),
         _node("ab-dry-idea", parent="ab-dry-rollup", plan_path=None),
     ])
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
 
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
 
     assert result.exit_code == 0, result.output
     assert "Would reclaim ab-dry-rollup: in_progress -> ready" in result.output
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_reconcile_json_reports_status_reclaim(cli_env):
@@ -796,7 +809,7 @@ def test_reconcile_json_reports_status_reclaim(cli_env):
         ),
         _node("ab-json-idea", parent="ab-json-rollup", status="idea", plan_path=None),
     ])
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
 
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
 
@@ -805,7 +818,7 @@ def test_reconcile_json_reports_status_reclaim(cli_env):
     assert payload["reclaimed"] == [
         {"node_id": "ab-json-rollup", "from": "in_progress", "to": "ready"}
     ]
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_reconcile_status_drift_ignores_read_time_blocked_overlay(cli_env):
@@ -838,7 +851,7 @@ def test_reconcile_node_scope_does_not_run_global_status_reclaim(cli_env):
         ),
         _node("ab-scoped-idea", parent="ab-scoped-rollup", status="idea", plan_path=None),
     ])
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
 
     result = runner.invoke(
         app, ["backlog", "reconcile", "--node", "ab-scoped-rollup", "--dry-run", "--json"]
@@ -846,7 +859,7 @@ def test_reconcile_node_scope_does_not_run_global_status_reclaim(cli_env):
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["reclaimed"] == []
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
@@ -1038,10 +1051,10 @@ def test_reconcile_dry_run_byte_identical(cli_env, monkeypatch):
     _make_graph(graph_path, [_node("ab-dry", pr_number=400)])
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({400: "MERGED"}))
 
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
     assert result.exit_code == 0, result.output
-    after = graph_path.read_bytes()
+    after = _store_state(graph_path)
 
     assert before == after  # nothing mutated
     assert "ab-dry" in result.output
@@ -1453,6 +1466,36 @@ def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monk
     assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
 
 
+def test_reconcile_pr_number_leaves_node_released_from_claimant_open(cli_env, monkeypatch):
+    """The owner's PR body was written while the child was contained, so the
+    trailer still names it after a release. The release recorded released_from,
+    so the bind skips the child and the forward scan closes the owner only."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-500001"),
+        _node("ab-500002", released_from="ab-500001"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Fixes ab-500001 ab-500002\n", number=810,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-500001"}
+
+    entries = _read_entries(graph_path)
+    released = next(e for e in entries if e["id"] == "ab-500002")
+    assert released["completed_at"] is None
+
+
 def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypatch, tmp_path):
     """x-2f24: ``~/.fno/graph.json`` is a single store shared across every
     project on the machine. A --pr-number call must not reverse-map another
@@ -1711,7 +1754,7 @@ def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, mon
     )
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({907: "MERGED"}))
 
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
     result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "907", "--dry-run", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1723,7 +1766,7 @@ def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, mon
     assert "ab-100021" in candidate_ids
 
     # --dry-run leaves the graph byte-identical.
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_reconcile_pr_number_idempotent_rerun(cli_env, monkeypatch):
@@ -2299,7 +2342,7 @@ def test_open_pr_heal_rebind_is_dry_run_safe(cli_env, tmp_path, monkeypatch):
     _make_graph(graph_path, [_node("ab-c4ad", pr_number=30, cwd=str(tmp_path))])
     monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({31: "feature/ab-c4ad-v2"}))
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({30: "CLOSED", 31: "OPEN"}))
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
 
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
     assert result.exit_code == 0, result.output
@@ -2312,7 +2355,7 @@ def test_open_pr_heal_rebind_is_dry_run_safe(cli_env, tmp_path, monkeypatch):
             "would": True,
         }
     ]
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_open_pr_heal_fills_an_unstamped_node(cli_env, tmp_path, monkeypatch):
@@ -2352,8 +2395,8 @@ def test_open_pr_heal_fills_an_unstamped_node(cli_env, tmp_path, monkeypatch):
 def test_open_pr_heal_ambiguous_prs_mutate_nothing(cli_env, tmp_path, monkeypatch):
     """AC4: one node named by two open PRs -> advisory, no graph mutation."""
     graph_path, _sentinel = cli_env
-    _make_graph(graph_path, [_node("ab-3b9e", cwd=str(tmp_path))])
-    before = graph_path.read_bytes()
+    _make_graph(graph_path, [_node("ab-3b9e", cwd=str(tmp_path), status="idea", slug="ab-3b9e")])
+    before = _store_state(graph_path)
     monkeypatch.setattr(
         rec, "list_open_pr_branches", _open_rows({10: "feature/ab-3b9e", 11: "target/x-ab-3b9e"})
     )
@@ -2365,7 +2408,7 @@ def test_open_pr_heal_ambiguous_prs_mutate_nothing(cli_env, tmp_path, monkeypatc
     assert any("ab-3b9e" in a for a in payload["open_binding_advisories"])
     node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-3b9e")
     assert node["pr_number"] is None
-    assert graph_path.read_bytes() == before  # no lock fired, bytes untouched
+    assert _store_state(graph_path) == before
 
 
 def test_open_pr_heal_ignores_a_branch_naming_no_real_node(cli_env, tmp_path, monkeypatch):
@@ -2424,7 +2467,7 @@ def test_open_pr_heal_dry_run_binds_in_memory_only(cli_env, tmp_path, monkeypatc
     graph.json byte-identical."""
     graph_path, _sentinel = cli_env
     _make_graph(graph_path, [_node("ab-8e9f", cwd=str(tmp_path))])
-    before = graph_path.read_bytes()
+    before = _store_state(graph_path)
     monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({31: "feature/ab-8e9f"}))
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({31: "OPEN"}))
 
@@ -2437,7 +2480,7 @@ def test_open_pr_heal_dry_run_binds_in_memory_only(cli_env, tmp_path, monkeypatc
             "url": "https://github.com/test-owner/test-repo/pull/31",
         }
     ]
-    assert graph_path.read_bytes() == before
+    assert _store_state(graph_path) == before
 
 
 def test_open_pr_heal_rechecks_current_node_inside_graph_lock(cli_env, tmp_path, monkeypatch):

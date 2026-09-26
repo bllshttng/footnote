@@ -160,10 +160,7 @@ mod tests {
 
     fn fake_claude(body: &str) -> (tempfile::TempDir, Command) {
         let dir = tempfile::tempdir().unwrap();
-        let stub = dir.path().join("claude");
-        std::fs::write(&stub, format!("#!/bin/bash\n{body}\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stub = crate::write_exec_stub(dir.path(), "claude", &format!("#!/bin/bash\n{body}\n"));
         (dir, Command::new(&stub))
     }
 

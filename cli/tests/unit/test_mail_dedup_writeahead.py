@@ -210,7 +210,7 @@ def test_present_mail_ids_reads_envelope_ids_from_transcript(tmp_path, monkeypat
 # ---------------------------------------------------------------------------
 
 
-def _register_claude_peer(name: str = "red") -> str:
+def _register_claude_peer(name: str = "red", mux: dict | None = None) -> str:
     """One live claude peer with a full session id; returns its canonical handle
     (the durable recipient a send addresses)."""
     from fno.agents.registry import AgentEntry, write_registry
@@ -220,26 +220,36 @@ def _register_claude_peer(name: str = "red") -> str:
     write_registry([
         AgentEntry(
             name=name, harness="claude", harness_session_id=sid,
-            cwd="/tmp", log_path="/tmp/red.log", short_id="abcd1234", status="live",
+            cwd="/tmp", log_path="/tmp/red.log", status="live",
+            # A mux row must not also carry a worker-socket key (one-live-ref).
+            short_id="abcd1234" if mux is None else "",
+            mux=mux,
         )
     ])
     return canonical_handle(sid)
 
 
 def test_writeahead_writes_durable_for_asleep_recipient(runner, tmp_path, monkeypatch):
-    """AC8-HP: a send to a recipient we will not attempt live (asleep) writes the
-    durable placeholder ahead. The recipient cannot drain during a live window
-    (there is none), and a sender crash before it wakes leaves the message on the
-    bus, drainable exactly once."""
+    """AC8-HP: a send to a recipient we will not attempt live (asleep, in a pane)
+    writes the durable placeholder ahead. The recipient cannot drain during a
+    live window (there is none), and a sender crash before it wakes leaves the
+    message on the bus, drainable exactly once."""
     from fno.bus.cursor import scan_unread
     from fno.cli import app
 
     use_tmpdir(monkeypatch, tmp_path)
-    recipient = _register_claude_peer("red")
+    # The pane ref keeps this row transcript-vetoed; a paneless claude row is
+    # live-first now and would skip the write-ahead.
+    recipient = _register_claude_peer("red", mux={"session": "main", "pane_id": 11})
     # Asleep: not live and not unknown -> not attemptable -> the write-ahead path.
     monkeypatch.setattr(
         "fno.agents.dispatch._registered_family1_state", lambda _e: "asleep"
     )
+
+    def _no_live_lane(*_a, **_k):
+        raise AssertionError("live lane ran for a transcript-vetoed recipient")
+
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _no_live_lane)
 
     res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"

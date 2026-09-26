@@ -662,6 +662,11 @@ def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
     return _ExecClient(path)
 
 
+def _refusal(exc: Exception, message: str) -> Exception:
+    exc.fno_refusal = message  # type: ignore[attr-defined]
+    return exc
+
+
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)
@@ -672,12 +677,13 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "lock_timeout":
         raise GraphLockTimeout(message)
     if kind == "empty_field_update":
-        raise ValueError(message)
+        raise _refusal(ValueError(message), message)
     if kind == "conflict":
         raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
-    raise RuntimeError(f"store error ({kind}): {message}")
+    err = RuntimeError(f"store error ({kind}): {message}")
+    raise _refusal(err, message) if kind == "invalid" else err
 
 
 class _Conflict(Exception):
@@ -732,7 +738,6 @@ def _commit_rows(client, base_version: str, base_digests: dict,
     return client.request("commit_rows", {
         "base_version": base_version,
         "base_digests": {rid: base_digests[rid] for rid in touched if rid in base_digests},
-        "base_plan_rungs": _plan_rung_map(base_entries),
         "changed": changed,
         "removed": removed,
         "plan_rungs": plan_rungs,
@@ -926,6 +931,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    filter_args: "list[str] | None" = None,
     occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
@@ -953,6 +959,8 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
+    if filter_args:
+        params["filter_args"] = filter_args
     if occupancy is not None:
         params["claimed"] = sorted(occupancy)
     else:
@@ -981,6 +989,8 @@ def ready(
         result = _client_for(_paths.graph_json()).request("ready", params)
     except RuntimeError as exc:
         text = str(exc)
+        if "ready filter: " in text:
+            raise ValueError(text[text.index("ready filter: ") :]) from None
         if "no such node" in text:
             # The verb's own refusal wording, without the store-error prefix
             # the transport wraps it in.
@@ -1023,26 +1033,7 @@ def read_file_bytes(path: Path) -> bytes:
 
 
 def _read_json(path: Path) -> list[dict]:
-    """Raw read of a JSON entries file through the keeper's byte read.
-
-    Raises GraphCorruptError on JSON parse failure OR when the root value is
-    not a JSON object. A missing file or a valid file with no/empty entries
-    key returns [] -- those are NOT corruption.
-    """
-    path = Path(path)
-    if not path.exists():
-        return []
-    raw = read_file_bytes(path)
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GraphCorruptError(str(path)) from exc
-    if not isinstance(data, dict):
-        raise GraphCorruptError(str(path))
-    entries = data.get("entries", [])
-    if not isinstance(entries, list):
-        raise GraphCorruptError(str(path))
-    return entries
+    return _read_snapshot(_client_for(Path(path)))[1]
 
 
 def _graph_lock_path(path: Path) -> Path:
@@ -1108,8 +1099,6 @@ def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
 
 
 def store_export_status(path: Path) -> dict:
-    """The keeper's backend/version row, no entries: the identity surface
-    for derived caches. Empty dict on any failure, never a guess."""
     try:
         return _client_for(Path(path)).request("export_status", {})
     except Exception:  # noqa: BLE001 - identity is an optimization; the read owns correctness
@@ -1117,11 +1106,7 @@ def store_export_status(path: Path) -> dict:
 
 
 def served_store_path(path: Path) -> Path:
-    """The store file the keeper served this read from: graph.db on the
-    sqlite backend, the json mirror only on the json rollback default."""
-    if store_export_status(path).get("backend") == "sqlite":
-        return path.with_suffix(".db")
-    return path
+    return path.with_suffix(".db")
 
 
 def read_archive_entries(path: Path | None = None) -> list[dict]:
@@ -1618,7 +1603,7 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
 # Bounded ceiling for harness / session-id strings.
 _SESSION_STR_MAX = 200
 
-_SESSION_PHASES = ("think", "blueprint", "do", "review", "ship")
+_SESSION_PHASES = ("think", "blueprint", "execute", "review", "ship")
 
 
 def _utc_session_stamp(label: str, value: str) -> str:
@@ -1830,7 +1815,7 @@ def reap_open_session_record(
         raise ValueError(
             f"invalid phase {phase!r}; expected 'all' or one of {sorted(_SESSION_PHASES)}"
         )
-    identity_phase = "do" if phase == "all" else phase
+    identity_phase = "execute" if phase == "all" else phase
     harness_v, session_v = _validate_session_identity(identity_phase, harness, session_id)
     if ended_at is None:
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
