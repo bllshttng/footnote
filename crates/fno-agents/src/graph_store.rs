@@ -2444,9 +2444,17 @@ pub fn locked_mutate_with_hook(
         hook(&raw)?;
     }
 
-    let (version, _retries) =
-        crate::backlog::retry_on_busy(|| crate::backlog::authoritative_sync(path, &raw, &entries))
-            .map_err(StoreError::Sqlite)?;
+    // The store diff runs against the baseline in the same canonical shape
+    // the publish itself carries: canonicalize injects default keys
+    // (children, lock mirrors) into every row, so a raw-baseline diff would
+    // rewrite every row and bump every version on every publish, defeating
+    // row-level conflict detection for untouched rows.
+    let mut baseline = raw.clone();
+    canonicalize_entries(&mut baseline);
+    let (version, _retries) = crate::backlog::retry_on_busy(|| {
+        crate::backlog::authoritative_sync(path, &baseline, &entries)
+    })
+    .map_err(StoreError::Sqlite)?;
     crate::backlog::snapshot_db(path, crate::backlog::now_ms()).map_err(StoreError::Sqlite)?;
     let backup: Option<PathBuf> = None;
     let shadow_warning = None;
