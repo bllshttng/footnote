@@ -4603,6 +4603,7 @@ async fn entry_for_lifecycle(
     registry: &state::Registry,
     token: &str,
     registry_path: &std::path::Path,
+    cross_project: bool,
 ) -> Result<Option<RegistryEntry>, String> {
     let Value::Array(rows) = serde_json::to_value(&registry.entries)
         .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
@@ -4612,7 +4613,13 @@ async fn entry_for_lifecycle(
     let worker_token = token.to_string();
     let path = registry_path.to_path_buf();
     let resolved = tokio::task::spawn_blocking(move || {
-        crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
+        crate::client_verbs::resolve_entry_with_heal_scoped(
+            &rows,
+            &worker_token,
+            &path,
+            cross_project,
+            None,
+        )
     })
     .await
     .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
@@ -4650,7 +4657,9 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         Err(e) => return registry_read_failed(req.id, e),
     };
     let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
+        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json(), false)
+            .await
+        {
             Ok(Some(entry)) => entry,
             Ok(None) => {
                 return Response::err(
@@ -5343,22 +5352,36 @@ async fn handle_rm_with(
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // rm is the one lifecycle verb whose caller can name a session whose cwd
+    // resolves outside this project (the store heal's refusal prescribes
+    // --cross-project for exactly that case); forward the grant to resolution.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     let audit = RemovalAuditContext::from_request(req, &entry);
     // Computed once (self-review finding): every other reference in this

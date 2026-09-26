@@ -3712,6 +3712,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
             }
+            "--cross-project" if verb == "rm" => {
+                // rm's store heal resolves through the same project-confinement
+                // refusal resume/adopt answer with this flag; accept it so the
+                // refusal's taught remedy is a form this verb takes.
+                params.insert("cross_project".into(), Value::Bool(true));
+            }
             "--no-wait" => {
                 // Spawn-gate escape: fail immediately at max_live
                 // instead of queueing for a free slot. Client-side only.

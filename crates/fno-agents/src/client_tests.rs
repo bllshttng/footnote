@@ -1206,6 +1206,30 @@ fn global_register_boolean_shorts_parse() {
     assert_eq!(force_params["force"], true);
 }
 
+/// x-a2eb: the store heal's confinement refusal prescribes `--cross-project`,
+/// so `fno agents rm <id> --cross-project` must PARSE (the old surface died
+/// with "unknown flag: --cross-project" before any resolution ran). The flag
+/// rides to the daemon as `cross_project`, where entry_for_lifecycle hands it
+/// to the scoped resolver; verbs that take no such flag keep refusing it.
+#[test]
+fn rm_accepts_cross_project_as_prescribed() {
+    let (method, params) = build_request(
+        "rm",
+        &["myagent".to_string(), "--cross-project".to_string()],
+    )
+    .expect("the refusal-prescribed --cross-project must parse on rm");
+    assert_eq!(method, "agent.rm");
+    assert_eq!(params["cross_project"], true);
+    let (_, plain) = build_request("rm", &["myagent".to_string()]).expect("plain rm must parse");
+    assert!(plain.get("cross_project").is_none());
+    let err = build_request(
+        "stop",
+        &["myagent".to_string(), "--cross-project".to_string()],
+    )
+    .unwrap_err();
+    assert!(err.contains("unknown flag: --cross-project"), "got: {err}");
+}
+
 /// x-c5cc: the spawn-gate flags parse on the spawn verb (--force already
 /// shared with stop/rm; --no-wait is gate-only).
 #[test]
