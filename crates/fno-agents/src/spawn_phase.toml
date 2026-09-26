@@ -3,7 +3,7 @@
 # cli/src/fno/agents/spawn_phase.toml (Python package data).
 # A verb matches its bare (/verb), plugin (/fno:verb) and codex ($fno:verb) spellings.
 [phases]
-do = ["target", "execute", "tdd", "fix", "do"]
+execute = ["target", "execute", "tdd", "fix", "do"]
 review = ["review", "code-review"]
 blueprint = ["blueprint"]
 think = ["think"]

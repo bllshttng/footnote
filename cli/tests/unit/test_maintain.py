@@ -364,7 +364,7 @@ def test_detect_stale_ideas_skips_node_with_movement():
     now = datetime(2026, 6, 8, tzinfo=timezone.utc)
     old = (now - timedelta(days=40)).isoformat()
     entries = [
-        _n("ab-live-session", status="idea", created_at=old, sessions=[{"phase": "do"}]),
+        _n("ab-live-session", status="idea", created_at=old, sessions=[{"phase": "execute"}]),
     ]
     stale = m.detect_stale_ideas(entries, 30, now=now)
     assert stale == []
@@ -1529,7 +1529,7 @@ def test_maintain_budget_seconds_rejects_non_positive():
 
 def test_node_has_movement_field_signals():
     now = _sr_now()
-    assert m.node_has_movement({"sessions": [{"phase": "do"}]}, now, 21)
+    assert m.node_has_movement({"sessions": [{"phase": "execute"}]}, now, 21)
     assert m.node_has_movement({"pr_number": 5}, now, 21)
     assert m.node_has_movement({"locked_by": "sess"}, now, 21)
     assert m.node_has_movement({"locked_at": "2026-07-18T00:00:00+00:00"}, now, 21)
@@ -1662,8 +1662,8 @@ def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
     node = {
         "id": "x-a78b",
         "sessions": [
-            {"session_id": codex_id, "phase": "do", "harness": "codex"},
-            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+            {"session_id": codex_id, "phase": "execute", "harness": "codex"},
+            {"session_id": codex_id, "phase": "execute", "harness": "claude"},
         ],
     }
     twins = m.detect_misharnessed_twins([node])
@@ -1674,7 +1674,7 @@ def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
     # No shape-correct twin: nothing is provably wrong, nothing reported.
     lone = {
         "id": "x-lone",
-        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+        "sessions": [{"session_id": codex_id, "phase": "execute", "harness": "claude"}],
     }
     assert m.detect_misharnessed_twins([lone]) == []
 
@@ -1682,9 +1682,9 @@ def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
     legacy = {
         "id": "x-legacy",
         "sessions": [
-            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "execute",
              "harness": "claude"},
-            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "execute",
              "harness": "unknown"},
         ],
     }
@@ -1698,8 +1698,8 @@ def test_apply_twin_drops_drops_only_under_the_lock_recheck():
     claimed_node = {
         "id": "x-claim",
         "sessions": [
-            {"session_id": codex_id, "phase": "do", "harness": "codex"},
-            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+            {"session_id": codex_id, "phase": "execute", "harness": "codex"},
+            {"session_id": codex_id, "phase": "execute", "harness": "claude"},
         ],
     }
     drops = m.detect_misharnessed_twins([claimed_node])
@@ -1713,19 +1713,19 @@ def test_apply_twin_drops_drops_only_under_the_lock_recheck():
     assert [a["node_id"] for a in applied] == ["x-claim"]
     assert skipped == [] and warnings == []
     assert claimed_node["sessions"] == [
-        {"session_id": codex_id, "phase": "do", "harness": "codex"}
+        {"session_id": codex_id, "phase": "execute", "harness": "codex"}
     ]
 
     # In-lock recheck: the correct twin left since the scan, so the drop is
     # stale and BOTH-row removal must not fire (provenance never leaves).
     stale_shape = {
         "id": "x-claim",
-        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+        "sessions": [{"session_id": codex_id, "phase": "execute", "harness": "claude"}],
     }
     applied, _, _ = m.apply_twin_drops([stale_shape], drops, set())
     assert applied == []
     assert stale_shape["sessions"] == [
-        {"session_id": codex_id, "phase": "do", "harness": "claude"}
+        {"session_id": codex_id, "phase": "execute", "harness": "claude"}
     ]
 
 
@@ -1737,7 +1737,7 @@ def test_harness_shape_fix_detected_only_without_a_shape_correct_twin():
     codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
     lone = {
         "id": "x-lone",
-        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+        "sessions": [{"session_id": codex_id, "phase": "execute", "harness": "claude"}],
     }
     fixes = m.detect_harness_shape_fixes([lone])
     assert [(f.node_id, f.wrong_harness, f.right_harness) for f in fixes] == [
@@ -1748,8 +1748,8 @@ def test_harness_shape_fix_detected_only_without_a_shape_correct_twin():
     twinned = {
         "id": "x-twin",
         "sessions": [
-            {"session_id": codex_id, "phase": "do", "harness": "codex"},
-            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+            {"session_id": codex_id, "phase": "execute", "harness": "codex"},
+            {"session_id": codex_id, "phase": "execute", "harness": "claude"},
         ],
     }
     assert m.detect_harness_shape_fixes([twinned]) == []
@@ -1758,7 +1758,7 @@ def test_harness_shape_fix_detected_only_without_a_shape_correct_twin():
     silent = {
         "id": "x-silent",
         "sessions": [
-            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "execute",
              "harness": "claude"}
         ],
     }
@@ -1772,7 +1772,7 @@ def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
     node = {
         "id": "x-fix",
         "sessions": [
-            {"session_id": codex_id, "phase": "do", "harness": "claude",
+            {"session_id": codex_id, "phase": "execute", "harness": "claude",
              "started_at": "2026-09-03T20:10:03Z"},
         ],
     }
@@ -1787,7 +1787,7 @@ def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
     assert [a["node_id"] for a in applied] == ["x-fix"]
     assert skipped == [] and warnings == []
     assert node["sessions"] == [
-        {"session_id": codex_id, "phase": "do", "harness": "codex",
+        {"session_id": codex_id, "phase": "execute", "harness": "codex",
          "started_at": "2026-09-03T20:10:03Z"}
     ]
 
@@ -1812,7 +1812,7 @@ def _do_node(nid, sid=_CLAUDE_SID, **over):
         "locked_by": None,
         "cwd": "/some/worktree",
         "sessions": [
-            {"phase": "do", "harness": "claude", "session_id": sid,
+            {"phase": "execute", "harness": "claude", "session_id": sid,
              "started_at": "2026-09-09T15:46:29Z"}
         ],
     }
