@@ -137,6 +137,18 @@ function makeHandler(io, dir) {
   return async function handle(kind, sid) {
     try {
       if (kind === "created") {
+        // Report this session's id to the daemon (the registry holds it; mail
+        // and liveness stop guessing). Fire-and-forget, best-effort.
+        if (sid) {
+          try {
+            await io.run(
+              [process.env.FNO_AGENTS_BIN || "fno-agents", "session-report", "--harness", "opencode", "--session-id", sid],
+              dir,
+            )
+          } catch (e) {
+            console.error(`[footnote] session-report failed: ${e}`)
+          }
+        }
         // Presence via the resolver: a plain native session pays nothing.
         if (sid && (await resolveManifest(dir, io))) {
           try {
