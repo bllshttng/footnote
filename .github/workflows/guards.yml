@@ -106,7 +106,7 @@ jobs:
   main-python-static:
     name: Python static correctness (495 sources)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -124,8 +124,21 @@ jobs:
         run: bash scripts/ci/check-python-static.sh
 
       # The verb x harness doc is a projection of the capability table and
-      # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because
-      # a skill prose edit must not pay a cargo build to prove one doc fresh.
+      # skills/*/SKILL.md frontmatter, and since the renderer moved into the
+      # fno-agents binary it takes one build from this checkout: the renderer
+      # must be the same parser that validates the table, or the freshness
+      # verdict can lie.
+      - name: Rust toolchain (matrix renderer build)
+        if: ${{ !cancelled() }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build fno-agents (matrix renderer)
+        if: ${{ !cancelled() }}
+        working-directory: crates/fno-agents
+        run: |
+          cargo build --bin fno-agents
+          cp target/debug/fno-agents "$HOME/.cargo/bin/"
+
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}
         working-directory: cli

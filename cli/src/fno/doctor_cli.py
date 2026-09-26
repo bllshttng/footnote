@@ -96,43 +96,28 @@ doctor_app.command("lanes", hidden=True)(lanes_command)
 
 
 def _route_harness(verb: str, argv: list[str]) -> None:
-    """Exec the fno-agents door: the Rust runtime is the only implementation."""
     from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
     from fno.rust_binary import resolve_installed_binary
-
-    binary = resolve_installed_binary()
-    if binary is None:
-        refuse_without_binary(verb)
+    binary = resolve_installed_binary() or refuse_without_binary(verb)
     route_to_rust(argv, binary=binary)
 
 
 @doctor_app.command("harness", hidden=True)
 def harness_command(
-    harness: str = typer.Argument(..., help="Harness name to probe."),
-    live: bool = typer.Option(False, "--live", help="Run real pane and state probes."),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Emit machine-readable JSON."),
+    harness: str = typer.Argument(...),
+    live: bool = typer.Option(False, "--live"),
+    json_out: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """The executable support rubric for one harness, served by the crate."""
-    argv = ["harness-probe", "rubric", harness]
-    if live:
-        argv.append("--live")
-    if json_out:
-        argv.append("--json")
-    _route_harness("harness", argv)
+    _route_harness(
+        "harness", ["harness-probe", "rubric", harness] + ["--live"] * live + ["--json"] * json_out,
+    )
 
 
-# `doctor harness-matrix` regenerates both matrix docs from the table. The
-# renderer lives in the fno-agents binary; the leaf refuses without it,
-# the same shape `fno doctor scratch` has.
 @doctor_app.command("harness-matrix", hidden=True)
 def harness_matrix_command(
     write: bool = typer.Option(False, "--write"),
 ) -> None:
-    """Render the features and verb matrices from the capability table."""
-    argv = ["harness-matrix"]
-    if write:
-        argv.append("--write")
-    _route_harness("harness-matrix", argv)
+    _route_harness("harness-matrix", ["harness-matrix"] + ["--write"] * write)
 doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared
 # routing inventory can actually reach (absorbs the old "no surface answers

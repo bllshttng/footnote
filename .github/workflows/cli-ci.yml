@@ -610,7 +610,13 @@ jobs:
       - name: Install strace
         run: sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
-        run: cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+        # The copy onto PATH installs the build for the freshness step below:
+        # `fno doctor harness-matrix` execs the *installed* binary by design
+        # (resolve_installed_binary), and the freshness verdict is only honest
+        # when that binary was built from this checkout.
+        run: |
+          cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+          cp crates/fno-agents/target/release/fno-agents "$HOME/.cargo/bin/"
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -778,7 +784,11 @@ jobs:
         # minutes, not after the 26-minute integration shard. The package clean
         # above still makes this binary and the tests share one fresh source
         # build. Dependencies stay cached.
-        run: cargo build --bin fno-agents
+        # The PATH copy installs the build for the freshness step below:
+        # `fno doctor harness-matrix` execs the *installed* binary by design.
+        run: |
+          cargo build --bin fno-agents
+          cp target/debug/fno-agents "$HOME/.cargo/bin/"
 
       - name: Generated copies match their sources
         # The ONE freshness gate for every build-generated copy. build.rs

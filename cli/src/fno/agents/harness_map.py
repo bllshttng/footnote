@@ -539,9 +539,6 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         )
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
-    # The probe and journey instrument tables are validated by the Rust
-    # parser (HarnessContract::validate) and nowhere else: a second copy of
-    # a refusal is how the first one rots.
     return version, harnesses
 
 

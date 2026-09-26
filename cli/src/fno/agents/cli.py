@@ -4898,30 +4898,15 @@ harness_app = typer.Typer(
 
 @harness_app.command("probe")
 def harness_probe(
-    harness: str = typer.Argument(..., help="Harness name to probe."),
-    live: bool = typer.Option(
-        False, "--live", help="Allow behavioral probes (they spawn a scratch session)."
-    ),
-    write: bool = typer.Option(
-        False, "--write", help="Emit the config stanza for each disagreement, evidence + date beside it."
-    ),
-    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
+    harness: str = typer.Argument(...),
+    live: bool = typer.Option(False, "--live"),
+    write: bool = typer.Option(False, "--write"),
+    as_json: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Measure the capability table against the live harness; the reader
-    lives in the fno-agents binary and this leaf keeps the spelling."""
     from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
     from fno.rust_binary import resolve_installed_binary
-
-    binary = resolve_installed_binary()
-    if binary is None:
-        refuse_without_binary("harness probe")
-    argv = ["harness-probe", "fields", harness]
-    if live:
-        argv.append("--live")
-    if write:
-        argv.append("--write")
-    if as_json:
-        argv.append("--json")
+    binary = resolve_installed_binary() or refuse_without_binary("harness probe")
+    argv = ["harness-probe", "fields", harness] + ["--live"] * live + ["--write"] * write + ["--json"] * as_json
     route_to_rust(argv, binary=binary)
 
 
