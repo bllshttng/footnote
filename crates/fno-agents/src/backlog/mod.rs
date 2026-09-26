@@ -1127,7 +1127,7 @@ pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, Stri
                        AND (p.merge_status IS NULL
                             OR (p.merge_status <> 'merged' AND p.merge_status <> 'closed'))
                        AND EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id
-                                   AND s.phase = 'do'
+                                   AND s.phase = 'execute'
                                    AND s.merge_grant IS NOT NULL
                                    AND s.merge_grant <> 'null')",
                 )

@@ -1150,7 +1150,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
                     (SELECT c.created_at FROM node_claims c WHERE c.node_id = n.id),
                     (SELECT c.locked_by FROM node_claims c WHERE c.node_id = n.id),
                     EXISTS(SELECT 1 FROM sessions s WHERE s.node_id = n.id
-                           AND s.phase = 'do' AND s.ended_at IS NULL),
+                           AND s.phase = 'execute' AND s.ended_at IS NULL),
                     EXISTS(SELECT 1 FROM pull_requests p WHERE p.node_id = n.id
                            AND p.seq = 0 AND p.number IS NOT NULL),
                     n.ownership_defect
@@ -1184,7 +1184,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
     let mut do_statement = connection
         .prepare(
             "SELECT node_id, COALESCE(started_at, ''), COALESCE(session_id, '')
-             FROM sessions WHERE phase = 'do' AND ended_at IS NULL",
+             FROM sessions WHERE phase = 'execute' AND ended_at IS NULL",
         )
         .map_err(|error| error.to_string())?;
     let do_list = do_statement
