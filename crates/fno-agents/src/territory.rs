@@ -1205,7 +1205,10 @@ path = "/repo/alpha"
     #[test]
     fn territory_rows_project_the_ac7_row_shape() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        // The live count reads claim lockfiles (the holder of record), so
+        // the fixture seeds the claim w-1's registry row implies.
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
         let rows = territory_rows(&cwd, &registry);
         assert_eq!(rows.len(), 2);
         let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
@@ -1307,7 +1310,10 @@ path = "/repo/alpha"
     #[test]
     fn territory_rows_count_each_worker_in_exactly_one_row() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        // Seed the claims the two live workers' registry rows imply.
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
+        acquire_node_claim(tmp.path(), "e-loose", Some(std::process::id()), None, false);
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
@@ -1447,7 +1453,8 @@ path = "/repo/alpha"
     #[test]
     fn a_non_epic_crown_scope_reads_unknown_while_others_stay_ok() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
