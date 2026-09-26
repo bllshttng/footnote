@@ -6,6 +6,7 @@ three explanations and only one of them is the outcome.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Generator
 
@@ -338,6 +339,83 @@ def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path
     assert result.exit_code == 0, result.output
     unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
     assert unknown == [], unknown
+
+
+def test_backlog_max_open_ideas_is_modeled(tmp_path: Path) -> None:
+    """The Rust idea cap enforces this key (idea_cap.rs), so the model must
+    know it: no fno call warns, and get reads the set value (x-dddb)."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        "[backlog]\nmax_open_ideas = 400\n" % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
+    assert unknown == [], unknown
+
+
+def test_max_open_ideas_zero_is_a_legal_value(tmp_path: Path) -> None:
+    """0 is cap-off for the Rust reader; ge=0 must accept it, not refuse."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        "[backlog]\nmax_open_ideas = 0\n" % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+
+
+def test_a_retired_attention_row_reads_as_retired(tmp_path: Path) -> None:
+    """A [[attention]] row is dead config (attention-items.md, "Config
+    keys"), so the line says retired and names the file - "unknown; ignored"
+    would teach that it once worked by modeling (x-448f)."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        '[[attention]]\nname = "sms"\npath = "/x"\n' % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    retired = [ln for ln in result.output.splitlines() if "retired" in ln]
+    assert any("[[attention]]" in ln and str(f) in ln for ln in retired), retired
+    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
+    assert unknown == [], unknown
+
+
+def test_a_json_read_stays_parseable_with_an_unknown_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--json is a machine surface and a reader may capture stderr with
+    stdout, so the load warning stays off it entirely (x-dddb). argv carries
+    the verb's own flag in a real process, so it is pinned here. Paired
+    negative: without --json the warning prints."""
+    import json as _json
+
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        "[nosuchblock]\nleaf = 1\n" % (tmp_path / ".fno"),
+    )
+    env = {**_ENV, "FNO_CONFIG": str(f)}
+    monkeypatch.setattr(
+        sys, "argv", ["fno", "config", "get", "backlog.max_open_ideas", "--json"]
+    )
+    quiet = runner.invoke(
+        app, ["config", "get", "backlog.max_open_ideas", "--json"], env=env
+    )
+    assert quiet.exit_code == 0, quiet.output
+    assert _json.loads(quiet.output)["value"] == 25
+    assert "fno config:" not in quiet.output
+
+    # A new fingerprint, so the loud half recomputes the load the cache
+    # would otherwise reuse from the quiet half.
+    f.write_text(f.read_text() + "\n# recompute\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["fno", "config", "get", "backlog.max_open_ideas"])
+    loud = runner.invoke(
+        app, ["config", "get", "backlog.max_open_ideas"], env=env
+    )
+    assert loud.exit_code == 0, loud.output
+    assert "fno config:" in loud.output
 
 
 def test_route_slot_policy_leaves_default_to_unset() -> None:

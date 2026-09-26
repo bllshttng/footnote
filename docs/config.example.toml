@@ -111,6 +111,8 @@ id_hex_width = 8
 staleness_days = 21
 # Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install.
 # epic_max_open_children = <unset>   # optional; no default
+# Most unplanned, machine-filed ideas one nearest-epic or project scope may hold (default 25; 0 is off). Operator asks are never capped. The graph store reads it from the config.toml beside graph.json.
+max_open_ideas = 25
 # Auto-rendered projections (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local|backlog|roadmap} target; public targets use the leak gate and local is full-detail.
 render_targets = []
 # Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off).
