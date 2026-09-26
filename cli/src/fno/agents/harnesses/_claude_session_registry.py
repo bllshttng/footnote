@@ -434,7 +434,7 @@ def _revive_proof_verdict(short_id: str) -> dict:
         return {"ok": True}
     import subprocess
 
-    cmd = [str(binary), "revive-proof", "--short-id", short_id]
+    cmd = [str(binary), "claude-birth-exec", "revive-proof", "--short-id", short_id]
     return json.loads(
         subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=90).stdout
     )

@@ -92,7 +92,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "roster-reap",
     "reconcile",
     "reclaim",
-    "revive-proof",
     "plugin-install",
     "recover",
     "registry-json",
@@ -329,6 +328,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if matches!(verb, "claude-birth-exec") {
+        // `revive-proof` rides this action as an argument (the fleet-incident
+        // gh-budget shape): law d-fe66560a allows no new client action, and
+        // the revival liveness gate belongs to the same claude birth/relaunch
+        // door. Direct dispatch, no daemon RPC - a fork that never started
+        // must refuse even when the daemon is the thing wedged.
+        if args.get(1).map(String::as_str) == Some("revive-proof") {
+            return fno_agents::revive_proof::run_revive_proof(&args[2..]);
+        }
         return fno_agents::claude_supervisor::run_birth_exec(&args[1..]);
     }
 
@@ -544,15 +551,6 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
-    }
-
-    // `revive-proof`: the revival liveness gate's poll (see revive_proof.rs).
-    // Direct dispatch, no daemon RPC: a fork that never started must refuse
-    // even when the daemon is the thing wedged. Same `==` dispatch +
-    // ALL_CLIENT_ACTIONS registration as `test-run`, so the parity guard
-    // does not see it - Python's revival path shells it and owns the stop.
-    if verb == "revive-proof" {
-        return fno_agents::revive_proof::run_revive_proof(&args[1..]);
     }
 
     // `prove-it-verdicts`: the one reader for terminal prove-it records

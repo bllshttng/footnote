@@ -5,12 +5,12 @@
 //! a revival that reads as success while the slot is spent and mail queues to
 //! nothing. This op polls for proof of life - a non-empty transcript for the
 //! fork's own session id under any claude root, and a job state outside the
-//! wedged pair - and prints one JSON verdict. Python's revival path stops the
-//! fork's session and refuses on `ok: false`; the poll lives here because the
-//! readers (session records, job state, transcript layout) already live in
-//! this crate and Rust is the product. Direct dispatch, no daemon RPC: same
-//! `matches!` treatment as `test-run`, so the routable-verb parity guard does
-//! not see it.
+//! wedged pair - and prints one JSON verdict, stopping a fork that never came
+//! up. Python's revival path refuses on `ok: false`; the poll lives here
+//! because the readers (session records, job state, transcript layout)
+//! already live in this crate and Rust is the product. Reached as
+//! `claude-birth-exec revive-proof ...` (law d-fe66560a allows no new client
+//! action); direct dispatch, no daemon RPC.
 use crate::claude_ask::{read_state_json, resolve_session_uuid, ClaudeHome};
 use crate::subprocess_ask::wait_with_grace;
 use serde_json::json;
