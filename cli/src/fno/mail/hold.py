@@ -4,13 +4,9 @@ The HOLD itself is not here. It is the registry flag (schema v14) that
 :func:`fno.agents.dispatch._delivery_policy_refusal` already enforces before
 any transport call on every injector lane. This module owns only the two
 things that flag cannot express on its own: WHEN the hold ends, and whether
-it ends at all.
-
-That split is deliberate. Putting an expiry on the registry row would mean a
-schema bump and a new field threaded through the Rust ``RegistryEntry`` at
-nine construction sites, for one timestamp. So the clock is a sidecar and the
-flag stays the sole enforcement authority: a reader asking "is mail held"
-reads the flag, a reader asking "until when" reads the sidecar.
+it ends at all. The split is deliberate: the clock is a sidecar so the flag
+stays the sole enforcement authority without a schema bump threaded through
+the Rust ``RegistryEntry`` at nine construction sites.
 
 Three sidecar states, and only one of them ever expires:
 
@@ -227,22 +223,16 @@ def extend(handle: str) -> Optional[Hold]:
 def lapsed(handle) -> bool:
     """True when a TIMED hold for ``handle`` has run out. Only ever timed.
 
-    An absent or unreadable clock reads as NOT lapsed, which leaves the flag
-    exactly as it behaved before busy mode existed. The alternative was tried
-    and is wrong: lifting a flag that has no clock silently revokes the
-    delivery policy of every row stamped by ``fno agents register
-    --delivery-policy bus-only`` before this file existed, and a row so stamped
-    has no clock by construction. That is a shipped no-paste guarantee broken
-    on rows nobody touched.
-
-    The fear that argument answers - a hold whose timer died holding mail
-    forever - does not describe this design. Held mail is durable on the bus.
-    It surfaces at the recipient's next SessionStart or turn boundary, and
-    ``fno agents mail notify-self`` tidies the stale flag when it gets there. So a
-    lost clock costs a stall bounded by the operator's next prompt, never a
-    lost message. Auto-expire stays a safety property by having two carriers
-    that do not depend on this file surviving: the detached release timer, and
-    that turn-boundary tidy.
+    An absent or unreadable clock reads as NOT lapsed. Lifting a flag that has
+    no clock silently revokes the delivery policy of every row stamped by
+    ``fno agents register --delivery-policy bus-only``, which has no clock by
+    construction - a shipped no-paste guarantee broken on rows nobody touched.
+    The fear that argument answers, a hold whose timer died holding mail
+    forever, does not describe this design: held mail is durable on the bus
+    and surfaces at the next SessionStart or turn boundary, so a lost clock
+    costs a stall bounded by the operator's next prompt, never a lost message.
+    Auto-expire stays real through two carriers that do not depend on this
+    file surviving: the detached release timer, and that turn-boundary tidy.
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     that already holds the registry lock and cannot raise into the gate.
@@ -256,13 +246,11 @@ def lapsed(handle) -> bool:
 def tidy_lapsed(handle: str) -> bool:
     """Clear a timed hold that has run out, flag and clock together.
 
-    The delivery gate deliberately stays a pure read, so nothing on the send
-    path clears a stale ``bus-only`` flag. This is where it gets cleared: a
-    turn boundary, where the registry lock is free and a write is safe.
-
-    Only a TIMED hold is tidied. A clock reading ``until: null`` is a
-    deliberate permanent policy, and an absent clock cannot be told apart from
-    a row that never had one, so neither is touched here.
+    The delivery gate stays a pure read, so this is where a stale ``bus-only``
+    flag gets cleared: a turn boundary, where the registry lock is free. Only a
+    TIMED hold is tidied. A ``until: null`` clock is a deliberate permanent
+    policy, and an absent clock cannot be told apart from a row that never had
+    one, so neither is touched here.
     """
     clock = read(handle)
     if clock is None or clock.until is None or clock.until > _now():
@@ -393,14 +381,22 @@ def addresses(entry) -> tuple:
     from fno.harness_identity import canonical_handle, session_identity_key
 
     session_id = getattr(entry, "harness_session_id", None)
-    tokens = [
+    # The identity key leads: a live clock under the new key must outrank a
+    # legacy alias file, or a lapsed pre-migration clock lifts a hold the new
+    # clock still enforces.
+    tokens: list = []
+    if session_id:
+        try:
+            tokens.append(session_identity_key(session_id))
+        except Exception:  # noqa: BLE001 - a malformed id contributes no address
+            pass
+    tokens += [
         getattr(entry, "name", None),
         getattr(entry, "short_id", None),
         session_id,
     ]
     if session_id:
         try:
-            tokens.append(session_identity_key(session_id))
             tokens.append(canonical_handle(session_id))
         except Exception:  # noqa: BLE001 - a malformed id contributes no address
             pass
@@ -436,19 +432,14 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
     """Stamp ``delivery_policy`` on the registry row addressed by ``handle``.
 
     Returns whether the DESIRED STATE now holds, not whether a row was edited.
-    So a handle with no registry row returns True: no row carries a policy, so
-    the caller's "clear it" is already satisfied and there is nothing to strand.
-    False means only that the registry could not be read or written, which is
-    the one case where a flag may still be set behind the caller's back.
-
-    The distinction is load-bearing for :func:`release`, which drops the clock
-    on True. Collapsing "no such row" and "registry unreadable" into one False
-    kept the clock forever for every handle that has no row, which is every
-    sandbox and every handle whose session already exited.
-
+    A handle with no registry row returns True: no row carries a policy, so the
+    caller's "clear it" is already satisfied and there is nothing to strand.
+    False means only that the registry could not be read or written. The
+    distinction is load-bearing for :func:`release`, which drops the clock on
+    True: collapsing "no such row" and "registry unreadable" into one False
+    kept the clock forever for every handle whose session already exited.
     Separate from ``register_existing_session`` because that verb resolves the
-    AMBIENT session, and the release path runs in a detached timer process with
-    no ambient identity of its own.
+    AMBIENT session, and the release path runs in a detached timer process.
     """
     from fno.agents.registry import update_registry
 
@@ -521,32 +512,18 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
 def release(handle: str, *, held_for_s: int = 0) -> dict:
     """End the hold and deliver what it held, with no operator input.
 
-    THE DRAIN TRIGGER THAT IS NOT THE OPERATOR. Mail otherwise drains at
-    exactly two moments, ``inject-mail-drain-session-start.sh`` (SessionStart)
-    and ``inject-mail-notify.sh`` (UserPromptSubmit), and both need the
-    operator to type. A hold with only those two triggers converts an
-    interruption into a stall, which is worse than the interruption.
-
-    Order is load-bearing. The flag is cleared FIRST, and the registry row is
-    re-read only after that, because every lane consults
-    ``_delivery_policy_refusal`` on the object it is handed. Release with the
-    flag still set, or with a row captured before it was cleared, and the
-    delivery is refused by the very gate that held the mail.
-
-    Delivery goes through ``_deliver_live``, the lane DISPATCHER, so a codex,
-    gemini or mux-hosted operator gets the same drain trigger a claude one
-    does. Wiring it to the claude injector alone made this a producer on one of
-    N lanes: the hold lifted on time and delivered nothing, which is the stall
-    this feature exists to prevent wearing the costume of a working one.
-
-    A missed inject does NOT advance the cursor. The mail stays on the bus and
-    the recipient's next turn boundary surfaces it, so a dead daemon degrades
-    to today's behavior rather than to a loss.
-
-    Always emits ``mail_hold_released``, including when nothing was held. A
-    release path that fires only on a non-empty digest cannot tell a working
-    expiry from a dead timer, which is the same absence-is-not-evidence trap
-    this whole feature exists to avoid.
+    THE DRAIN TRIGGER THAT IS NOT THE OPERATOR. Mail otherwise drains only at
+    SessionStart and UserPromptSubmit, and both need the operator to type. The
+    flag is cleared FIRST and the registry row re-read after, because every
+    lane consults ``_delivery_policy_refusal`` on the object it is handed:
+    release with the flag still set and the delivery is refused by the very
+    gate that held the mail. Delivery goes through ``_deliver_live``, the lane
+    DISPATCHER, so every harness gets the same drain trigger. A missed inject
+    does NOT advance the cursor: the mail stays on the bus and the recipient's
+    next turn boundary surfaces it, a degrade, never a loss. Always emits
+    ``mail_hold_released``, including when nothing was held - a release path
+    that fires only on a non-empty digest cannot tell a working expiry from a
+    dead timer.
     """
     from fno.agents import events
     from fno.bus.cursor import advance_cursor, scan_unread
@@ -567,10 +544,34 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     if policy_cleared:
         clear(handle)
 
-    try:
-        messages = scan_unread(handle, warn=False)
-    except Exception:  # noqa: BLE001 - a bus read failure is not a delivery failure
-        messages = []
+    # The entry is resolved HERE, after the flag was cleared above, because
+    # every lane under this call re-checks the delivery policy on the object
+    # it is handed. Its session id names the MAILBOX forms: the name lane
+    # files durable mail under the canonical first-eight and the collision
+    # escape under the full identity key, neither of which is the clock key
+    # on codex.
+    entry = resolve_entry(handle)
+    from fno.harness_identity import canonical_handle, session_identity_key
+
+    forms = [handle]
+    sid = getattr(entry, "harness_session_id", "") if entry is not None else ""
+    if sid:
+        # Order-preserving dedupe: on a claude row the canonical form IS the
+        # handle, and one mailbox must not drain twice.
+        forms = list(dict.fromkeys([session_identity_key(sid), canonical_handle(sid), handle]))
+    form_mail: list = []
+    messages: list = []
+    seen_ids: set = set()
+    for form in forms:
+        try:
+            got = scan_unread(form, warn=False)
+        except Exception:  # noqa: BLE001 - a bus read failure is not a delivery failure
+            got = []
+        form_mail.append((form, got))
+        for message in got:
+            if getattr(message, "id", "") not in seen_ids:
+                seen_ids.add(getattr(message, "id", ""))
+                messages.append(message)
     survivors = dedupe(messages)
     held_count = len(messages)
     deduped_count = held_count - len(survivors)
@@ -581,17 +582,9 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         from fno.agents.dispatch import _deliver_live
 
         digest = render_digest(handle, survivors, held_for_s)
-        # Route through the LANE DISPATCHER, not the claude injector. Delivering
-        # via `_mail_inject_claude` alone made the release a producer on one of
-        # N lanes: a codex or gemini operator, or a mux-hosted pane, armed a
-        # hold that lifted on time and then delivered nothing, so their mail
-        # waited for them to type. That is the stall busy mode exists to
-        # prevent, wearing the costume of a working feature.
-        #
-        # The entry is resolved HERE, after the flag was cleared above, because
-        # every lane under this call re-checks the delivery policy on the object
-        # it is handed.
-        entry = resolve_entry(handle)
+        # Route through the LANE DISPATCHER, not the claude injector: wired to
+        # one injector this was a producer on one of N lanes, a hold that
+        # lifted on time and delivered nothing.
         delivered = False
         if entry is None:
             miss_reason.append("no-registry-row")
@@ -605,8 +598,9 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
                 miss_reason.append("deliver-raised")
         if delivered:
             outcome = "delivered"
-            for message in messages:
-                advance_cursor(handle, getattr(message, "id", ""))
+            for form, got in form_mail:
+                for message in got:
+                    advance_cursor(form, getattr(message, "id", ""))
         else:
             outcome = "inject-missed"
 
@@ -693,7 +687,12 @@ def cmd_notify_self() -> None:
     try:
         if extend(clock_key) is not None:
             return
+        # The first-eight key is the pre-migration clock: extend it so an old
+        # hold keeps its idle re-arm, and tidy whichever form has lapsed.
+        if extend(handle) is not None:
+            return
         tidy_lapsed(clock_key)
+        tidy_lapsed(handle)
     except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
         pass
 
