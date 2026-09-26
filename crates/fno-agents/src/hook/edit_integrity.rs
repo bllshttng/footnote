@@ -96,8 +96,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, ()> {
 fn check_paths(paths: &[PathBuf], base: &str, before: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
     for path in paths {
-        let baseline = baseline_for(path, base, before);
-        out.extend(check_one(path, baseline));
+        out.extend(check_one(path, base, before));
     }
     out
 }
@@ -112,27 +111,23 @@ struct Baseline {
 /// The pre-edit text of one path: the `--before` file when given, else the
 /// base revision's copy. None when the file is new, untracked, outside a
 /// repo, or a read fails - the checks then treat the file as new.
-fn baseline_for(path: &Path, base: &str, before: Option<&Path>) -> Option<Baseline> {
+fn baseline_for(
+    canonical: &Path,
+    rel: &str,
+    base: &str,
+    before: Option<&Path>,
+    root: Option<&Path>,
+) -> Option<Baseline> {
     if let Some(file) = before {
         return std::fs::read_to_string(file).ok().map(|text| Baseline {
             text,
             label: "before this edit".to_string(),
         });
     }
-    let abs = absolutize(path);
-    let dir = abs.parent().unwrap_or(Path::new("."));
-    let root = repo_root(dir)?;
-    // git prints the canonical root (/private/var on macOS) while the path
-    // may arrive through a symlink (/var), so compare canonical to canonical.
-    let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
-    let rel = canonical
-        .strip_prefix(&root)
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
+    let root = root?;
     let out = Command::new("git")
         .arg("-C")
-        .arg(&root)
+        .arg(root)
         .arg("show")
         .arg(format!("{base}:{rel}"))
         .output()
@@ -146,13 +141,26 @@ fn baseline_for(path: &Path, base: &str, before: Option<&Path>) -> Option<Baseli
     })
 }
 
-fn check_one(path: &Path, baseline: Option<Baseline>) -> Vec<String> {
+fn check_one(path: &Path, base: &str, before: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
     let abs = absolutize(path);
     if !abs.is_file() {
         return out;
     }
-    let Some((text, rel)) = read_text(&abs) else {
+    // One repo-root read per path. git prints the canonical root
+    // (/private/var on macOS) while the path may arrive through a symlink
+    // (/var), so the comparison is canonical to canonical.
+    let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+    let root = canonical.parent().and_then(repo_root);
+    let rel = match &root {
+        Some(root) => canonical
+            .strip_prefix(root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| abs.to_string_lossy().into_owned()),
+        None => abs.to_string_lossy().into_owned(),
+    };
+    let baseline = baseline_for(&canonical, &rel, base, before, root.as_deref());
+    let Some(text) = read_text(&abs) else {
         return out;
     };
     let prefix = format!("edit-integrity: {rel}: ");
@@ -171,11 +179,9 @@ fn check_one(path: &Path, baseline: Option<Baseline>) -> Vec<String> {
         out.push(format!("{prefix}{message}"));
     }
     if ext == "py" {
-        if let Some(baseline) = baseline.as_ref() {
-            if let Some(root) = repo_root(abs.parent().unwrap_or(Path::new("."))) {
-                for message in stale_reference_findings(&root, &rel, baseline, &text) {
-                    out.push(format!("{prefix}{message}"));
-                }
+        if let (Some(baseline), Some(root)) = (baseline.as_ref(), root.as_deref()) {
+            for message in stale_reference_findings(root, &rel, baseline, &text) {
+                out.push(format!("{prefix}{message}"));
             }
         }
     }
@@ -196,7 +202,7 @@ fn absolutize(path: &Path) -> PathBuf {
 /// first 8 KiB (a binary) skips every check. A first read that is empty or
 /// unterminated is read once more 50 ms later - format-on-edit may still
 /// be rewriting the same file in parallel.
-fn read_text(abs: &Path) -> Option<(String, String)> {
+fn read_text(abs: &Path) -> Option<String> {
     let bytes = std::fs::read(abs).ok()?;
     let binary = bytes
         .chunks(8192)
@@ -211,25 +217,10 @@ fn read_text(abs: &Path) -> Option<(String, String)> {
         std::thread::sleep(std::time::Duration::from_millis(50));
         text = String::from_utf8_lossy(&std::fs::read(abs).ok()?).into_owned();
     }
-    Some((text, repo_relative(abs)))
+    Some(text)
 }
 
-/// The path as the message shows it: repo-relative when the file sits in a
-/// repo, the absolute path otherwise. Canonicalized the same way
-/// `baseline_for` is, so the /var to /private/var symlink never splits the
-/// two reads.
-fn repo_relative(abs: &Path) -> String {
-    if let Some(dir) = abs.parent() {
-        if let Some(root) = repo_root(dir) {
-            let canonical = std::fs::canonicalize(abs).unwrap_or_else(|_| abs.to_path_buf());
-            if let Ok(rel) = canonical.strip_prefix(&root) {
-                return rel.to_string_lossy().replace('\\', "/");
-            }
-        }
-    }
-    abs.to_string_lossy().into_owned()
-}
-
+/// The worktree root containing `dir`, or None outside a repository.
 fn repo_root(dir: &Path) -> Option<PathBuf> {
     let out = Command::new("git")
         .arg("-C")
@@ -435,15 +426,12 @@ fn stale_reference_findings(
     for name in removed {
         let mut shown = 0usize;
         let mut total = 0usize;
-        for hit in &hits {
-            let Some((file, lineno, line)) = split_grep_hit(hit) else {
-                continue;
-            };
+        for (file, lineno, line) in &hits {
             if file == rel {
                 continue;
             }
             let Some((hit_file, hit_lineno, hit_line)) =
-                stale_hit_at(file, lineno, line, &dotted, &name, root)
+                stale_hit_at(file, *lineno, line, &dotted, &name, root)
             else {
                 continue;
             };
@@ -465,10 +453,13 @@ fn stale_reference_findings(
     out
 }
 
-/// The `git grep -n -F` output lines for the dotted module, one call for
-/// every removed name; a grep that fails (no matches) answers empty.
-fn grep_dotted(root: &Path, dotted: &str) -> Vec<String> {
-    match Command::new("git")
+/// (file, lineno, line) for each `git grep -n -F -z` hit for the dotted
+/// module, one call for every removed name; a grep with no matches
+/// answers empty. With -z the path is NUL-delimited and printed verbatim,
+/// so a filename holding a colon, a newline or non-ASCII bytes still
+/// parses exactly - the colon format would quote or mis-split all three.
+fn grep_dotted(root: &Path, dotted: &str) -> Vec<(String, usize, String)> {
+    let out = match Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("grep")
@@ -476,24 +467,28 @@ fn grep_dotted(root: &Path, dotted: &str) -> Vec<String> {
         .arg("-F")
         .arg("-e")
         .arg(dotted)
+        .arg("-z")
         .arg("--")
         .arg("*.py")
         .output()
     {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => return Vec::new(),
+    };
+    let mut hits = Vec::new();
+    for record in out.split('\n') {
+        // -z NUL-terminates every field: path \0 lineno \0 content.
+        let mut fields = record.splitn(3, '\0');
+        let (Some(file), Some(lineno), Some(line)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(lineno) = lineno.parse::<usize>() else {
+            continue;
+        };
+        hits.push((file.to_string(), lineno, line.to_string()));
     }
-}
-
-/// `file:lineno:line` for one `git grep -n` hit; the content may hold
-/// colons.
-fn split_grep_hit(hit: &str) -> Option<(&str, usize, &str)> {
-    let (file, rest) = hit.split_once(':')?;
-    let (lineno, line) = rest.split_once(':')?;
-    Some((file, lineno.parse().ok()?, line))
+    hits
 }
 
 /// The finding triple for this grep hit when it still names `name`: a
@@ -810,18 +805,15 @@ mod tests {
 
     // --- stale-hit filter ---
 
-    fn hit(file: &str, lineno: usize, line: &str) -> String {
-        format!("{file}:{lineno}:{line}")
+    fn hit(file: &str, lineno: usize, line: &str) -> (String, usize, String) {
+        (file.to_string(), lineno, line.to_string())
     }
 
-    fn stale_filter(dotted: &str, name: &str, hits: &[String]) -> Vec<String> {
+    fn stale_filter(dotted: &str, name: &str, hits: &[(String, usize, String)]) -> Vec<String> {
         let mut out = Vec::new();
-        for hit_line in hits {
-            let Some((file, lineno, line)) = split_grep_hit(hit_line) else {
-                continue;
-            };
+        for (file, lineno, line) in hits {
             if let Some((f, l, text)) =
-                stale_hit_at(file, lineno, line, dotted, name, Path::new(""))
+                stale_hit_at(file, *lineno, line, dotted, name, Path::new(""))
             {
                 out.push(format!(
                     "removed top-level {name}; still named at {f}:{l}: {text}"
@@ -934,6 +926,10 @@ mod tests {
             "from fno import helpers\n\ndef test_one():\n    patch(\"helpers.heal\")\n\ndef test_two():\n    pass\n",
         )
         .expect("write");
+        // A filename with a colon: the NUL-delimited grep output must
+        // parse it exactly where the colon format would mis-split.
+        let colon = root.join("weird:name.py");
+        std::fs::write(&colon, "x = patch(\"helpers.heal\")\n").expect("write");
         git(root, &["add", "."]);
         git(
             root,
@@ -954,8 +950,15 @@ mod tests {
             .iter()
             .filter(|f| f.contains("removed top-level heal"))
             .collect();
-        assert_eq!(stale.len(), 1, "{findings:?}");
-        assert!(stale[0].contains("test_helpers.py:4"), "{}", stale[0]);
+        assert_eq!(stale.len(), 2, "{findings:?}");
+        assert!(
+            stale.iter().any(|f| f.contains("test_helpers.py:4")),
+            "{findings:?}"
+        );
+        assert!(
+            stale.iter().any(|f| f.contains("weird:name.py:1")),
+            "{findings:?}"
+        );
         assert!(is_blocking(stale[0]));
     }
 
