@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from fno.test_cmd import (
+    _ALWAYS_LINTS,
     _STRUCTURAL_STEPS,
     changed_snapshot,
     discover_shell_harnesses,
@@ -155,6 +156,146 @@ def test_duplicate_selection_is_emitted_once(tmp_path: Path) -> None:
     sel, _ = select_changed(
         tmp_path, ["cli/src/fno/widget.py", "cli/tests/unit/test_widget.py"])
     assert len(sel) == 1
+
+
+# --- reach widening (the 2026-09-26 red-on-main merges) -----------------------------
+
+
+def test_infix_test_family_is_selected_by_name_containment(tmp_path: Path) -> None:
+    """An envelope change also owns test_fno_mail_envelope.py: the same-stem
+    map caught the exact spelling and left the infix one unselected, and the
+    merge went green while main ran it red."""
+    _write(tmp_path / "cli/src/fno/mail/envelope.py", "x = 1\n")
+    _write(tmp_path / "cli/tests/relay/test_envelope.py", "def test_a(): pass\n")
+    _write(tmp_path / "cli/tests/unit/test_fno_mail_envelope.py", "def test_b(): pass\n")
+    sel, _ = select_changed(tmp_path, ["cli/src/fno/mail/envelope.py"])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("python-source-stem", "cli/tests/relay/test_envelope.py") in by_rule
+    assert ("python-source-infix", "cli/tests/unit/test_fno_mail_envelope.py") in by_rule
+
+
+def test_import_chain_through_a_source_module_is_selected(tmp_path: Path) -> None:
+    """A test importing dispatch owns an envelope change, because dispatch
+    imports envelope - at function level, so the scan must walk the AST, not
+    the first column. One source hop is the bound: a test of a module that
+    merely imports an importer stays out and leans on the full gate."""
+    _write(tmp_path / "cli/src/fno/mail/envelope.py", "def wrap(): ...\n")
+    _write(tmp_path / "cli/src/fno/agents/dispatch.py",
+           "def _send():\n    from fno.mail.envelope import wrap\n")
+    _write(tmp_path / "cli/src/fno/agents/hop.py",
+           "from fno.agents.dispatch import _send\n")
+    _write(tmp_path / "cli/tests/unit/test_pane_guarded.py",
+           "import fno.agents.dispatch as dispatch\n")
+    _write(tmp_path / "cli/tests/unit/test_two_hops.py",
+           "import fno.agents.hop as hop\n")
+    sel, _ = select_changed(tmp_path, ["cli/src/fno/mail/envelope.py"])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("python-source-importers", "cli/tests/unit/test_pane_guarded.py") in by_rule
+    assert ("python-source-importers", "cli/tests/unit/test_two_hops.py") not in by_rule
+
+
+def test_path_literal_selects_the_test_that_reads_the_file(tmp_path: Path) -> None:
+    """A co-located test reads a Rust source as text; a Rust edit to it used
+    to select no Python test at all."""
+    _write(tmp_path / "crates/fno-agents/src/client_verbs.rs", "pub fn verbs() {}\n")
+    _write(tmp_path / "cli/src/fno/agents/test_harness_map.py",
+           'CRATE = "crates/fno-agents/src/client_verbs.rs"\n')
+    sel, _ = select_changed(tmp_path, ["crates/fno-agents/src/client_verbs.rs"])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("path-literal", "cli/src/fno/agents/test_harness_map.py") in by_rule
+
+
+def test_bundle_member_selects_the_freshness_tests(tmp_path: Path) -> None:
+    """An edited bundle source drifts the bundled copies; the freshness tests
+    own that drift and were not selected before this rule."""
+    _write(tmp_path / "skill-bundles.yaml",
+           "- skill: target\n"
+           "  files:\n"
+           "    - source: cli/src/fno/events/schema.yaml\n"
+           "      dest: cli/src/fno/events/schema.yaml\n")
+    _write(tmp_path / "cli/tests/unit/test_skill_bundles.py", "def test_a(): pass\n")
+    _write(tmp_path / "cli/tests/unit/test_bundle_cli.py", "def test_b(): pass\n")
+    sel, _ = select_changed(tmp_path, ["cli/src/fno/events/schema.yaml"])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("bundle-member", "cli/tests/unit/test_skill_bundles.py") in by_rule
+    assert ("bundle-member", "cli/tests/unit/test_bundle_cli.py") in by_rule
+
+
+def test_repo_wide_lints_ride_a_packet_only_with_their_scripts(tmp_path: Path) -> None:
+    """A crates-only diff used to select no lint while the placement rule read
+    the whole tree and failed on main. The whole-tree lints are seconds long
+    and ride every packet; a fixture without the scripts stays lint-free,
+    which is what keeps the exact-list contract tests above stable."""
+    _write(tmp_path / "crates/fno-agents/src/reentry.rs", "pub fn f() {}\n")
+    sel, _ = select_changed(tmp_path, ["crates/fno-agents/src/reentry.rs"])
+    assert not [s for s in sel if s["rule"] == "repo-wide-lint"]
+    _write(tmp_path / "scripts/ci/check-placement-rule.sh", "#!/usr/bin/env bash\n:\n")
+    sel, _ = select_changed(tmp_path, ["crates/fno-agents/src/reentry.rs"])
+    lints = [s["target"] for s in sel if s["rule"] == "repo-wide-lint"]
+    assert lints == ["placement rule"]
+
+
+def test_always_lints_are_registered_steps_backed_by_real_scripts() -> None:
+    """A drifted step name would KeyError the packet runner; a deleted script
+    would silently drop the lint from every packet. Pin both to the repo."""
+    registry = {name for name, _cwd, _cmd in _STRUCTURAL_STEPS}
+    root = Path(__file__).resolve().parents[3]
+    for name, script in _ALWAYS_LINTS:
+        assert name in registry, name
+        assert (root / script).exists(), script
+
+
+_SEPT26_MAIL_PR_CHANGED: tuple[str, ...] = (
+    "cli/src/fno/lint_cli.py", "cli/src/fno/mail/envelope.py", "cli/src/fno/user.py",
+    "cli/tests/agents/test_seed_provenance_env.py", "cli/tests/agents/test_send.py",
+    "cli/tests/agents/test_send_deliver_gate.py", "cli/tests/bus/test_to_king.py",
+    "cli/tests/unit/test_cached_state_surface.py",
+    "cli/tests/unit/test_dispatch_mux_send.py",
+    "cli/tests/unit/test_fno_mail_envelope.py",
+    "cli/tests/unit/test_harness_identity.py", "cli/tests/unit/test_lint_cli.py",
+    "cli/tests/unit/test_mail_addressing.py", "cli/tests/unit/test_mail_cli.py",
+    "cli/tests/unit/test_mail_force.py", "cli/tests/unit/test_mail_origin.py",
+    "crates/fno-agents/src/bin/client.rs", "crates/fno-agents/src/crown_names.rs",
+    "crates/fno-agents/src/daemon.rs", "crates/fno-agents/src/daemon/tests/gc_receipts.rs",
+    "crates/fno-agents/src/king_checkin.rs", "crates/fno-agents/src/lib.rs",
+    "crates/fno-agents/src/mail_envelope.rs", "crates/fno-agents/src/state.rs",
+    "crates/fno/src/agents_view.rs", "crates/fno/src/bootstrap.rs",
+    "crates/fno/src/client/sideline.rs",
+    "crates/fno/src/client/tests/sideline_card_tests.rs",
+    "crates/fno/src/client/tests/sideline_table_tests.rs",
+    "crates/fno/src/client_tests.rs", "crates/fno/src/crown_names.rs",
+    "crates/fno/src/lib.rs", "crates/fno/src/proto.rs",
+    "crates/fno/src/registry_label.rs", "crates/fno/src/server.rs",
+    "crates/fno/src/server/tests/rename_tests.rs",
+)
+
+
+def test_replay_sept26_mail_packet_contains_the_tests_that_went_red() -> None:
+    """The merge went green; main then ran the infix, mux-inject and
+    pane-guarded tests red. Replaying the real changed list through the
+    selector must map every one of them, plus the placement rule."""
+    root = Path(__file__).resolve().parents[3]
+    sel, _ = select_changed(root, list(_SEPT26_MAIL_PR_CHANGED))
+    targets = {(s["kind"], s["target"]) for s in sel}
+    for want in ("cli/tests/unit/test_fno_mail_envelope.py",
+                 "cli/tests/agents/test_mux_inject.py",
+                 "cli/tests/unit/test_mux_pane_guarded.py"):
+        assert ("pytest", want) in targets, want
+    assert ("step", "placement rule") in targets
+
+
+def test_replay_sept26_rust_edit_selects_the_text_reader() -> None:
+    """The Rust-only merge went green; main then ran the co-located reader
+    test red. Replaying its changed list must map that test."""
+    root = Path(__file__).resolve().parents[3]
+    sel, _ = select_changed(root, [
+        "crates/fno-agents/src/attach.rs",
+        "crates/fno-agents/src/claude_resume.rs",
+        "crates/fno-agents/src/client_verbs.rs",
+        "crates/fno-agents/src/lib.rs",
+    ])
+    by_rule = {(s["rule"], s["target"]) for s in sel}
+    assert ("path-literal", "cli/src/fno/agents/test_harness_map.py") in by_rule
 
 
 def _git_repo(root: Path) -> None:
