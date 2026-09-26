@@ -13074,13 +13074,25 @@ fn question_item(
 ) -> crate::needs_overlay::QuestionItem {
     crate::needs_overlay::QuestionItem {
         id: id.into(),
-        question: format!("prose for {id}"),
-        ask: Some(format!("ask for {id}")),
-        asker: Some("fno-peer".into()),
-        node: None,
-        options: options.iter().map(|s| s.to_string()).collect(),
-        live,
-        rank: None,
+        kind: "question".into(),
+        title: format!("ask for {id}"),
+        body: Some(format!("prose for {id}")),
+        asker: Some(crate::needs_overlay::QuestionAsker {
+            handle: "fno-peer".into(),
+            live,
+            ..Default::default()
+        }),
+        state: "open".into(),
+        options: options
+            .iter()
+            .enumerate()
+            .map(|(i, s)| crate::needs_overlay::QuestionOption {
+                n: i as u32 + 1,
+                text: (*s).to_string(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
     }
 }
 
@@ -13524,13 +13536,19 @@ async fn answer_keys_digit_on_question_with_options_queues_answer() {
     let mut v = view_with_agents(vec![]);
     v.mine_fold = Some(Vec::new());
     v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-1", &["oauth", "apikey"], Some(true))]);
+    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+        items: vec![question_item("q-1", &["oauth", "apikey"], Some(true))],
+        ..Default::default()
+    });
     v.answers = Some(0);
     let mut buf: Vec<u8> = Vec::new();
     answer_keys(&mut v, b"2", &mut buf).await.unwrap();
     assert_eq!(
         v.question_action,
-        Some(("q-1".to_string(), "apikey".to_string()))
+        Some((
+            "q-1".to_string(),
+            crate::needs_overlay::AnswerPick::Option(2)
+        ))
     );
     assert!(v.question_acting);
     assert!(
@@ -13546,7 +13564,7 @@ async fn answer_keys_digit_on_question_with_options_queues_answer() {
 fn apply_question_action_result_success_requests_refold() {
     let mut v = view_with_agents(vec![]);
     v.needs_want = false;
-    v.apply_question_action_result(Ok(()));
+    v.apply_question_action_result(Ok("recorded, delivering".into()));
     assert!(!v.question_acting);
     assert!(v.needs_want, "success re-folds so the row leaves on refold");
 }
@@ -13569,7 +13587,10 @@ async fn answer_keys_enter_on_no_options_question_opens_free_text_then_sends_it(
     let mut v = view_with_agents(vec![]);
     v.mine_fold = Some(Vec::new());
     v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-2", &[], None)]);
+    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+        items: vec![question_item("q-2", &[], None)],
+        ..Default::default()
+    });
     v.answers = Some(0);
     let mut buf: Vec<u8> = Vec::new();
     answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
@@ -13583,7 +13604,10 @@ async fn answer_keys_enter_on_no_options_question_opens_free_text_then_sends_it(
         .unwrap();
     assert_eq!(
         v.question_action,
-        Some(("q-2".to_string(), "go with oauth".to_string()))
+        Some((
+            "q-2".to_string(),
+            crate::needs_overlay::AnswerPick::Words("go with oauth".into())
+        ))
     );
     assert!(v.question_answering.is_none());
     assert!(buf.is_empty());
@@ -13597,7 +13621,10 @@ async fn answer_keys_digit_with_no_matching_question_option_bels() {
     let mut v = view_with_agents(vec![]);
     v.mine_fold = Some(Vec::new());
     v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-3", &["oauth"], Some(true))]);
+    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+        items: vec![question_item("q-3", &["oauth"], Some(true))],
+        ..Default::default()
+    });
     v.answers = Some(0);
     let mut buf: Vec<u8> = Vec::new();
     answer_keys(&mut v, b"9", &mut buf).await.unwrap();
@@ -13615,7 +13642,10 @@ fn needs_overlay_lines_renders_stale_question_with_explanation() {
     let mut v = view_with_agents(vec![]);
     v.mine_fold = Some(Vec::new());
     v.needs_fold = Some(Vec::new());
-    v.questions_fold = Some(vec![question_item("q-4", &["a", "b"], Some(false))]);
+    v.questions_fold = Some(crate::needs_overlay::QuestionsFold {
+        items: vec![question_item("q-4", &["a", "b"], Some(false))],
+        ..Default::default()
+    });
     let projection = v.needs_projection();
     let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
     assert!(lines.iter().any(|l| l.contains("STALE")));
