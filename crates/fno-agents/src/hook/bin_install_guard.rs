@@ -119,8 +119,67 @@ fn judge_seg(home: &str, bin_dir: &str, seg: &[String]) -> Option<String> {
                 {
                     return Some(REASON.replace("{cmd}", &seg.join(" ")));
                 }
+                // `cargo install` writes the built binary straight into the
+                // cargo bin dir: the same in-place overwrite through a head
+                // the copy family does not name.
+                if head == "cargo"
+                    && argv.first().map(String::as_str) == Some("install")
+                    && cargo_install_refusal(&argv[1..]).is_some()
+                {
+                    return Some(REASON.replace("{cmd}", &seg.join(" ")));
+                }
             }
         }
+    }
+    None
+}
+
+/// Flags of `cargo install` whose next token is its value, so the value can
+/// be matched (`--path crates/fno-agents`, `--bin fno-agents`) instead of
+/// read as a package-name positional.
+const CARGO_VALUE_FLAGS: &[&str] = &[
+    "--path",
+    "-p",
+    "--package",
+    "--bin",
+    "--git",
+    "--index",
+    "--registry",
+    "--target",
+];
+
+/// The refusal for one `cargo install` argv (past the `install` token), or
+/// None to allow: the command must name one of the deployed binaries as the
+/// thing it installs.
+fn cargo_install_refusal(argv: &[String]) -> Option<()> {
+    let mut i = 0;
+    while i < argv.len() {
+        let tok = &argv[i];
+        let (flag, glued) = match tok.split_once('=') {
+            Some((f, v)) => (f, Some(v)),
+            None => (tok.as_str(), None),
+        };
+        if glued.is_none() && !tok.starts_with('-') && BIN_NAMES.contains(&tok.as_str()) {
+            return Some(());
+        }
+        let value = glued.map(str::to_string).or_else(|| {
+            argv.get(i + 1)
+                .filter(|_| CARGO_VALUE_FLAGS.contains(&flag))
+                .cloned()
+        });
+        if let Some(v) = value {
+            let v = v.trim_end_matches('/');
+            if BIN_NAMES.contains(&v.to_string().as_str())
+                || v.ends_with("/fno-agents")
+                || v.ends_with("/fno-agents-worker")
+            {
+                return Some(());
+            }
+        }
+        if glued.is_none() && CARGO_VALUE_FLAGS.contains(&flag) {
+            i += 1;
+        }
+        i += 1;
     }
     None
 }
@@ -194,8 +253,14 @@ fn refusal_for(home: &str, bin_dir: &str, head: &str, argv: &[String]) -> Option
             .then_some(());
     }
     let prefix = format!("{bin_dir}/");
-    if dest_n.starts_with(&prefix) && BIN_NAMES.contains(&basename(dest_n)) {
-        return Some(());
+    if dest_n.starts_with(&prefix) {
+        // A trailing `*` is a shell glob the shell expands to the live name
+        // before exec, so `~/.cargo/bin/fno-agents*` IS the binary.
+        let name = basename(dest_n);
+        let name = name.strip_suffix('*').unwrap_or(name);
+        if BIN_NAMES.contains(&name) {
+            return Some(());
+        }
     }
     None
 }
@@ -243,12 +308,30 @@ mod tests {
         denied("rsync -a target/debug/fno-agents \"$HOME/.cargo/bin/\"");
         denied("cp -t \"$HOME/.cargo/bin\" target/debug/fno-agents");
         denied("env cp target/debug/fno-agents ~/.cargo/bin/");
+        // A glob the shell expands to the live binary name is still the
+        // binary.
+        denied("cp x ~/.cargo/bin/fno-agents*");
         let r = denied("cp x ~/.cargo/bin/fno-agents-worker");
         assert!(r.contains("FNO_AGENTS_FRONT"), "names the pin door: {r}");
         assert!(
             r.contains("fno doctor update"),
             "names the deploy door: {r}"
         );
+    }
+
+    #[test]
+    fn cargo_install_denies() {
+        denied("cargo install --path crates/fno-agents");
+        denied("cargo install --path crates/fno-agents --locked");
+        denied("cargo install fno-agents");
+        denied("cargo install fno-agents-worker");
+        denied("cargo install --bin fno-agents --path crates/fno");
+        denied("cargo install --package=fno-agents");
+        // A repair rename or a different crate still installs.
+        allowed("cargo install --list");
+        allowed("cargo install sd");
+        allowed("cargo install --path crates/fno");
+        allowed("cargo install fno");
     }
 
     #[test]
