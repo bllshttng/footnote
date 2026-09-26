@@ -124,6 +124,16 @@ def _patch_mux(monkeypatch, fake: FakeMux) -> None:
     from fno.agents import dispatch as dispatch_mod
 
     monkeypatch.setattr(dispatch_mod.subprocess, "run", fake)
+    # The wholesale subprocess stub also swallows the Rust envelope renderer's
+    # call, whose empty stdout would wrap every payload as the empty string.
+    # Stub the renderer with a deterministic minimal envelope instead.
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope,
+        "_render_in_rust",
+        lambda payload: "<fno_mail>\n{}\n</fno_mail>".format(payload.get("body", "")),
+    )
 
 
 def test_inject_reads_the_undeclared_posture_instead_of_raising(monkeypatch) -> None:

@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 21
+map_version = 22
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -510,7 +510,7 @@ remove_strategy = "registry-only"
 # whole-row claim, and only the THREAD lane binds an id today. The pane arm
 # still launches a bare `agy` and mints nothing, so `true` would assert a
 # binding for a lane that makes none - and would add agy to
-# `_SESSION_BINDING_HARNESSES` (harness_probe._required_registrations), where
+# `_SESSION_BINDING_HARNESSES` (the live rubric's registration sweep), where
 # its pane receipts would then report `bound: false` for healthy workers.
 # Minting on the pane lane too is what makes this `true`.
 session_binding = { strategy = "callee-minted-read-back", required = false, timeout_ms = 60000 }
@@ -581,6 +581,7 @@ status_pattern = ""
 # conversation interactively with its transcript restored.
 [harness.agy.features.spawn]
 state = "native"
+measured_by = { reader = "agy spawn journey", version = "1.1.24", date = "2026-09-03" }
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). state_root_grant
 # above records a write-access MECHANISM per lane, never whether a lane was
@@ -727,6 +728,7 @@ state = "native"
 # verb inventory no: the split this key exists to record.
 [harness.opencode.features.attach]
 state = "native"
+measured_by = { reader = "daemon-kept attach journey", date = "2026-09-03" }
 
 # pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
 # a session gets is a choice fno makes at exec, never a property of pi:
@@ -941,6 +943,7 @@ status_pattern = ""
 # that seats pi in the spawn roster.
 [harness.pi.features.spawn]
 state = "native"
+measured_by = { reader = "thread keeper journey", version = "0.84.2", date = "2026-09-01" }
 
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
@@ -1094,6 +1097,11 @@ state = "native"
 kind = "declared"
 authority = "{bin} --help"
 pattern = '--effort\s+.*\((?P<vocab>[a-z|]+)\)'
+# The control is the text a correct reader must reject: a help line denying
+# the effort surface in ordinary words. The pattern needs the literal
+# --effort flag with a parenthesized choice list, which the denial lacks, so
+# the reader can tell presence from denial.
+control = "no reasoning effort options are available in this build"
 # What a match means: the binary declares a reasoning-effort surface, so a
 # row whose kind is "unsupported" understates the CLI (the live agy case).
 
@@ -1117,10 +1125,13 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
 # and never instead of them. Eleven keys, closed so a typo is a parse error:
 # review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
-# acp. A claim's only field is `state`: native, capable, absent, unmeasured -
+# acp. A claim's fields are `state` (native, capable, absent, unmeasured -
 # defined once in harness_capabilities.rs beside FEATURE_STATES, the parser
-# that enforces them; the per-row comments below cite the measurements,
-# never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# that enforces them) and the optional `measured_by` receipt naming the
+# reader, version and date that settled the state. A state without a receipt
+# keeps its row comment, and the matrix renders the cell unmeasured rather
+# than repeating a word nobody can point at a measurement for. The per-row
+# comments below cite the measurements, never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
 # the refusal lives in the consuming lane, which names the key, the state, and
 # the probe that settles it. Every key used on any row needs a
 # [probe.features.<key>] declaration below, or the table refuses to load: a
@@ -1142,45 +1153,104 @@ marker = "an unattended spawn on the harness's thread lane starts, drives a turn
 kind = "behavioral"
 marker = "a real attach to a live session lands in that session's own interface and returns its lines - the native verb where one ships, else the daemon-kept lane (mux-thread portal) against a session the keeper holds"
 
+# The eight keys below were help-word matches until this conversion: a
+# pattern like (?i)\bhooks?\b matches "no hook support in this build" just as
+# it matches real support, so the reader could not report absence and the
+# load now refuses such a declaration (a declared instrument must carry a
+# control it rejects). The rust regex engine has no lookaround, so no
+# one-pattern instrument can tell the word in a capability section from the
+# same word in a denial, and no harness ships a one-shot absence-capable
+# instrument for these keys. Each is honest unprobeable now: fewer honest
+# columns beat word matches that cannot fail. The renderer prints the first
+# three words of these reasons as the unmeasured reason.
 [probe."features.rpc"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\b(app-server|rpc|daemon)\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build has no app-server, rpc, or daemon support'; no one-shot instrument reports absence for this key"
 
 [probe."features.server"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\b(serve|server|listen)\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no serve mode: this binary neither serves nor listens'; no one-shot instrument reports absence for this key"
 
 [probe."features.plugins"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bplugins?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'plugins are not supported in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.hooks"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bhooks?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no hook support in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.skills_dir"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bskills?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'no skills directory in this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.subagent_dispatch"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bsubagents?\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build cannot dispatch subagents'; no one-shot instrument reports absence for this key"
 
 [probe."features.mcp"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bmcp\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'MCP support is absent from this build'; no one-shot instrument reports absence for this key"
 
 [probe."features.acp"]
-kind = "declared"
-authority = "{bin} --help"
-pattern = '(?i)\bacp\b'
+kind = "unprobeable"
+reason = "reader refused as blind: the help-word match also matched a denial such as 'this build speaks no ACP'; no one-shot instrument reports absence for this key"
+
+# THE JOURNEYS DIMENSION. The ten user-journey classes the cross-harness
+# audits name, keyed by the closed JOURNEY_KEYS set in
+# harness_capabilities.rs, each carrying either a runner (an instrument the
+# live tier can run) or an unprobeable reason. The live rubric's observed
+# lines are six of the ten runners. A journey cell renders unmeasured until a
+# live-tier run earns it; no live-tier cell is earned by a table edit. Two
+# journeys are settled by code that already refuses, and the renderer reads
+# that code rather than guessing: wait-for-ci reads the watch lease, whose
+# permit list is one harness wide today.
+
+[journeys.fresh-install]
+kind = "unprobeable"
+reason = "the fresh-install read is the OpenCode installation surface's filtered catalog reader, which has not landed; the unfiltered catalog read is refused as blind because another plugin's mirrored fno: registrations satisfy it with no footnote install"
+reader = "filtered catalog read (OpenCode installation surface)"
+
+[journeys.spawn-turn-resume]
+kind = "behavioral"
+marker = "an unattended spawn on the harness's thread lane starts, drives a turn to completion, ends in a clean stop, and a fresh process resumes the same session id"
+reader = "live rubric: SPAWN + IDENTITY lines"
+
+[journeys.parent-children]
+kind = "unprobeable"
+reason = "the behavior it measures, a parent worker holding children under a concurrency cap, is owned by the continuation-correctness work and has not landed; until then the cell reads unmeasured, never asserted"
+
+[journeys.send-during-active-work]
+kind = "behavioral"
+marker = "a message sent to a worker mid-turn changes the worker's output: PROBE_REPLY=<nonce> appears after PROBE_MAIL=<nonce> was sent and was absent before"
+reader = "live rubric: MAIL BOTH WAYS line"
+
+[journeys.wait-for-ci]
+kind = "behavioral"
+marker = "a session parked on a CI watch wakes when its watcher exits, on a harness whose watch lease permits idling"
+reader = "the watch lease (loopcheck): only a claude session may idle today; every other harness reads absent with its refusal quoted"
+
+[journeys.compact-reopen]
+kind = "behavioral"
+marker = "after the harness process is stopped, a fresh process resumes the session and the prior turn's planted token is visible again: PROBE_SURVIVE=<nonce>"
+reader = "live rubric: SURVIVE line"
+
+[journeys.restart-viewport]
+kind = "unprobeable"
+reason = "no live fleet restart is part of the work that declares this journey, so the viewport restart is unprobeable here; nobody looked is not measured absence, and the cell renders unmeasured"
+
+[journeys.review-ship]
+kind = "unprobeable"
+reason = "declared, never driven: the review-and-ship journey opens a review lane against a live PR, which no one-shot instrument reaches and no isolated run may open"
+
+[journeys.native-remote-view]
+kind = "behavioral"
+marker = "a portal view onto the session's own pane returns its live screen: the harness's pane read exits 0 with nonempty output on the row's pane reference"
+reader = "live rubric: VIEW line"
+
+[journeys.cleanup]
+kind = "behavioral"
+marker = "every fleet row the run minted is removed by name and the removal is recorded; a row that survives fails the journey"
+reader = "live rubric: row-removal check"
 
 # grok joins on the same keeper lane pi and cursor-agent use. The shared ACP
 # stdio client is in Rust at crates/fno-agents/src/acp_stdio.rs; this row still
@@ -1339,6 +1409,7 @@ status_pattern = ""
 # seats grok in the spawn roster.
 [harness.grok.features.spawn]
 state = "native"
+measured_by = { reader = "session-id resume journey", version = "1.0.13", date = "2026-09-02" }
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). Re-using a
 # spent `--session-id` is a grok refusal, never a resume, so the arm refuses

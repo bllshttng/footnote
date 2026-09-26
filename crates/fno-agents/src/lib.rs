@@ -178,6 +178,8 @@ pub mod grok_ask;
 pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
+pub mod harness_matrix;
+pub mod harness_reader;
 pub mod harness_verbs;
 pub mod heal;
 pub mod honesty_sweep;
