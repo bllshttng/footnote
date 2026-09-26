@@ -52,14 +52,13 @@ Two shortcuts were considered and rejected on measurement rather than taste. Hoi
 
 ## Audit and CI modes
 
-`bash scripts/ci/check-company-boundaries.sh --strict` is the full audit and remains red while any prohibited dependency or declared-layer cycle exists.
-The strict result currently names two prohibited imports and the platform-to-runtime-to-platform cycle, so it preserves the falsification finding.
+`bash scripts/ci/check-company-boundaries.sh --strict` is the full audit and remains red while any prohibited dependency or declared-layer cycle exists. The strict result names every prohibited import the baseline holds, plus the platform-to-runtime-to-platform cycle, so it preserves the falsification finding.
 
 The cycle line reports the first cycle the detector finds, not every cycle present.
 Retiring the config-to-graph import did not clear "the" cycle; it revealed the next one, which the two surviving events-CLI imports keep alive.
 Expect a burndown to re-root the reported cycle rather than remove it, until the last upward edge out of a layer is gone.
 
-`bash scripts/ci/check-company-boundaries.sh --baseline` is the gate registered in `fno doctor test`. Its checked-in source of truth is `scripts/ci/company-boundary-baseline.txt`. The file records each finding's import site, layer pair, import statement, and cycle. When the exact finding set is unchanged, the baseline gate passes. New or changed findings fail. Removed findings also fail until their readable baseline entries leave in the same pull request. Therefore, green means known debt did not grow. It does not mean the architecture is clean or supersede the red strict audit.
+`bash scripts/ci/check-company-boundaries.sh --baseline` is the gate registered in `fno doctor test`. Its checked-in source of truth is `scripts/ci/company-boundary-baseline.txt`. The file records each finding's importing file, layer pair, import statement, and cycle. The line number is deliberately absent: an unrelated edit above an import must not churn the file. When the exact finding set is unchanged, the baseline gate passes. New or changed findings fail. Removed findings also fail until their readable baseline entries leave in the same pull request. Therefore, green means known debt did not grow. It does not mean the architecture is clean or supersede the red strict audit.
 
 The check enforces no edges for `fno-skills`, which is Markdown and shell content, or for `fno-mux`, which is Rust in `crates/fno/src/mux_cli.rs`.
 They remain named as uncovered seams instead of being counted as clean Python boundaries.
