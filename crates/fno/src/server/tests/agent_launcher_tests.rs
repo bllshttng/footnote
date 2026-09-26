@@ -11,6 +11,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         harness: harness.to_string(),
         substrate: "pane".to_string(),
         model: None,
+        provider: None,
         model_names_harness: false,
         effort: None,
         permission_mode: None,
@@ -19,6 +20,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         split: None,
         node: None,
         message: String::new(),
+        extra_flags: Vec::new(),
     }
 }
 
