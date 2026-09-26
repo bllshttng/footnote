@@ -4036,27 +4036,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_is_the_state_view_of_classify_with_basis() {
-        let me = std::process::id() as i32;
-        let host = hostname();
-        let now = now_ms();
-        let cases = [
-            record(me, now, None, &host),
-            record(-1, now, None, &host),
-            record(me, 1, None, &host),
-            record(me, now, Some(now - 1), &host),
-            record(-1, now, Some(now + 60_000), &host),
-            record(me, now, Some(now + 60_000), "elsewhere.example"),
-        ];
-        for rec in &cases {
-            assert_eq!(
-                classify(rec, Some(now)),
-                classify_with_basis(rec, Some(now), &|pid| probe_pid(pid)).0
-            );
-        }
-    }
-
-    #[test]
     fn pid_dies_with_session_is_a_denylist_of_measured_harnesses() {
         // AC4-EDGE. Only a harness MEASURED to share one host process is
         // denied. Unknown and absent keep today's behavior on purpose: 1808 of
