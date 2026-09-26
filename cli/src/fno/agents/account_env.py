@@ -128,9 +128,8 @@ def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
     A no-op unless the mapping actually moves HOME. When it does, pin
     ``FNO_AGENTS_HOME``, ``FNO_CLAIMS_ROOT`` and ``FNO_STATE_DIR`` to the roots
     THIS process resolves, so the child's registry row, its claim, its locks
-    and its graph all stay findable. A value already in the mapping wins, so an
-    inherited pin propagates unchanged and a caller that meant to redirect a
-    root is not second-guessed.
+    and its graph all stay findable. A value already in the mapping wins, so a
+    caller that meant to redirect a root is not second-guessed.
 
     The remaining honest limit: the ``FNO_HOME``-anchored sidecars and any
     root without a carrier still follow the moved HOME; the three pins cover
