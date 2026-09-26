@@ -26,9 +26,9 @@ pub(crate) struct OverlayLayout {
     pub(crate) framed: chrome::Framed,
     /// The body window the layout chose: first visible body line, and how
     /// many it took.
-    window: (usize, usize),
+    pub(crate) window: (usize, usize),
     /// The framed-line index the first body line paints at.
-    body_top: usize,
+    pub(crate) body_top: usize,
 }
 
 impl OverlayLayout {

@@ -327,24 +327,22 @@ fn f_key_toggles_full_screen() {
     );
 }
 
-// The composed frame paints the backlog inside the sideline column with
-// NO second border: the board's text starts at column 0 and no chrome box
-// wraps it.
+// The composed frame paints the backlog inside the sideline column: the
+// filter bar, the board pane and the detail pane are the column's
+// content, region-framed, with the card rows visible.
 #[test]
 fn compose_paints_the_backlog_inside_the_sideline_column() {
     let mut v = key_view(board_with(board_inputs()));
     v.experimental_backlog = true;
     v.sideline_view = crate::view_store::SidelineView::Backlog;
     let text = crate::vt::frame_text(&v.compose());
+    assert!(text.contains("filters"), "filter bar frame: {text}");
     assert!(text.contains("In Progress"), "column header: {text}");
-    assert!(text.contains("First card"), "card row: {text}");
-    for line in text.lines() {
-        assert!(!line.starts_with('┌'), "no second border anywhere: {text}");
-    }
+    assert!(text.contains("mux card"), "card row: {text}");
 }
 
-// Full screen paints the board box at column 0 and lists the edit keys in
-// the footer (D6).
+// Full screen paints the filter bar, the board pane and the two-row hint;
+// the hint carries the edit keys (the footer's replacement).
 #[test]
 fn compose_full_screen_board_fills_the_terminal() {
     let mut v = key_view(board_with(board_inputs()));
@@ -353,12 +351,20 @@ fn compose_full_screen_board_fills_the_terminal() {
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
-        text.lines().any(|l| l.starts_with("╭─ backlog")),
-        "board box at column 0: {text}"
+        text.lines().any(|l| l.starts_with("╭─ filters")),
+        "filter bar at column 0: {text}"
     );
     assert!(
-        text.contains("e/p/s/S/D/N/E"),
-        "footer lists the edit keys: {text}"
+        text.lines().any(|l| l.starts_with("╭─ backlog")),
+        "board pane at column 0: {text}"
+    );
+    assert!(
+        text.lines().any(|l| l.starts_with("╭─ details")),
+        "detail pane paints: {text}"
+    );
+    assert!(
+        text.contains("e/p/s/S edit"),
+        "hint carries the edit keys: {text}"
     );
 }
 
@@ -410,83 +416,80 @@ fn cell_at(frame: &crate::proto::Frame, r: usize, c: usize, cols: usize) -> crat
     frame.cells[r * cols + c]
 }
 
-// The hierarchy proof: in the composed backlog column, a column header
-// cell, a card-id cell, a meta cell and a body cell carry DISTINCT
-// attribute sets, no cell in the column carries INVERSE, and the cursor
-// row wears the explicit band pair.
+// The hierarchy proof: in the composed full-screen board, a column header
+// cell, a card-id cell, a meta cell and the cursor band carry DISTINCT
+// attribute sets, and no cell carries INVERSE.
 #[test]
 fn backlog_panel_cells_carry_distinct_attributes() {
-    let view = sideline_backlog_view();
+    let mut view = sideline_backlog_view();
+    view.board_full = true;
     let frame = view.compose();
     let cols = 100usize;
     let text = crate::vt::frame_text(&frame);
-    let find_row = |needle: &str| {
-        text.lines()
-            .position(|l| l.starts_with(needle))
-            .unwrap_or_else(|| panic!("no row starts with {needle:?}: {text}"))
-    };
-    // The stats line leads with the same words, so the column head is the
-    // LAST row that starts with one.
-    let meta_row = find_row("In Progress");
-    let head_row = text
+    // The cursor card row and the stacked column header directly above
+    // it (the panes share rows, so anchors stay within the board pane).
+    let band_row = text
         .lines()
         .enumerate()
-        .filter(|(_, l)| l.starts_with("In Progress"))
-        .map(|(i, _)| i)
-        .last()
-        .expect("no column head row");
-    let body_row = text
-        .lines()
-        .position(|l| l.contains("x-2"))
-        .expect("no card row for x-2");
-    // A column header cell is BOLD.
-    let head = cell_at(&frame, head_row, 2, cols);
+        .find(|(_, l)| l.starts_with("│ ▸●") && l.contains("x-2"))
+        .expect("cursor card row")
+        .0;
+    let head_row = band_row - 1;
+    let head_line = text.lines().nth(head_row).expect("head line");
+    assert!(
+        head_line
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with("In Progress"),
+        "column header above the cursor row: {head_line}"
+    );
+    let head_col = head_line.find("In Progress").expect("head text") + 1;
+    let head = cell_at(&frame, head_row, head_col, cols);
     assert!(
         head.flags & crate::proto::cell_flags::BOLD != 0,
-        "header bold"
+        "header bold at row {head_row}: {text}"
     );
-    // A meta (summary/counts) cell is the dim slot, no INVERSE.
+    // The stats line (contains `·`) reads dim.
+    let meta_row = text
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.contains("In Progress 1 \u{b7}"))
+        .expect("stats line")
+        .0;
     let meta = cell_at(&frame, meta_row, 2, cols);
     assert_eq!(meta.fg, crate::proto::Color::Indexed(8), "meta dim slot");
-    // The CURSOR row (x-2) wears the explicit band pair across its full
-    // width, id included: the band is the one place a color pair is legal.
-    let band = cell_at(&frame, body_row, 1, cols);
+    let band_line = text.lines().nth(band_row).expect("band line");
+    let id_col = band_line.find("x-2").expect("id on the cursor row");
+    let band = cell_at(&frame, band_row, id_col, cols);
     assert_eq!(band.bg, crate::proto::Color::Indexed(0), "band surface");
     assert_eq!(band.fg, crate::proto::Color::Indexed(3), "band accent text");
-    // A NON-cursor card id takes the accent slot, and its title is plain.
+    // A non-cursor card id keeps the accent slot and a plain title.
     let id_row = text
         .lines()
-        .position(|l| l.contains("x-1"))
-        .expect("no card row for x-1");
+        .enumerate()
+        .find(|(_, l)| l.contains("x-1") && l.contains("First card"))
+        .expect("x-1 card row")
+        .0;
     let line = text.lines().nth(id_row).expect("id row");
-    let id_col = line.find("x-1").expect("id on its row") + 1;
-    let id_cell = cell_at(&frame, id_row, id_col + 1, cols);
+    let id_col = line.find("x-1").expect("id on its row");
+    let id_cell = cell_at(&frame, id_row, id_col, cols);
     assert_eq!(
         id_cell.fg,
         crate::proto::Color::Indexed(3),
         "id accent slot"
     );
-    let title_col = line.find("First card").expect("title on its row") + 1;
-    let title_cell = cell_at(&frame, id_row, title_col + 1, cols);
+    let title_col = line.find("First card").expect("title on its row");
+    let title_cell = cell_at(&frame, id_row, title_col, cols);
     assert_eq!(title_cell.fg, crate::proto::Color::Default, "title plain");
-    assert_eq!(title_cell.flags, 0, "title plain");
-    // Nothing in the painted column is inverse, and no second border.
+    // Nothing in the frame is inverse.
     for r in 0..24usize {
-        for c in 0..27usize {
+        for c in 0..cols {
             let cell = cell_at(&frame, r, c, cols);
             assert!(
                 cell.flags & crate::proto::cell_flags::INVERSE == 0,
                 "INVERSE at {r},{c}: {text}"
             );
         }
-        assert!(
-            !text
-                .lines()
-                .nth(r)
-                .map(|l| l.starts_with('┌'))
-                .unwrap_or(false),
-            "no second border: {text}"
-        );
     }
 }
 
@@ -541,7 +544,7 @@ fn ux_shot_backlog_node_detail() {
             node_id: "x-1".into(),
             trail: vec![],
             sel: 0,
-            details_open: false,
+            scroll: 0,
         });
     }
     let frame = view.compose();
@@ -574,7 +577,7 @@ fn ux_shot_backlog_node_detail_catppuccin() {
             node_id: "x-1".into(),
             trail: vec![],
             sel: 0,
-            details_open: false,
+            scroll: 0,
         });
     }
     let frame = view.compose();
@@ -599,7 +602,7 @@ fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
                 node_id: "x-1".into(),
                 trail: vec![],
                 sel: 0,
-                details_open: false,
+                scroll: 0,
             });
         }
     }
@@ -662,7 +665,7 @@ fn field_pickers_open_from_board_and_detail() {
                     node_id: "x-1".into(),
                     trail: vec![],
                     sel: 0,
-                    details_open: false,
+                    scroll: 0,
                 });
             }
         }
@@ -777,7 +780,7 @@ fn detail_field_labels_go_dim_and_values_stay_normal() {
     focus_card(&mut v.backlog_board.as_mut().expect("board"), Some("x-1"));
     open_detail(&mut v);
     let b = v.backlog_board.as_ref().expect("detail opened");
-    let (lines, _) = node_detail::overlay_lines(b, 120);
+    let (lines, _) = node_detail::pane_lines(b, "x-1", Some(0), 120);
     let field = lines
         .iter()
         .find(|l| l.starts_with("kind:"))
@@ -789,4 +792,111 @@ fn detail_field_labels_go_dim_and_values_stay_normal() {
         &field.roles[..=colon]
     );
     assert_eq!(field.roles[colon + 2], BRole::Body, "value stays normal");
+}
+
+// AC4-HP: Space on value rows builds a multi-select set; the board keeps
+// cards in either status; `any` clears the set.
+#[test]
+fn space_toggle_multi_select_and_any_clears() {
+    let mut inp = board_inputs();
+    if let Some(r) = inp.rows.get_mut(2) {
+        r["status"] = json!("done");
+    }
+    let mut v = key_view(board_with(inp));
+    // The status facet's value list sorts: any, done, in_progress, ready.
+    if let Some(b) = v.backlog_board.as_mut() {
+        b.facet = Some(FacetPick {
+            facet: 2,
+            sel: 0,
+            value_sel: Some(3), // ready
+        });
+    }
+    facet_toggle(&mut v);
+    if let Some(b) = v.backlog_board.as_mut() {
+        b.facet = Some(FacetPick {
+            facet: 2,
+            sel: 0,
+            value_sel: Some(2), // in_progress
+        });
+    }
+    facet_toggle(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    let set = b.query.sets.get("status").expect("status set built");
+    assert!(set.contains(&"ready".to_string()) && set.contains(&"in_progress".to_string()));
+    let kept: Vec<&str> = b
+        .body
+        .as_ref()
+        .unwrap()
+        .lanes
+        .iter()
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter())
+        .map(|c| c.id.as_str())
+        .collect();
+    let mut sorted = kept.clone();
+    sorted.sort();
+    assert_eq!(sorted, ["x-1", "x-2"], "either status stays, done drops");
+    // Both rows carry the ticked mark.
+    let b = v.backlog_board.as_mut().expect("board open");
+    b.facet = Some(FacetPick {
+        facet: 2,
+        sel: 0,
+        value_sel: Some(0),
+    });
+    let popup = facet_popup(b).expect("value popup");
+    let marks: Vec<&str> = popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .filter(|l| l.starts_with('['))
+        .collect();
+    assert_eq!(
+        marks,
+        vec!["[ ] done", "[x] in_progress", "[x] ready"],
+        "{marks:?}"
+    );
+    // `any` clears the set.
+    facet_toggle(&mut v);
+    let b = v.backlog_board.as_ref().expect("board open");
+    assert!(b.query.sets.get("status").is_none(), "any clears the set");
+}
+
+// AC3-EDGE bar half: with no tags anywhere, the bar names the hidden facet.
+#[test]
+fn filter_bar_says_labels_hidden_while_no_node_carries_a_tag() {
+    let b = board_with(board_inputs());
+    let board = b.body.as_ref().unwrap();
+    let lines = filter_bar_lines(&b, board, 120);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.text.contains("Labels: none on any node")),
+        "{lines:?}"
+    );
+}
+
+// AC3-EDGE picker half: the tag facet hides while empty and shows once a
+// row carries one.
+#[test]
+fn tag_facet_hides_while_empty_and_shows_with_values() {
+    let b = board_with(board_inputs());
+    let names: Vec<&str> = visible_facets(b.body.as_ref().unwrap())
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(!names.contains(&"tag"), "empty tag facet hides: {names:?}");
+    let mut inp = board_inputs();
+    if let Some(r) = inp.rows.get_mut(0) {
+        r["tags"] = json!(["infra"]);
+    }
+    let mut b = board_with(inp);
+    rederive(&mut b);
+    let names: Vec<&str> = visible_facets(b.body.as_ref().unwrap())
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(names.contains(&"tag"), "a tagged row reveals the facet");
 }
