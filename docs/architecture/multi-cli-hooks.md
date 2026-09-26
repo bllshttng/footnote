@@ -241,6 +241,7 @@ OpenCode has no `hooks.json`. Its plugin surface exposes the same outcomes as se
 | Claim heartbeat | `PostToolUse` command hook | `tool.execute.after` |
 | Compaction context (canon-doc pointer) | `PreCompact` command hook | `experimental.session.compacting` |
 | Completion loop | `Stop` command hook | `session.idle` event + `fno-agents loop-check` |
+| Edit integrity (parse, last line, test count, stale patch targets) | `PostToolUse` command hook | none; scripts/ci/check-edit-integrity.sh and the preflight leg cover it |
 
 The pre-tool seam translates OpenCode's `{tool, sessionID, callID}` plus `output.args` into the claude-shaped `{tool_name, tool_input, cwd, session_id}` payload the five shared scripts already read from stdin, and honors `permissionDecision: "deny"`. The abort channel is an exception: the hook signature returns void and offers no decision field, so a deny throws and the tool never runs. The same scripts read the same payload shape, and the fail-open posture carries over. A script that is missing, times out, or answers without a decision is reported once and the tool proceeds. A protection gap must never become a silent block. The heartbeat and compact arms feed the same scripts the same stdin shapes they already parse. `autocontinue` is left at OpenCode's default (enabled): the synthetic continue turn is what the claude flow relies on too.
 
