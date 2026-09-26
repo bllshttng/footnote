@@ -353,7 +353,7 @@ fn compose_full_screen_board_fills_the_terminal() {
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
-        text.lines().any(|l| l.starts_with("┌─ backlog")),
+        text.lines().any(|l| l.starts_with("╭─ backlog")),
         "board box at column 0: {text}"
     );
     assert!(
@@ -499,7 +499,7 @@ fn full_board_panel_cells_match_the_theme_bg() {
     let text = crate::vt::frame_text(&frame);
     assert!(
         text.lines()
-            .any(|l| l.starts_with("\u{250c}\u{2500} backlog")),
+            .any(|l| l.starts_with("\u{256d}\u{2500} backlog")),
         "board box at column 0: {text}"
     );
     assert!(text.contains("In Progress"), "{text}");

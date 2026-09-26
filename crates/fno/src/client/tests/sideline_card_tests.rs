@@ -463,7 +463,7 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     // label is the name, so the tag cells are gone.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0x5c25ff47dfcd3e8e,
+        0x8f03cc1b0244586,
         "List frame-cell snapshot"
     );
 }

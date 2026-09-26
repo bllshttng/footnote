@@ -6768,9 +6768,8 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
     assert_eq!(core.agent_rows()[0].tail, None);
 
     core.handle_msg(CoreMsg::AgentTails {
-        tails: [("uuid-live".to_string(), "said something new".to_string())]
-            .into_iter()
-            .collect(),
+        tails: HashMap::from([("uuid-live".into(), "said something new".into())]),
+        ctx: HashMap::new(),
     });
     assert_eq!(
         core.agent_rows()[0].tail.as_deref(),
@@ -8660,6 +8659,7 @@ pub(super) fn empty_core() -> Core {
         launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
+        ctx_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
         truth_seq: 0,
         backlog: Vec::new(),
