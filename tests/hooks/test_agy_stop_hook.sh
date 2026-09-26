@@ -121,6 +121,9 @@ log "T2: fullyIdle false -> continue (bg tasks live)"
     STUB="${TMP_DIR}/fno-agents"
     make_stub "$STUB" <<STUB
 #!/usr/bin/env bash
+# state path now routes through FNO_AGENTS_BIN too (x-271c); only a
+# loop-check invocation may mark.
+if [[ "\$1" == "state" ]]; then exit 1; fi
 touch "${MARKER}"
 echo '{"decision":"allow","termination_reason":"DonePRGreen","message":"x"}'
 STUB
