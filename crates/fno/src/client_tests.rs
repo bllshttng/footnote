@@ -887,8 +887,8 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
         sel_cell.bg,
-        Color::Indexed(7),
-        "the selector row is the palette-following hover band"
+        Color::Indexed(0),
+        "the selector row is the palette-following cursor band"
     );
     assert_ne!(
         sel_cell.bg, LATTICE_ACCENT,
@@ -6548,9 +6548,9 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
     // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections; a short window scrolls them). The
-    // global (no prefix) section spent five rows, so the pin moved from 64.
-    view.term = (72, 100);
+    // ride below the binding sections): the global section spent five rows
+    // and the V chord one more, so the pin moved from 64.
+    view.term = (73, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
@@ -7871,9 +7871,9 @@ async fn update_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.aux = Some(build_update_modal(None));
     let r = v.aux.as_ref().unwrap().popup.render(v.term);
-    let footer = overlay_footer_cell(&OverlayLayout {
-        origin: r.origin,
-        framed: chrome::Framed {
+    let footer = overlay_footer_cell(&OverlayLayout::from_parts(
+        r.origin,
+        chrome::Framed {
             lines: r
                 .lines
                 .iter()
@@ -7885,7 +7885,7 @@ async fn update_modal_footer_esc_close_click_closes() {
                 .collect(),
             width: r.width,
         },
-    });
+    ));
     let mut buf: Vec<u8> = Vec::new();
     aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
         .await
@@ -8342,7 +8342,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
-    assert_eq!(sel_cell.bg, Color::Indexed(7), "hover band bg");
+    assert_eq!(sel_cell.bg, Color::Indexed(0), "hover band bg");
 }
 
 #[test]
@@ -8758,7 +8758,7 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     // actionable, not inert); the band's own pair replaces BOLD.
     view.hover_row = Some(footer);
     let hovered = at(&view);
-    assert_eq!(hovered.bg, Color::Indexed(7));
+    assert_eq!(hovered.bg, Color::Indexed(0));
     assert_eq!(hovered.flags & cell_flags::INVERSE, 0);
 }
 
@@ -13143,7 +13143,7 @@ fn foreign_cwd_agent_gets_dim_inert_subline() {
         0,
         "never an INVERSE bar"
     );
-    assert_eq!(hovered.bg, Color::Indexed(7), "the hover band is explicit");
+    assert_eq!(hovered.bg, Color::Indexed(0), "the hover band is explicit");
 }
 
 // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and

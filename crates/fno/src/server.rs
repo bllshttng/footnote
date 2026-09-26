@@ -78,7 +78,6 @@ mod portal_reach;
 mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
-mod revival_gate;
 mod row_set;
 mod session_guard;
 mod shutdown_capture;
@@ -719,17 +718,6 @@ pub(crate) enum CoreMsg {
         argv: Result<(Vec<String>, bool), String>,
         replay: Box<ResumeReplay>,
     },
-    /// One revival gate answer (the `fno-agents spawn-gate` ask the
-    /// resume gesture or the held-pane focus fired off the core loop).
-    /// `Ok` stages an admission for the row and re-dispatches the same
-    /// command; `Err` is the visible refusal - the verdict line plus the
-    /// one-run CLI escape - and starts no pane.
-    RevivalGateAnswered {
-        id: u64,
-        name: String,
-        verdict: Result<(), String>,
-        replay: Box<ResumeReplay>,
-    },
     /// A batch's pre-resolved attach plans (restore's members or a
     /// picker recruit's selected ids, keyed by attach id), routed back so the
     /// existing loop re-enters on the core loop with the verdicts in hand.
@@ -752,14 +740,12 @@ pub(crate) enum CoreMsg {
     },
     /// The bulk apply half of a workspace restore: the plans are in
     /// hand (keyed by member worker name, `Err` being that member's visible
-    /// refusal), and the revival gate's probed headroom is in hand (`Err`
-    /// refusing every member), so every gate runs on the core loop through
+    /// refusal), so every gate runs on the core loop through
     /// [`Core::resume_one`].
     WorkspaceRestoreApply {
         dry_run: bool,
         harness: Option<String>,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
-        headroom: Result<revival_gate::ProbeHeadroom, String>,
         reply: ControlReply,
     },
     /// (v71) `ControlVerb::SquadReload`: re-read `squads.json` into
@@ -1788,11 +1774,6 @@ pub(crate) struct Core {
     /// bulk apply, which keeps its sync declared-form render), consumed
     /// exactly once by the receiving arm. Empty in steady state.
     staged_resume_argv: Option<Vec<String>>,
-    /// The staged revival-gate admission for the worker whose `spawn-gate`
-    /// ask just admitted: `(name, staged_at)`, consumed exactly once by
-    /// [`Core::resume_worker_into`] and stale after 120s. Empty in steady
-    /// state.
-    revival_admission: Option<(String, std::time::Instant)>,
     /// A batch's pre-resolved attach plans, keyed by attach id:
     /// staged by the `BatchPlansReady` handler, drained per member by the
     /// consuming loop (restore or a picker recruit). Empty outside a batch
@@ -5823,21 +5804,6 @@ impl Core {
         if dry_run {
             return ResumeOutcome::Planned;
         }
-        // The revival gate asks BEFORE the claude plan or the codex argv
-        // resolution: a refusal starts neither hop. The bulk restore
-        // caller carries its own admission staging, so it skips this ask.
-        if client_id != portal_reach::RESTORE_CLIENT {
-            let replay_name = row_name.clone().unwrap_or_else(|| facts.name.clone());
-            match self.revival_admitted(
-                client_id,
-                &facts,
-                ResumeReplay::Gesture { name: replay_name },
-            ) {
-                None => return ResumeOutcome::PlanPending,
-                Some(Err(reason)) => return ResumeOutcome::Refused { reason },
-                Some(Ok(())) => {}
-            }
-        }
         let sid = self
             .squad_members
             .iter()
@@ -5973,9 +5939,6 @@ impl Core {
         plan: Option<&ReentryVerdict>,
         staged_argv: Option<&[String]>,
     ) -> Result<(u64, TabId, Option<String>), String> {
-        // Fail closed: the one spawn site spawns only behind a staged
-        // revival admission, so a future caller cannot skip the gate.
-        self.take_revival_admission(&facts.name)?;
         if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
         }
@@ -8027,7 +7990,7 @@ impl Core {
         tokio::spawn(async move {
             let mut plans = HashMap::new();
             for (attach_id, name) in wanted {
-                plans.insert(attach_id, run_reentry_plan(&name, "attach").await);
+                plans.insert(attach_id, run_reentry_plan(&name, "revive").await);
             }
             let _ = core_tx
                 .send(CoreMsg::BatchPlansReady {
@@ -8129,7 +8092,7 @@ impl Core {
             self.resolve_reentry(
                 client_id,
                 &name,
-                "attach",
+                "revive",
                 ReentrySpawnRequest::Attach {
                     attach_id: id.to_string(),
                     placement: placement.clone(),
@@ -8159,7 +8122,7 @@ impl Core {
         if let Some(verdict) = self.reentry_verdict.take() {
             return Some(verdict);
         }
-        self.resolve_reentry(client_id, row_name, "resume", request);
+        self.resolve_reentry(client_id, row_name, "revive", request);
         None
     }
 
@@ -10266,8 +10229,11 @@ impl Core {
                     // `Command::ResumeAgent` and the sideline render use: a
                     // pane of this session already running the row's session
                     // is direct observation the backend is live, and resuming
-                    // under it opens a second writer on the live rollout.
-                    if current.is_some_and(|agent| !self.row_resumable_in_session(agent)) {
+                    // under it opens a second writer on the live rollout. A
+                    // claude revive attaches a live session instead.
+                    if held.harness != "claude"
+                        && current.is_some_and(|agent| !self.row_resumable_in_session(agent))
+                    {
                         self.held_workers.remove(&pid);
                         self.write_restore_message(
                             pid,
@@ -10287,27 +10253,12 @@ impl Core {
                             .find(|client| client.id == client_id)
                             .map(|client| client.dims)
                             .unwrap_or((vp.rows, vp.cols));
-                        // The revival gate asks before any plan or argv
-                        // resolution. A refusal keeps the held pane held
-                        // (a retry after a worker finishes is one click)
-                        // and names the gate's verdict on the seat itself.
-                        match self.revival_admitted(client_id, &facts, ResumeReplay::Held { pid }) {
-                            None => return Flow::Continue,
-                            Some(Err(reason)) => {
-                                self.write_restore_message(
-                                    pid,
-                                    &format!("{} was not resumed: {reason}", facts.name),
-                                );
-                                self.notice(client_id, format!("resume refused: {reason}"));
-                                return Flow::Continue;
-                            }
-                            Some(Ok(())) => {}
-                        }
-                        // A claude row's held resume runs the
-                        // canonical re-entry plan; the `None` arm fires the
+                        // A claude row's held seat runs the canonical revive
+                        // plan: attach a live session, else respawn or
+                        // bg-resume it, then attach. The `None` arm fires the
                         // off-loop resolution and this focus replays with the
-                        // verdict staged. A non-claude row does the
-                        // same with its resolved argv.
+                        // verdict staged. A non-claude row does the same with
+                        // its resolved argv.
                         let plan;
                         let staged_argv;
                         if facts.harness == "claude" {
@@ -11852,15 +11803,6 @@ impl Core {
             // against live state before the pane spawns. The degradation
             // notice fires even when the replay later refuses: the operator
             // asked for a resume and deserves the grant-loss news regardless.
-            CoreMsg::RevivalGateAnswered {
-                id,
-                name,
-                verdict,
-                replay,
-            } => {
-                self.on_revival_gate_answered(id, name, verdict, replay);
-                Flow::Continue
-            }
             CoreMsg::ResumeArgvReady { id, argv, replay } => {
                 let parked = self.pending_thread_reply.take().and_then(|p| {
                     if p.client == id {
@@ -12020,10 +11962,9 @@ impl Core {
                 dry_run,
                 harness,
                 plans,
-                headroom,
                 reply,
             } => {
-                self.workspace_restore_apply(dry_run, harness, plans, headroom, reply);
+                self.workspace_restore_apply(dry_run, harness, plans, reply);
                 Flow::Continue
             }
             CoreMsg::SquadReload { reply } => {
@@ -12976,7 +12917,6 @@ async fn serve(
         last_topology_flush: None,
         reentry_verdict: None,
         staged_resume_argv: None,
-        revival_admission: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),

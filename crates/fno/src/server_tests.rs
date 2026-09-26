@@ -7007,7 +7007,6 @@ fn staged_reentry_verdict() -> ReentryVerdict {
             "CLAUDE_CONFIG_DIR=/acct/makers/cfg".into(),
         ],
         config_dir: Some("/acct/makers/cfg".into()),
-        mechanism: None,
     }
 }
 
@@ -7154,7 +7153,6 @@ fn resume_agent_runs_the_staged_reentry_verdict() {
         ],
         env: vec!["FNO_ACCOUNT=makers".into()],
         config_dir: Some("/acct/makers/cfg".into()),
-        mechanism: None,
     });
 
     core.command(
@@ -8700,7 +8698,6 @@ pub(super) fn empty_core() -> Core {
         last_topology_flush: None,
         reentry_verdict: None,
         staged_resume_argv: None,
-        revival_admission: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),

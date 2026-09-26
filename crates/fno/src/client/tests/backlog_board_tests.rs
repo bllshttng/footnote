@@ -252,16 +252,15 @@ fn t_key_keeps_a_held_draft_and_says_so() {
     let notice = v.notice.as_ref().map(|(t, _)| t.as_str()).unwrap_or("");
     assert!(notice.contains("holds a draft"), "notice: {notice}");
 }
+// ----: the sideline backlog view + full screen ----
 
-// ----: the docked sideline + full screen ----
-
-// The dock's narrow render is the stacked one-column shape: each column
-// header carries its count, card rows beneath - never the six-wide cells.
+// The narrow render is the stacked one-column shape: each column header
+// carries its count, card rows beneath - never the six-wide cells.
 #[test]
-fn render_at_dock_width_groups_by_column_with_counts() {
+fn render_at_column_width_groups_by_column_with_counts() {
     let b = board_with(board_inputs());
-    let text_w = super::BOARD_DOCK_W as usize - crate::chrome::Chrome::FRAME_COLS;
-    assert!(text_w < WIDE_CELLS_AT, "the dock renders stacked");
+    let text_w = 34;
+    assert!(text_w < WIDE_CELLS_AT, "the column renders stacked");
     let (lines, follow) = render(&b, text_w);
     assert!(follow.is_some(), "the cursor card is the follow line");
     assert!(
@@ -271,33 +270,36 @@ fn render_at_dock_width_groups_by_column_with_counts() {
     assert!(lines.iter().any(|l| l.contains("First card")));
 }
 
-// `x` cycles off -> left -> right -> off on the View (persistence is the
-// view store's own test).
+// `V` cycles the sideline view and the board rides with it: to backlog
+// opens the board, back to agents closes it. `x` no longer does anything
+// on the board (the dock is gone).
 #[test]
-fn x_key_cycles_the_dock_side() {
+fn v_key_cycles_the_sideline_view() {
     let mut v = key_view(board_with(board_inputs()));
-    let mut sock: Vec<u8> = Vec::new();
+    v.backlog_board = None;
+    v.experimental_backlog = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
+    assert!(v.backlog_board.is_none(), "agents view starts closed");
     rt.block_on(async {
-        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
+        cycle_sideline_view(&mut v);
     });
-    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Left));
-    assert!(v
-        .notice
-        .as_ref()
-        .map(|(t, _)| t.contains("left"))
-        .unwrap_or(false));
+    assert!(matches!(
+        v.sideline_view,
+        crate::view_store::SidelineView::Backlog
+    ));
+    assert!(v.backlog_board.is_some(), "backlog view opens the board");
     rt.block_on(async {
-        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
+        cycle_sideline_view(&mut v);
     });
-    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Right));
-    rt.block_on(async {
-        board_keys(&mut v, b"x", &mut sock).await.expect("x folds");
-    });
-    assert!(matches!(v.board_dock, crate::view_store::BoardDock::Off));
+    assert!(matches!(
+        v.sideline_view,
+        crate::view_store::SidelineView::Agents
+    ));
+    assert!(v.backlog_board.is_none(), "agents view closes the board");
 }
 
-// `F` toggles the full-screen board and back.
+// `F` toggles the full-screen board and back; the first Esc folds the
+// full screen back to the column, the second closes the board.
 #[test]
 fn f_key_toggles_full_screen() {
     let mut v = key_view(board_with(board_inputs()));
@@ -308,77 +310,483 @@ fn f_key_toggles_full_screen() {
     });
     assert!(v.board_full);
     rt.block_on(async {
-        board_keys(&mut v, b"F", &mut sock).await.expect("F folds");
+        board_keys(&mut v, b"\x1b", &mut sock)
+            .await
+            .expect("esc folds");
     });
-    assert!(!v.board_full);
-}
-
-// Docked left: the column sits right of the agent sideline at the full
-// dock width; full screen or a closed board gives the width back.
-#[test]
-fn dock_left_reserves_width_right_of_the_sideline() {
-    let mut v = key_view(board_with(board_inputs()));
-    assert_eq!(v.board_left_w(), 0, "closed board docks nothing");
-    v.backlog_board = None;
-    v.board_dock = crate::view_store::BoardDock::Left;
-    assert_eq!(v.board_left_w(), 0, "a closed board never docks");
-    v.backlog_board = Some(BoardView::new(0));
-    assert_eq!(v.board_left_w(), super::BOARD_DOCK_W);
-    assert_eq!(v.board_right_w(), 0);
-    assert_eq!(v.left_chrome_w(), v.panel_w() + super::BOARD_DOCK_W);
-    v.board_full = true;
-    assert_eq!(v.board_left_w(), 0, "full screen is not docked");
-}
-
-// The dock rect: left pins to the sideline's right edge; right hugs the
-// terminal's right edge (no feed panel open); full screen is None.
-#[test]
-fn dock_rect_pins_to_the_chosen_side() {
-    let mut v = key_view(board_with(board_inputs()));
-    v.board_dock = crate::view_store::BoardDock::Left;
-    let ((row, col), (_h, w)) = v.backlog_dock_rect().expect("docked");
-    assert_eq!(col, v.panel_w() as usize);
-    assert_eq!(row, TAB_BAR_ROWS as usize);
-    assert_eq!(w, super::BOARD_DOCK_W as usize);
-    v.board_dock = crate::view_store::BoardDock::Right;
-    let ((_row, col), _) = v.backlog_dock_rect().expect("docked");
-    assert_eq!(
-        col,
-        80 - super::BOARD_DOCK_W as usize,
-        "right dock hugs the right edge (feed closed)"
-    );
-    v.board_full = true;
+    assert!(!v.board_full, "esc unfulls first");
+    assert!(v.backlog_board.is_some(), "still the backlog column");
+    rt.block_on(async {
+        board_keys(&mut v, b"\x1b", &mut sock)
+            .await
+            .expect("esc folds");
+    });
     assert!(
-        v.backlog_dock_rect().is_none(),
-        "full screen paints the overlay"
+        matches!(v.sideline_view, crate::view_store::SidelineView::Agents),
+        "second esc returns the sideline to agents"
     );
-    v.board_full = false;
-    v.board_dock = crate::view_store::BoardDock::Off;
-    assert!(v.backlog_dock_rect().is_none());
 }
 
-// The composed frame paints the docked column with the board chrome.
+// The composed frame paints the backlog inside the sideline column with
+// NO second border: the board's text starts at column 0 and no chrome box
+// wraps it.
 #[test]
-fn compose_paints_the_docked_board_column() {
+fn compose_paints_the_backlog_inside_the_sideline_column() {
     let mut v = key_view(board_with(board_inputs()));
-    v.board_dock = crate::view_store::BoardDock::Left;
+    v.experimental_backlog = true;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     let text = crate::vt::frame_text(&v.compose());
-    assert!(text.contains("backlog"), "chrome title: {text}");
-    assert!(text.contains("x side"), "dock footer hint: {text}");
-    assert!(text.contains("In Progress"), "column group header: {text}");
+    assert!(text.contains("In Progress"), "column header: {text}");
+    assert!(text.contains("First card"), "card row: {text}");
+    for line in text.lines() {
+        assert!(!line.starts_with('┌'), "no second border anywhere: {text}");
+    }
 }
 
-// Full screen paints the board box at column 0 (the docked column paints
-// it right of the sideline), never the dock hint.
+// Full screen paints the board box at column 0 and lists the edit keys in
+// the footer (D6).
 #[test]
 fn compose_full_screen_board_fills_the_terminal() {
     let mut v = key_view(board_with(board_inputs()));
-    v.board_dock = crate::view_store::BoardDock::Left;
+    v.experimental_backlog = true;
+    v.sideline_view = crate::view_store::SidelineView::Backlog;
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
         text.lines().any(|l| l.starts_with("╭─ backlog")),
         "board box at column 0: {text}"
     );
-    assert!(!text.contains("x side"), "no dock when full screen");
+    assert!(
+        text.contains("e/p/s/S/D/N/E"),
+        "footer lists the edit keys: {text}"
+    );
+}
+
+// ----: D1/D2 proof - distinct attributes, no INVERSE, real frames ----
+
+/// A view whose sideline shows the fixture backlog, like the operator's.
+fn sideline_backlog_view() -> View {
+    let (rows, cols) = (24u16, 100u16);
+    let mut view = View::new(
+        (rows, cols),
+        "main".into(),
+        LayoutView {
+            squads: vec![SquadMeta {
+                id: 1,
+                name: "main".into(),
+                canonical_cwd: "/code/main".into(),
+                tabs: vec![TabMeta {
+                    id: 0,
+                    name: "0".into(),
+                    named: false,
+                    panes: Vec::new(),
+                }],
+                active_tab: 0,
+                panes: 1,
+            }],
+            active_squad: 1,
+            panes: vec![(
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: rows - 1,
+                    cols: cols - 28,
+                },
+            )],
+            focus: 10,
+            area: (rows - 1, cols - 28),
+            agents: vec![],
+            focus_node: None,
+        },
+    );
+    view.experimental_backlog = true;
+    view.sideline_view = crate::view_store::SidelineView::Backlog;
+    view.backlog_board = Some(board_with(board_inputs()));
+    view
+}
+
+fn cell_at(frame: &crate::proto::Frame, r: usize, c: usize, cols: usize) -> crate::proto::Cell {
+    frame.cells[r * cols + c]
+}
+
+// The hierarchy proof: in the composed backlog column, a column header
+// cell, a card-id cell, a meta cell and a body cell carry DISTINCT
+// attribute sets, no cell in the column carries INVERSE, and the cursor
+// row wears the explicit band pair.
+#[test]
+fn backlog_panel_cells_carry_distinct_attributes() {
+    let view = sideline_backlog_view();
+    let frame = view.compose();
+    let cols = 100usize;
+    let text = crate::vt::frame_text(&frame);
+    let find_row = |needle: &str| {
+        text.lines()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("no row starts with {needle:?}: {text}"))
+    };
+    // The stats line leads with the same words, so the column head is the
+    // LAST row that starts with one.
+    let meta_row = find_row("In Progress");
+    let head_row = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("In Progress"))
+        .map(|(i, _)| i)
+        .last()
+        .expect("no column head row");
+    let body_row = text
+        .lines()
+        .position(|l| l.contains("x-2"))
+        .expect("no card row for x-2");
+    // A column header cell is BOLD.
+    let head = cell_at(&frame, head_row, 2, cols);
+    assert!(
+        head.flags & crate::proto::cell_flags::BOLD != 0,
+        "header bold"
+    );
+    // A meta (summary/counts) cell is the dim slot, no INVERSE.
+    let meta = cell_at(&frame, meta_row, 2, cols);
+    assert_eq!(meta.fg, crate::proto::Color::Indexed(8), "meta dim slot");
+    // The CURSOR row (x-2) wears the explicit band pair across its full
+    // width, id included: the band is the one place a color pair is legal.
+    let band = cell_at(&frame, body_row, 1, cols);
+    assert_eq!(band.bg, crate::proto::Color::Indexed(0), "band surface");
+    assert_eq!(band.fg, crate::proto::Color::Indexed(3), "band accent text");
+    // A NON-cursor card id takes the accent slot, and its title is plain.
+    let id_row = text
+        .lines()
+        .position(|l| l.contains("x-1"))
+        .expect("no card row for x-1");
+    let line = text.lines().nth(id_row).expect("id row");
+    let id_col = line.find("x-1").expect("id on its row") + 1;
+    let id_cell = cell_at(&frame, id_row, id_col + 1, cols);
+    assert_eq!(
+        id_cell.fg,
+        crate::proto::Color::Indexed(3),
+        "id accent slot"
+    );
+    let title_col = line.find("First card").expect("title on its row") + 1;
+    let title_cell = cell_at(&frame, id_row, title_col + 1, cols);
+    assert_eq!(title_cell.fg, crate::proto::Color::Default, "title plain");
+    assert_eq!(title_cell.flags, 0, "title plain");
+    // Nothing in the painted column is inverse, and no second border.
+    for r in 0..24usize {
+        for c in 0..27usize {
+            let cell = cell_at(&frame, r, c, cols);
+            assert!(
+                cell.flags & crate::proto::cell_flags::INVERSE == 0,
+                "INVERSE at {r},{c}: {text}"
+            );
+        }
+        assert!(
+            !text
+                .lines()
+                .nth(r)
+                .map(|l| l.starts_with('┌'))
+                .unwrap_or(false),
+            "no second border: {text}"
+        );
+    }
+}
+
+// The full-screen board keeps the hierarchy on the terminal's own bg.
+#[test]
+fn full_board_panel_cells_match_the_theme_bg() {
+    let mut view = sideline_backlog_view();
+    view.board_full = true;
+    let frame = view.compose();
+    let text = crate::vt::frame_text(&frame);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("\u{256d}\u{2500} backlog")),
+        "board box at column 0: {text}"
+    );
+    assert!(text.contains("In Progress"), "{text}");
+}
+
+// Evidence shots (FNO_UX_SHOTS): the sideline column, the full board and
+// the node detail, each composed for real.
+#[test]
+fn ux_shot_backlog_sideline_column() {
+    use crate::frame_html::write_shot;
+    let view = sideline_backlog_view();
+    let frame = view.compose();
+    write_shot(
+        &frame,
+        "ux-shot-backlog-sideline",
+        "the backlog as a sideline view",
+    );
+}
+
+#[test]
+fn ux_shot_backlog_full_board() {
+    use crate::frame_html::write_shot;
+    let mut view = sideline_backlog_view();
+    view.board_full = true;
+    let frame = view.compose();
+    write_shot(
+        &frame,
+        "ux-shot-backlog-full-board",
+        "the full-screen backlog board",
+    );
+}
+
+#[test]
+fn ux_shot_backlog_node_detail() {
+    use crate::frame_html::write_shot;
+    let mut view = sideline_backlog_view();
+    if let Some(b) = view.backlog_board.as_mut() {
+        b.detail = Some(node_detail::NodeDetailOverlay {
+            node_id: "x-1".into(),
+            trail: vec![],
+            sel: 0,
+            details_open: false,
+        });
+    }
+    let frame = view.compose();
+    write_shot(&frame, "ux-shot-backlog-detail", "the node detail overlay");
+}
+
+// The same three frames under the user's theme (Catppuccin): the panel
+// must stay on the theme's bg with its palette slots - the pale-fill
+// regression shot.
+#[test]
+fn ux_shot_backlog_sideline_column_catppuccin() {
+    use crate::frame_html::write_shot;
+    let mut view = sideline_backlog_view();
+    view.theme = crate::theme::Theme::from_name("catppuccin").0;
+    let frame = view.compose();
+    write_shot(
+        &frame,
+        "ux-shot-backlog-sideline-catppuccin",
+        "the backlog sideline, catppuccin",
+    );
+}
+
+#[test]
+fn ux_shot_backlog_node_detail_catppuccin() {
+    use crate::frame_html::write_shot;
+    let mut view = sideline_backlog_view();
+    view.theme = crate::theme::Theme::from_name("catppuccin").0;
+    if let Some(b) = view.backlog_board.as_mut() {
+        b.detail = Some(node_detail::NodeDetailOverlay {
+            node_id: "x-1".into(),
+            trail: vec![],
+            sel: 0,
+            details_open: false,
+        });
+    }
+    let frame = view.compose();
+    write_shot(
+        &frame,
+        "ux-shot-backlog-detail-catppuccin",
+        "the node detail overlay, catppuccin",
+    );
+}
+
+// ----: D6 proof - every edit key works from the board AND the detail ----
+
+/// The edit keys both surfaces accept: key, the input kind or write it
+/// must queue.
+fn edit_key_opens_input(key: &[u8], kind: BoardInputKind, from_detail: bool) {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    if from_detail {
+        if let Some(b) = v.backlog_board.as_mut() {
+            b.detail = Some(node_detail::NodeDetailOverlay {
+                node_id: "x-1".into(),
+                trail: vec![],
+                sel: 0,
+                details_open: false,
+            });
+        }
+    }
+    if let Some(b) = v.backlog_board.as_mut() {
+        focus_card(b, Some("x-1"));
+    }
+    {
+        let b = v.backlog_board.as_ref().expect("board");
+        edit_target(b).expect("a target card");
+    }
+    rt.block_on(async {
+        if from_detail {
+            node_detail::detail_keys(&mut v, key, &mut sock)
+                .await
+                .expect("key folds");
+        } else {
+            board_keys(&mut v, key, &mut sock).await.expect("key folds");
+        }
+    });
+    let b = v.backlog_board.as_ref().expect("board open");
+    assert_eq!(
+        b.input.as_ref().map(|(k, _)| *k),
+        Some(kind),
+        "key {key:?} from detail={from_detail} opens its input"
+    );
+}
+
+#[test]
+fn board_edit_keys_open_their_inputs() {
+    edit_key_opens_input(b"e", BoardInputKind::Title, false);
+    edit_key_opens_input(b"D", BoardInputKind::Append, false);
+    edit_key_opens_input(b"N", BoardInputKind::Note, false);
+}
+
+#[test]
+fn detail_edit_keys_open_their_inputs() {
+    edit_key_opens_input(b"e", BoardInputKind::Title, true);
+    edit_key_opens_input(b"D", BoardInputKind::Append, true);
+    edit_key_opens_input(b"N", BoardInputKind::Note, true);
+}
+
+// p/s/S open their pickers from both surfaces; the target follows the
+// detail's node when it is open.
+#[test]
+fn field_pickers_open_from_board_and_detail() {
+    for (key, from_detail) in [
+        (b'p', false),
+        (b's', false),
+        (b'S', false),
+        (b'p', true),
+        (b's', true),
+        (b'S', true),
+    ] {
+        let mut v = key_view(board_with(board_inputs()));
+        let mut sock: Vec<u8> = Vec::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        if from_detail {
+            if let Some(b) = v.backlog_board.as_mut() {
+                b.detail = Some(node_detail::NodeDetailOverlay {
+                    node_id: "x-1".into(),
+                    trail: vec![],
+                    sel: 0,
+                    details_open: false,
+                });
+            }
+        }
+        rt.block_on(async {
+            board_keys(&mut v, &[key], &mut sock)
+                .await
+                .expect("key folds");
+        });
+        let b = v.backlog_board.as_ref().expect("board open");
+        assert!(
+            b.pick.is_some(),
+            "{key} from detail={from_detail} opens the picker"
+        );
+    }
+}
+
+// The `c` column picker: opening, hiding the focus column, and the focus
+// width clamp (25..=75), each persisted.
+#[test]
+fn colpick_hides_and_rewides_the_focus_column() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        board_keys(&mut v, b"c", &mut sock).await.expect("c folds");
+    });
+    assert!(
+        v.backlog_board.as_ref().expect("board").colpick.is_some(),
+        "c opens the picker"
+    );
+    // Enter on the focus column hides it; the cursor clamps to the new
+    // last shown column.
+    rt.block_on(async {
+        colpick_keys(&mut v, b"\r");
+    });
+    let b = v.backlog_board.as_ref().expect("board");
+    assert_eq!(b.layout.columns.len(), 5, "a column was hidden");
+    assert!(b.col < b.layout.columns.len(), "cursor clamped");
+    // Widen past the clamp; 75 holds.
+    for _ in 0..10 {
+        rt.block_on(async {
+            colpick_keys(&mut v, b"+");
+        });
+    }
+    let b = v.backlog_board.as_ref().expect("board");
+    assert_eq!(b.layout.focus_pct, 75, "focus clamps at 75");
+}
+
+// The crown's finding: a wide row merged its columns' role walks out of
+// lockstep, so a header's style landed mid-word (`No|w`). Each header word
+// carries exactly one style.
+#[test]
+fn wide_cell_headers_carry_one_style_per_header() {
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, 200);
+    // The stats and flow lines also name every column but carry `·`; the
+    // merged wide header row does not.
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide row merges the cell headers onto one line");
+    for word in ["In Progress", "Now", "Next", "Later", "Triage"] {
+        let at = header.find(word).expect(word);
+        let roles = &header.roles[at..at + word.len()];
+        assert!(
+            roles.iter().all(|&r| r == roles[0]),
+            "{word} must carry one style, got {roles:?}"
+        );
+    }
+}
+
+// The wide layout keeps every shown column inside the row width: at the
+// WIDE_CELLS_AT threshold with the six default columns, the last column's
+// header still paints (the 12-column floors never overrun `w`).
+#[test]
+fn wide_layout_fits_every_shown_column_at_the_threshold() {
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, WIDE_CELLS_AT);
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide header row renders at the threshold");
+    assert!(
+        header.contains("Done"),
+        "last column survives the cut: {header}"
+    );
+}
+
+// The crown's finding: a summary cut mid-word (`Nex`) reads as a broken
+// word; the cut lands after a whole word and carries an ellipsis.
+#[test]
+fn summary_lines_elide_at_a_word_with_an_ellipsis() {
+    assert_eq!(
+        elide_words(
+            "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
+            26
+        ),
+        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
+    );
+    assert_eq!(elide_words("short", 26), "short");
+    // One long word: no boundary exists, so the ellipsis follows a hard cut.
+    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
+}
+
+// D5: a detail field's label reads dim and its value stays normal.
+#[test]
+fn detail_field_labels_go_dim_and_values_stay_normal() {
+    use crate::client::backlog_style::BRole;
+    let mut v = key_view(board_with(board_inputs()));
+    focus_card(&mut v.backlog_board.as_mut().expect("board"), Some("x-1"));
+    open_detail(&mut v);
+    let b = v.backlog_board.as_ref().expect("detail opened");
+    let (lines, _) = node_detail::overlay_lines(b, 120);
+    let field = lines
+        .iter()
+        .find(|l| l.starts_with("kind:"))
+        .expect("the kind field line");
+    let colon = field.find(':').expect("label ends with a colon");
+    assert!(
+        field.roles[..=colon].iter().all(|&r| r == BRole::Meta),
+        "label chars go dim, got {:?}",
+        &field.roles[..=colon]
+    );
+    assert_eq!(field.roles[colon + 2], BRole::Body, "value stays normal");
 }

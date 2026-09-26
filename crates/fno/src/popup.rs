@@ -522,6 +522,8 @@ impl Popup {
         let body: Vec<BodyLine> = windowed
             .iter()
             .map(|l| BodyLine {
+                segs: Vec::new(),
+                pad_role: Role::Body,
                 text: l.text.clone(),
                 header: l.header,
                 disabled: l.disabled,

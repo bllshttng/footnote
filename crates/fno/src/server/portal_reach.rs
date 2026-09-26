@@ -1157,7 +1157,7 @@ impl Core {
             self.resolve_reentry(
                 CONTROL_CLIENT,
                 &row.name,
-                "attach",
+                "revive",
                 ReentrySpawnRequest::Attach {
                     attach_id,
                     placement,

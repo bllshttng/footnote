@@ -56,7 +56,7 @@ use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
 use crate::lane_colors_panel::LaneColorsUi;
-use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
+use crate::popup::{Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
     AnswerablePrompt, BlockDir, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -72,6 +72,13 @@ use crate::view_store::{
 };
 use crate::vt::ShellActivity;
 use crate::wordmark;
+use overlay_paint::{
+    draw_body_overlay, draw_lines_overlay, draw_overlay_layout, draw_popup_overlay,
+    layout_lines_overlay, OverlayAnchor, OverlayLayout,
+};
+// Re-exported for the test module's glob; the layout fns are the only callers.
+#[allow(unused_imports)]
+pub(crate) use overlay_paint::family_b_origin;
 use sideline::sideline_column_rects;
 
 mod row_stamp;
@@ -1080,8 +1087,7 @@ struct View {
     backlog: Vec<crate::proto::BacklogCard>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
-    /// The board's docked-sideline side (persisted in the view store).
-    board_dock: view_store::BoardDock,
+    sideline_view: crate::view_store::SidelineView,
     /// The board's full-screen toggle (persisted in the view store).
     board_full: bool,
     /// The persisted experimental toggle for the backlog board view.
@@ -1968,8 +1974,10 @@ pub(crate) enum AuxAction {
 }
 
 mod backlog_board;
+mod backlog_style;
 mod config_set;
 mod node_detail;
+mod overlay_paint;
 mod settings_modal;
 mod update_menu;
 
@@ -2164,7 +2172,7 @@ impl View {
             theme: Theme::default_theme(),
             backlog: Vec::new(),
             backlog_board: None,
-            board_dock: view_store::load_board_dock(),
+            sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
@@ -3398,12 +3406,7 @@ impl View {
                 .max(1),
             self.term
                 .1
-                .saturating_sub(
-                    self.panel_w()
-                        + self.board_left_w()
-                        + self.board_right_w()
-                        + self.feed_panel_w(),
-                )
+                .saturating_sub(self.panel_w() + self.feed_panel_w())
                 .max(1),
         )
     }
@@ -5478,7 +5481,7 @@ impl View {
 
         if !self.sideline_full {
             let origin_r = TAB_BAR_ROWS as usize;
-            let origin_c = panel_w + self.board_left_w() as usize;
+            let origin_c = panel_w as usize;
             // Blit, frames, underline, grips, indicator, letterbox +
             // dividers, empty state, drop band, reveal (the pane-pass move).
             self.paint_panes(&mut cells, rows, cols, origin_r, origin_c, now);
@@ -7672,202 +7675,6 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
         }
     }
     p.to_string()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum OverlayAnchor {
-    Center,
-    At { row: usize, col: usize },
-}
-
-/// One family-B overlay layout. Drawing and mouse hit-testing consume this same
-/// framed block and origin, so a close chip cannot drift away from the glyph it
-/// paints.
-#[derive(Debug, Clone)]
-struct OverlayLayout {
-    origin: (usize, usize),
-    framed: chrome::Framed,
-}
-
-impl OverlayLayout {
-    fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
-        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
-    }
-}
-
-fn family_b_origin(
-    anchor: OverlayAnchor,
-    block_w: usize,
-    block_h: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-) -> (usize, usize) {
-    let (base_r, base_c) = content_origin;
-    let (content_rows, content_cols) = content_dims;
-    let max_r = base_r + content_rows.saturating_sub(block_h);
-    let max_c = base_c + content_cols.saturating_sub(block_w);
-    match anchor {
-        OverlayAnchor::Center => (
-            base_r + content_rows.saturating_sub(block_h) / 2,
-            base_c + content_cols.saturating_sub(block_w) / 2,
-        ),
-        OverlayAnchor::At { row, col } => {
-            let origin_r = if row.saturating_add(block_h) <= base_r + content_rows {
-                row.max(base_r).min(max_r)
-            } else {
-                row.saturating_sub(block_h).max(base_r).min(max_r)
-            };
-            (origin_r, col.max(base_c).min(max_c))
-        }
-    }
-}
-
-/// Lay out family-B overlay lines in the content viewport. The body window,
-/// frame, origin, and hit spans are calculated once for both drawing and input.
-#[allow(clippy::too_many_arguments)]
-fn layout_lines_overlay<S: AsRef<str>>(
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    follow: Option<usize>,
-    anchor: OverlayAnchor,
-) -> OverlayLayout {
-    let (content_rows, content_cols) = content_dims;
-    // Body width: the widest line (across the whole body, windowed-out rows
-    // included), capped to the viewport minus the side borders.
-    let body_w = lines
-        .iter()
-        .map(|l| l.as_ref().chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
-    // Reserve the chrome overhead and window the body to the rows that remain.
-    // Before chrome the body had the whole viewport; the frame borrows `overhead`
-    // rows for its border/footer, so without windowing a body that filled the
-    // viewport loses its tail off-screen while those rows stay selectable. Top-
-    // pin matches the pre-chrome posture (centered when it fits, clipped at the
-    // top when it does not); the scrollbar marks the cut.
-    let overhead = chrome.rows_overhead();
-    let body_budget = content_rows.saturating_sub(overhead);
-    let total = lines.len();
-    let (start, take, scroll) = if total > body_budget {
-        // Covers body_budget == 0 (a viewport shorter than the chrome
-        // overhead): windows to zero body rows instead of painting the whole
-        // body plus its border past the content viewport.
-        //
-        // `follow` is the body index that MUST stay visible - a cursor. Without
-        // it the window is top-pinned, which is right for a static body and
-        // wrong for one the operator drives: the tenth row of a fourteen-row
-        // picker on a short terminal would be selectable and invisible, which is
-        // the same "you cannot reach it" defect as truncating the list. The
-        // window scrolls by the minimum needed to contain the cursor, so it only
-        // moves at the edges. `pos` then reports where the window really is,
-        // making the scrollbar thumb truthful rather than always parked at 0.
-        let start = match follow.filter(|_| body_budget > 0) {
-            Some(f) => f.saturating_sub(body_budget - 1).min(total - body_budget),
-            None => 0,
-        };
-        (
-            start,
-            body_budget,
-            Some(chrome::Scroll {
-                pos: start,
-                total,
-                visible: body_budget,
-            }),
-        )
-    } else {
-        (0, total, None)
-    };
-    let body: Vec<chrome::BodyLine> = lines[start..start + take]
-        .iter()
-        .map(|l| chrome::BodyLine::plain(l.as_ref()))
-        .collect();
-    let framed = chrome::frame(&body, chrome, body_w, scroll);
-    let box_h = framed.lines.len().min(content_rows);
-    let box_w = framed.width.min(content_cols);
-    let origin = family_b_origin(anchor, box_w, box_h, content_origin, content_dims);
-    OverlayLayout { origin, framed }
-}
-
-fn draw_overlay_layout(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    layout: &OverlayLayout,
-    theme: &Theme,
-) {
-    let (origin_r, origin_c) = layout.origin;
-    // A framed block stamps a SUB-RANGE of each row, so a double-width
-    // glyph in the pane content underneath can straddle either edge, leaving one
-    // half painted and the row corrupted. The name modal carried this guard when
-    // it hand-painted its own block; every family-B overlay needs it for the same
-    // reason, so it lives here, once, rather than travelling with one caller.
-    for i in 0..layout.framed.lines.len() {
-        let r = origin_r + i;
-        if r >= rows {
-            break;
-        }
-        // `framed.width`, not `box_w`: `blit` paints the FULL framed width, and
-        // `box_w` is that width clamped to the viewport. When the chrome's own
-        // minimum (a long title) pushes the frame past the viewport the two
-        // differ, and clamping here would leave the real right edge unchecked -
-        // stranding a spacer on exactly the overflow this guard exists for.
-        blank_straddling_pair(
-            cells,
-            cols,
-            r,
-            origin_c,
-            (origin_c + layout.framed.width).min(cols),
-        );
-    }
-    chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
-}
-
-/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's child picker).
-fn draw_popup_overlay(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    popup: &popup::Popup,
-    term: (u16, u16),
-    theme: &Theme,
-) {
-    popup::draw(cells, rows, cols, &popup.render(term), theme);
-}
-
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (placement; policy).
-#[allow(clippy::too_many_arguments)]
-fn draw_lines_overlay<S: AsRef<str>>(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    theme: &Theme,
-    follow: Option<usize>,
-) {
-    let layout = layout_lines_overlay(
-        content_origin,
-        content_dims,
-        chrome,
-        lines,
-        follow,
-        OverlayAnchor::Center,
-    );
-    draw_overlay_layout(cells, rows, cols, &layout, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -10915,6 +10722,12 @@ async fn dispatch_event(
             // The chord rides the same gate as the menu row: the pref
             // decides, and the off case notices instead of opening.
             backlog_board::open_pref_gated(view);
+        }
+        Event::CycleSidelineView => {
+            // The sideline's view cycle: agents <-> backlog. The backlog
+            // leg rides the experimental pref and opens the board (the
+            // board IS the view); the agents leg closes it.
+            backlog_board::cycle_sideline_view(view);
         }
         Event::OpenSettings => {
             execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;

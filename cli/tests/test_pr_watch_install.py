@@ -111,7 +111,6 @@ def test_ac3hp_install_prints_plist_before_writing(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -132,7 +131,6 @@ def test_ac3hp_install_writes_file_on_confirm(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -152,7 +150,6 @@ def test_ac3hp_dry_run_prints_plist_writes_nothing(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=True,
     )
 
@@ -177,7 +174,6 @@ def test_ac3err_decline_writes_nothing(tmp_home, tmp_launch_agents, monkeypatch)
         m.install(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/usr/local/bin/fno",
-            install_path="/usr/bin:/bin",
             dry_run=False,
         )
 
@@ -198,7 +194,6 @@ def test_ac3err_decline_message_contains_not_installed(
         m.install(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/usr/local/bin/fno",
-            install_path="/usr/bin:/bin",
             dry_run=False,
         )
 
@@ -1050,7 +1045,6 @@ def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monke
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1070,7 +1064,6 @@ def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, mon
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -1092,7 +1085,6 @@ def test_install_reload_bounces_when_loaded(tmp_home, tmp_launch_agents, monkeyp
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1117,7 +1109,6 @@ def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, 
     m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     )
 
     content = plist.read_text()
@@ -1139,7 +1130,6 @@ def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys,
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1411,7 +1401,6 @@ def test_refresh_watcher_rerenders_then_bounces(tmp_launch_agents):
         msg, rc = m.refresh_watcher(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/fresh/bin/fno-py",
-            install_path="/usr/bin:/bin",
         )
     finally:
         mod._run_launchctl_timed = orig
@@ -1431,7 +1420,6 @@ def test_refresh_watcher_write_failure_is_error(tmp_path, monkeypatch):
     msg, rc = m.refresh_watcher(
         launch_agents_dir=blocker / "LaunchAgents",
         fno_binary="/x/fno-py",
-        install_path="/usr/bin:/bin",
     )
     assert rc == 1 and "failed to write plist" in msg
 
@@ -1474,7 +1462,6 @@ def test_ensure_activated_noop_when_loaded(tmp_home, tmp_launch_agents, monkeypa
     assert m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     ) == "already-running"
 
 
@@ -1488,7 +1475,6 @@ def test_ensure_activated_installs_and_loads(tmp_home, tmp_launch_agents, monkey
     outcome = m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     )
 
     assert outcome == "activated"
@@ -1505,7 +1491,6 @@ def test_ensure_activated_reports_load_failure(tmp_home, tmp_launch_agents, monk
     assert m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     ) == "load-failed"
 
 
@@ -2104,3 +2089,89 @@ def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
     result = CliRunner().invoke(app, ["pr-watch", "refresh"])
     assert result.exit_code == 0
     assert "Heal: armed; never ran" in result.stdout, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# An unchanged refresh must not re-register the agent
+# (launchd posts a macOS background-activity notice on every re-registration)
+# ---------------------------------------------------------------------------
+
+
+def test_default_agent_path_ignores_the_caller_environment(tmp_home, monkeypatch):
+    """Two callers with different PATHs derive the same launchd PATH."""
+    m = _install()
+    monkeypatch.setenv(
+        "PATH", "/var/run/com.apple.security.cryptexd/codex.system/usr/bin"
+    )
+    codex_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+    monkeypatch.setenv("PATH", "/Users/claude/only/bin")
+    claude_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+
+    assert codex_view == claude_view
+    assert "/opt/homebrew/bin" in codex_view and "/usr/bin" in codex_view
+
+
+def test_refresh_unchanged_skips_write_and_bounce(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+    )
+
+    assert rc == 0 and "unchanged" in msg
+    assert bounces == [], "an unchanged refresh must not re-register the agent"
+
+
+def test_refresh_changed_reregisters(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist>stale</plist>")
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+    )
+
+    assert rc == 0 and len(bounces) == 1
+    assert "stale" not in plist.read_text()
+
+
+def test_refresh_force_bounce_reregisters_an_unchanged_plist(
+    tmp_home, tmp_launch_agents, monkeypatch
+):
+    """A dead/wedged verdict needs the re-bootstrap even with identical bytes."""
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+        force_bounce=True,
+    )
+
+    assert rc == 0 and len(bounces) == 1
