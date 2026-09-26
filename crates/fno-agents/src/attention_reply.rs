@@ -183,12 +183,14 @@ pub fn tick_answers(
         if state.terminal() {
             continue;
         }
-        // The clear phase: while the item is open, the arm owns the clear
-        // (same retry cap as the file lane). A closed item, a withdrawn one
-        // or a note needs no clear - the ladder starts from the answer row.
+        // The clear phase: while the door can still close, the arm owns the
+        // clear (same retry cap as the file lane). `answered` still needs it:
+        // the answer row recorded, and the clear is what closes the question.
+        // A closed item, a withdrawn one or a note needs no clear - the ladder
+        // starts from the answer row.
         if !state.cleared {
             let item = items.iter().find(|i| i.id == *item_id);
-            let open = item.is_some_and(|i| i.state == "open");
+            let open = item.is_some_and(|i| matches!(i.state.as_str(), "open" | "answered"));
             if open && !item_id.starts_with("note-") {
                 match io.clear(item_id, answer) {
                     Ok(posture) => {
@@ -355,10 +357,12 @@ fn run_resume(
         "--message".into(),
         resume_message(state),
     ];
+    // The offset is the PRE-resume transcript length: `fno agents resume`
+    // delivers synchronously, so a marker injected before this runner returns
+    // must sit after the offset the confirm scan reads from, not before it.
+    let pre_len = transcript_for(&sid, &harness).map(|p| transcript_len(&p));
     let (code, _stdout, _stderr) = runner(&argv);
-    if let Some(path) = transcript_for(&sid, &harness) {
-        state.offset = Some(transcript_len(&path));
-    }
+    state.offset = pre_len;
     state.resumed_at = Some(now);
     state.resume_exit = Some(code);
 }
@@ -390,7 +394,7 @@ fn mail_note(
         asker.clone(),
         resume_message(state),
         "--style-exception".into(),
-        "operator answer verbatim: quoted decision text, not authored prose".into(),
+        "attention delivery: quoted answer text, not authored prose".into(),
     ];
     let (code, stdout, _stderr) = runner(&argv);
     state.note_mail_sent = true;
@@ -418,7 +422,7 @@ fn mail_crown(
         holder.to_string(),
         resume_message(state),
         "--style-exception".into(),
-        "operator answer verbatim: quoted decision text, not authored prose".into(),
+        "attention delivery: quoted answer text, not authored prose".into(),
     ];
     let (code, _stdout, _stderr) = runner(&argv);
     state.session_id = state.session_id.clone().or(None);
@@ -487,7 +491,10 @@ fn transcript_len(path: &Path) -> u64 {
 /// projection has the item; words and done stand alone.
 fn fold_answer_rows(
     items: &[AttentionItem],
-) -> (Vec<(String, String, String)>, std::collections::HashSet<String>) {
+) -> (
+    Vec<(String, String, String)>,
+    std::collections::HashSet<String>,
+) {
     let home = crate::paths::AgentsHome::from_env();
     let path = crate::provider_cap::questions_path(&home);
     let mut out: Vec<(String, String, String)> = Vec::new();
@@ -500,7 +507,10 @@ fn fold_answer_rows(
         match v.get("type").and_then(Value::as_str) {
             Some("attention_answer") => {}
             Some("attention_delivery") => {
-                let Some(did) = v.get("data").and_then(|d| d.get("item_id")).and_then(Value::as_str)
+                let Some(did) = v
+                    .get("data")
+                    .and_then(|d| d.get("item_id"))
+                    .and_then(Value::as_str)
                 else {
                     continue;
                 };
@@ -575,8 +585,11 @@ fn save_states(state_dir: &Path, states: &HashMap<String, ReplyState>) {
 }
 
 /// Commit one terminal ladder: the `attention_delivery` row in
-/// `questions.jsonl`, beside the answer row it delivers.
-fn emit_delivery(state: &ReplyState) {
+/// `questions.jsonl`, beside the answer row it delivers. A failed append
+/// clears the terminal marker: the row IS the terminal marker, so a write
+/// that did not land leaves the item non-terminal and the next beat retries
+/// the write instead of skipping a terminal state forever.
+fn emit_delivery(state: &mut ReplyState) {
     let answered_at = chrono::Utc::now().to_rfc3339();
     let row = serde_json::json!({
         "ts": answered_at,
@@ -598,12 +611,14 @@ fn emit_delivery(state: &ReplyState) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let wrote = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-    {
-        let _ = writeln!(f, "{row}");
+        .and_then(|mut f| writeln!(f, "{row}"))
+        .is_ok();
+    if !wrote {
+        state.outcome.clear();
     }
 }
 
@@ -680,7 +695,7 @@ mod tests {
     }
 
     fn ready_item(id: &str, harness: Option<&str>, sid: Option<&str>) -> AttentionItem {
-        let mut item = AttentionItem {
+        let item = AttentionItem {
             id: id.into(),
             kind: "question".into(),
             title: "Which?".into(),

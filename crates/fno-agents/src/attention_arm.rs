@@ -1381,6 +1381,15 @@ pub(crate) fn append_answer_row(
     // this item makes this one a superseded marker that changes nothing.
     let home = crate::paths::AgentsHome::from_env();
     let path = crate::provider_cap::questions_path(&home);
+    // First-answer-wins is check-and-append: two lanes racing both read an
+    // empty journal and both append unsuperseded rows. The per-agent flock
+    // serializes the whole critical section across processes.
+    let _lock = crate::agent_lock::AgentLock::acquire(
+        &home,
+        "attention-answer",
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|_| "another answer writer holds the lock; retry".to_string())?;
     let already_won = crate::event_store::journal_text(&path, &[])
         .lines()
         .any(|line| {

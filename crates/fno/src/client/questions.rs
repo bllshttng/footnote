@@ -175,6 +175,8 @@ pub(super) struct Detail {
     pub(super) sel: Option<u32>,
     pub(super) free: Option<String>,
     pub(super) notice: Option<String>,
+    /// The follow line the draw windows to: j/k move it, n/N reset it.
+    pub(super) scroll: usize,
 }
 
 impl Detail {
@@ -196,6 +198,7 @@ impl Detail {
             sel: None,
             free: None,
             notice: None,
+            scroll: 0,
         })
     }
 
@@ -210,6 +213,7 @@ impl Detail {
         self.sel = None;
         self.free = None;
         self.notice = None;
+        self.scroll = 0;
     }
 }
 
@@ -376,7 +380,13 @@ pub(super) fn draw_detail(
         }
     };
     let chrome = chrome::Chrome::new("question", Anchor::Center).footer(&footer);
-    let follow = d.free.is_some().then(|| lines.len().saturating_sub(1));
+    // Free-text pins the window to the typing line; otherwise j/k own the
+    // follow position, so the hidden tail is reachable on a short terminal.
+    let follow = if d.free.is_some() {
+        lines.len().saturating_sub(1)
+    } else {
+        d.scroll.min(lines.len().saturating_sub(1))
+    };
     draw_lines_overlay(
         cells,
         rows,
@@ -386,7 +396,7 @@ pub(super) fn draw_detail(
         &chrome,
         &lines,
         &view.theme,
-        follow,
+        Some(follow),
     );
     true
 }
@@ -454,8 +464,15 @@ pub(super) async fn detail_keys(
         match k {
             b'n' => d.advance(1),
             b'N' => d.advance(-1),
-            b'j' => d.idx = (d.idx + 1).min(d.items.len().saturating_sub(1)),
-            b'k' => d.idx = d.idx.saturating_sub(1),
+            // j/k scroll the body, they never change the question. The clamp
+            // uses this question's rendered line count at the draw width, so
+            // the window never follows past the last line.
+            b'j' => {
+                let cols = view.term.1 as usize;
+                let lines = detail_lines(d.item(), d, cols.saturating_sub(6)).len();
+                d.scroll = (d.scroll + 1).min(lines.saturating_sub(1));
+            }
+            b'k' => d.scroll = d.scroll.saturating_sub(1),
             b'0'..=b'9' => {
                 let n = (k - b'0') as u32;
                 if d.item().options.iter().any(|o| o.n == n) {
@@ -473,7 +490,7 @@ pub(super) async fn detail_keys(
                     None
                 };
                 match pick {
-                    Some(n) if pin => {
+                    Some(_) if pin => {
                         if !view.question_acting {
                             let id = item.id.clone();
                             view.question_action =
