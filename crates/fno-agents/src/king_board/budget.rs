@@ -55,6 +55,13 @@ impl Budget {
             Some(last) => format!("not-read: board budget exhausted after {last}"),
         }
     }
+
+    /// The spent budget as a read: a source that never spawned is the same
+    /// budget kill as one killed at its slice, and carries the same marker,
+    /// so the two can never render as an unreadable source.
+    pub(crate) fn spent_read(&self) -> SourceRead {
+        SourceRead::over_budget(self.spent_error())
+    }
 }
 
 /// Why a bounded read produced no stdout. A budget kill is a different event
