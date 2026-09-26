@@ -134,25 +134,22 @@ def test_cursor_agent_registry_session_id_mapping_is_explicit():
     assert HARNESS_SESSION_ID_FIELDS["cursor-agent"] == "harness_session_id"
 
 
-def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch):
+def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     """The thread bit reads true behind the live keeper journey
     (cli/scripts/smoke/cursor-agent-keeper-journey.py), so a one-shot
     dispatch resolves onto the keeper lane and the row's lane answer is
-    keeper. The loop decision itself lives behind the binary's
-    target-family leaf (capability_leaves.rs), which asks the machine's
-    extension install; the Python leg relays that answer, so both relay
-    sides are pinned here against a stubbed leaf instead of the machine's
-    install state."""
+    keeper. The loop refusal for the autonomous /target template lives in
+    the fno-agents target-family leaf (capability_leaves.rs): loop_participation
+    stays extension until a stop-hook firing marker is proven, and the
+    packaged row refuses there rather than in this module, whose assertions
+    must not depend on the machine's installed binary."""
     from fno.agents.harness_map import (
-        DispatchResolveError,
-        check_loop_participation,
         resolve_dispatch,
         thread_lane,
+        thread_seatable,
     )
 
     assert thread_lane("cursor-agent") == "keeper"
-    from fno.agents.harness_map import thread_seatable
-
     assert thread_seatable("cursor-agent") is True
     resolved = resolve_dispatch(
         harness="cursor-agent",
@@ -161,23 +158,6 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit(monkeyp
     )
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
-
-    from fno.agents import harness_map
-
-    monkeypatch.setattr(
-        harness_map,
-        "_loop_gate_answer",
-        lambda harness, command: {"family": True, "refusal": None},
-    )
-    check_loop_participation("cursor-agent", "/target")
-
-    monkeypatch.setattr(
-        harness_map,
-        "_loop_gate_answer",
-        lambda harness, command: {"family": True, "refusal": "refused: no."},
-    )
-    with pytest.raises(DispatchResolveError, match="refused: no."):
-        check_loop_participation("cursor-agent", "/target")
 
 
 def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():
