@@ -34,7 +34,7 @@ fn phase_of(verb: &str) -> Option<&'static str> {
     match verb {
         "think" => Some("think"),
         "blueprint" => Some("blueprint"),
-        "target" | "execute" | "do" => Some("do"),
+        "target" | "execute" | "do" => Some("execute"),
         "review" => Some("review"),
         "pr" | "ship" => Some("ship"),
         _ => None,
@@ -160,7 +160,7 @@ pub fn run(args: &[String]) -> i32 {
 type Counts = BTreeMap<&'static str, BTreeMap<&'static str, u64>>;
 
 fn bump(counts: &mut Counts, phase: &str, key: &'static str) {
-    let phase = ["think", "blueprint", "do", "review", "ship"]
+    let phase = ["think", "blueprint", "execute", "review", "ship"]
         .into_iter()
         .find(|p| *p == phase)
         .unwrap_or("other");
@@ -247,7 +247,7 @@ fn plan(
             let (started, ended) = (field("started_at"), field("ended_at"));
             // A ship row's end is its merge (phase_close); a do row's end is
             // its gated settle.
-            let wants_end = ended.is_none() && !matches!(phase, "ship" | "do");
+            let wants_end = ended.is_none() && !matches!(phase, "ship" | "execute");
             if started.is_none() {
                 bump(&mut counts, phase, "start_missing");
             }
@@ -510,7 +510,7 @@ mod tests {
         let entries = vec![json!({"id": "x-1", "sessions": [
             {"phase": "blueprint", "harness": "claude", "session_id": "s", "ended_at": "2026-09-01T02:00:00Z"},
             {"phase": "think", "harness": "claude", "session_id": "s"},
-            {"phase": "do", "harness": "claude", "session_id": "s", "started_at": "2026-09-01T03:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s", "started_at": "2026-09-01T03:00:00Z"},
             {"phase": "review", "harness": "claude", "session_id": "gone"}
         ]})];
         let events = vec![
@@ -519,7 +519,7 @@ mod tests {
             ev("2026-09-01T00:50:00Z", None),
             ev("2026-09-01T01:00:00Z", Some("blueprint")),
             ev("2026-09-01T01:30:00Z", None),
-            ev("2026-09-01T03:00:00Z", Some("do")),
+            ev("2026-09-01T03:00:00Z", Some("execute")),
             ev("2026-09-01T05:00:00Z", None),
         ];
         let (fills, counts) = plan(&entries, &mut |_, sid| {
@@ -549,9 +549,9 @@ mod tests {
             ]
         );
         assert_eq!(counts["review"]["no_transcript"], 1);
-        assert_eq!(counts["do"]["end_missing"], 1);
+        assert_eq!(counts["execute"]["end_missing"], 1);
         assert_eq!(
-            counts["do"].get("end_filled"),
+            counts["execute"].get("end_filled"),
             None,
             "an open do row is never ended here"
         );

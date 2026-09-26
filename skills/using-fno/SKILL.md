@@ -26,7 +26,7 @@ Invoke plugin-qualified per harness: `/fno:<verb>` on claude/opencode, `$fno:<ve
 
 | Verb | Purpose |
 |------|---------|
-| `target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
+| `target` | End-to-end pipeline: think -> plan -> execute -> review -> ship. |
 | `think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
 | `review` | Review a diff. Routes: `default` (inline lane), `peer` (cross-model), `prove-it`, `cleanup`. |
 | `pr` | PR lifecycle: create inline, check, merged. |

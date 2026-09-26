@@ -2804,7 +2804,7 @@ mod tests {
         let entries = vec![json!({
             "id": "x-open",
             "status": "in_progress",
-            "sessions": [phase_row("do", "uuid-open", None)],
+            "sessions": [phase_row("execute", "uuid-open", None)],
         })];
         let (read, _) = read_driver_rows(Some(&entries));
         std::env::remove_var("FNO_AGENTS_HOME");
@@ -2848,7 +2848,7 @@ mod tests {
                 "id": "x-pr",
                 "status": "in_review",
                 "pr_number": 2126,
-                "sessions": [phase_row("do", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
+                "sessions": [phase_row("execute", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
             }),
             json!({
                 "id": "x-nopr",
@@ -2894,12 +2894,12 @@ mod tests {
                 "id": "x-old",
                 "status": "in_review",
                 "pr_number": 2126,
-                "sessions": [phase_row("do", "uuid-move", Some("2026-09-17T06:19:07Z"))],
+                "sessions": [phase_row("execute", "uuid-move", Some("2026-09-17T06:19:07Z"))],
             }),
             json!({
                 "id": "x-now",
                 "status": "in_progress",
-                "sessions": [phase_row("do", "uuid-move", None)],
+                "sessions": [phase_row("execute", "uuid-move", None)],
             }),
         ];
         let (read, _) = read_driver_rows(Some(&entries));
@@ -2941,7 +2941,7 @@ mod tests {
         let entries = vec![json!({
             "id": "x-graph",
             "status": "in_progress",
-            "sessions": [phase_row("do", "uuid-stamp", None)],
+            "sessions": [phase_row("execute", "uuid-stamp", None)],
         })];
         let (read, _) = read_driver_rows(Some(&entries));
         std::env::remove_var("FNO_AGENTS_HOME");

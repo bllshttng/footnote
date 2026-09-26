@@ -1443,7 +1443,7 @@ def _parked_row(name: str = "target-x-def1"):
             pid_start_time=1_000,
             node=DEFER_NODE,
             effort="xhigh",
-            pending_session_row={"phase": "do", "merge_grant": None},
+            pending_session_row={"phase": "execute", "merge_grant": None},
             cwd="/proj",
             log_path="",
             status="spawning",
@@ -1470,7 +1470,7 @@ def test_session_start_first_fill_opens_the_parked_row(
     rows = _deferred_sessions()
     assert len(rows) == 1
     assert rows[0]["session_id"] == REMINT
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     assert rows[0]["effort"] == "xhigh"
     row = load_registry()[0]
     assert row.pending_session_row is None
@@ -1495,7 +1495,7 @@ def test_restamp_first_fill_opens_the_parked_row(
     rows = _deferred_sessions()
     assert len(rows) == 1
     assert rows[0]["session_id"] == REMINT
-    assert rows[0]["phase"] == "do"
+    assert rows[0]["phase"] == "execute"
     row = load_registry()[0]
     assert row.pending_session_row is None
 
@@ -1513,7 +1513,7 @@ def test_deferred_open_is_a_noop_after_the_claim_path_won(
     _seed_deferred_node()
     _parked_row()
     append_session_record(
-        paths.graph_json(), DEFER_NODE, phase="do", harness="claude",
+        paths.graph_json(), DEFER_NODE, phase="execute", harness="claude",
         session_id=REMINT, started_at="2026-09-22T00:00:00Z",
     )
     entry, outcome = record_session_observation(

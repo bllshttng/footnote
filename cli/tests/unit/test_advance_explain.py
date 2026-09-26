@@ -477,7 +477,7 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
         "id": node_id, "title": "abandoned arm", "priority": "p2",
         "project": "fno", "domain": "code", "cwd": "/some/worktree",
         "status": "in_progress",
-        "sessions": [{"phase": "do", "harness": "claude", "session_id": sid,
+        "sessions": [{"phase": "execute", "harness": "claude", "session_id": sid,
                       "started_at": started_at}],
     }]}))
     return g

@@ -3490,7 +3490,7 @@ pub(super) fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Ve
 /// One open do row.
 pub(super) fn open_do_row(harness: &str, sid: &str) -> Value {
     json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": harness,
         "session_id": sid,
         "started_at": "2026-09-01T01:00:00Z",
@@ -3633,7 +3633,7 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     let row = &sessions[0];
-    assert_eq!(row["phase"], json!("do"));
+    assert_eq!(row["phase"], json!("execute"));
     assert_eq!(row["session_id"], json!("sess-a"));
     assert_eq!(row["harness"], json!("claude"));
     assert_eq!(row["started_at"], json!("2026-09-01T01:00:00Z"));
@@ -3885,7 +3885,7 @@ fn a_dry_run_settles_nothing_on_disk() {
 #[test]
 fn an_unidentified_do_row_is_not_open() {
     let row = json!({
-        "phase": "do",
+        "phase": "execute",
         "harness": "",
         "session_id": "sess-x",
         "started_at": "2026-09-01T01:00:00Z",

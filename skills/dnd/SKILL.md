@@ -11,7 +11,7 @@ metadata:
 
 # DND
 
-Do-not-disturb for this session. Mail addressed to this session never pastes into the prompt line. It queues durable, the sender gets a receipt saying so, and when the hold lifts it delivers what it held as one digest, with no new prompt needed. Your own typing is never muted.
+Do-not-disturb for this session. Mail addressed to this session never pastes into the prompt line. It queues durable, and the sender gets a receipt saying so. When the hold lifts, the held mail is delivered as one digest, with no new prompt needed. Your own typing is never muted.
 
 ## Route
 
@@ -28,11 +28,11 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 
 ## Report the real receipt
 
-Run the genuine command and report its receipt line verbatim. The CLI calls the hold busy mode; that is DND. The proof is the receipt line, the `fno agents list` DND column, and the mux `[DND]` marker. A nonzero exit (3 is no provable harness identity) or a `hold NOT off` line is relayed verbatim, and you claim no DND state.
+Run the genuine command and report its receipt line verbatim. The CLI calls the hold busy mode. That is DND. The proof is the receipt line, the `fno agents list` DND column, and the mux `[DND]` marker. Relay a nonzero exit or a `hold NOT off` line verbatim, and claim no DND state. Exit 3 is no provable harness identity.
 
 ## Scope
 
-The hold applies to the session that runs the command. Asked by chat or mail, a king runs it on its own session. To quiet another session, run the door in that session.
+The hold applies to the session that runs the command. When the ask arrives by chat or mail, the king runs it on the king's own session. To quiet another session, run the door in that session.
 
 ## Not a pause
 

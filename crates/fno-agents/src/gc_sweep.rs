@@ -702,11 +702,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .push(node_id.to_string());
             }
-            // Locked Decision 3: every `do` row, ended or not - a session
+            // Locked Decision 3: every `execute` row, ended or not - a session
             // that ever did the work on a node is the session whose PR it
             // is. The open-do map above stays the obligation question; this
             // one is the attribution question.
-            if row.get("phase").and_then(Value::as_str) == Some("do") {
+            if row.get("phase").and_then(Value::as_str) == Some("execute") {
                 do_nodes
                     .entry(sid.to_ascii_lowercase())
                     .or_default()
@@ -977,7 +977,7 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             &row.node,
             &row.session_id,
             "reap-sweep",
-            Some("do"),
+            Some("execute"),
             Some(&row.harness),
             crate::claude_adopt::transcript_stamp(&row.session_id).as_deref(),
         ) {
@@ -1027,7 +1027,7 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
             node,
             session_id,
             "reap-release",
-            Some("do"),
+            Some("execute"),
             Some(&harness),
             tail.as_deref(),
         ) {
@@ -4876,7 +4876,7 @@ mod tests {
             "status": "done", "priority": "p2", "merge_status": "merged",
             "created_at": "2026-09-11T00:00:00+00:00",
             "completed_at": "2026-09-11T02:00:00+00:00",
-            "sessions": [{"phase": "do", "harness": "claude", "session_id": "s-open",
+            "sessions": [{"phase": "execute", "harness": "claude", "session_id": "s-open",
                           "started_at": "2026-09-11T01:00:00+00:00"}]
         })
     }
