@@ -13051,9 +13051,9 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 }
 
 #[test]
-fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
+fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
     // A partial crown (level set, scope None) must never panic: it orders at
-    // its altitude and its badge scope degrades to `?`.
+    // its altitude and paints no bracket tag - the registry label is the name.
     let mut v = view_with_agents(vec![
         crowned_row("dir", 2, Some(1), None),
         crowned_row("leaf", 3, None, None),
@@ -13063,8 +13063,8 @@ fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
     let text = frame_text(&v.compose());
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
-        dir_line.contains("[L1 ?]"),
-        "malformed scope badges ?: {dir_line:?}"
+        !dir_line.contains("[L1 ?]"),
+        "no bracket badge on a crowned row: {dir_line:?}"
     );
 }
 
