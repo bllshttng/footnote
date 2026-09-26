@@ -30,7 +30,6 @@ use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
 use crate::resume_route::ResumeRoute;
 use crate::state::REGISTRY_SCHEMA_VERSION;
-use crate::truth_probe::family1_truth_state;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -1750,54 +1749,6 @@ where
     RowLiveness::Unknown
 }
 
-/// The dead-row pointer for `attach` (Fix 2): `Some(message)` when `entry`
-/// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
-/// session uuid is recorded - the two revival commands to print instead of
-/// dead-ending in claude's own "session not found". `None` when the row is live
-/// (fall through to a normal attach) or carries no revivable uuid (nothing to
-/// point at - never print an unusable command). Probes reality (locate_session +
-/// socket), never the registry `status` field, matching the resume smart verb.
-pub(crate) fn claude_attach_pointer(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-) -> Option<String> {
-    claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
-}
-
-fn claude_attach_pointer_with_truth<F>(
-    claude_home: &ClaudeHome,
-    entry: &Value,
-    name: &str,
-    truth_fn: F,
-) -> Option<String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
-    let uuid = entry
-        .get("claude_session_uuid")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if short_id.is_empty() || !is_uuid_shaped(uuid) {
-        return None;
-    }
-    let socket_live = locate_session(claude_home, short_id)
-        .map(|loc| liveness_probe(&loc.messaging_socket_path))
-        .unwrap_or(false);
-    if socket_live {
-        return None;
-    }
-    if !matches!(truth_fn(uuid).as_deref(), Some("done" | "stalled")) {
-        return None;
-    }
-    Some(format!(
-        "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
-         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
-    ))
-}
-
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
@@ -3248,7 +3199,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude_resume::claude_resume_argv_with_truth;
+    use crate::claude_resume::{claude_attach_pointer_with_truth, claude_resume_argv_with_truth};
     use crate::resume_wake::acquire_named_session_claim;
     use serde_json::json;
 
@@ -4712,6 +4663,17 @@ mod tests {
             claude_attach_pointer_with_truth(&ch_dead, &no_uuid, "w", |_| Some("done".into())),
             None
         );
+
+        // Adopted typed row: claude_session_uuid never serializes, so only
+        // harness_session_id is present - the pointer still resolves.
+        let adopted = serde_json::json!({
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
+            "harness_session_id": uuid,
+        });
+        let msg =
+            claude_attach_pointer_with_truth(&ch_dead, &adopted, "w", |_| Some("done".into()))
+                .expect("adopted row -> pointer through the canonical id");
+        assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
 
         // Live supervisor -> no pointer (fall through to a real attach).
         let live_home = cv_tmpdir();

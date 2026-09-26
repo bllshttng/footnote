@@ -1,5 +1,6 @@
 //! How `fno agents resume` picks the argv for a claude row: attach a live
-//! supervisor, relaunch an exited one, or refuse naming the cause.
+//! supervisor, relaunch an exited one, or refuse naming the cause. Also the
+//! attach-side dead-row revival pointer for the same rows.
 
 use std::fs;
 
@@ -7,7 +8,7 @@ use serde_json::Value;
 
 use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 use crate::resume_wake::is_uuid_shaped;
-use crate::truth_probe::family1_truth_state_for_resume;
+use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 
 /// The claude arm of `resume` (Fix 1): liveness-probe first, then pick the
 /// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
@@ -175,4 +176,62 @@ where
         );
         Err(13)
     }
+}
+
+/// The dead-row pointer for `attach` (Fix 2): `Some(message)` when `entry`
+/// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
+/// session uuid is recorded - the two revival commands to print instead of
+/// dead-ending in claude's own "session not found". `None` when the row is live
+/// (fall through to a normal attach) or carries no revivable uuid (nothing to
+/// point at - never print an unusable command). Probes reality (locate_session +
+/// socket), never the registry `status` field, matching the resume smart verb.
+pub(crate) fn claude_attach_pointer(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+) -> Option<String> {
+    claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
+}
+
+pub(crate) fn claude_attach_pointer_with_truth<F>(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+    truth_fn: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
+    // Same alias hole as the resume arm above: an adopted typed row serializes
+    // with only `harness_session_id`, and its dead-row pointer must resolve.
+    let uuid = entry
+        .get("claude_session_uuid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            entry
+                .get("harness_session_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("");
+    if short_id.is_empty() || !is_uuid_shaped(uuid) {
+        return None;
+    }
+    let socket_live = locate_session(claude_home, short_id)
+        .map(|loc| liveness_probe(&loc.messaging_socket_path))
+        .unwrap_or(false);
+    if socket_live {
+        return None;
+    }
+    if !matches!(truth_fn(uuid).as_deref(), Some("done" | "stalled")) {
+        return None;
+    }
+    Some(format!(
+        "{name} has exited - fno agents resume {name} (continue it in your terminal)\n\
+         or: fno agents spawn {name} --resume {uuid} --substrate bg (detached worker)"
+    ))
 }
