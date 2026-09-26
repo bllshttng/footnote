@@ -26,6 +26,7 @@ uses it verbatim, giving `UNPROCESSED` passthrough: every pytest flag (`-x`,
 from __future__ import annotations
 
 import fnmatch
+import ast
 import atexit
 import json
 import os
@@ -785,6 +786,10 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
     ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),
+    # Single owner: this entry replaced the duplicate step in the cli-ci
+    # smoke-rest job, so one failure is red exactly once and the changed
+    # packet can carry the lint on every PR.
+    ("Hook exec bits", ".", "bash scripts/ci/check-hook-exec-bit.sh"),
     ("No ${REPO_ROOT}/scripts in skills", ".", "bash scripts/lint/no-repo-root-scripts-in-skills.sh"),
     ("Marketplace-readiness lint (no Skill calls, no path escapes, fno declared)", ".",
      "bash scripts/lint/no-cross-skill-runtime-calls.sh"),
@@ -1350,6 +1355,28 @@ _INFRA_SELECTS = (
     "tests/ci/test_changed_smoke_workflow.sh",
 )
 
+# Repo-wide lints that ride EVERY changed packet: each reads the whole tree,
+# so no per-path rule can fire it, and all of them are seconds long. A
+# crates-only merge once went green while the placement rule failed on main
+# and the nightly refused. Gated on the script existing so the selector
+# contract tests' synthetic fixtures (no scripts/ tree) keep their exact
+# selection lists.
+_ALWAYS_LINTS: tuple[tuple[str, str], ...] = (
+    ("placement rule", "scripts/ci/check-placement-rule.sh"),
+    ("No stale /spec refs (blueprint rename audit)", "scripts/ci/check-no-stale-spec-refs.sh"),
+    ("Skill bundles freshness check", "scripts/lint/check-skill-bundles-fresh.sh"),
+    ("Hook exec bits", "scripts/ci/check-hook-exec-bit.sh"),
+)
+
+# A changed file listed as a bundle source in skill-bundles.yaml selects the
+# bundle freshness tests: an edited schema once drifted the bundled copies
+# because no packet member owned them. The freshness STEP itself rides in
+# _ALWAYS_LINTS.
+_BUNDLE_TEST_TARGETS = (
+    "cli/tests/unit/test_skill_bundles.py",
+    "cli/tests/unit/test_bundle_cli.py",
+)
+
 
 # (path prefix, the registry step whose runner orchestrates that whole tree).
 _ORCHESTRATED_SUBTREES = (("cli/tests/smoke/", "Smoke tests"),)
@@ -1437,6 +1464,127 @@ def _conventional_tests(root: Path, stem: str) -> list[str]:
     hits = {p.relative_to(root).as_posix() for p in tests.rglob(f"test_{stem}.py")}
     hits |= {p.relative_to(root).as_posix() for p in tests.rglob(f"test_{stem}_*.py")}
     return sorted(hits)
+
+
+def _module_name(rel: str) -> str:
+    """cli/src/fno/mail/envelope.py -> fno.mail.envelope; "" for anything else.
+
+    A co-located ``__init__.py`` maps to its package, not ``pkg.__init__``.
+    """
+    prefix = "cli/src/"
+    if not rel.startswith(prefix) or not rel.endswith(".py"):
+        return ""
+    dotted = rel[len(prefix):].removesuffix(".py").replace("/", ".")
+    return dotted.removesuffix(".__init__")
+
+
+def _import_refs(text: str, mod: str, is_package: bool = False) -> set[str]:
+    """Every module name `text` references through import, at any depth.
+
+    Function-level imports are the point (test_mux_inject imports dispatch
+    inside its fixtures), so this walks the AST rather than the first
+    column. `from X import y` records both X and X.y: which of the two is a
+    module is not knowable without executing, and recording both is the
+    optimistic reading a selector should take. Every ancestor package is
+    recorded too: importing any submodule executes its __init__, so a
+    change to the package owns those importers.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    refs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            refs.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                parts = mod.split(".")
+                # A module file's package is its parent; a package's package
+                # is itself. One dot resolves inside that package.
+                base_parts = parts if is_package else parts[:-1]
+                base_parts = base_parts[: len(base_parts) - (node.level - 1)]
+                base = ".".join(base_parts)
+            else:
+                base = node.module or ""
+            if base:
+                refs.add(base)
+                refs.update(f"{base}.{alias.name}" for alias in node.names)
+    expanded: set[str] = set()
+    for ref in refs:
+        parts = ref.split(".")
+        for i in range(1, len(parts) + 1):
+            expanded.add(".".join(parts[:i]))
+    return expanded
+
+
+def _fno_importers(root: Path) -> dict[str, set[str]]:
+    """Module -> the modules it imports, across cli/src/fno, one AST each."""
+    graph: dict[str, set[str]] = {}
+    src = root / "cli" / "src" / "fno"
+    if not src.is_dir():
+        return graph
+    for p in src.rglob("*.py"):
+        rel = p.relative_to(root).as_posix()
+        mod = _module_name(rel)
+        if not mod:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        refs = _import_refs(text, mod, is_package=rel.endswith("__init__.py"))
+        if refs:
+            graph[mod] = refs
+    return graph
+
+
+def _importer_neighbourhood(graph: dict[str, set[str]], mod: str) -> set[str]:
+    """`mod` plus the modules that import it directly (one hop).
+
+    The red-on-main mux chain was exactly this shape: the test imports
+    dispatch, dispatch imports envelope. Full transitive closure is honest
+    reach but selects ~950 of ~1100 test files for a hub module - the
+    everything-run the packet exists to avoid - so the widening stops at one
+    hop and leaves deeper chains to the full gate on main. ponytail: depth
+    1; raise it only when a replayed miss proves depth > 1 matters.
+    """
+    hit = {mod}
+    hit.update(m for m, refs in graph.items() if mod in refs)
+    return hit
+
+
+def _test_reach_index(root: Path) -> list[tuple[str, str, set[str]]]:
+    """(rel, text, import refs) for every test file, read once per selection.
+
+    The literal scan needs the text, the import scan needs the refs, and the
+    infix scan needs the names; one pass feeds all three. Covers cli/tests,
+    the root tests/ tree, and tests co-located in cli/src (test_harness_map).
+    """
+    out: list[tuple[str, str, set[str]]] = []
+    for base in ("cli/tests", "tests", "cli/src"):
+        d = root / base
+        if not d.is_dir():
+            continue
+        for p in d.rglob("test_*.py"):
+            rel = p.relative_to(root).as_posix()
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            out.append((rel, text, _import_refs(text, _module_name(rel))))
+    return out
+
+
+def _bundle_sources(root: Path) -> set[str]:
+    """Repo-rooted source paths listed in skill-bundles.yaml."""
+    try:
+        text = (root / "skill-bundles.yaml").read_text(encoding="utf-8",
+                                                       errors="replace")
+    except OSError:
+        return set()
+    return {m.group(1)
+            for m in re.finditer(r"^\s*-\s*source:\s*(\S+)\s*$", text, re.M)}
 
 
 def _rust_family(rel: str) -> list[str]:
@@ -1535,6 +1683,51 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
             fallback(rel)
             continue
         fallback(rel)
+
+    # Reach widening: the rules above match names; a test can also be reached
+    # by an infix file name, an import chain, or a path literal, and a bundle
+    # member drags its freshness tests. Additive to the rules above; `add`
+    # dedupes. The indices build lazily and at most once, so a diff with no
+    # widened shapes pays nothing.
+    reach: list[tuple[str, str, set[str]]] | None = None
+
+    def reach_index() -> list[tuple[str, str, set[str]]]:
+        nonlocal reach
+        if reach is None:
+            reach = _test_reach_index(root)
+        return reach
+
+    bundle_sources = _bundle_sources(root)
+    graph: dict[str, set[str]] | None = None
+    for rel in paths:
+        base = os.path.basename(rel)
+        if rel in bundle_sources:
+            for target in _BUNDLE_TEST_TARGETS:
+                if (root / target).exists():
+                    add("bundle-member", rel, "pytest", target)
+        if rel.startswith("cli/src/") and rel.endswith(".py"):
+            stem = base[:-3]
+            if len(stem) >= 4:
+                for trel, _text, _refs in reach_index():
+                    if stem in os.path.basename(trel) and "/tests/" in trel:
+                        add("python-source-infix", rel, "pytest", trel)
+            mod = _module_name(rel)
+            if mod:
+                if graph is None:
+                    graph = _fno_importers(root)
+                mods = _importer_neighbourhood(graph, mod)
+                for trel, _text, refs in reach_index():
+                    if refs & mods:
+                        add("python-source-importers", rel, "pytest", trel)
+        for trel, text, _refs in reach_index():
+            if rel in text:
+                add("path-literal", rel, "pytest", trel)
+
+    # The repo-wide lints ride every packet: each reads the whole tree, so no
+    # per-path rule can fire it, and all of them are seconds long.
+    for name, script in _ALWAYS_LINTS:
+        if (root / script).exists():
+            add("repo-wide-lint", "*", "step", name)
     return selections, unmapped
 
 

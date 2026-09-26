@@ -13,7 +13,17 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
     from fno.tracker import active_backend_name
 
     if active_backend_name() == "graph":
-        _exec(["backlog", "get", ids[0]])
+        # The single-id graph read execs the native front; the read options
+        # must ride along or `get --field X` silently degrades to the full
+        # record (the megawalk arg contract asserts the field spelling).
+        argv = ["backlog", "get", ids[0]]
+        if field:
+            argv += ["--field", str(field)]
+        if grouped:
+            argv.append("--grouped")
+        if strict:
+            argv.append("--strict")
+        _exec(argv)
     return ids[0]
 
 
