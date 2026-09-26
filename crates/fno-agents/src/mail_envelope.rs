@@ -80,9 +80,18 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let harness = from_row
         .and_then(|row| row.harness.as_deref())
         .or(harness_hint);
-    let from = from_session
+    let from_full = from_session
         .or_else(|| from_row.and_then(|row| row.harness_session_id.as_deref()))
         .unwrap_or(from_input);
+    // Claude and opencode mint random UUIDv4 ids, so the first 8 hex are the
+    // collision-safe handle the fleet already types. Codex mints time-ordered
+    // ids whose 8-hex clock bucket repeats within a minute, so codex keeps the
+    // full id on the wire.
+    let from_shortened = match harness {
+        Some("claude") | Some("opencode") => from_full.get(..8).map(str::to_string),
+        _ => None,
+    };
+    let from: &str = from_shortened.as_deref().unwrap_or(from_full);
     let resolved_harness = harness.map(|value| match value {
         "claude" => "claude-code",
         other => other,
@@ -228,7 +237,7 @@ mod tests {
                 "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
                 "agents": [
                     {"name":"folio", "short_id":"folio-short", "status":"live", "harness":"claude", "cwd":"/repo",
-                     "harness_session_id":"claude-session", "created_at":"2026-09-23T20:00:00Z",
+                     "harness_session_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7", "created_at":"2026-09-23T20:00:00Z",
                      "crown_level":1,"crown_scope":"fno"},
                     {"name":"quill", "short_id":"quill-short", "status":"busy", "harness":"codex", "cwd":"/repo",
                      "harness_session_id":"codex-session", "created_at":"2026-09-23T20:00:00Z"}
@@ -240,14 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn render_uses_current_labels_ranks_and_full_reply_addresses() {
+    fn render_uses_current_labels_and_short_claude_reply_handles() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("registry.json");
         registry(&path);
         let claude = render_at(
             &json!({
                 "mode":"wrap", "body":"hello", "from":"folio-short",
-                "from_session":"claude-session", "harness":"claude",
+                "from_session":"7c9e6679-7425-40de-944b-e07fc1f90ae7", "harness":"claude",
                 "to":"quill-short", "to_session":"codex-session", "id":"msg-1"
             }),
             &path,
@@ -255,7 +264,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             claude,
-            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
+            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\" id=\"msg-1\">hello</fno_mail>"
         );
         let codex = render_at(
             &json!({
@@ -305,12 +314,12 @@ mod tests {
 
         assert_eq!(
             tag,
-            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\">"
+            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\">"
         );
     }
 
     #[test]
-    fn wrapped_mail_resolves_full_sessions_and_names_from_registered_handles() {
+    fn wrapped_mail_resolves_sessions_and_names_from_registered_handles() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("registry.json");
         registry(&path);
@@ -325,7 +334,7 @@ mod tests {
         .unwrap();
 
         assert!(wrapped.starts_with(
-            "<fno_mail from=\"claude-session\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\">"
+            "<fno_mail from=\"7c9e6679\" harness=\"claude-code\" from_rank=\"L1 fno\" from_name=\"folio\" to=\"quill-short\" to_name=\"quill\" to_rank=\"none\">"
         ));
     }
 }

@@ -1881,10 +1881,8 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert result.delivery == "hosted", "live control.sock recipient delivers, not durable"
     assert len(inject_calls) == 1, "the control.sock lane is the sole live path"
     framed = inject_calls[0]["text"]
-    # The current sender label and full session are both recorded.
-    assert framed.startswith(
-        '<fno_mail from="5e9de401-1111-2222-3333-444444444444"'
-    ), framed
+    # The current sender label and the short claude reply handle are recorded.
+    assert framed.startswith('<fno_mail from="5e9de401"'), framed
     assert 'from_name="sender"' in framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
@@ -1907,12 +1905,12 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
         [
             AgentEntry(
                 name="alice", harness="claude", cwd="/repo", log_path="",
-                harness_session_id="session-alice", status="live",
+                harness_session_id="a11ce000-1111-4222-8333-444444444444", status="live",
                 crown_level=1, crown_scope="fno",
             ),
             AgentEntry(
                 name="bob", harness="claude", cwd="/repo", log_path="",
-                harness_session_id="session-bob", status="live",
+                harness_session_id="b0b00000-1111-4222-8333-444444444444", status="live",
             ),
         ]
     )
@@ -1931,11 +1929,13 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
     ctxs = {
         "alice": _MailCtx(
             from_="aaaa1111", model="unknown", to="bbbb2222",
-            from_session="session-alice", to_session="session-bob",
+            from_session="a11ce000-1111-4222-8333-444444444444",
+            to_session="b0b00000-1111-4222-8333-444444444444",
         ),
         "bob": _MailCtx(
             from_="bbbb2222", model="unknown", to="aaaa1111",
-            from_session="session-bob", to_session="session-alice",
+            from_session="b0b00000-1111-4222-8333-444444444444",
+            to_session="a11ce000-1111-4222-8333-444444444444",
         ),
     }
     # seed = bob's reply; the first continuation drives alice with it, so the
@@ -1949,7 +1949,8 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="session-bob"'), body
+    # A claude sender renders the short 8-hex handle, not the full uuid.
+    assert body.startswith('<fno_mail from="b0b00000"'), body
     assert 'from_name="bob"' in body
     assert 'to_name="alice"' in body
     assert 'to_rank="L1 fno"' in body, body

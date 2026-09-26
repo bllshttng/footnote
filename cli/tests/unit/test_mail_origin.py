@@ -281,7 +281,8 @@ def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
         "run the smoke", from_="king", from_session="session-king"
     )
     assert rendered.startswith(
-        '<fno_mail from="session-king" from_rank="L1 fno" from_name="king">'
+        '<fno_mail from="session-king" harness="codex" '
+        'from_rank="L1 fno" from_name="king">'
     )
     assert not any(line.startswith("-- ") for line in rendered.splitlines())
 

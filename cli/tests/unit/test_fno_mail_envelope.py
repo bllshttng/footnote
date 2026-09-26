@@ -92,7 +92,7 @@ def test_open_tag_renders_ranks_after_their_side():
             to_rank="L1 fno",
             id="msg-5a760f",
         )
-        == '<fno_mail from="647b3a9c-6544-43fe-899e-704382f3d973" '
+        == '<fno_mail from="647b3a9c" '
         'harness="claude-code" from_rank="L2 epic-scope" to="278c9a89" '
         'to_rank="L1 fno" id="msg-5a760f">'
     )
@@ -164,7 +164,7 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
         registry,
         [
             {"name":"folio", "status":"live", "harness":"claude", "cwd":"/repo",
-             "harness_session_id":"sender-session", "created_at":"2026-09-23T20:00:00Z",
+             "harness_session_id":"647b3a9c-6544-43fe-899e-704382f3d973", "created_at":"2026-09-23T20:00:00Z",
              "crown_level":2, "crown_scope":"epic-scope"},
             {"name":"quill", "status":"live", "harness":"claude", "cwd":"/repo",
              "harness_session_id":"reader-session", "created_at":"2026-09-23T20:00:00Z",
@@ -178,12 +178,12 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
         from_="647b3a9c",
         to="278c9a89",
         id="msg-5a760f",
-        from_session="sender-session",
+        from_session="647b3a9c-6544-43fe-899e-704382f3d973",
         to_session="reader-session",
         harness="claude",
     )
     assert wrapped == (
-        '<fno_mail from="sender-session" harness="claude-code" '
+        '<fno_mail from="647b3a9c" harness="claude-code" '
         'from_rank="L2 epic-scope" from_name="folio" to="278c9a89" '
         'to_name="quill" to_rank="L1 fno" id="msg-5a760f">'
         "hi"
@@ -192,24 +192,26 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch, tmp_path)
     assert not any(line.startswith("-- ") for line in wrapped.splitlines())
 
 
-def test_wrap_uses_the_full_session_for_claude_and_reads_rank_by_session(
+def test_wrap_uses_the_short_handle_for_claude_and_reads_rank_by_session(
     monkeypatch, tmp_path
 ):
-    # Every harness uses the full session id as its reply address.
+    # Claude mints random UUIDv4 ids, so from= renders the 8-hex handle the
+    # fleet already types; codex alone keeps the full time-ordered id.
     import fno.mail.envelope as envelope
     registry = tmp_path / "claude.json"
+    full_id = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
     _write_registry(
         registry,
         [{"name":"king", "status":"live", "harness":"claude", "cwd":"/repo",
-          "harness_session_id":"session-king", "created_at":"2026-09-23T20:00:00Z",
+          "harness_session_id":full_id, "created_at":"2026-09-23T20:00:00Z",
           "crown_level":1, "crown_scope":"fno"}],
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     wrapped = envelope.wrap_fno_mail(
-        "hi", from_="king", from_session="session-king"
+        "hi", from_="king", from_session=full_id
     )
     assert wrapped.startswith(
-        '<fno_mail from="session-king" harness="claude-code" '
+        '<fno_mail from="7c9e6679" harness="claude-code" '
         'from_rank="L1 fno" from_name="king">'
     )
     # A handle that resolves to no live row stays bare: no session upgrade,
@@ -269,9 +271,10 @@ def test_envelope_overhead_budget(monkeypatch, tmp_path):
     )
     assert 'from_rank="L2 epic-scope"' in wrapped
     assert 'to_rank="L1 fno"' in wrapped
-    # Crowned overhead, measured 208 once from_name and to_name joined the
-    # header (176 at the reshaping, 537 before the compaction).
-    assert len(wrapped) - len(body) <= 210
+    # Crowned overhead, measured 178 once from= rendered the short claude
+    # handle and from_name and to_name joined the header (176 at the
+    # reshaping, 537 before the compaction).
+    assert len(wrapped) - len(body) <= 200
 
     sender.pop("crown_level")
     sender.pop("crown_scope")
