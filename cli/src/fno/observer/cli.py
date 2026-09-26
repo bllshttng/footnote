@@ -170,9 +170,9 @@ def _capped_gh(gh_runner, cap: int):
 
 
 def _score_item(item: dict, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
-    """Score one blueprint corpus item, returning ``{dimension: verdict|None}``.
-    A gh/disk failure for an attributed item yields all-None (a coverage gap),
-    never a crash (AC1-ERR / AC1-EDGE)."""
+    """Score one corpus item, returning ``{dimension: verdict|None}``. A gh/disk
+    failure for an attributed item yields all-None (a coverage gap), never a
+    crash (AC1-ERR / AC1-EDGE)."""
     node = by_id.get(item.get("graph_node_id"))
     try:
         plan_text = _read_plan_text(item, node, gh_runner)
@@ -415,15 +415,14 @@ def sweep(
     if json_out:
         typer.echo(json.dumps({**summary, "state": state, "digest": str(digest)}, indent=2))
         return
-    ev = summary.get("evidence_line")
-    ev_part = f"\n  {ev}" if ev else ""
     typer.echo(
         f"{state}: {skill_id} run {run_id}\n"
         f"  scored {scored_count}/{len(items)} attributable items "
         f"({summary['coverage_pct']}% coverage)\n"
         f"  verdicts: pass={summary['pass_count']} degraded={summary['degraded_count']} "
-        f"fail={summary['fail_count']}{ev_part}\n"
-        f"  digest: {digest}"
+        f"fail={summary['fail_count']}"
+        + (f"\n  {summary['evidence_line']}" if summary.get("evidence_line") else "")
+        + f"\n  digest: {digest}"
     )
 
 
@@ -441,40 +440,30 @@ def _arg_value(args: list[str], flag: str) -> Optional[str]:
     return args[i] if 0 <= i < len(args) else None
 
 
-# The digest line when the evidence read fails: names the fault instead of
-# leaving every item an unexplained gap.
-_EVIDENCE_UNREAD = "evidence: unread (fno-agents review-summary --evidence failed)"
-
-
 def _review_evidence(items: list[dict], by_id: dict) -> dict:
-    """One fno-agents review-summary --evidence round-trip: what the attestation
-    journal proves about each item's review. On any fault every item stays a
-    coverage gap and the digest says why - never a fabricated verdict."""
+    """One fno-agents review-summary --evidence round-trip; on any fault every
+    item stays a coverage gap and the digest names it, never a fabricated verdict."""
+    gap = {"items": [{} for _ in items],
+           "evidence_line": "evidence: unread (fno-agents review-summary --evidence failed)"}
+    # A missing binary dies inside subprocess.run and lands in the gap below,
+    # same as any other unread evidence.
     binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
-        return {"items": [{} for _ in items], "evidence_line": _EVIDENCE_UNREAD}
     payload = [
-        {
-            "node": (by_id.get(item.get("graph_node_id")) or {}).get("id"),
-            "pr_number": (by_id.get(item.get("graph_node_id")) or {}).get("pr_number"),
-        }
+        {"node": (by_id.get(item.get("graph_node_id")) or {}).get("id"),
+         "pr_number": (by_id.get(item.get("graph_node_id")) or {}).get("pr_number")}
         for item in items
     ]
     try:
-        result = subprocess.run(
+        p = subprocess.run(
             [str(binary), "review-summary", "--evidence"],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            timeout=120,
+            input=json.dumps(payload), capture_output=True, text=True, timeout=120,
         )
-        out = json.loads(result.stdout)
-        if result.returncode == 0 and len(out.get("items", [])) == len(items):
+        out = json.loads(p.stdout)
+        if p.returncode == 0 and len(out.get("items", [])) == len(items):
             return out
     except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
-    return {"items": [{} for _ in items], "evidence_line": _EVIDENCE_UNREAD}
+    return gap
 
 
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
