@@ -323,4 +323,95 @@ class TestSweepBoundedByPhaseClock:
             listing=self._listing(set()), deadline=None,
         )
         assert d.SCAN_PROGRESS["sweep"] == "scanned=1 of 2 read_failed=1"
+        delivery = WatermarkStore(path=d._delivery_state_path(store_path)).load()
+        assert delivery["owner/repo#1"]["last_read_failed"] is True
         d.SCAN_PROGRESS.pop("sweep", None)  # module global: leave it as found
+
+    def test_failed_read_cursor_yields_to_unpolled_candidates(self, tmp_path, monkeypatch):
+        """A rich-read failure advances the next tick past untouched candidates."""
+        from types import SimpleNamespace
+
+        import pytest
+        from fno.graph._reconcile import ReconcileError
+
+        candidates = [_make_candidate(pr_number=n, repo_dir=tmp_path) for n in (1, 2, 3)]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = tmp_path / "state.json"
+        prior = "2026-06-14T11:00:00Z"
+        for pr in (2, 3):
+            WatermarkStore(path=store_path).set(f"owner/repo#{pr}", {
+                "last_review_ts": None, "last_seen_state": "OPEN",
+                "merge_dispatched": False, "retries": 0, "parked": None,
+                "last_polled_at": prior,
+            })
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads: list[int] = []
+        fail = {"once": True}
+
+        def flaky_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            if candidate.pr_number == 1 and fail["once"]:
+                fail["once"] = False
+                raise ReconcileError("gh query timed out")
+            return _make_obs(pr_number=candidate.pr_number)
+
+        deps["read_pr_state"] = flaky_read
+        self._tick(
+            tmp_path, deps, store_path, listing=self._listing(set()),
+            deadline=clock["t"] + 15.5,
+        )
+        assert reads == [1]
+        assert "owner/repo#1" not in WatermarkStore(path=store_path).load()
+        delivery = WatermarkStore(path=d._delivery_state_path(store_path)).load()
+        assert delivery["owner/repo#1"] == {
+            "last_polled_at": "2026-06-14T12:00:00Z",
+            "last_read_failed": True,
+        }
+
+        reads.clear()
+        self._tick(tmp_path, deps, store_path, listing=self._listing(set()), deadline=None)
+        assert reads == [2, 3, 1]
+
+    def test_phase_cut_persists_attempted_candidate_cursors(self, tmp_path, monkeypatch):
+        """The watermark survives a cut raised inside a later candidate read."""
+        from types import SimpleNamespace
+
+        import pytest
+
+        candidates = [_make_candidate(pr_number=n, repo_dir=tmp_path) for n in (1, 2, 3)]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = tmp_path / "state.json"
+        prior = "2026-06-14T11:00:00Z"
+        for pr in (1, 2, 3):
+            WatermarkStore(path=store_path).set(f"owner/repo#{pr}", {
+                "last_review_ts": None, "last_seen_state": "OPEN",
+                "merge_dispatched": False, "retries": 0, "parked": None,
+                "last_polled_at": prior,
+            })
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads: list[int] = []
+        cut = {"once": True}
+
+        def cutting_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            if candidate.pr_number == 2 and cut["once"]:
+                cut["once"] = False
+                raise TimeoutError("phase cut")
+            return _make_obs(pr_number=candidate.pr_number)
+
+        deps["read_pr_state"] = cutting_read
+        with pytest.raises(TimeoutError, match="phase cut"):
+            self._tick(tmp_path, deps, store_path, listing=self._listing(set()), deadline=None)
+        delivery = WatermarkStore(path=d._delivery_state_path(store_path)).load()
+        assert delivery["owner/repo#1"]["last_polled_at"] == "2026-06-14T12:00:00Z"
+        assert delivery["owner/repo#2"]["last_polled_at"] == "2026-06-14T12:00:00Z"
+
+        reads.clear()
+        self._tick(tmp_path, deps, store_path, listing=self._listing(set()), deadline=None)
+        assert reads[0] == 3
