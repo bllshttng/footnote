@@ -393,6 +393,13 @@ fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
 /// (claim_store folds legacy lockfiles in on first open), so this is the
 /// primary projection source.
 fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
+    // Read-only leg: an absent claims db is an empty answer, never a
+    // creation. Opening the store here would mint graph.db at whatever
+    // claims root the process env names at this instant.
+    match crate::claim_store::database_path(None) {
+        Ok(path) if path.exists() => {}
+        _ => return Ok(Default::default()),
+    }
     let connection = crate::claim_store::open(None)?;
     let mut statement = connection
         .prepare(

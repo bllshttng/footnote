@@ -106,5 +106,4 @@ A	crates/fno/src/review_invocation.rs	events.jsonl	unowned	the mux client's Proj
 A	crates/fno-agents/src/question_intake.rs	events.jsonl	ask-port	Fallback when the request carries no journal_path; the shim always passes paths.project_log("events.jsonl"). Drains with the ask-port PR: the fallback moves to state_path::resolve when a Rust caller appears.
 A	crates/fno-agents/src/backlog/api/tests.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/spawn_gate_territory_tests.rs	claims	unowned	call the resolver STATE_FILES names for this file.
-A	crates/fno-agents/src/spawn_gate_territory_tests.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/law_match.rs	events.jsonl	unowned	crate journal site of the law record door; mirrors resolve_carveout_root precedence, fix is a crate resolver mirroring fno.paths.project_events_json.

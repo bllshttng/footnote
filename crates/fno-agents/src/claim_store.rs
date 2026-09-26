@@ -41,7 +41,7 @@ fn root_path(root: Option<&Path>) -> Result<PathBuf, String> {
         .ok_or_else(|| "claims root is unavailable".to_string())
 }
 
-fn database_path(root: Option<&Path>) -> Result<PathBuf, String> {
+pub(crate) fn database_path(root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(root_path(root)?.join("graph.db"))
 }
 
