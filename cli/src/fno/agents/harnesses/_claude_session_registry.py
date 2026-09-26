@@ -414,7 +414,7 @@ def read_timeline_tail(jobs_dir: Path, offset: int) -> str:
     return "".join(chunks)
 
 
-# x-eb64: a `spawn --resume` fork of a claude thread worker can return a
+# A `spawn --resume` fork of a claude thread worker can return a
 # session id while the new session never writes a transcript line and its job
 # state reads `blocked` - a revival that reads as success while the slot is
 # spent and mail queues to nothing. Read at call time so a test can retime

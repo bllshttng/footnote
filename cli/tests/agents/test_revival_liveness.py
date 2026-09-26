@@ -1,4 +1,4 @@
-"""x-eb64: a revival fork must prove it came up before the verb reports one.
+"""A revival fork must prove it came up before the verb reports one.
 
 The reported failure: a ``spawn --resume`` fork of a claude thread worker
 returned a session id while the new session never wrote a transcript line and

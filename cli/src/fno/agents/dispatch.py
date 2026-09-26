@@ -1958,7 +1958,7 @@ def _claude_create_path(
             exit_code=12,
         ) from exc
 
-    # x-eb64: a revival fork that never started must not read as success.
+    # A revival fork that never wrote a transcript must not read as success.
     if revive and resume_session_id:
         from fno.agents.harnesses._claude_session_registry import revive_proof_or_refuse
         revive_proof_or_refuse(name, short_id, account_env=account_env)
