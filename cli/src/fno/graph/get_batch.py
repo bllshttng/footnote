@@ -13,7 +13,7 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
     argv = ["backlog", "get", ids[0]]
     # The native get owns the render ladder (render_field keeps the _status
     # alias), so the single-id flags ride through instead of being dropped.
-    if field:
+    if field is not None:
         argv += ["--field", str(field)]
     if grouped:
         argv.append("--grouped")

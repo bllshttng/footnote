@@ -70,22 +70,11 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 def test_backlog_find_native_help_registers() -> None:
     """`backlog find --help` is the native binary's now; the flag decl still
     parses and the surface answers."""
-    import os as _os
-    import subprocess as _sp
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    proc = _sp.run(
-        [str(binary), "backlog", "find", "--help"],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Usage" in proc.stdout + proc.stderr
+    code, out, err = run_native("backlog", "find", "--help")
+    assert code == 0, err
+    assert "Usage" in out + err
 
 
 @pytest.fixture
@@ -106,21 +95,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _native_find(*args: str) -> tuple[int, str, str]:
-    import os as _os
-    import subprocess as _sp
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    proc = _sp.run(
-        [str(binary), "backlog", "find", *args],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    return proc.returncode, proc.stdout, proc.stderr
+    return run_native("backlog", "find", *args)
 
 
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:

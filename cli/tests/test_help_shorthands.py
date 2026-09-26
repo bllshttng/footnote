@@ -133,21 +133,10 @@ def _resolves(path: str) -> None:
     result = runner.invoke(app, [*path.split(), "--help"], env=_IN_PROCESS)
     if result.exit_code == 0:
         return
-    import os as _os
-    import subprocess as _sp
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build to resolve native legend rows")
-    proc = _sp.run(
-        [str(binary), *path.split(), "--help"],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    assert proc.returncode == 0, f"legend names `fno {path}`, which does not resolve"
+    code, _out, _err = run_native(*path.split(), "--help")
+    assert code == 0, f"legend names `fno {path}`, which does not resolve"
 
 
 def test_legend_names_no_dead_command() -> None:
