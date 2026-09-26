@@ -14,16 +14,17 @@ fn territory_cap_counts_live_and_suspect_node_claims_without_registry_node_field
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".fno")).unwrap();
     std::fs::write(dir.path().join(".fno/config.toml"), "schema_version = 1\n").unwrap();
-    std::fs::write(
-        dir.path().join("graph.json"),
-        serde_json::json!({"entries": [
-            {"id": "x-1", "project": "proj", "status": "idea"},
-            {"id": "x-2", "project": "proj", "status": "idea"},
-            {"id": "x-3", "project": "proj", "status": "idea"}
-        ]})
-        .to_string(),
-    )
-    .unwrap();
+    // Seed through the store: a bare graph.json is an un-imported seed the
+    // strict read refuses to retire, never a row source.
+    let entries: Vec<Value> = ["x-1", "x-2", "x-3"]
+        .iter()
+        .map(|id| {
+            serde_json::json!({"id": id, "slug": id, "title": id, "type": "feature",
+                "status": "idea", "priority": "p2", "project": "proj", "domain": "code",
+                "created_at": "2026-09-07T00:00:00Z"})
+        })
+        .collect();
+    crate::graph_store::seed_rows(&dir.path().join("graph.json"), &entries).unwrap();
     std::env::set_var("FNO_HOME", dir.path());
     std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
     let reg = dir.path().join("registry.json");

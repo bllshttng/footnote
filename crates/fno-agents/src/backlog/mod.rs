@@ -45,6 +45,7 @@ pub const SCHEMA_VERSION: &str = "4";
 /// owner's file fails naming file and line.
 pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("nodes", "backlog/nodes.rs"),
+    ("node_claims", "backlog/nodes.rs"),
     ("node_dispatch", "backlog/nodes.rs"),
     ("node_provenance", "backlog/nodes.rs"),
     ("supersessions", "backlog/nodes.rs"),
@@ -1186,11 +1187,8 @@ pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, Stri
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    // Read the lockfile directory once for the whole carrier batch.
-    let node_claims = nodes::node_claims_by_id()?;
     for id in ids {
-        let claim = node_claims.get(&id).cloned().unwrap_or_default();
-        if let Some(node) = nodes::load_with_claim(&transaction, &id, Some(claim))? {
+        if let Some(node) = nodes::load(&transaction, &id)? {
             entries.push(node.to_json());
         }
     }
@@ -1204,9 +1202,6 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
-    // Project the external claim store once for the whole export. Loading each
-    // node through `nodes::load` would rescan every lockfile for every row.
-    let node_claims = nodes::node_claims_by_id()?;
     let mut statement = connection
         .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
         .map_err(|error| error.to_string())?;
@@ -1218,19 +1213,13 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     let mut typed: Vec<(i64, String, Value)> = Vec::new();
     for id in ids {
         let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let claim = node_claims.get(&id).cloned().unwrap_or_default();
-        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
+        let Some(node) = nodes::load(&connection, &id)? else {
             return Err(format!("node {id} vanished mid-export"));
         };
         typed.push((ordinal, id, node.to_json()));
     }
     // Raw-carried rows round-trip verbatim, merged into ordinal order.
-    let mut raw_rows = nodes::raw_rows(connection)?;
-    for (id, _, body) in &mut raw_rows {
-        let claim = node_claims.get(id).cloned().unwrap_or_default();
-        nodes::project_claim_value(body, claim);
-    }
-    let mut merged: Vec<(i64, String, Value)> = raw_rows
+    let mut merged: Vec<(i64, String, Value)> = nodes::raw_rows(connection)?
         .into_iter()
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();
@@ -1300,67 +1289,6 @@ pub(crate) fn snapshot_db(graph: &Path, now: u128) -> Result<(), String> {
     Ok(())
 }
 
-/// One parity sample: authoritative JSON vs the relational export.
-#[derive(Clone, Debug)]
-pub struct ParityReport {
-    pub rows: usize,
-    pub divergent: usize,
-    /// The first ten divergent ids; enough to name the drift, bounded so a
-    /// badly drifted graph cannot flood the journal.
-    pub divergent_ids: Vec<String>,
-}
-
-/// Compare graph.json against the relational export, the only parity
-/// implementation (the Python leg is a thin client over the keeper op that
-/// serves this). Both sides canonicalize through the null-stripped
-/// to_python_json form, so an explicit null and an absent key agree. The
-/// db must already exist: parity never creates a store to compare against.
-pub fn parity(graph: &Path) -> Result<ParityReport, String> {
-    if !database_path(graph).exists() {
-        return Err(format!(
-            "no relational store at {} to compare against",
-            database_path(graph).display()
-        ));
-    }
-    let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
-    let doc: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-    let mut json_entries: Vec<Value> = doc
-        .get("entries")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{} has no entries array", graph.display()))?
-        .clone();
-    // Both legs serve the projected word: the file's stored lock fields are
-    // the retired mirror, so comparing them raw against the projected
-    // export would name every holder-bearing row divergent.
-    nodes::project_claims(&mut json_entries)?;
-    let json_rows = canonical_rows(&json_entries, "graph.json")?;
-    let connection = open(graph)?;
-    let export = export_rows(&connection)?;
-    let db_rows = canonical_rows(&export, "relational export")?;
-    let mut divergent_ids = Vec::new();
-    let mut keys: Vec<String> = json_rows.keys().chain(db_rows.keys()).cloned().collect();
-    keys.sort();
-    keys.dedup();
-    for key in &keys {
-        if json_rows.get(key) != db_rows.get(key) && divergent_ids.len() < 10 {
-            divergent_ids.push(key.clone());
-        }
-    }
-    let divergent = keys
-        .iter()
-        .filter(|key| json_rows.get(*key) != db_rows.get(*key))
-        .count();
-    Ok(ParityReport {
-        rows: json_rows.len().max(db_rows.len()),
-        divergent,
-        divergent_ids,
-    })
-}
-
-/// Recursively sort object keys, the parity canonical form: the JSON leg's
-/// key order and the export's key order differ, and only the sorted form
-/// compares equal.
 fn sorted_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -1437,245 +1365,6 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:?}");
-    }
-
-    #[test]
-    fn backend_reads_json_when_db_absent() {
-        let (_dir, graph) = fixture("graph.json");
-        assert_eq!(backend(&graph), Backend::Json);
-        assert!(!database_path(&graph).exists());
-    }
-
-    #[test]
-    fn node_claim_lockfiles_replace_the_claim_mirror_table() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE node_claims (
-                    node_id TEXT PRIMARY KEY,
-                    locked_by TEXT,
-                    harness TEXT,
-                    harness_session TEXT,
-                    locked_at TEXT
-                );",
-            )
-            .unwrap();
-
-        nodes::ensure_table(&connection).unwrap();
-
-        let table_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table_count, 0, "the stale claim mirror table is removed");
-        assert!(TABLE_OWNERS
-            .iter()
-            .all(|(table, _)| *table != "node_claims"));
-    }
-
-    fn sample_report(divergent: usize, ids: Vec<String>) -> ParityReport {
-        ParityReport {
-            rows: 2,
-            divergent,
-            divergent_ids: ids,
-        }
-    }
-
-    #[test]
-    fn flipgate_soak_days_covered_read_clean() {
-        // AC9-HP: clean samples covering every UTC day of the run read
-        // clean, whatever the run's age. Law d-bbbb5a26 waived the 7-day
-        // clock, so a same-day run passes with today's sample alone.
-        let (dir, graph) = fixture("graph.json");
-        let now = chrono::Utc::now();
-        for offset in (0..8).rev() {
-            record_parity_sample(
-                &graph,
-                &sample_report(0, vec![]),
-                now - chrono::Duration::days(offset),
-            )
-            .unwrap();
-        }
-        assert_eq!(soak_gaps(&graph, now), Vec::<String>::new());
-        let (day_dir, day_graph) = fixture("graph.json");
-        record_parity_sample(&day_graph, &sample_report(0, vec![]), now).unwrap();
-        assert_eq!(soak_gaps(&day_graph, now), Vec::<String>::new());
-        drop(day_dir);
-        drop(dir);
-    }
-
-    #[test]
-    fn flipgate_soak_divergent_sample_ends_the_run_and_names_its_ids() {
-        // AC10-EDGE: a three-day clean run ends at one divergent sample;
-        // the gap names the ids, and the next clean sample restarts the
-        // clock at its own instant.
-        let (dir, graph) = fixture("graph.json");
-        let now = chrono::Utc::now();
-        for offset in (1..4).rev() {
-            record_parity_sample(
-                &graph,
-                &sample_report(0, vec![]),
-                now - chrono::Duration::days(offset),
-            )
-            .unwrap();
-        }
-        record_parity_sample(&graph, &sample_report(1, vec!["x-bad".into()]), now).unwrap();
-        let gaps = soak_gaps(&graph, now);
-        assert!(
-            gaps.iter()
-                .any(|gap| gap.contains("x-bad") && gap.contains("restarts")),
-            "{gaps:?}"
-        );
-        let clean = sample_report(0, vec![]);
-        let restart = now + chrono::Duration::hours(1);
-        record_parity_sample(&graph, &clean, restart).unwrap();
-        let connection = open(&graph).unwrap();
-        let since = meta(&connection, "soak_clean_since_ms").unwrap();
-        assert_eq!(since, Some(restart.timestamp_millis().to_string()));
-        drop(connection);
-        drop(dir);
-    }
-
-    #[test]
-    fn flipgate_soak_missing_day_names_the_gap() {
-        // AC11-EDGE: a run whose day 2 has no sample names that date, and
-        // a young run names no age gap (law d-bbbb5a26 waived the 7-day
-        // clock).
-        let (dir, graph) = fixture("graph.json");
-        let now = chrono::Utc::now();
-        let clean = sample_report(0, vec![]);
-        record_parity_sample(&graph, &clean, now - chrono::Duration::days(2)).unwrap();
-        record_parity_sample(&graph, &clean, now).unwrap();
-        let gaps = soak_gaps(&graph, now);
-        let skipped = (now - chrono::Duration::days(1)).date_naive().to_string();
-        assert!(
-            gaps.iter()
-                .any(|gap| gap.contains("no sample on 1 day(s)") && gap.contains(&skipped)),
-            "{gaps:?}"
-        );
-        assert!(
-            !gaps.iter().any(|gap| gap.contains("day(s) old")),
-            "{gaps:?}"
-        );
-        drop(dir);
-    }
-
-    #[test]
-    fn flipgate_soak_no_evidence_names_the_gap() {
-        let (dir, graph) = fixture("graph.json");
-        let gaps = soak_gaps(&graph, chrono::Utc::now());
-        assert_eq!(
-            gaps,
-            vec!["no clean parity sample recorded yet".to_string()]
-        );
-        drop(dir);
-    }
-
-    #[test]
-    fn vacuum_snapshot_once_per_hour_and_prunes() {
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let now = now_ms();
-        let snaps = |d: &Path| -> Vec<PathBuf> {
-            let mut paths: Vec<PathBuf> = std::fs::read_dir(d)
-                .unwrap()
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().starts_with("graph.db."))
-                        .unwrap_or(false)
-                })
-                .collect();
-            paths.sort();
-            paths
-        };
-        let backup_dir = graph.parent().unwrap().join("backups");
-        std::fs::create_dir_all(&backup_dir).unwrap();
-        snapshot_db(&graph, now).unwrap();
-        snapshot_db(&graph, now + 60_000).unwrap();
-        assert_eq!(snaps(&backup_dir).len(), 1, "one snapshot per hour");
-        // After the hour gate a second lands; the stamp moves with it.
-        snapshot_db(&graph, now + 3_600_001).unwrap();
-        assert_eq!(snaps(&backup_dir).len(), 2);
-        // Plant stale snapshots past the retention cap; the next hourly
-        // snapshot prunes to GRAPH_BACKUP_KEEP.
-        for i in 0..(crate::graph_store::GRAPH_BACKUP_KEEP + 3) {
-            std::fs::write(backup_dir.join(format!("graph.db.old{i}")), b"x").unwrap();
-        }
-        snapshot_db(&graph, now + 2 * 3_600_002).unwrap();
-        assert_eq!(
-            snaps(&backup_dir).len(),
-            crate::graph_store::GRAPH_BACKUP_KEEP,
-            "retention prunes to GRAPH_BACKUP_KEEP"
-        );
-    }
-
-    #[test]
-    fn flip_backend_stamps_since_only_on_change() {
-        let (dir, graph) = fixture("graph.json");
-        // The probe is read-only: an absent db reads None and stays absent.
-        assert_eq!(backend_since(&graph).unwrap(), None);
-        assert!(!database_path(&graph).exists());
-        let (previous, since1) = flip_backend(&graph, Backend::Sqlite).unwrap();
-        assert_eq!(previous, Backend::Json);
-        let since1 = since1.expect("a real flip stamps since");
-        // An idempotent re-run keeps the original clock.
-        let (previous, since2) = flip_backend(&graph, Backend::Sqlite).unwrap();
-        assert_eq!(previous, Backend::Sqlite);
-        assert_eq!(since2, Some(since1));
-        // Rolling back stamps a NEW since.
-        let (_, since3) = flip_backend(&graph, Backend::Json).unwrap();
-        let since3 = since3.expect("a real flip stamps since");
-        assert!(since3 > since1, "rollback moves the clock forward");
-        drop(dir);
-    }
-
-    #[test]
-    fn backend_reads_graph_meta_backend() {
-        let (dir, graph) = fixture("graph.json");
-        set_backend(&graph, Backend::Sqlite).unwrap();
-        assert_eq!(backend(&graph), Backend::Sqlite);
-        // An unset key is the sqlite product from birth, never the old
-        // unset-means-json default; the rollback door is the EXPLICIT
-        // json name only.
-        let connection = open(&graph).unwrap();
-        connection
-            .execute("DELETE FROM graph_meta WHERE key = 'backend'", [])
-            .unwrap();
-        drop(connection);
-        assert_eq!(backend(&graph), Backend::Sqlite);
-        set_backend(&graph, Backend::Json).unwrap();
-        assert_eq!(backend(&graph), Backend::Json);
-        drop(dir);
-    }
-
-    #[test]
-    fn backend_change_is_visible_without_restart() {
-        // AC5-EDGE: a second process flips the backend; the next read on a
-        // pre-existing connection sees it. The store reads sqlite from
-        // birth; the visible change is the explicit json rollback door.
-        let (dir, graph) = fixture("graph.json");
-        let connection = open(&graph).unwrap();
-        assert_eq!(backend(&graph), Backend::Sqlite);
-        set_backend(&graph, Backend::Json).unwrap();
-        drop(connection);
-        assert_eq!(backend(&graph), Backend::Json);
-        drop(dir);
-    }
-
-    /// Pin an empty claims root so the read projection is deterministic and
-    /// the operator's live claims never reach an assertion. The guard must
-    /// stay bound for the test's whole body.
-    fn pin_empty_claims_root() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
-        let guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let root = tempfile::TempDir::new().unwrap();
-        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
-        (guard, root)
     }
 
     fn two_node_graph(dir: &TempDir) -> PathBuf {
@@ -1792,53 +1481,6 @@ mod tests {
     }
 
     #[test]
-    fn parity_clean_copies_compare_clean_and_a_mutated_row_diverges() {
-        // AC2-HP's mechanical core: clean compares clean, one changed
-        // title diverges naming that id.
-        let (_guard, _root) = pin_empty_claims_root();
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let rows = read_entries(&graph).unwrap();
-        // Seed the relational side from the same rows.
-        shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
-        let report = parity(&graph).unwrap();
-        assert_eq!(report.rows, 2);
-        assert_eq!(report.divergent, 0, "clean copies compare clean");
-        // Mutate one copied row's title on the JSON side.
-        let mut doc: Value =
-            serde_json::from_str(&std::fs::read_to_string(&graph).unwrap()).unwrap();
-        doc["entries"][0]["title"] = Value::String("One mutated".into());
-        std::fs::write(&graph, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
-        let report = parity(&graph).unwrap();
-        assert_eq!(report.divergent, 1, "the mutated row diverges");
-        assert_eq!(report.divergent_ids, vec!["ab-one".to_string()]);
-    }
-
-    #[test]
-    fn parity_refuses_a_missing_db_and_duplicate_ids() {
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let err = parity(&graph).unwrap_err();
-        assert!(
-            err.contains("no relational store"),
-            "parity never creates a store to compare against: {err}"
-        );
-        // Seed the store, then duplicate an id in the JSON.
-        let rows = read_entries(&graph).unwrap();
-        shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
-        let mut doc: Value =
-            serde_json::from_str(&std::fs::read_to_string(&graph).unwrap()).unwrap();
-        let dup = doc["entries"][1].clone();
-        doc["entries"].as_array_mut().unwrap().push(dup);
-        std::fs::write(&graph, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
-        let err = parity(&graph).unwrap_err();
-        assert!(
-            err.contains("duplicate id"),
-            "a duplicate id is refused loudly: {err}"
-        );
-    }
-
-    #[test]
     fn backlog_schema_delete_removes_the_whole_aggregate() {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
@@ -1851,7 +1493,9 @@ mod tests {
             .unwrap();
         assert_eq!(nodes_left, 1, "the surviving node stays");
         // The mirrors cascade with the node row; a pragma-less connection
-        // would strand these as orphans.
+        // would strand these as orphans. node_claims is absent by design:
+        // the claim mirror retires, and ensure_table drops the table on
+        // every open, so there is nothing left to strand.
         for table in [
             "node_dispatch",
             "node_provenance",
@@ -2132,166 +1776,6 @@ mod tests {
         let error = authoritative_sync(&graph, &before, &after).unwrap_err();
 
         assert!(error.contains("ab-two"));
-    }
-
-    #[test]
-    fn flipgate_child_extras_note_reads_key_survives_the_roundtrip() {
-        let (_guard, _root) = pin_empty_claims_root();
-        // AC4-HP: a progress note carrying an unknown key keeps it through
-        // save + export, so the two legs agree.
-        let dir = TempDir::new().unwrap();
-        let graph = two_node_graph(&dir);
-        let mut rows = raw_rows(&graph);
-        rows[0]["progress_notes"] =
-            serde_json::json!([{"ts": "2026-09-14T00:00:00+00:00", "text": "note", "reads": [42]}]);
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&rows)).unwrap();
-        shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
-        let reloaded = read_entries(&graph).unwrap();
-        let notes = reloaded[0]
-            .get("progress_notes")
-            .and_then(Value::as_array)
-            .unwrap();
-        assert_eq!(notes[0]["reads"], serde_json::json!([42]));
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 0,
-            "flipgate_child_extras_note_reads_key_survives_the_roundtrip: {report:?}"
-        );
-    }
-
-    /// Seed a schema-2 store whose db rows lag the json: the title change
-    /// after the seed is published to graph.json only, then the store is
-    /// downgraded.
-    fn schema2_graph_with_stale_rows(dir: &TempDir) -> PathBuf {
-        let graph = two_node_graph(dir);
-        let rows = raw_rows(&graph);
-        shadow_sync(&graph, &[], &rows, "sha256:one").unwrap();
-        let mut after = rows.clone();
-        after[0]["title"] = Value::String("One renamed".into());
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&after)).unwrap();
-        let connection = open(&graph).unwrap();
-        connection
-            .execute(
-                "UPDATE graph_meta SET value = '2' WHERE key = 'schema_version'",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        graph
-    }
-
-    #[test]
-    fn schema_v3_population_keeps_its_rows_and_stamps_three() {
-        // The store is sqlite from birth now: a populated schema-2 store's
-        // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The first schema-3 open keeps the rows and stamps the
-        // schema; parity still reports the
-        // mirror's staleness instead of papering over it with a rebuild.
-        let dir = TempDir::new().unwrap();
-        let graph = schema2_graph_with_stale_rows(&dir);
-        let entries = read_entries(&graph).unwrap();
-        assert_eq!(entries[0]["title"], "One", "the store rows kept");
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 1,
-            "parity still sees the stale mirror: {report:?}"
-        );
-        let connection = open(&graph).unwrap();
-        let schema: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema, SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn flipgate_schema_v3_sqlite_backend_stamps_without_rewrite() {
-        // AC7-EDGE: under the sqlite backend graph.json is not
-        // authoritative; the stamp moves and no row is rebuilt.
-        let dir = TempDir::new().unwrap();
-        let graph = schema2_graph_with_stale_rows(&dir);
-        // Stamp the backend directly: set_backend opens the store, and an
-        // open here would run the json-backend rebuild first.
-        let connection = Connection::open(database_path(&graph)).unwrap();
-        connection
-            .execute(
-                "INSERT INTO graph_meta(key, value) VALUES('backend', 'sqlite')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        let entries = read_entries(&graph).unwrap();
-        assert_eq!(
-            entries[0]["title"], "One",
-            "the stale row was NOT rewritten from json"
-        );
-        let connection = open(&graph).unwrap();
-        let schema: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema, SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn flipgate_schema_v3_entriesless_json_never_wipes_the_db() {
-        // A json that parses but holds no entries array is malformed for
-        // this store, never an empty authority: the rebuild skips it and
-        // the db rows stay.
-        let dir = TempDir::new().unwrap();
-        let graph = schema2_graph_with_stale_rows(&dir);
-        std::fs::write(&graph, b"{\"entries\": null}").unwrap();
-        let entries = read_entries(&graph).unwrap();
-        assert_eq!(entries[0]["title"], "One", "the rows survived");
-        let connection = open(&graph).unwrap();
-        let schema: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema, SCHEMA_VERSION, "the store stamps three regardless");
-    }
-
-    #[test]
-    fn flipgate_schema_v3_concurrent_opens_both_reach_schema_3() {
-        // AC8-EDGE: two openers racing the same schema-2 store both
-        // succeed. No rebuild runs under the store-only flip, so the
-        // mirror's staleness stays visible: parity reports the one
-        // divergent row the seed never renamed.
-        let dir = TempDir::new().unwrap();
-        let graph = schema2_graph_with_stale_rows(&dir);
-        let handles: Vec<_> = (0..2)
-            .map(|_| {
-                let path = graph.clone();
-                std::thread::spawn(move || read_entries(&path).map(|rows| rows.len()))
-            })
-            .collect();
-        for handle in handles {
-            handle.join().unwrap().unwrap();
-        }
-        let report = parity(&graph).unwrap();
-        assert_eq!(
-            report.divergent, 1,
-            "parity sees the stale mirror after the race: {report:?}"
-        );
-        let connection = open(&graph).unwrap();
-        let schema: String = connection
-            .query_row(
-                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(schema, SCHEMA_VERSION);
     }
 
     // -- single-row mutations --------------------------------------------

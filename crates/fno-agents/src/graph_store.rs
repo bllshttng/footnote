@@ -1203,10 +1203,16 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
             obj.entry(k.to_string()).or_insert_with(|| v.clone());
         }
         if !obj.contains_key("locked_at") {
-            // The legacy claimed_at stamp never becomes locked_at: the lock
-            // fields are projection-owned, and the two readers that want the
-            // legacy stamp fall back to claimed_at themselves.
-            obj.insert("locked_at".to_string(), Value::Null);
+            let legacy = obj.get("claimed_at").and_then(Value::as_str);
+            let stamped = match legacy {
+                Some(s) if !s.trim().is_empty() => {
+                    chrono::DateTime::parse_from_rfc3339(&s.replace('Z', "+00:00"))
+                        .map(|_| Value::String(s.to_string()))
+                        .unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            };
+            obj.insert("locked_at".to_string(), stamped);
         }
         for (k, v) in [
             ("completed_at", Value::Null),
@@ -1499,20 +1505,6 @@ pub fn recompute_statuses_with_plan_rungs(
     entries: &mut [Value],
     plan_rungs: Option<&BTreeMap<String, String>>,
 ) {
-    let children_by_parent = derive_entry_statuses(entries, plan_rungs);
-    rollup_containers(entries, &children_by_parent);
-}
-
-/// The per-entry half of [`recompute_statuses_with_plan_rungs`]: normalize,
-/// migrate vocabulary, and derive each row's own status from its facts.
-/// Returns the children-by-parent map the container rollup needs. WRITE-path
-/// only: reads never derive status (a projected claim projects the holder,
-/// never the word), so a read cannot invent a transition the write path
-/// never stamped.
-pub fn derive_entry_statuses(
-    entries: &mut [Value],
-    plan_rungs: Option<&BTreeMap<String, String>>,
-) -> std::collections::BTreeMap<String, Vec<usize>> {
     normalize_lock_fields(entries);
 
     let valid_ids: std::collections::HashSet<String> = entries
@@ -1692,13 +1684,6 @@ pub fn derive_entry_statuses(
         }
     }
 
-    children_by_parent
-}
-
-fn rollup_containers(
-    entries: &mut [Value],
-    children_by_parent: &std::collections::BTreeMap<String, Vec<usize>>,
-) {
     // Container rollup, deepest first, keyed by id for index lookups.
     let id_index: std::collections::HashMap<String, usize> = entries
         .iter()
@@ -2496,18 +2481,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// and `node_state::read_rows_for` were this same
 /// shape twice; both delegate here now.
 pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
-    let mut rows = match crate::backlog::backend(path) {
-        crate::backlog::Backend::Sqlite => {
-            crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
-        }
-        crate::backlog::Backend::Json => {
-            let mut rows = read_json_leg(path, false, true)?;
-            crate::backlog::nodes::project_claims(&mut rows)
-                .map_err(StoreError::ClaimsUnavailable)?;
-            normalize_lock_fields(&mut rows);
-            rows
-        }
-    };
+    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
     Ok(rows)
 }
