@@ -175,10 +175,12 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
+            "--attention-api" => args.attention_api = true,
+            "--attention-port" => args.attention_port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
         }
     }
-    (web || args.stop || args.status).then_some(args)
+    (web || args.stop || args.status || args.attention_api).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {

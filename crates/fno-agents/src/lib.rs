@@ -61,6 +61,7 @@ pub mod attach;
 pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
+pub mod attention_http;
 pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
