@@ -614,3 +614,4 @@ fn journal_text_creates_no_store_for_an_absent_journal() {
 }
 
 mod drift;
+mod observation;
