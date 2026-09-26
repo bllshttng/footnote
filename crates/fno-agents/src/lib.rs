@@ -1449,6 +1449,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_sent",
     "pr_nudge_escalated",
     "pr_nudge_paused",
+    // Burn arm (daemon-emitted): a worker whose spend or node age grows on
+    // a flat sample is woken; three unanswered wakes escalate as one fleet
+    // task through the pr-nudge store.
+    "burn_watch_wake",
+    "burn_watch_escalated",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     //. The roots reach a spawn as an RPC param from the Python seam,
