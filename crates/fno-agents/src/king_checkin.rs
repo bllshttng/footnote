@@ -953,6 +953,18 @@ fn r_refusal_rate() -> Result<Value, String> {
     crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
+/// The finished background subagents this session still holds, read from
+/// its own claude transcript; claude-only, the same posture as the refusal
+/// and wake readers, and it fails as a reader on every other harness.
+fn r_subagents() -> Result<Value, String> {
+    let transcript = own_claude_transcript()?;
+    crate::subagent_hold::reading(
+        &transcript,
+        std::time::SystemTime::now(),
+        crate::subagent_hold::live_threshold(),
+    )
+}
+
 /// The caller's own claude transcript, shared by the refusal and wake
 /// readers. Only claude sessions keep a per-session transcript file today
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
@@ -1252,6 +1264,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     });
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
+    take("subagents", r_subagents());
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
@@ -1305,6 +1318,10 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "oldest_worker_seen".into(),
             workers.value["oldest_worker_seen"].clone(),
         );
+        data.insert(
+            "live_subagents".into(),
+            workers.value["live_subagents"].clone(),
+        );
     }
     if let Some(capacity) = get("capacity").filter(|r| r.ok) {
         for (key, wire) in [
@@ -1327,6 +1344,20 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             "refusal_rate".into(),
             rr.value.get("rate").cloned().unwrap_or(Value::Null),
         );
+    }
+    if let Some(sa) = get("subagents").filter(|r| r.ok) {
+        data.insert("idle_subagents".into(), sa.value["held_idle"].clone());
+        let ids: Vec<Value> = sa
+            .value
+            .get("held")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("id").cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        data.insert("idle_subagent_ids".into(), Value::Array(ids));
     }
     if let Some(wm) = get("wake_meter").filter(|r| r.ok) {
         data.insert("wake_machine".into(), wm.value["machine"].clone());
@@ -1469,6 +1500,19 @@ fn derive_change(
             None => "wake ratio n/a (no typed turns) over 3 to 1".to_string(),
         };
         attention.push(item);
+    }
+    if data
+        .get("idle_subagents")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        attention.push(format!(
+            "{} finished subagents held unstopped",
+            data.get("idle_subagents")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
     }
     // Attention outranks silence: a control plane failing for 30 minutes,
     // or a refusal rate climbing two beats running, is never journaled as
@@ -1795,11 +1839,13 @@ fn render_lines(
             lines.push(format!("worker activity unmeasured: {}", r.error));
         }
         None => lines.push(format!(
-            "workers: live {}, oldest activity {}",
+            "workers: live {}, oldest activity {}, subagents active {}",
             dash(data.get("live_workers")),
             dash(data.get("oldest_worker_seen")),
+            dash(data.get("live_subagents")),
         )),
     }
+    lines.extend(crate::king_answers::subagent_lines(readings));
 
     match failed("crown") {
         Some(r) => lines.push(format!("READER FAILED crown: {}", r.error)),
@@ -3213,6 +3259,7 @@ mod tests {
             Reading::took("territory", json!([])),
             Reading::took("capacity", cap),
             Reading::took("workers", workers),
+            Reading::took("subagents", json!({"held_idle": 0, "held": []})),
             Reading::took(
                 "crown",
                 json!({"total": 2, "splits": 0, "disagreements": 0, "anomalies": []}),
@@ -3774,9 +3821,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(19)));
+        assert_eq!(data.get("coverage"), Some(&json!(20)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
-        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 20 of 20 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -3798,6 +3845,105 @@ mod tests {
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
         assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
+    }
+
+    // The subagents reading: the workers line carries the fleet's active
+    // count, the held line names the finished agents this session still
+    // holds with their TaskStop remedy, and held rows raise attention.
+    #[test]
+    fn subagents_reading_names_held_agents_and_raises_attention() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "subagents",
+                json!({
+                    "held_idle": 2,
+                    "held": [
+                        {"id": "a1", "name": null, "status": "completed", "idle_secs": 7200},
+                        {"id": "a2", "name": "bp-x", "status": "failed", "idle_secs": 3600}
+                    ]
+                }),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let change = derive_change(None, &data, "");
+        assert!(
+            change.starts_with("attention:"),
+            "held rows raise attention: {change}"
+        );
+        assert!(
+            change.contains("2 finished subagents held unstopped"),
+            "change: {change}"
+        );
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
+        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
+        assert!(
+            workers_line.contains("subagents active 3"),
+            "line: {workers_line}"
+        );
+        let held_line = lines.iter().find(|l| l.starts_with("subagents:")).unwrap();
+        assert!(
+            held_line.contains("holds 2 finished and unstopped"),
+            "line: {held_line}"
+        );
+        assert!(held_line.contains("TaskStop a1"), "line: {held_line}");
+        assert!(held_line.contains("TaskStop bp-x"), "line: {held_line}");
+    }
+
+    // AC5: a non-claude harness fails the reading, the beat prints
+    // READER FAILED subagents:, and coverage counts it as failed.
+    #[test]
+    fn a_failed_subagents_reader_prints_its_own_line_and_counts_failed() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::failed(
+                "subagents",
+                "the wake and refusal readers need a claude transcript; \
+                 this session's harness is not claude"
+                    .into(),
+            ),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("coverage"), Some(&json!(19)), "19 of 20 ok");
+        assert_eq!(data.get("idle_subagents"), None);
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("READER FAILED subagents:")),
+            "lines: {lines:?}"
+        );
+    }
+
+    // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
+    #[test]
+    fn workers_payload_without_subagents_renders_a_dash() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("live_subagents"), Some(&Value::Null));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
+        assert!(
+            workers_line.contains("subagents active -"),
+            "line: {workers_line}"
+        );
     }
 
     // AC4: an over-ceiling wake ratio prints the OVER suffix and journals an
@@ -3958,7 +4104,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
+            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -4143,7 +4289,7 @@ mod tests {
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
-        assert!(lines.iter().any(|l| l == "coverage: 18 of 18 readings ok"));
+        assert!(lines.iter().any(|l| l == "coverage: 19 of 19 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -4281,7 +4427,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 18 of 19 readings ok")));
+            .any(|l| l.starts_with("coverage: 19 of 20 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
