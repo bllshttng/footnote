@@ -5566,6 +5566,10 @@ async fn handle_rm_with(
     // mode). Nor can it report WHICH rows it dropped, so the identity match
     // above is also the only defense against dropping more than the one row
     // this request resolved -- checked below.
+    // The tombstone lands BEFORE the row is published absent: a resolver
+    // racing this rm must never see row-gone-but-no-tombstone, or the store
+    // healer adopts the session back under a fresh short-id name.
+    let tombstone_error = rm_teardown::stamp_removed_session_tombstone(&ctx.home, &entry);
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| {
@@ -5618,7 +5622,6 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
-    let tombstone_error = rm_teardown::stamp_removed_session_tombstone(&ctx.home, &entry);
     // The row is gone from the registry: take its worktree, but only
     // as far as the reapable gate allows. The receipt rides the RESULT (the
     // operator's notice), deliberately NOT the event: agent_removed sits

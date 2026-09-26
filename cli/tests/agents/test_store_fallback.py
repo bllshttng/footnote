@@ -1119,7 +1119,7 @@ def test_raising_store_import_degrades_pid_and_resolution_survives(monkeypatch, 
     assert entry.harness_session_id == CLAUDE_UUID
 
 
-# --- rm tombstone: a just-removed session is not re-adopted (x-976b) --------
+# --- rm tombstone: a just-removed session is not re-adopted ------------------
 
 
 def _write_tombstone(root, harness, session_id, *, age_s=0):

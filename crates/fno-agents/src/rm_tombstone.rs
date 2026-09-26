@@ -44,6 +44,11 @@ pub(crate) fn record_at(
         return Ok(());
     }
     let file = path(home);
+    // One flock over the whole read-modify-write: two concurrent rms must
+    // not lose each other's stamp, and the stable sidecar keeps the rename
+    // from invalidating the lock (the registry writer's own pattern).
+    let _lock = crate::state::acquire_exclusive(&crate::state::lock_path(&file))
+        .map_err(|e| e.to_string())?;
     let mut entries: Vec<Value> = match std::fs::read_to_string(&file) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Vec::new()),
         Err(_) => Vec::new(),
@@ -58,8 +63,9 @@ pub(crate) fn record_at(
         "session_id": session_id,
         "removed_at": now,
     }));
-    // Atomic rename so the Python reader never sees a torn write.
-    let tmp = file.with_extension("json.tmp");
+    // Atomic rename so the Python reader never sees a torn write; the pid
+    // suffix keeps a crashed writer's leftover from colliding with this one.
+    let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(
         &tmp,
         serde_json::to_string(&entries).map_err(|e| e.to_string())?,

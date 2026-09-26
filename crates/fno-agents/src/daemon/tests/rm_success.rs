@@ -740,9 +740,9 @@ async fn rm_drops_a_codex_thread_row_whose_actor_is_gone() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// x-976b: rm of a codex thread row stamps a tombstone beside the registry,
-/// so the harness-store healer refuses to adopt the same session back under
-/// a fresh short-id name (the adopted duplicate that blocked resume). The
+/// rm of a codex thread row stamps a tombstone beside the registry, so the
+/// harness-store healer refuses to adopt the same session back under a
+/// fresh short-id name (the adopted duplicate that blocked resume). The
 /// row here carries the dead-actor shape the gone-row test uses; the
 /// tombstone is the point, not the teardown.
 #[tokio::test]

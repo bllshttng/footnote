@@ -96,13 +96,13 @@ pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The row is gone; stamp the tombstone so the harness-store healer
-/// does not adopt the same session back under a fresh short-id name (the
-/// adopted duplicate that then blocked resume). Any harness: the store
-/// fallback adopts claude transcripts by the same door. A failed write
-/// rides the rm receipt (`tombstone_reason`), never refuses the removal -
-/// the row is already gone. `None` when nothing was stamped (no session id)
-/// or the write landed; `Some` carries the write error.
+/// Stamp the tombstone BEFORE the registry row is published absent, so a
+/// resolver racing this rm can never observe row-gone-but-no-tombstone and
+/// heal the session back under a fresh short-id name (the adopted duplicate
+/// that then blocked resume). Any harness: the store fallback adopts claude
+/// transcripts by the same door. A failed write rides the rm receipt
+/// (`tombstone_reason`), never refuses the removal. `None` when nothing was
+/// stamped (no session id) or the write landed; `Some` carries the error.
 pub(crate) fn stamp_removed_session_tombstone(
     home: &crate::paths::AgentsHome,
     entry: &RegistryEntry,
