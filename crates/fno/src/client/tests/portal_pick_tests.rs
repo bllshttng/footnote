@@ -149,11 +149,11 @@ async fn portal_pick_lists_open_portals_and_preselects_new() {
         "tab 1",
         "tab 2",      //
         "new portal", //
-        "hjkl/arrows move",
+        "arrows/hjkl move",
         "1-9 jump",
         "enter place",
         "esc/q cancel",
-        "shift+HJKL split",
+        "shift+arrows/HJKL split",
         "t new tab",
     ] {
         assert!(overlay.contains(label), "missing {label}: {overlay}");
@@ -267,7 +267,7 @@ async fn portal_pick_with_no_open_portals_still_offers_new() {
 
 #[tokio::test]
 async fn portal_pick_hjkl_move_and_q_esc_cancel() {
-    // The vocabulary is the attach picker's: hjkl/arrows move, esc/q cancel.
+    // The vocabulary is the attach picker's: arrows/hjkl move, esc/q cancel.
     let mut v = portal_pick_view();
     open_portal_pick_by_key(&mut v).await; // cursor 3
     let mut buf = Vec::new();

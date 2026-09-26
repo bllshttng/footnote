@@ -156,6 +156,7 @@ pub mod fleet_page;
 pub mod fleet_task;
 pub mod flight_gate;
 pub mod gc;
+pub mod gc_adopt;
 pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
