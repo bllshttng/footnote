@@ -329,8 +329,8 @@ def test_seam_names_the_binary_when_the_verb_is_unavailable(monkeypatch, capsys)
 
 def test_seam_skips_without_an_explicit_node_flag(monkeypatch):
     """AC3-HP: no `--node` (with or without FNO_NODE) reads no graph: the env
-    var is provenance, never a decision. The resolver asks first; a prose
-    seed answers null on both calls, so the argv is untouched."""
+    var is provenance, never a decision. The derivation asks the verb (one
+    derive call); a prose seed reads none, so the argv is untouched."""
     monkeypatch.setenv("FNO_NODE", "x-1")
 
     def boom_graph():
@@ -341,9 +341,8 @@ def test_seam_skips_without_an_explicit_node_flag(monkeypatch):
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("port it"))
-    assert len(seen) == 2
-    assert "spawn_node" in seen[0], "the resolver call rides first"
-    assert "node" not in seen[1]
+    assert len(seen) == 1
+    assert "node" not in seen[0]
     assert node_verb is None
     assert args[1] == "port it"
 
@@ -477,20 +476,16 @@ def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
     facts, so the mint below the seam binds the row to the node the seed named."""
     _stub_row(monkeypatch, _row(dispatch_verb="/target"))
     inserted = ["spawn", "/fno:target x-1", "--node", "x-1"]
-    seen = _stub_verb_seq(monkeypatch, [
-        {"node": None, "source": None},          # the resolver declines x-1 (short id)
-        {"action": "compose", "argv": inserted},  # the derive arm binds it
-    ])
+    seen = _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": inserted}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-1"))
     assert "--node" in args
     assert args[args.index("--node") + 1] == "x-1"
     assert node_verb is None
-    assert len(seen) == 3
-    assert "spawn_node" in seen[0], "the resolver call rides first"
-    assert "node" not in seen[1], "the derive call carries no row facts"
-    assert seen[2]["node"] == "x-1"
+    assert len(seen) == 2
+    assert "node" not in seen[0], "the derive call carries no row facts"
+    assert seen[1]["node"] == "x-1"
 
 
 def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
@@ -505,10 +500,7 @@ def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
         "--node-reason",
         "x-gone names no readable backlog row (derived from the seed)",
     ]
-    _stub_verb_seq(monkeypatch, [
-        {"node": None, "source": None},
-        {"action": "compose", "argv": receipt_argv},
-    ])
+    _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": receipt_argv}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
@@ -525,10 +517,7 @@ def test_seam_degrades_when_the_verb_predates_the_derivation(monkeypatch, capsys
     and spawns exactly as before the derivation existed."""
     monkeypatch.delenv("FNO_AGENTS_RUNTIME", raising=False)
     _stub_row(monkeypatch, None)
-    _stub_verb_seq(monkeypatch, [
-        {"node": None, "source": None},
-        {"action": "refuse", "message": "names no readable backlog row"},
-    ])
+    _stub_verb_seq(monkeypatch, [{"action": "refuse", "message": "names no readable backlog row"}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
@@ -604,11 +593,15 @@ def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
 
 
 def test_seam_refuses_when_the_payload_names_an_unknown_node(monkeypatch, capsys):
-    """AC7-ERR: the payload names x-dead; the seam splices the flag, and the
-    row gate's payload-sourced refusal exits 2 before any peer exists."""
+    """AC7-ERR: the payload names x-dead; the scan-arm compose carries the
+    payload source, and the row gate's refusal exits 2 before any peer."""
     _stub_row(monkeypatch, None)
     _stub_verb_seq(monkeypatch, [
-        {"node": "x-dead", "source": "payload"},
+        {
+            "action": "compose",
+            "argv": ["spawn", "/fno:target x-dead", "--node", "x-dead"],
+            "source": "payload",
+        },
         {
             "action": "refuse",
             "message": "the payload names x-dead, but no readable backlog row has that id; fix the id, or pass the work as prose",
@@ -635,7 +628,7 @@ def test_seam_real_binary_binds_a_seed_named_after_a_modifier(monkeypatch, tmp_p
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target L x-1be2"))
-    assert args[1:3] == ["--node", "x-1be2"]
+    assert args[-2:] == ["--node", "x-1be2"]
     assert node_verb is None
 
 

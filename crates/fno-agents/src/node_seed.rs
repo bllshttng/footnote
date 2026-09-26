@@ -91,11 +91,33 @@ fn without_flag(mut argv: Vec<String>, flag: &str) -> Vec<String> {
     argv
 }
 
+/// The strict first-line scan: after a leading verb token, the first
+/// node-shaped token names the spawn's node even past a modifier (`L`).
+/// Reuses `resolve_node`'s scanner so no second spelling rule exists.
+fn scan_seed_node(text: &str) -> Option<String> {
+    let toks: Vec<&str> = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if !toks.first().is_some_and(|t| parse_verb_token(t).is_some()) {
+        return None;
+    }
+    toks.iter().skip(1).find_map(|tok| {
+        let word = tok
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        matches_node_id_shape(&word).then_some(word)
+    })
+}
+
 /// The nodeless arm: read the seed's verb argument as the node the
 /// spawn is FOR, and answer compose with the flag already inserted, so the
 /// Python side applies the answer generically and both lanes see an
 /// explicit node afterwards. A seed naming no node answers pass with a
-/// `derive_reason`. Pure over the payload.
+/// `derive_reason`. A strict-scan name binds unconditionally: the row gate
+/// on the Python side re-decides with real row facts. Pure over the payload.
 fn derive_from_seed(payload: &Value, seed: Option<String>, rows: &[Value]) -> Value {
     let pass = |reason: String| json!({"action": "pass", "derive_reason": reason});
     let Some(text) = seed.filter(|t| !t.trim().is_empty()) else {
@@ -121,9 +143,19 @@ fn derive_from_seed(payload: &Value, seed: Option<String>, rows: &[Value]) -> Va
     if !family.iter().any(|f| f == &format!("/{first}")) {
         return pass(format!("verb /{first} is outside the target family"));
     }
-    let arg = toks.get(1).map(|t| trim_sentence_punct(t));
+    let scanned = scan_seed_node(&text);
+    let arg = scanned
+        .as_deref()
+        .or_else(|| toks.get(1).map(|t| trim_sentence_punct(t)));
     match arg.filter(|a| looks_like_node_id(a)) {
         Some(id) => {
+            if scanned.as_deref() == Some(id) {
+                // A shape-valid scan name rides with its source so the seam
+                // marks the node payload-named and the row gate refuses a
+                // typo instead of degrading it onto the default lane.
+                let argv = with_flag_inserted(argv_of(payload), "--node", id);
+                return json!({"action": "compose", "argv": argv, "source": "payload"});
+            }
             let named = rows
                 .iter()
                 .any(|r| r.get("id").and_then(Value::as_str) == Some(id));
@@ -349,21 +381,8 @@ pub fn resolve_node(payload: &Value) -> Value {
         return json!({"node": flag, "source": "flag"});
     }
     if let Some(text) = seed_text(payload) {
-        let toks: Vec<&str> = text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .collect();
-        if toks.first().is_some_and(|t| parse_verb_token(t).is_some()) {
-            for tok in toks.iter().skip(1) {
-                let word = tok
-                    .trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase();
-                if matches_node_id_shape(&word) {
-                    return json!({"node": word, "source": "payload"});
-                }
-            }
+        if let Some(word) = scan_seed_node(&text) {
+            return json!({"node": word, "source": "payload"});
         }
     }
     if let Some(env) = named("env_node") {
@@ -626,15 +645,39 @@ mod tests {
 
     #[test]
     fn derived_name_with_no_row_answers_the_receipt() {
-        let out = decide_map_rows(base_derive("/fno:target x-ffff", 1), &rows_named(&[]));
+        // A liberal-only id (x-gone is not hex) keeps the receipt arm; a
+        // shape-valid scan name binds instead and the row gate refuses it.
+        let out = decide_map_rows(base_derive("/fno:target x-gone", 1), &rows_named(&[]));
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 2], "--node-reason");
         assert_eq!(
             argv[argv.len() - 1],
-            "x-ffff names no readable backlog row (derived from the seed)"
+            "x-gone names no readable backlog row (derived from the seed)"
         );
         assert!(!argv.contains(&json!("--node")));
+    }
+
+    #[test]
+    fn a_modifier_seed_scans_to_the_node_and_marks_the_source() {
+        let out = decide_map_rows(base_derive("$fno:blueprint L x-1111", 1), &[]);
+        assert_eq!(out["action"], "compose");
+        assert_eq!(out["source"], "payload");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node");
+        assert_eq!(argv[argv.len() - 1], "x-1111");
+    }
+
+    #[test]
+    fn a_scanned_name_binds_without_a_row() {
+        // A shape-valid scan name skips the derive row check: the Python row
+        // gate re-decides with real rows and refuses the typo itself.
+        let out = decide_map_rows(base_derive("/fno:target x-2222", 1), &[]);
+        assert_eq!(out["action"], "compose");
+        assert_eq!(out["source"], "payload");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node");
+        assert_eq!(argv[argv.len() - 1], "x-2222");
     }
 
     #[test]
@@ -740,33 +783,33 @@ mod tests {
     #[test]
     fn a_seed_named_node_answers_with_source_payload() {
         let out = resolved(resolve_payload(
-            "/fno:target x-75e3",
+            "/fno:target x-5555",
             Value::Null,
             Value::Null,
         ));
-        assert_eq!(out["node"], "x-75e3");
+        assert_eq!(out["node"], "x-5555");
         assert_eq!(out["source"], "payload");
     }
 
     #[test]
     fn modifier_tokens_are_skipped_on_the_scan() {
         let out = resolved(resolve_payload(
-            "$fno:blueprint L x-1be2",
+            "$fno:blueprint L x-1111",
             Value::Null,
             Value::Null,
         ));
-        assert_eq!(out["node"], "x-1be2");
+        assert_eq!(out["node"], "x-1111");
         assert_eq!(out["source"], "payload");
     }
 
     #[test]
     fn trailing_punctuation_is_trimmed_on_the_scan() {
         let out = resolved(resolve_payload(
-            "/fno:target x-1234,",
+            "/fno:target x-3333,",
             Value::Null,
             Value::Null,
         ));
-        assert_eq!(out["node"], "x-1234");
+        assert_eq!(out["node"], "x-3333");
         assert_eq!(out["source"], "payload");
     }
 
@@ -805,8 +848,8 @@ mod tests {
     fn unshaped_seeds_answer_null() {
         for seed in [
             "/fno:target \"add a flag\"",
-            "work on x-1234",
-            "/fno:target\n\nx-1234 later",
+            "work on x-3333",
+            "/fno:target\n\nx-3333 later",
         ] {
             let out = resolved(resolve_payload(seed, Value::Null, Value::Null));
             assert_eq!(out["node"], Value::Null, "{seed}");

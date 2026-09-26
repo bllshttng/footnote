@@ -869,8 +869,7 @@ def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
 def _grid_node(node_id: Optional[str] = None) -> Optional[dict]:
     """Read the node's difficulty and priority for the dispatch grid.
 
-    The id is the one answer inject_spawn_defaults resolved (flag, payload
-    seed, or FNO_NODE); this is the row lookup only.
+    The id is the one answer inject_spawn_defaults resolved.
     """
     if not node_id:
         return None
@@ -1210,10 +1209,8 @@ def inject_spawn_defaults(
         # --yolo/-Y are the same knob as --permission-mode; the filter must
         # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
-    # One node answer for the grid: the Rust resolver owns the
-    # precedence (flag, then the payload's seed, then FNO_NODE). The
-    # flag-or-env read is that answer's first arms without the call; the
-    # payload read exists only on the resolver.
+    # One node answer for the grid: the Rust resolver owns the precedence
+    # (flag, then the seed's payload, then FNO_NODE); ask only when both miss.
     node = _flag_value(out[1:], "--node") or (env or {}).get("FNO_NODE") or None
     if node is None:
         try:
@@ -1221,11 +1218,9 @@ def inject_spawn_defaults(
 
             _slot = _seed_slot(list(out[1:]))
             _answer = verb_call("spawn-axes", {"spawn_node": {
-                "argv": list(out),
-                "seed_index": (_slot[0] + 1) if _slot else None,
+                "argv": list(out), "seed_index": (_slot[0] + 1) if _slot else None,
                 "seed_form": _slot[1] if _slot else None,
-                "flag_node": None,
-                "env_node": None,
+                "flag_node": None, "env_node": None,
             }}, VerbUnavailable)
             node = _answer.get("node") or None
         except Exception:  # noqa: BLE001 - the grid is advisory, as _grid_node
