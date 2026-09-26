@@ -2146,8 +2146,8 @@ mod tests {
             1,
         );
         let err = HarnessContract::parse(&bad).unwrap_err().to_string();
-        assert!(err.contains("agy"), "{err}");
-        assert!(err.contains("conversion"), "{err}");
+        assert!(err.contains("pi"), "{err}");
+        assert!(err.contains("strategy"), "{err}");
     }
 
     #[test]
