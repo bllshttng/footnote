@@ -845,19 +845,20 @@ mod tests {
     #[test]
     fn a_tabbed_modal_keeps_one_width_across_tabs() {
         // tabbed-width fix:: the widest tab's floor pins the modal, so
-        // switching tabs never resizes the box.
+        // switching tabs never resizes the box. The footer stays short: a
+        // long footer widens every fixture equally and masks the difference.
         let narrow = Popup::new(vec![entry("a", "one", "")], Anchor::Center)
             .title("settings")
-            .footer("tab switches section · esc close");
+            .footer("esc close");
         let wide = Popup::new(
             vec![entry("a", "one", "hint-hint-hint"), entry("b", "two", "")],
             Anchor::Center,
         )
         .title("settings")
-        .footer("tab switches section · esc close");
+        .footer("esc close");
         let pinned = Popup::new(vec![entry("a", "one", "")], Anchor::Center)
             .title("settings")
-            .footer("tab switches section · esc close")
+            .footer("esc close")
             .min_width(wide.content_width());
         let w_narrow = narrow.render((30, 100)).width;
         let w_wide = wide.render((30, 100)).width;
@@ -887,8 +888,9 @@ mod tests {
         // Each body row reports one hit, offset past the left border (+1).
         assert_eq!(body0.hits.len(), 1);
         assert_eq!(body0.hits[0].0, 0);
+        // Border plus the body's one side pad.
         assert_eq!(
-            body0.hits[0].1, 1,
+            body0.hits[0].1, 2,
             "hit offset shifted past the left border"
         );
         assert_eq!(body1.hits[0].0, 1);
@@ -972,7 +974,8 @@ mod tests {
         // The two cells occupy disjoint, adjacent spans, offset past the border.
         let (_, off0, len0) = body.hits[0];
         let (_, off1, _) = body.hits[1];
-        assert_eq!(off0, 1, "first cell past the left border");
+        // Border plus the body's one side pad.
+        assert_eq!(off0, 2, "first cell past the left border");
         assert_eq!(off1, off0 + len0, "cells are disjoint and adjacent");
     }
 

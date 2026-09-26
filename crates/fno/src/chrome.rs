@@ -797,7 +797,7 @@ mod tests {
             framed
                 .lines
                 .iter()
-                .any(|l| l.text.contains("colors") && l.text.contains('╮')),
+                .any(|l| l.text.contains("colors") && l.text.contains('│')),
             "the strip row carries the tabs and closes its own border"
         );
     }
@@ -1013,7 +1013,9 @@ mod tests {
             .iter()
             .find(|l| l.hits.iter().any(|(t, _, _)| *t == 0))
             .unwrap();
-        assert_eq!(body.hits[0], (0, 1, 5));
+        // The body's side pad sits between the border and the text, so the
+        // span starts one column deeper than border+1.
+        assert_eq!(body.hits[0], (0, 2, 5));
     }
 
     #[test]
@@ -1216,7 +1218,7 @@ mod tests {
         );
         assert_eq!(row[5].c, 'b', "the next char lands at column+2");
         assert!(
-            row[4].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
+            row[5].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
             "no spacer on a narrow char"
         );
         assert_eq!(row[7].c, '│', "the right border stays inside the frame");
