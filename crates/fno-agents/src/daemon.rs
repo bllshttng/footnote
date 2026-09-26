@@ -30,6 +30,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 
 mod blocking_bound;
 mod claude_stop;
+mod fleet_arms;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
@@ -1433,6 +1434,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // silently emptied roster (the false "0 registered agents" outage: a stale
     // daemon swallowing its own read failure while discovery kept answering).
     load_registry_asserted(&home.registry_json())?;
+    let _ = state::heal_full_uuid_short_ids(&home.registry_json());
 
     // State: cold_start.
     // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
@@ -1541,11 +1543,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                     .emit("keeper_sweep_failed", &json!({"error": msg}));
                             }
                         }
-                        // Startup sweep: every thread row reads hosted. The
-                        // async recovery pass owns resume-and-settle here and
-                        // has not run yet, so settling unhosted rows now would
-                        // stamp Orphaned rows the recovery pass is about to
-                        // resume.
+                        // The reboot revival plans BEFORE this sweep rewrites
+                        // pre-reboot statuses. Startup sweep: every thread row
+                        // reads hosted; the async recovery pass owns resume
+                        // and settle here and has not run yet.
+                        crate::boot_revival::start(&home_sweep);
                         run_reconcile_sweep(&home_sweep, &emitter_sweep, &|_| true, SweepMode::Full)
                     }))
                     .unwrap_or_else(|_| {
@@ -1621,9 +1623,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         "daemon_fleet_scope",
         &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
     );
-    // A sandbox home starts no supervisor: its targets resolve from the real
-    // cwd and real graph, so it would work the operator's board from a
-    // tempdir and pin ab_live true forever.
+    // A sandbox home starts no supervisor and builds no fleet arms: their
+    // targets resolve from the real cwd and real graph, so they would work
+    // the operator's board from a tempdir (and pin ab_live true forever,
+    // so the daemon never idle-exits).
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {
@@ -1645,33 +1648,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
-    // Screen-manifest scrape gate: a slow mux stalls only its own sweep.
-    let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop gate: a large marker set never serializes inline.
-    let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Orphaned-test-binary reap gate: shells ps + a kill, off the core loop.
-    let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut last_orphan_sweep = Instant::now();
-    let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut last_liveness_sweep = Instant::now();
-    // The periodic arms: each module owns its cadence, gate and memory.
-    let machine_watch = crate::machine_watch::Arm::default();
-    let merge_close = crate::merge_close::Arm::default();
-    let crown_ledger = crate::king_ledger::Arm::default();
-    let fleet_page = crate::fleet_page::Arm::new(ctx.opts.agents_config_cwd.clone());
-    let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
-    let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
-    let slot_cutover = crate::slot_cutover::Arm::new(ctx.opts.agents_config_cwd.clone());
-    let attention = crate::attention_arm::Arm::new(ctx.opts.agents_config_cwd.clone());
-    // Retirement-sweep cadence: the throttle stamp beside the gate,
-    // plus the next interval cell the sweep body hands back (the idle-probe
-    // verdict pattern), so the tick reads a mutex instead of config files.
-    let mut last_gc_sweep = Instant::now();
-    let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
-    // Dead-row GC gate: its dormant check shells out to the truth
-    // probe, so it gets the same one-in-flight discipline as its neighbors.
-    let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
     // I/O (a connect per socket candidate), so the arm spawns it and reads
     // the completed verdict on a later tick. A verdict is only ever consumed
@@ -1681,18 +1657,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // registry directly, with no daemon contact - the mtime is the one
     // positive marker of that). Anything stale is discarded unread.
     let idle_probe_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Stale-question reconcile: same one-in-flight discipline as the sweeps
-    // beside it. The verb dedupes on outcome identity, so an extra run is a
-    // no-op; the gate exists so a slow fleet probe never stacks.
-    let stale_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Park sweep: same one-in-flight discipline. The verb is idempotent on a
-    // store nobody touched, so an extra run is a no-op; the gate exists so a
-    // slow head probe never stacks.
-    let park_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
     let mut drift_flag = crate::quiet_retire::DriftFlag::new();
+    // The periodic fleet arms, extracted to daemon/fleet_arms.rs (this file
+    // is shrink-only). One driver, built once on a shared home only: a
+    // sandbox home builds none, so no arm can act on the shared fleet.
+    let mut fleet_arms = (!sandbox).then(|| fleet_arms::FleetArms::new(&ctx.opts));
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -1700,7 +1672,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // an inline sweep makes the daemon both unreachable and unstoppable at the
     // same time -- which is how 59 supervisors accumulated, each new client
     // reading the silence as "no daemon" and starting another. Give a sweep
-    // `spawn_blocking` plus a one-in-flight `AtomicBool`, like the four below.
+    // `spawn_blocking` plus a one-in-flight `AtomicBool`, the shape every arm
+    // in `fleet_arms::FleetArms::tick` keeps.
     // The reason the serve loop ended, threaded to the shared exit tail so
     // `daemon_exited` can tell an abnormal ending from a graceful one
     // every break carries its reason string.
@@ -1749,164 +1722,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 crate::orphan_reap::reap_daemon_children();
-                // Screen-manifest scrape sweep (the badge-lattice fallback
-                // rung): subprocesses + file IO, so it runs off-loop under
-                // spawn_blocking behind the one-in-flight gate.
-                if !scrape_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&scrape_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    let notify_on_blocked = ctx.opts.notify_on_blocked;
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
-                    });
+                if let Some(arms) = fleet_arms.as_mut() {
+                    arms.tick(&ctx);
                 }
-                // Retirement sweep: a row leaves when its work is done (reverse
-                // join) and its transcript is quiet past `agents.retire_grace_s`.
-                // The dead crown sweep runs first. Throttled to
-                // `agents.retire_interval_s`; off-loop.
-                let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
-                crate::gc::maybe_retirement_sweep(
-                    &mut last_gc_sweep,
-                    &gc_in_flight,
-                    &retire_interval_next,
-                    ctx.home.clone(),
-                    ctx.opts.agents_config_cwd.clone(),
-                    ctx.home.events_jsonl(),
-                    retire_interval,
-                    || crate::gc::mux_tab_sweep(false, false),
-                    crate::gc::production_roster_sweep,
-                    crate::gc::production_crown_sweep,
-                );
-                // Worktree sweep + merge reaper: the sweep backstops
-                // what the reaper cannot reach; the reaper is the merge-triggered
-                // consumer of `merge_cleanup_requested` (60s floor). Both
-                // off-loop; grace and stop order live in merge_reap.rs.
-                if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&worktree_sweep_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        let roots = worktree_sweep::registry_repo_roots(&home);
-                        let now = now_epoch_secs();
-                        worktree_sweep::worktree_sweep(&home, &emitter, now, &roots, &|root| {
-                            // A pending merge-cleanup request is the standing
-                            // order: the pass applies while one waits.
-                            crate::merge_reap::merge_cleanup_requested(&home, root).into()
-                        }, &|root, apply| {
-                            let mut cmd = std::process::Command::new("fno");
-                            cmd.current_dir(root)
-                                .env("FNO_AGENTS_HOME", home.root())
-                                .args([
-                                "agents", "workspace", "worktree", "cleanup", "--merged",
-                                ]);
-                            if apply {
-                                cmd.arg("--apply");
-                            }
-                            match cmd.output() {
-                                Ok(output) => worktree_sweep::WorktreeSweepOutput {
-                                    exit_code: output.status.code(),
-                                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                                },
-                                Err(error) => worktree_sweep::WorktreeSweepOutput {
-                                    exit_code: None,
-                                    stdout: String::new(),
-                                    stderr: error.to_string(),
-                                },
-                            }
-                        });
-                        let grace_secs =
-                            crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
-                        crate::merge_reap::consume_merge_cleanup_requests(
-                            &home, &roots, &emitter, grace_secs,
-                        );
-                        // Daily janitor; gate and receipt in reclaim.rs.
-                        crate::reclaim::maybe_run_daily(&home);
-                    });
-                }
-                crate::orphan_reap::maybe_sweep(
-                    &mut last_orphan_sweep,
-                    &orphan_sweep_in_flight,
-                    ctx.home.events_jsonl(),
-                );
-                crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
-                crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
-                crate::king_ledger::maybe_tick(&crown_ledger, ctx.home.clone());
-                crate::fleet_page::maybe_tick(&fleet_page, ctx.home.clone());
-                crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
-                crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
-                crate::slot_cutover::maybe_tick(&slot_cutover, ctx.home.clone());
-                crate::attention_arm::maybe_tick(&attention, ctx.home.clone());
-                // Serve-only liveness tick: the served pair is the sweep's measurement,
-                // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.
-                let codex_threads_for_liveness = Arc::clone(&ctx.codex_threads);
-                crate::liveness_sweep::maybe_sweep(
-                    &mut last_liveness_sweep,
-                    &liveness_sweep_in_flight,
-                    ctx.home.clone(),
-                    ctx.home.events_jsonl(),
-                    Arc::new(move |entry: &RegistryEntry| {
-                        match codex_threads_for_liveness.try_lock() {
-                            Ok(guard) => guard.contains_key(&entry.name),
-                            // An actor is mid insert/remove: hosted, so a race
-                            // can never settle a thread the map is about to name.
-                            Err(_) => true,
-                        }
-                    }),
-                );
-                // Terminal-stop sweep: exit fire-and-forget `claude --bg`
-                // workers finalize marked terminal, so a shipped bg /target frees
-                // its slot instead of parking at an idle prompt forever. Spawned
-                // off the select arm behind a one-in-flight gate (mirrors the
-                // scrape sweep) so N serialized `claude stop`s never starve
-                // accept()/SIGTERM. Cheap when there are no markers.
-                if !terminal_stop_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&terminal_stop_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    tokio::spawn(async move {
-                        let _gate = SweepGate(flag);
-                        terminal_stop_sweep(&home, &emitter).await;
-                    });
-                }
-                // Stale-question reconcile, the arm above `stale_sweep`: its
-                // doc comment there covers the shape.
-                if !stale_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&stale_sweep_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        stale_sweep(&home, &emitter, now_epoch_secs(), &|| {
-                            std::process::Command::new("fno")
-                                .args(["agents", "stale-escalate", "--json"])
-                                .output()
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        });
-                    });
-                }
-                // Park sweep, the arm beside `stale_sweep`: same doc comment
-                // there covers the one-in-flight shape. The run closure walks
-                // every repo root the registry knows, so parked rows of other
-                // repos are un-parked from THEIR checkout (the head probe resolves PR numbers against the repo).
-                if !park_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&park_sweep_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        park_sweep(&home, &emitter, now_epoch_secs(), &|| {
-                            sweeps::sweep_all_roots(&home)
-                        });
-                    });
-                }
-                crate::question_sweep::daemon_tick(&ctx.home, now_epoch_secs());
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
@@ -2346,7 +2164,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidParams,
-                "name must be 1-64 chars of [A-Za-z0-9_-]",
+                "name must be 1-64 chars of [A-Za-z0-9_'-]",
             )
         }
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
@@ -4677,15 +4495,14 @@ where
         "status": filter_status,
         "progress": filter_progress,
     });
-    Response::ok(
-        req.id,
-        json!({
-            "agents": entries,
-            "filters_applied": filters_applied,
-            "fields_omitted": LIST_PROJECTION_OMISSIONS,
-            "truth_probe_asked": truth_probe_asked,
-            "truth_probe_answered": truth_probe_answered,
-        }),
+    list_rows::list_response(
+        req,
+        entries,
+        filters_applied,
+        truth_probe_asked,
+        truth_probe_answered,
+        all,
+        &ctx.home,
     )
 }
 
@@ -5628,16 +5445,8 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Err(interrupt_report) = rm_teardown::end_codex_thread(ctx, &name).await {
-            return Response::err(
-                req.id,
-                ErrorCode::Busy,
-                format!(
-                    "agent {name}: the codex thread's turn did not settle \
-                     ({interrupt_report}); the registry row and the codex index \
-                     entry are kept"
-                ),
-            );
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+            return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
@@ -6702,12 +6511,10 @@ pub(crate) fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
-    // Liveness for a `claude --substrate bg` thread reads the daemon roster:
-    // presence for the zombie flip, a live-pid listing for the crown
-    // revival. See liveness_sweep::BgRoster - the witness moved there with
-    // the crown-revival work (this file is shrink-only). A MISSING roster
+    // Liveness for a `claude --substrate bg` thread reads the daemon roster
+    // and the claude listing: see liveness_sweep::BgRoster. A MISSING roster
     // parses as zero workers and reaps as before; an UNREADABLE one is
-    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
@@ -6782,6 +6589,7 @@ pub(crate) fn run_reconcile_sweep(
         roster_readable,
     );
     changes.append(&mut revivals);
+    witness.serve_listing(&entries, &mut changes);
     outcome.recovered.extend(revived);
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to

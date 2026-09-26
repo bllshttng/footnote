@@ -1434,7 +1434,7 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
 
 /// x-df08 (PR 1355 review, P2): gemini's `command_surface` reads `refused` -
 /// a deprecated harness with no dispatch lane at all, never a harness that
-/// merely lacks a built thread-spawn arm. `bg_substrate_refusal` must check
+/// merely lacks a built thread-spawn arm. `thread_substrate_refusal` must check
 /// that BEFORE naming a `thread_lane`, or a retired harness reads as future
 /// lane work.
 #[test]

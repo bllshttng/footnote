@@ -61,6 +61,15 @@ impl ClaudeAgentRow {
         self.pid = pid;
         self
     }
+
+    /// A hosted process stands behind this row. A session that died keeps
+    /// its last state (`blocked`, `working`) with no pid, so the state
+    /// alone lies. `carries_pids` is false for a listing whose rows carry
+    /// no pid field at all; that listing keeps the state-only reading.
+    pub fn has_live_process(&self, carries_pids: bool) -> bool {
+        let terminal = self.state.as_deref().is_some_and(is_terminal_roster_state);
+        !terminal && (!carries_pids || self.pid.is_some())
+    }
 }
 
 /// The one terminal-state set, shared by every death-evidence reader (rm's
@@ -112,6 +121,18 @@ impl ClaudeAgentsSnapshot {
         matches!(self, Self::Known { .. })
     }
 
+    /// Whether ANY row in this listing carries a pid. A listing with no pid
+    /// anywhere (an older claude that omits the field) keeps the state-only
+    /// liveness reading; a listing that carries pids makes a missing pid a
+    /// death witness.
+    pub fn carries_pids(&self) -> bool {
+        match self {
+            Self::Known { rows, .. } | Self::Unknown { rows, .. } => {
+                rows.iter().any(|row| row.pid.is_some())
+            }
+        }
+    }
+
     pub fn warning_text(&self) -> String {
         let warnings = match self {
             Self::Known { warnings, .. } | Self::Unknown { warnings, .. } => warnings,
@@ -128,6 +149,13 @@ struct ClaudeCommandOutput {
 
 pub fn read_all_agents() -> ClaudeAgentsSnapshot {
     read_all_agents_with(run_all_agents_command)
+}
+
+/// Read `claude agents --json --all` under one account root. `None` preserves
+/// the ambient `CLAUDE_CONFIG_DIR`; a plan's explicit root pins both the
+/// roster and the daemon paths used by live resume.
+pub fn read_all_agents_in(config_dir: Option<&Path>) -> ClaudeAgentsSnapshot {
+    read_all_agents_with(|| run_all_agents_command_in(config_dir))
 }
 
 fn read_all_agents_with(
@@ -531,8 +559,18 @@ pub fn config_dir() -> PathBuf {
 /// Resolve the Claude daemon directory (`<home>/.claude/daemon`). Honors
 /// [`DAEMON_DIR_ENV`] first so tests and alt-home setups redirect the whole tree.
 pub fn daemon_dir() -> PathBuf {
+    daemon_dir_in(None)
+}
+
+/// Resolve the Claude daemon directory for an explicit account root. The
+/// operator override remains highest priority so tests and alt-home setups
+/// can redirect the complete daemon tree.
+pub fn daemon_dir_in(config_dir: Option<&Path>) -> PathBuf {
     if let Some(v) = std::env::var_os(DAEMON_DIR_ENV) {
         return PathBuf::from(v);
+    }
+    if let Some(config_dir) = config_dir {
+        return config_dir.join("daemon");
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -557,7 +595,11 @@ pub fn control_key_path() -> PathBuf {
 /// client, allowed via peerUid"), so the caller treats this as optional, never an
 /// error. [corroborated]
 pub fn read_control_key() -> Option<String> {
-    let raw = std::fs::read_to_string(control_key_path()).ok()?;
+    read_control_key_in(&daemon_dir())
+}
+
+pub(crate) fn read_control_key_in(daemon_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(daemon_dir.join("control.key")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         None
@@ -774,6 +816,109 @@ mod tests {
             Some(std::path::Path::new("/")),
             "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
+    }
+
+    // A session that died while blocked keeps its `blocked` row with no
+    // pid and no process. In a listing that carries pids the missing pid
+    // is the death witness; the state alone reads live and lies.
+    #[test]
+    fn a_pid_less_blocked_row_reads_dead_when_the_listing_carries_pids() {
+        let dead = ClaudeAgentRow::new("deadbeef", Some("blocked"));
+        let live_peer = ClaudeAgentRow::new("c0ffee00", Some("working")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![dead.clone(), live_peer]);
+        assert!(snapshot.carries_pids());
+        assert!(!dead.has_live_process(snapshot.carries_pids()));
+    }
+
+    #[test]
+    fn the_same_row_with_a_pid_reads_live() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("blocked")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(snapshot.carries_pids());
+        assert!(row.has_live_process(snapshot.carries_pids()));
+    }
+
+    #[test]
+    fn a_done_row_with_a_pid_still_reads_dead() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("done")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(snapshot.carries_pids());
+        assert!(!row.has_live_process(snapshot.carries_pids()));
+    }
+
+    // An older claude whose listing omits the pid field everywhere keeps
+    // today's state-only reading: absence of the column is not death.
+    #[test]
+    fn a_listing_without_pids_keeps_the_state_only_reading() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("blocked"));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(!snapshot.carries_pids());
+        assert!(row.has_live_process(snapshot.carries_pids()));
+    }
+
+    #[test]
+    fn pinned_agents_reader_uses_the_plan_config_dir() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = temp.path().join("config-dir");
+        crate::write_exec_stub(
+            &bin,
+            "claude",
+            "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$FNO_TEST_CLAUDE_CONFIG_LOG\"\nprintf '%s\\n' '{\"agents\":[{\"kind\":\"background\",\"short_id\":\"abcd1234\",\"status\":\"idle\"}]}'\n",
+        );
+
+        let old_path = std::env::var_os("PATH");
+        let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let old_log = std::env::var_os("FNO_TEST_CLAUDE_CONFIG_LOG");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("CLAUDE_CONFIG_DIR", temp.path().join("ambient"));
+        std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", &log);
+        let alt = temp.path().join("alt");
+
+        let snapshot = read_all_agents_in(Some(&alt));
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match old_log {
+            Some(value) => std::env::set_var("FNO_TEST_CLAUDE_CONFIG_LOG", value),
+            None => std::env::remove_var("FNO_TEST_CLAUDE_CONFIG_LOG"),
+        }
+
+        assert!(snapshot.is_known(), "the pinned fake roster must parse");
+        assert_eq!(
+            snapshot
+                .find("abcd1234")
+                .and_then(|row| row.state.as_deref()),
+            Some("idle")
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), alt.to_string_lossy());
+    }
+
+    #[test]
+    fn pinned_daemon_dir_uses_config_root_and_keeps_the_override() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("account");
+        let old = std::env::var_os(DAEMON_DIR_ENV);
+        std::env::remove_var(DAEMON_DIR_ENV);
+        let account_dir = daemon_dir_in(Some(&config_dir));
+        let override_dir = temp.path().join("override");
+        std::env::set_var(DAEMON_DIR_ENV, &override_dir);
+        let redirected_dir = daemon_dir_in(Some(&config_dir));
+        match old {
+            Some(value) => std::env::set_var(DAEMON_DIR_ENV, value),
+            None => std::env::remove_var(DAEMON_DIR_ENV),
+        }
+        assert_eq!(account_dir, config_dir.join("daemon"));
+        assert_eq!(redirected_dir, override_dir);
     }
 
     // A 2-worker roster in the confirmed live shape (extra keys present, to prove

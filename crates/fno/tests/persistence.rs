@@ -310,11 +310,7 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
     // Observed once in CI on this test: the screen at panic carried "$
     // old=[]" and nothing but the layout kept it from matching.
     h2.type_bytes(b"echo old=[$OLD_WORLD]\r");
-    let final_screen = h2.wait_screen(15, |s| s.contains("old=[]") && !s.contains("old=[yes]"));
-    assert!(
-        !final_screen.contains("old=[yes]"),
-        "the respawned shell inherited the dead server's environment:\n{final_screen}"
-    );
+    h2.wait_screen(15, |s| s.contains("old=[]") && !s.contains("old=[yes]"));
     // The one-line notice reached the user (printed before the TUI).
     assert!(
         h2.raw_output().contains("previous session ended"),

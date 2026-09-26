@@ -262,9 +262,7 @@ See [wave-patterns.md](wave-patterns.md) for the decision tree on sequential vs 
 
 ### 3. Spawn Task Executors
 
-Use Task tool to spawn fresh executors for each task. Before dispatch, resolve
-the per-task executor with the three-tier chain (task → plan → surface
-inference → `do`):
+Use Task tool to spawn fresh executors for each task. The executor loads `fno:test-audit` in authoring mode beside `fno:tdd`. Every new or changed test's four gate answers must appear in the task result. Prefer extending the owning test or a table-driven case, and require a named reason before adding a test file. Before dispatch, resolve the per-task executor with the three-tier chain (task → plan → surface inference → `do`):
 
 ```bash
 # Resolve task.executor with documented precedence:
@@ -525,6 +523,8 @@ Before reporting completion:
 2. Pass plan path and STATE.md
 3. Wait for verification result
 4. Only report "done" if verification PASSES
+
+Each task's verification runs only the tests covering the files it changed (`fno doctor test <test files>`), never the whole suite locally. CI runs every suite on every PR. When a whole-suite local run is truly needed, start it as a background task: it queues on `test:suite` and the turn never blocks.
 
 If verification FAILS, report issues and do not claim done.
 

@@ -1978,6 +1978,21 @@ impl CodexThreadActor {
             .await
             .map_err(|_| "codex thread actor is gone".to_string())
     }
+
+    /// A handle whose actor task is already dead: the shape a daemon
+    /// restart leaves behind in `ctx.codex_threads`. Test-only.
+    #[cfg(test)]
+    pub(crate) fn with_dead_actor() -> Self {
+        let (tx, rx) = mpsc::channel(THREAD_CHANNEL_CAP);
+        drop(rx);
+        Self {
+            tx,
+            pid: None,
+            shared: Arc::new(ActorShared {
+                turn_id: std::sync::Mutex::new(None),
+            }),
+        }
+    }
 }
 
 /// Sequential frame pump from the daemon connection's read half into the

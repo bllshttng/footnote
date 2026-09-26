@@ -2264,6 +2264,39 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     })
 }
 
+/// One migration pass over claude rows whose `short_id` is a byte-copy of
+/// the session uuid (the register path once wrote it that way): the
+/// transport key is the uuid's own leading 8-hex segment, and a full uuid
+/// refuses `claude attach`. Rewrites ONLY `short_id` - name, aliases and
+/// crown fields are untouched - under the registry lock, skips the write
+/// entirely when nothing matches, and never touches a short id that is an
+/// independent transport key (not a copy of the row's own session id).
+pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
+    let mut healed = 0usize;
+    update_registry(path, |registry| {
+        for entry in registry.entries.iter_mut() {
+            if entry.harness.as_deref() != Some("claude")
+                || entry.mux.is_some()
+                || entry.short_id.len() <= 8
+            {
+                continue;
+            }
+            let Some(session) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            if entry.short_id != session {
+                continue;
+            }
+            let lead = session.split('-').next().unwrap_or(session);
+            if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+                entry.short_id = lead.to_ascii_lowercase();
+                healed += 1;
+            }
+        }
+    })?;
+    Ok(healed)
+}
+
 /// Read-modify-write the registry under an exclusive lock, publishing the
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never
@@ -2389,7 +2422,8 @@ pub fn rename_agent(
 ) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes"
+                .to_string(),
         );
     }
     if let Some(node) = node {
@@ -2496,7 +2530,7 @@ pub fn rename_agent(
 }
 
 /// The label grammar `rename_agent` enforces (1..=64 chars from
-/// `[A-Za-z0-9_-]`). The ONE grammar predicate in this crate: the daemon's
+/// `[A-Za-z0-9_'-]`). The ONE grammar predicate in this crate: the daemon's
 /// `valid_agent_name` delegates here, so the spawn-time name rule and the
 /// rename-time rule cannot drift. (fno's proto.rs carries its own copy for the
 /// pre-subprocess notice; the crates do not link, only shell.)
@@ -2505,7 +2539,8 @@ pub fn is_valid_registry_label(name: &str) -> bool {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .enumerate()
+            .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (i > 0 && c == '\''))
 }
 
 /// The `agent.rename` RPC handler, beside the transaction it serves (the
@@ -2539,7 +2574,7 @@ pub(crate) fn rename_response(
         return Response::err(
             req.id,
             ErrorCode::InvalidParams,
-            "registry name must be 1-64 letters, numbers, underscores, or hyphens",
+            "registry name must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
         );
     }
     match rename_agent(registry_path, token, new_name, None) {

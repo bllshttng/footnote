@@ -23,6 +23,11 @@ mod sweep_both_tests;
 #[path = "client/tests/portal_pick_tests.rs"]
 mod portal_pick_tests;
 
+// The attach-placement picker family (p, cursor-vs-here commits) and the
+// picker arrow-twin guarantees live in their own module too.
+#[path = "client/tests/placement_picker_tests.rs"]
+mod placement_picker_tests;
+
 // The status-glyph family joined the nav family. The rename-overlay family
 // (tab, squad, agent targets) lives in its own module too.
 #[path = "client/tests/glyph_tests.rs"]
@@ -915,8 +920,8 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
         sel_cell.bg,
-        Color::Indexed(7),
-        "the selector row is the palette-following hover band"
+        Color::Indexed(0),
+        "the selector row is the palette-following cursor band"
     );
     assert_ne!(
         sel_cell.bg, LATTICE_ACCENT,
@@ -3194,7 +3199,7 @@ fn cycle_section_tri_state_filters_then_collapses_then_restores() {
     let mut view = view_with_dead_interleaved();
     assert_eq!(
         agent_names(&view),
-        vec!["live-a", "dead-a", "live-b", "dead-b"],
+        ["live-a", "live-b", "dead-a", "dead-b"], // active sort: live first, exited last
         "expanded shows every row"
     );
 
@@ -4107,13 +4112,18 @@ fn client_compose_hint_paints_over_bottom_row() {
 
 #[test]
 fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
-    // The default selection is the first binding; row_events[selected] must
-    // be exactly the Event a direct chord of that key would produce (Locked
-    // 3 parity, at the modal boundary).
+    // The default selection is the first selectable row. The global
+    // (no prefix) section's rows are display-only (Enter on them BELs), so
+    // the first EXECUTABLE row is the first Global binding, and
+    // row_events[selected] must be exactly the Event a direct chord of that
+    // key would produce (Locked 3 parity, at the modal boundary).
     let m = build_keys_modal();
     let (ri, _) = m.popup.selected().expect("a selectable row");
-    let ev = m.row_events[ri].clone().expect("first row is executable");
-    // The first section is Global; its first binding is `w` -> OpenSelector.
+    let ev = m.row_events[ri..]
+        .iter()
+        .find_map(|e| e.clone())
+        .expect("a first executable row");
+    // That first executable row is Global's `w` -> OpenSelector.
     assert_eq!(ev, crate::keys::resolve_chord(b'w'));
 }
 
@@ -6581,8 +6591,9 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
     // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections; a short window scrolls them).
-    view.term = (64, 100);
+    // ride below the binding sections): the global section spent five rows
+    // and the V chord one more, so the pin moved from 64.
+    view.term = (73, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
@@ -7902,9 +7913,9 @@ async fn update_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.aux = Some(build_update_modal(None));
     let r = v.aux.as_ref().unwrap().popup.render(v.term);
-    let footer = overlay_footer_cell(&OverlayLayout {
-        origin: r.origin,
-        framed: chrome::Framed {
+    let footer = overlay_footer_cell(&OverlayLayout::from_parts(
+        r.origin,
+        chrome::Framed {
             lines: r
                 .lines
                 .iter()
@@ -7916,7 +7927,7 @@ async fn update_modal_footer_esc_close_click_closes() {
                 .collect(),
             width: r.width,
         },
-    });
+    ));
     let mut buf: Vec<u8> = Vec::new();
     aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
         .await
@@ -8373,7 +8384,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
-    assert_eq!(sel_cell.bg, Color::Indexed(7), "hover band bg");
+    assert_eq!(sel_cell.bg, Color::Indexed(0), "hover band bg");
 }
 
 #[test]
@@ -8789,7 +8800,7 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     // actionable, not inert); the band's own pair replaces BOLD.
     view.hover_row = Some(footer);
     let hovered = at(&view);
-    assert_eq!(hovered.bg, Color::Indexed(7));
+    assert_eq!(hovered.bg, Color::Indexed(0));
     assert_eq!(hovered.flags & cell_flags::INVERSE, 0);
 }
 
@@ -9288,6 +9299,7 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
     // something this layer has no mapping for, so it is dropped rather than
     // silently acted on as an unmodified press.
     let mut esc = Vec::new();
+    assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;2D"), b"");
     assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5B"), Vec::<u8>::new());
 
     // Still split-safe: a parameterised sequence broken across reads leaks
@@ -10708,65 +10720,6 @@ async fn selector_enter_reaches_bg_agent_thread_pane() {
     }
 }
 
-#[tokio::test]
-async fn selector_p_opens_attach_placement_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    let picker = v.attach_place.as_ref().expect("placement picker opens");
-    assert_eq!(picker.id, "c19cd2c3");
-    assert_eq!(picker.target(), Some(1));
-    assert_eq!(picker.squads, vec![1, 2]);
-    // The footer must let each axis name its OWN keys, and must say which
-    // key acts on the `›` marker. The old footer listed the split
-    // directions as if they were list navigation, which was the mislabel
-    // half of the reported defect. This footer collapses it to two lines
-    // and spells the split row `shift+HJKL` so the shift relationship to
-    // lowercase hjkl reads in words, not just in case.
-    let overlay = v.attach_place_lines(picker).join("\n");
-    for label in [
-        "hjkl/arrows move",
-        "1-9 jump",
-        // enter/t send byte-identical new-tab messages; space/. send
-        // byte-identical here messages. Each pair is one footer entry.
-        "enter/t new tab in ›",
-        "shift+HJKL split",
-        "space/. here",
-        "cancel",
-    ] {
-        assert!(overlay.contains(label), "missing {label}: {overlay}");
-    }
-    assert!(buf.is_empty());
-    assert_eq!(v.selector, None);
-}
-
-#[tokio::test]
-async fn attach_placement_selects_target_and_direction() {
-    // The digit jumps the cursor; UPPERCASE commits with a split direction.
-    // Lowercase `h` here would now only move the cursor (see
-    // attach_placement_arrows_move_the_cursor_without_attaching).
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"2H", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(2),
-                split: Some(Dir::Left),
-                ..Default::default()
-            },
-        })
-    );
-    assert!(v.attach_place.is_none());
-}
-
 /// Replace a view's layout with `n` real workspaces (ids 1..=n), so a picker
 /// opened over it has to cope with more destinations than there are digits.
 /// 14 is the operator's real number, and the number at which five used to
@@ -10966,240 +10919,6 @@ async fn move_picker_out_of_range_digit_bels_and_keeps_the_picker() {
         "and leaves the picker open to try again"
     );
     assert_eq!(v.move_pick.as_ref().unwrap().cursor, 0, "cursor unmoved");
-}
-
-#[tokio::test]
-async fn attach_placement_keys_do_not_depend_on_cursor_history() {
-    // The hard constraint behind superseding x-fbb1: a key must mean the
-    // same thing whether or not the cursor has moved. The tempting cheap
-    // fix was "Enter means here on the starting row, and commits the cursor
-    // once moved", which is a hidden mode - the exact class this node
-    // closes. Enter on an UNMOVED cursor must still commit that cursor,
-    // never silently fall back to the route.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let start = v.attach_place.as_ref().unwrap().target().unwrap();
-    let mut buf = Vec::new();
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-            assert_eq!(
-                placement.target,
-                PaneTarget::SquadId(start),
-                "Enter commits the cursor even when it has never moved"
-            );
-            assert!(!placement.here, "and is not secretly the route");
-        }
-        other => panic!("expected AttachAgent, got {other:?}"),
-    }
-
-    // And the cursor's ROUTE to a row does not change what commits: digit
-    // and arrows landing on the same index must produce the same command.
-    let by_digit = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"4\r", &mut buf).await.unwrap();
-        buf
-    };
-    let by_arrows = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj\r", &mut buf).await.unwrap();
-        buf
-    };
-    assert_eq!(
-        by_digit, by_arrows,
-        "how the cursor got there cannot matter"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
-    // A digit past the end of the list is a BEL, not a selection, and the
-    // notice says the row is not there rather than claiming the workspace is
-    // "no longer available" - it never was. The cursor stays put and the
-    // picker stays open, so the operator can just press the right key next.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "an out-of-range digit sends nothing");
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_drops_the_rest_of_the_batch() {
-    // The BEL alone is not enough. Terminal reads arrive in batches, so the
-    // keys typed AFTER a bad digit are already in the same buffer - and they
-    // were composed believing row 9 existed. `L` would commit a right split
-    // into whatever the cursor happened to be on, a placement the operator
-    // never chose, with only a beep between intent and commit. So the bad
-    // digit abandons the whole read: nothing is sent, the cursor is untouched
-    // and the picker stays open on screen the operator can now actually read.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
-    assert!(
-        buf.is_empty(),
-        "the trailing commit key must not reach the socket"
-    );
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and the cursor never moved");
-    assert!(
-        v.notice.is_some(),
-        "the operator is told why nothing happened"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_arrows_move_the_cursor_without_attaching() {
-    // AC3-FR, the exact reported defect: `j` (and therefore Down, which
-    // fold_selector_keys rewrites to `j`) used to return
-    // Some(Some(Dir::Down)) and attach IMMEDIATELY. Scanning the list with
-    // the arrow keys finalized a placement the operator never chose. This is
-    // the test that had to fail before the fix.
-    for key in [b"j".as_slice(), b"\x1b[B".as_slice()] {
-        let mut v = unified_rows_view();
-        v.selector = Some(8); // bg-claude
-        let mut buf = Vec::new();
-        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        assert_eq!(v.attach_place.as_ref().unwrap().cursor, 0);
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "key {key:?} must send no AttachAgent");
-        let picker = v.attach_place.as_ref().expect("picker stays open");
-        assert_eq!(picker.cursor, 1, "key {key:?} moves the cursor");
-        assert_eq!(picker.target(), Some(2));
-    }
-    // ...and back up, clamped at the top rather than wrapping.
-    let mut v = unified_rows_view();
-    v.selector = Some(8);
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"kk", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert_eq!(
-        v.attach_place.as_ref().unwrap().cursor,
-        0,
-        "clamped, no wrap"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_new_tab_and_cancel_are_distinct() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // `t` is Enter's named alias: both open a new tab in the
-    // cursor-marked workspace. Space and `.` are the separate "here" pair.
-    attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(1),
-                split: None,
-                ..Default::default()
-            },
-        })
-    );
-
-    v.selector = Some(8); // bg-claude
-    let mut cancelled = Vec::new();
-    selector_keys(&mut v, b"p", &mut cancelled).await.unwrap();
-    attach_place_keys(&mut v, b"q", &mut cancelled)
-        .await
-        .unwrap();
-    assert!(cancelled.is_empty());
-    assert!(v.attach_place.is_none());
-}
-
-#[tokio::test]
-async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
-    // SUPERSEDES x-fbb1's Enter-is-here ruling, which was correct while the
-    // picker had no cursor to contradict it. Adding a cursor removed its
-    // premise: the overlay drew a marker on one workspace and Enter
-    // attached to another, which is this node's own defect one layer up.
-    //
-    // This re-splits Enter and Space, which had been merged into one
-    // "new tab in ›" commit: Enter (and its alias `t`) always commits the
-    // cursor; Space (and its alias `.`) always attaches HERE. No key's
-    // meaning depends on cursor history either way.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let mut buf = Vec::new();
-    // Drive the cursor somewhere the digits cannot reach, which is the
-    // case the cursor exists for and the case the old Enter broke.
-    attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(10),
-                split: None,
-                ..Default::default()
-            },
-        }),
-        "Enter must attach to the marked workspace, not here"
-    );
-    assert!(v.attach_place.is_none());
-
-    // Space and `.` both ignore the cursor BY DESIGN rather than by
-    // accident - including after the cursor has moved, so their meaning
-    // is history-independent too.
-    for key in [b" ".as_slice(), b".".as_slice()] {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-                assert_eq!(placement.target, PaneTarget::CurrentRoute);
-                assert!(placement.here, "key {key:?} is route-anchored");
-            }
-            other => panic!("expected AttachAgent, got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn attach_placement_refuses_stale_target_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // Park the cursor on squad 2, then delete it out from under the open
-    // picker: the cursor guarantees an in-range index, never a live squad.
-    v.attach_place.as_mut().unwrap().cursor = 1;
-    v.layout.squads.retain(|s| s.id != 2);
-    attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert!(v.notice.is_some());
-    assert!(v.attach_place.is_none());
 }
 
 #[tokio::test]
@@ -13332,9 +13051,9 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 }
 
 #[test]
-fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
+fn crown_malformed_scope_orders_by_level_and_paints_no_bracket_badge() {
     // A partial crown (level set, scope None) must never panic: it orders at
-    // its altitude and its badge scope degrades to `?`.
+    // its altitude and paints no bracket tag - the registry label is the name.
     let mut v = view_with_agents(vec![
         crowned_row("dir", 2, Some(1), None),
         crowned_row("leaf", 3, None, None),
@@ -13344,8 +13063,8 @@ fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
     let text = frame_text(&v.compose());
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
-        dir_line.contains("[L1 ?]"),
-        "malformed scope badges ?: {dir_line:?}"
+        !dir_line.contains("[L1 ?]"),
+        "no bracket badge on a crowned row: {dir_line:?}"
     );
 }
 
@@ -13456,7 +13175,7 @@ fn foreign_cwd_agent_gets_dim_inert_subline() {
         0,
         "never an INVERSE bar"
     );
-    assert_eq!(hovered.bg, Color::Indexed(7), "the hover band is explicit");
+    assert_eq!(hovered.bg, Color::Indexed(0), "the hover band is explicit");
 }
 
 // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and

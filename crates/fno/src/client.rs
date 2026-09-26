@@ -56,7 +56,7 @@ use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
 use crate::lane_colors_panel::LaneColorsUi;
-use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
+use crate::popup::{Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
     AnswerablePrompt, BlockDir, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
@@ -71,6 +71,13 @@ use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
 use crate::vt::ShellActivity;
+use overlay_paint::{
+    draw_body_overlay, draw_lines_overlay, draw_overlay_layout, draw_popup_overlay,
+    layout_lines_overlay, OverlayAnchor, OverlayLayout,
+};
+// Re-exported for the test module's glob; the layout fns are the only callers.
+#[allow(unused_imports)]
+pub(crate) use overlay_paint::family_b_origin;
 use sideline::sideline_column_rects;
 
 mod row_stamp;
@@ -1077,8 +1084,7 @@ struct View {
     backlog: Vec<crate::proto::BacklogCard>,
     /// The experimental backlog board overlay, when open (one at a time).
     backlog_board: Option<backlog_board::BoardView>,
-    /// The board's docked-sideline side (persisted in the view store).
-    board_dock: view_store::BoardDock,
+    sideline_view: crate::view_store::SidelineView,
     /// The board's full-screen toggle (persisted in the view store).
     board_full: bool,
     /// The persisted experimental toggle for the backlog board view.
@@ -1687,6 +1693,10 @@ enum MenuAction {
     /// overlay on `RenameTarget::Agent`. Built only for a non-external,
     /// unambiguous agent row.
     RenameAgent,
+    /// Open the portal PICKER for this row - the same numbered picker
+    /// sideline `P` opens (open portals plus a new-portal row), so a
+    /// right-click offers a portal choice where it offers placement.
+    PortalPicker,
 }
 
 impl MenuAction {
@@ -1720,6 +1730,7 @@ impl MenuAction {
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
             MenuAction::ClosePortal => Some("close-portal"),
+            MenuAction::PortalPicker => Some("open-in-portal"),
             _ => None,
         }
     }
@@ -1957,8 +1968,10 @@ pub(crate) enum AuxAction {
 }
 
 mod backlog_board;
+mod backlog_style;
 mod config_set;
 mod node_detail;
+mod overlay_paint;
 mod settings_modal;
 mod update_menu;
 
@@ -1975,9 +1988,11 @@ mod input_folds;
 mod mail_input;
 mod overlay_keys;
 
+mod bottom_row;
+
 use input_folds::{
-    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys, ModalKey, NavKey,
-    SearchKey,
+    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys,
+    fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
 use mail_input::peek_input_keys;
@@ -2151,7 +2166,7 @@ impl View {
             theme: Theme::default_theme(),
             backlog: Vec::new(),
             backlog_board: None,
-            board_dock: view_store::load_board_dock(),
+            sideline_view: crate::view_store::load_sideline_view(),
             board_full: view_store::load_board_full(),
             experimental_backlog: view_store::load_experimental_backlog_view(),
             settings_tab: SettingsTab::General,
@@ -3385,12 +3400,7 @@ impl View {
                 .max(1),
             self.term
                 .1
-                .saturating_sub(
-                    self.panel_w()
-                        + self.board_left_w()
-                        + self.board_right_w()
-                        + self.feed_panel_w(),
-                )
+                .saturating_sub(self.panel_w() + self.feed_panel_w())
                 .max(1),
         )
     }
@@ -5458,7 +5468,7 @@ impl View {
         if !self.sideline_full {
             // Content area: dividers first (uncovered cells), panes blitted over.
             let origin_r = TAB_BAR_ROWS as usize;
-            let origin_c = panel_w + self.board_left_w() as usize;
+            let origin_c = panel_w as usize;
             let mut covered = vec![false; rows * cols];
             // cells owned by the focused pane, so the divider pass can accent
             // the seams that bound it (a standing "you are here" outline).
@@ -5991,33 +6001,6 @@ impl View {
         }
     }
 
-    /// The bottom chrome line (US4). While a prefix chord is pending past
-    /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
-    /// held - even with the status row toggled off, discoverability does not
-    /// die with the toggle; tmux's message-line behavior). Otherwise it is
-    /// the status row (AC4-UI): session name, focused pane cwd, the focused
-    /// pane's scroll offset (the canonical `[+N]` home; the per-pane inline
-    /// indicator stays so a scrolled UNFOCUSED pane is still observable),
-    /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
-    /// The bottom terminal row is chrome (search line / which-key hint / status
-    /// row, painted last by `draw_bottom_row`) rather than content or a sideline
-    /// row drawn underneath. Below minimum geometry both auto-hide (AC4-ERR) and
-    /// the row is content (`content_dims` handed the server the full height, a
-    /// pane tiled into it, so blanking would erase it). The single truth shared
-    /// by the renderer and `chrome_hit` so a click matches what's painted
-    /// (codex P2).
-    fn bottom_row_is_chrome(&self) -> bool {
-        self.term.0 >= MIN_ROWS_FOR_STATUS
-            && (self.confirm.is_some()
-                || self.create.is_some()
-                || self.rename.is_some()
-                || self.move_to.is_some()
-                || self.recruit.is_some()
-                || self.search.is_some()
-                || self.hint
-                || self.status_on)
-    }
-
     /// A centered, inverse-video name-entry modal for the create / rename /
     /// recruit inputs. Those used to paint the bottom-left chrome row, where they
     /// sat outside the operator's field of view and read as "nothing happened";
@@ -6085,169 +6068,6 @@ impl View {
         }
         let layout = self.name_modal_layout(label, name, hint);
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
-    }
-
-    fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
-        if !self.bottom_row_is_chrome() {
-            return;
-        }
-        // A card-dispatch confirm is modal - it owns the row above everything
-        // else while the operator decides.
-        if let Some(c) = &self.confirm {
-            self.draw_confirm_line(cells, rows, cols, c);
-            return;
-        }
-        // The new-workspace name input is a centered modal; the operator
-        // is mid-entry, so it sits above search/hint/status.
-        if let Some(name) = &self.create {
-            self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
-            return;
-        }
-        // The rename input (tab; widened to squads): the noun tracks
-        // the target so the operator sees what they are renaming, and the hint
-        // spells out the blank-clears semantics.
-        if let Some((target, name)) = &self.rename {
-            let noun = match target {
-                RenameTarget::Tab(_) => "tab",
-                RenameTarget::Squad(_) => "workspace",
-                RenameTarget::Agent(_) => "row",
-            };
-            let hint = match target {
-                RenameTarget::Agent(_) => Some("a-z 0-9 - _ (1-64 chars)"),
-                _ => Some("empty resets to auto"),
-            };
-            self.draw_name_modal(cells, rows, cols, &format!("rename {noun}"), name, hint);
-            return;
-        }
-        // The move-to prompt: the typed number IS the body; the hint
-        // names the grammar so a `4` never reads as "move 4 left".
-        if let Some((_, buf)) = &self.move_to {
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                "move tab to position",
-                buf,
-                Some("1-based; Enter moves"),
-            );
-            return;
-        }
-        // The recruit workspace-name input: the hint names how many
-        // marked agents will join (create-if-absent).
-        if let Some(name) = &self.recruit {
-            let n = self.marks.len();
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                &format!("recruit {n} into"),
-                name,
-                Some("create-if-absent"),
-            );
-            return;
-        }
-        // Search line takes the bottom row when active (precedence: search >
-        // which-key hint > status row). It OVERLAYS whatever held the row - no
-        // reserved row, so opening search never triggered a Resize/reflow.
-        if let Some(sv) = &self.search {
-            self.draw_search_line(cells, rows, cols, sv);
-            return;
-        }
-        let r = rows - 1;
-        // We own the row: blank it first so the divider-fill pass in `compose`
-        // (which treats this uncovered row as content and paints '─' glyphs)
-        // cannot bleed through the gaps between the segments below.
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
-        let put = |cells: &mut [Cell], c: usize, ch: char, flags: u8| {
-            if c < cols {
-                cells[r * cols + c] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags,
-                };
-            }
-        };
-        if self.hint {
-            let text = crate::keys::prefix_hint();
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                put(cells, i, ch, 0);
-            }
-            return;
-        }
-        let mut c = 0usize;
-        for ch in format!(" {} ", self.session).chars() {
-            put(cells, c, ch, cell_flags::BOLD);
-            c += 1;
-        }
-        // Active squad's name, only when there is more than one squad to be
-        // ambiguous about - the always-visible answer to "which
-        // squad?" when the sideline is toggled off or auto-hidden. BOLD: it
-        // is identity, like the session cell, not context like the cwd.
-        if self.layout.squads.len() > 1 {
-            if let Some(s) = self
-                .layout
-                .squads
-                .iter()
-                .find(|s| s.id == self.layout.active_squad)
-            {
-                for ch in format!("│ {} ", s.name).chars() {
-                    put(cells, c, ch, cell_flags::BOLD);
-                    c += 1;
-                }
-            }
-        }
-        let cwd = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .map(|s| abbrev_home(&s.canonical_cwd))
-            .unwrap_or_default();
-        for ch in format!("│ {cwd} ").chars() {
-            put(cells, c, ch, cell_flags::DIM);
-            c += 1;
-        }
-        // Provenance cell for the focused pane: config-free `⚑ <node>`,
-        // shown only when the focused pane was node-driven. Absent for an ad-hoc
-        // pane, so a plain shell reads clean.
-        if let Some(node) = &self.layout.focus_node {
-            for ch in format!("⚑ {node} ").chars() {
-                put(cells, c, ch, cell_flags::BOLD);
-                c += 1;
-            }
-        }
-        if let Some(f) = self.frames.get(&self.layout.focus) {
-            if f.scroll_offset != 0 {
-                for ch in format!("[+{}] ", f.scroll_offset).chars() {
-                    put(cells, c, ch, cell_flags::INVERSE);
-                    c += 1;
-                }
-            }
-        }
-        // The whole-machine meter, when toggled on: the latest one-line
-        // reading, or an explicit "sensor unavailable" until a sample lands.
-        // A dark sensor is named - the row never shows a zero or a blank as
-        // if it were a reading.
-        if self.resource_meter_on {
-            let text = self
-                .resource_meter_text
-                .clone()
-                .unwrap_or_else(|| "meter: sensor unavailable".into());
-            for ch in format!("│ {text} ").chars() {
-                put(cells, c, ch, cell_flags::DIM);
-                c += 1;
-            }
-        }
-        let help = "? keys · glyphs ";
-        let start = cols.saturating_sub(help.chars().count());
-        if start > c {
-            for (i, ch) in help.chars().enumerate() {
-                put(cells, start + i, ch, cell_flags::DIM);
-            }
-        }
     }
 
     /// Paint the confirm prompt over the bottom row (dispatch;
@@ -6744,6 +6564,7 @@ impl View {
         match self.density {
             Density::Regular => {
                 let (rows, depths) = self.tree_rows_with_depths();
+                let (rows, depths) = self.sort_agent_runs(rows, depths);
                 self.card_rows(rows, depths)
             }
             Density::Slim => {
@@ -6764,14 +6585,19 @@ impl View {
         }
     }
 
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
+    /// Sorts agent runs the way the extended table orders them: each
+    /// contiguous run of agent rows between non-agent rows orders by the
+    /// active column (kings compared against each other, workers ordered
+    /// inside their own lineage level), so the card view and the table read
+    /// in the sorted order and the painted age is the value sorted on.
+    fn sort_agent_runs<'a>(
+        &self,
+        rows: Vec<DisplayRow<'a>>,
+        depths: Vec<usize>,
+    ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
-        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
 
@@ -6800,15 +6626,22 @@ impl View {
             }
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+        out.into_iter().unzip()
+    }
 
-        let has_agent = out
-            .iter()
-            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
-        out.insert(0, (DisplayRow::TableHead, 0));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
+        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
+        rows.insert(0, DisplayRow::TableHead);
+        depths.insert(0, 0);
         if !has_agent {
-            out.insert(1, (DisplayRow::TableEmpty, 0));
+            rows.insert(1, DisplayRow::TableEmpty);
+            depths.insert(1, 0);
         }
-        let (rows, depths) = out.into_iter().unzip();
         self.card_rows(rows, depths)
     }
 
@@ -7229,110 +7062,6 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
-}
-
-#[allow(clippy::type_complexity)]
-fn append_sorted_agent_group<'a>(
-    out: &mut Vec<(DisplayRow<'a>, usize)>,
-    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-    sort: AgentSort,
-    needs: &HashMap<String, NeedKind>,
-    now_secs: u64,
-) {
-    let mut subtrees: Vec<(
-        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-        &'a AgentRow,
-    )> = Vec::new();
-    for item in group.drain(..) {
-        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
-        if depth == 0 || subtrees.is_empty() {
-            let root = item.1;
-            subtrees.push((vec![item], root));
-        } else {
-            subtrees.last_mut().unwrap().0.push(item);
-        }
-    }
-    subtrees.sort_by(|(_, a), (_, b)| {
-        compare_agent_rows(
-            a,
-            b,
-            sort,
-            needs.get(a.name.as_str()).copied(),
-            needs.get(b.name.as_str()).copied(),
-            now_secs,
-        )
-    });
-    for (items, _) in subtrees {
-        for (rows, _) in items {
-            out.extend(rows);
-        }
-    }
-}
-
-fn compare_agent_rows(
-    a: &AgentRow,
-    b: &AgentRow,
-    sort: AgentSort,
-    need_a: Option<NeedKind>,
-    need_b: Option<NeedKind>,
-    now_secs: u64,
-) -> Ordering {
-    let order = match sort.column {
-        AgentSortColumn::Status => {
-            let a_key = attention_key(a, need_a);
-            let b_key = attention_key(b, need_b);
-            let a_state = if a.exited {
-                u8::MAX
-            } else {
-                pane_state(a.badge, a.seen, a.pane_activity) as u8
-            };
-            let b_state = if b.exited {
-                u8::MAX
-            } else {
-                pane_state(b.badge, b.seen, b.pane_activity) as u8
-            };
-            apply_direction(
-                a_state
-                    .cmp(&b_state)
-                    .then_with(|| a_key.0.cmp(&b_key.0))
-                    .then_with(|| a_key.1.cmp(&b_key.1))
-                    .then_with(|| a_key.2.cmp(&b_key.2)),
-                sort.direction,
-            )
-        }
-        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
-        AgentSortColumn::LastMessage => cmp_optional(
-            a.tail.as_deref().filter(|value| !value.is_empty()),
-            b.tail.as_deref().filter(|value| !value.is_empty()),
-            sort.direction,
-        ),
-        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
-        AgentSortColumn::Age => {
-            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
-        }
-    };
-    order
-}
-
-fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
-    }
-}
-
-fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
-    match direction {
-        SortDirection::Ascending => order,
-        SortDirection::Descending => order.reverse(),
-    }
-}
-
-fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
-    a.last_activity_age_s
-        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
 /// (US3) The project basename a section is keyed by (the squad's
@@ -8142,202 +7871,6 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
         }
     }
     p.to_string()
-}
-
-#[derive(Debug, Clone, Copy)]
-enum OverlayAnchor {
-    Center,
-    At { row: usize, col: usize },
-}
-
-/// One family-B overlay layout. Drawing and mouse hit-testing consume this same
-/// framed block and origin, so a close chip cannot drift away from the glyph it
-/// paints.
-#[derive(Debug, Clone)]
-struct OverlayLayout {
-    origin: (usize, usize),
-    framed: chrome::Framed,
-}
-
-impl OverlayLayout {
-    fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
-        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
-    }
-}
-
-fn family_b_origin(
-    anchor: OverlayAnchor,
-    block_w: usize,
-    block_h: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-) -> (usize, usize) {
-    let (base_r, base_c) = content_origin;
-    let (content_rows, content_cols) = content_dims;
-    let max_r = base_r + content_rows.saturating_sub(block_h);
-    let max_c = base_c + content_cols.saturating_sub(block_w);
-    match anchor {
-        OverlayAnchor::Center => (
-            base_r + content_rows.saturating_sub(block_h) / 2,
-            base_c + content_cols.saturating_sub(block_w) / 2,
-        ),
-        OverlayAnchor::At { row, col } => {
-            let origin_r = if row.saturating_add(block_h) <= base_r + content_rows {
-                row.max(base_r).min(max_r)
-            } else {
-                row.saturating_sub(block_h).max(base_r).min(max_r)
-            };
-            (origin_r, col.max(base_c).min(max_c))
-        }
-    }
-}
-
-/// Lay out family-B overlay lines in the content viewport. The body window,
-/// frame, origin, and hit spans are calculated once for both drawing and input.
-#[allow(clippy::too_many_arguments)]
-fn layout_lines_overlay<S: AsRef<str>>(
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    follow: Option<usize>,
-    anchor: OverlayAnchor,
-) -> OverlayLayout {
-    let (content_rows, content_cols) = content_dims;
-    // Body width: the widest line (across the whole body, windowed-out rows
-    // included), capped to the viewport minus the side borders.
-    let body_w = lines
-        .iter()
-        .map(|l| l.as_ref().chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
-    // Reserve the chrome overhead and window the body to the rows that remain.
-    // Before chrome the body had the whole viewport; the frame borrows `overhead`
-    // rows for its border/footer, so without windowing a body that filled the
-    // viewport loses its tail off-screen while those rows stay selectable. Top-
-    // pin matches the pre-chrome posture (centered when it fits, clipped at the
-    // top when it does not); the scrollbar marks the cut.
-    let overhead = chrome.rows_overhead();
-    let body_budget = content_rows.saturating_sub(overhead);
-    let total = lines.len();
-    let (start, take, scroll) = if total > body_budget {
-        // Covers body_budget == 0 (a viewport shorter than the chrome
-        // overhead): windows to zero body rows instead of painting the whole
-        // body plus its border past the content viewport.
-        //
-        // `follow` is the body index that MUST stay visible - a cursor. Without
-        // it the window is top-pinned, which is right for a static body and
-        // wrong for one the operator drives: the tenth row of a fourteen-row
-        // picker on a short terminal would be selectable and invisible, which is
-        // the same "you cannot reach it" defect as truncating the list. The
-        // window scrolls by the minimum needed to contain the cursor, so it only
-        // moves at the edges. `pos` then reports where the window really is,
-        // making the scrollbar thumb truthful rather than always parked at 0.
-        let start = match follow.filter(|_| body_budget > 0) {
-            Some(f) => f.saturating_sub(body_budget - 1).min(total - body_budget),
-            None => 0,
-        };
-        (
-            start,
-            body_budget,
-            Some(chrome::Scroll {
-                pos: start,
-                total,
-                visible: body_budget,
-            }),
-        )
-    } else {
-        (0, total, None)
-    };
-    let body: Vec<chrome::BodyLine> = lines[start..start + take]
-        .iter()
-        .map(|l| chrome::BodyLine::plain(l.as_ref()))
-        .collect();
-    let framed = chrome::frame(&body, chrome, body_w, scroll);
-    let box_h = framed.lines.len().min(content_rows);
-    let box_w = framed.width.min(content_cols);
-    let origin = family_b_origin(anchor, box_w, box_h, content_origin, content_dims);
-    OverlayLayout { origin, framed }
-}
-
-fn draw_overlay_layout(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    layout: &OverlayLayout,
-    theme: &Theme,
-) {
-    let (origin_r, origin_c) = layout.origin;
-    // A framed block stamps a SUB-RANGE of each row, so a double-width
-    // glyph in the pane content underneath can straddle either edge, leaving one
-    // half painted and the row corrupted. The name modal carried this guard when
-    // it hand-painted its own block; every family-B overlay needs it for the same
-    // reason, so it lives here, once, rather than travelling with one caller.
-    for i in 0..layout.framed.lines.len() {
-        let r = origin_r + i;
-        if r >= rows {
-            break;
-        }
-        // `framed.width`, not `box_w`: `blit` paints the FULL framed width, and
-        // `box_w` is that width clamped to the viewport. When the chrome's own
-        // minimum (a long title) pushes the frame past the viewport the two
-        // differ, and clamping here would leave the real right edge unchecked -
-        // stranding a spacer on exactly the overflow this guard exists for.
-        blank_straddling_pair(
-            cells,
-            cols,
-            r,
-            origin_c,
-            (origin_c + layout.framed.width).min(cols),
-        );
-    }
-    chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
-}
-
-/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's child picker).
-fn draw_popup_overlay(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    popup: &popup::Popup,
-    term: (u16, u16),
-    theme: &Theme,
-) {
-    popup::draw(cells, rows, cols, &popup.render(term), theme);
-}
-
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (placement; policy).
-#[allow(clippy::too_many_arguments)]
-fn draw_lines_overlay<S: AsRef<str>>(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
-    content_origin: (usize, usize),
-    content_dims: (usize, usize),
-    chrome: &chrome::Chrome,
-    lines: &[S],
-    theme: &Theme,
-    follow: Option<usize>,
-) {
-    let layout = layout_lines_overlay(
-        content_origin,
-        content_dims,
-        chrome,
-        lines,
-        follow,
-        OverlayAnchor::Center,
-    );
-    draw_overlay_layout(cells, rows, cols, &layout, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -11376,6 +10909,12 @@ async fn dispatch_event(
             // decides, and the off case notices instead of opening.
             backlog_board::open_pref_gated(view);
         }
+        Event::CycleSidelineView => {
+            // The sideline's view cycle: agents <-> backlog. The backlog
+            // leg rides the experimental pref and opens the board (the
+            // board IS the view); the agents leg closes it.
+            backlog_board::cycle_sideline_view(view);
+        }
         Event::OpenSettings => {
             execute_aux_action(view, AuxAction::OpenSettings, sock_w).await?;
         }
@@ -12078,6 +11617,14 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("close portal send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::PortalPicker => {
+            // One decision path with sideline `P`: the picker itself refuses
+            // what it cannot show (not attachable, no open portals to keep).
+            match view.portal_pick_decision(Some(&a)) {
+                PortalPickDecision::Open(id) => view.open_portal_pick(id),
+                PortalPickDecision::Refuse(text) => view.set_notice(text),
+            }
+        }
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
                 // Recomputed at execute (a workspace added or removed between
@@ -14793,3 +14340,8 @@ mod glyph_legend;
 
 #[path = "client/sideline.rs"]
 mod sideline;
+
+#[path = "client/agent_sort.rs"]
+mod agent_sort;
+
+use agent_sort::append_sorted_agent_group;

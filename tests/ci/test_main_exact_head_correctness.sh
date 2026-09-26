@@ -106,6 +106,25 @@ for name in ("audit",):
 check(rust_jobs.get("fmt", {}).get("if") == "github.event_name == 'pull_request'",
       "rust-ci pinned formatting is explicitly PR-only")
 
+cli = load(".github/workflows/cli-ci.yml")
+cli_events = event_map(cli)
+cli_push = cli_events.get("push") or {}
+check(cli_push.get("branches") == ["main"] and cli_push.get("paths"),
+      "cli-ci remains scoped to relevant main pushes")
+check(bool(cli_events.get("schedule")),
+      "cli-ci schedules a full run even when main is quiet")
+cli_jobs = cli["jobs"]
+for name in ("smoke-pytest", "smoke-rest"):
+    job_if = str(cli_jobs.get(name, {}).get("if", ""))
+    check("needs.pr-affected.outputs.python_full" in job_if
+          and "!cancelled()" in job_if,
+          f"cli-ci {name} is eligible when the non-PR selector says full")
+for name in ("test-agents", "test-agents-integration", "test-mux"):
+    job_if = str(cli_jobs.get(name, {}).get("if", ""))
+    check("needs.pr-affected.outputs.cargo" in job_if
+          and "!cancelled()" in job_if,
+          f"cli-ci {name} is eligible when the non-PR selector says full")
+
 publish = load(".github/workflows/crates-publish.yml")
 publish_jobs = publish["jobs"]
 check(publish_jobs.get("dry-run", {}).get("if") == "github.event_name == 'pull_request'",

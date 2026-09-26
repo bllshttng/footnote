@@ -27,19 +27,57 @@ use crate::AgentStatus;
 pub(crate) struct BgRoster {
     roster: Option<crate::claude_roster::ClaudeRoster>,
     readable: bool,
+    /// `claude agents --json --all` across every account root: the job
+    /// state a claude row's served word reads.
+    listing: crate::claude_roster::ClaudeAgentsSnapshot,
 }
 
 impl BgRoster {
     pub(crate) fn load() -> Self {
+        let listing = crate::claude_roster::read_all_agents_union();
         match crate::claude_roster::ClaudeRoster::load_default() {
             Ok(roster) => Self {
                 roster: Some(roster),
                 readable: true,
+                listing,
             },
             Err(_) => Self {
                 roster: None,
                 readable: false,
+                listing,
             },
+        }
+    }
+
+    /// Serve a claude background row the state `claude agents --json --all`
+    /// lists for its job: a running job reads alive; a done, stopped,
+    /// failed or unlisted job reads dead. So a row after a reboot reads
+    /// Stop, never the unmeasured `?`. A spawning row, and every row when
+    /// the listing is unread or partial, keep the sweep's own word.
+    pub(crate) fn serve_listing(&self, entries: &[RegistryEntry], changes: &mut [ReconcileChange]) {
+        if !self.listing.is_known() || !self.listing.warning_text().is_empty() {
+            return;
+        }
+        for change in changes.iter_mut() {
+            let Some(e) = entries.iter().find(|e| e.name == change.name) else {
+                continue;
+            };
+            if e.harness_name() != "claude"
+                || !e.is_one_shot_ask()
+                || e.status == AgentStatus::Spawning
+            {
+                continue;
+            }
+            let job: String = match e.harness_session_id.as_deref() {
+                Some(sid) if sid.len() >= 8 => sid.chars().take(8).collect(),
+                _ => e.short_id.clone(),
+            };
+            let running = self
+                .listing
+                .find(&job)
+                .and_then(|row| row.state.as_deref())
+                .is_some_and(|state| !crate::claude_roster::is_terminal_roster_state(state));
+            change.new_liveness = Some(if running { "alive" } else { "dead" });
         }
     }
 
@@ -1131,6 +1169,7 @@ mod tests {
         let witness = BgRoster {
             roster: Some(roster),
             readable: true,
+            listing: crate::claude_roster::ClaudeAgentsSnapshot::unknown("not read"),
         };
         let mut e = state::RegistryEntry::default();
         e.name = "king".into();
@@ -1308,5 +1347,57 @@ mod tests {
         assert_eq!(crowns[0].holder, "king");
         assert_eq!(crowns[0].scope, "zed");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_claude_row_serves_the_state_the_claude_listing_reports() {
+        // After a reboot every row reads unmeasured. The listing decides:
+        // a running job reads alive, a stopped or unlisted job reads dead.
+        use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
+        let row = |name: &str, sid: &str| {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.harness = Some("claude".into());
+            e.harness_session_id = Some(sid.into());
+            // A full uuid in short_id (a register-path row) still keys by
+            // the session id's first eight.
+            e.short_id = sid.into();
+            e.status = AgentStatus::Orphaned;
+            e
+        };
+        let entries = vec![
+            row("quill", "99473043-0000-0000-0000-000000000000"),
+            row("warden", "49a80492-0000-0000-0000-000000000000"),
+            row("gone", "0badf00d-0000-0000-0000-000000000000"),
+        ];
+        let change = |name: &str| ReconcileChange {
+            name: name.into(),
+            new_status: None,
+            new_liveness: Some("unmeasured"),
+            pid_proven: false,
+            crown_revive: false,
+        };
+        let mut changes = vec![change("quill"), change("warden"), change("gone")];
+        let witness = BgRoster {
+            roster: None,
+            readable: false,
+            listing: ClaudeAgentsSnapshot::known(vec![
+                ClaudeAgentRow::new("99473043", Some("working")),
+                ClaudeAgentRow::new("49a80492", Some("stopped")),
+            ]),
+        };
+        witness.serve_listing(&entries, &mut changes);
+        let words: Vec<_> = changes.iter().map(|c| c.new_liveness).collect();
+        assert_eq!(words, vec![Some("alive"), Some("dead"), Some("dead")]);
+
+        // An unread listing leaves the sweep's own word standing.
+        let mut changes = vec![change("quill")];
+        let blind = BgRoster {
+            roster: None,
+            readable: false,
+            listing: ClaudeAgentsSnapshot::unknown("claude not on PATH"),
+        };
+        blind.serve_listing(&entries, &mut changes);
+        assert_eq!(changes[0].new_liveness, Some("unmeasured"));
     }
 }

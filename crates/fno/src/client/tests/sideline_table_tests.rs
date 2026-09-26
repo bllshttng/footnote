@@ -38,6 +38,38 @@ fn list_layout_paints_the_same_cells_as_an_untouched_view() {
     assert_eq!(fa.cells, fb.cells, "list mode is byte-identical");
 }
 
+#[test]
+fn crown_and_worker_rows_rely_on_their_registry_labels_without_bracket_tags() {
+    let mut view = wide_view(vec![
+        {
+            let mut row = agent_row("folio", 4, Some(AgentBadge::Working), false);
+            row.crown_level = Some(1);
+            row.crown_scope = Some("fno".into());
+            row.crown_name = Some("Folio".into());
+            row
+        },
+        {
+            let mut row = agent_row("worker-a", 5, Some(AgentBadge::Working), false);
+            row.crown_name = Some("Folio".into());
+            row
+        },
+    ]);
+    set_density(&mut view, Density::Extended);
+
+    let frame = view.compose();
+    let rendered: String = frame.cells.iter().map(|cell| cell.c).collect();
+    crate::frame_html::write_shot(
+        &frame,
+        "crown-worker-labels",
+        "Crown and worker rows use their registry labels",
+    );
+
+    assert!(rendered.contains("folio"), "{rendered:?}");
+    assert!(rendered.contains("worker-a"), "{rendered:?}");
+    assert!(!rendered.contains("Folio"), "{rendered:?}");
+    assert!(!rendered.contains("[L1 fno]"), "{rendered:?}");
+}
+
 // ---------------------------------------------------------------------------
 // the table rewrite: the sideline is a Table (status word, name, message, PR, age)
 // ---------------------------------------------------------------------------
@@ -145,8 +177,8 @@ fn sideline_selection_scrolls_into_view_and_paints_the_band() {
     let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
     assert_eq!(
         frame.cells[sel_row * cols].bg,
-        Color::Indexed(7),
-        "the selected row scrolls into view and paints the hover band"
+        Color::Indexed(0),
+        "the selected row scrolls into view and paints the cursor band"
     );
     assert_ne!(
         frame.cells[0].c, '\u{25be}',
@@ -311,8 +343,8 @@ fn list_hover_band_is_one_color_across_every_column_gap() {
     let cells = &frame.cells[row * cols..row * cols + text_w];
     assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
     for cell in cells {
-        assert_eq!(cell.bg, Color::Indexed(7), "one band bg, gaps included");
-        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "one band text color");
+        assert_eq!(cell.bg, Color::Indexed(0), "one band bg, gaps included");
+        assert_eq!(cell.fg, Color::Indexed(3), "one band accent text");
         assert_eq!(cell.flags, 0, "no INVERSE inside the band");
     }
 }

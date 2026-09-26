@@ -9,6 +9,7 @@
 //! discipline: a cheap store-version probe answers `Unchanged` when nothing
 //! moved; a moved (or failed) probe runs the full `backlog_model::gather`.
 
+use super::backlog_style::{self, BLine, BRole, BSeg};
 use super::*;
 use crate::backlog_model;
 use crate::backlog_model::{unavailable_features, Board, Lane};
@@ -28,15 +29,6 @@ pub(crate) fn open_pref_gated(view: &mut super::View) {
 }
 
 /// Right-pad one cell segment so side-by-side columns align.
-fn pad(seg: &str, w: usize) -> String {
-    let n = seg.chars().count();
-    if n >= w {
-        trunc(seg, w)
-    } else {
-        format!("{seg}{}", " ".repeat(w - n))
-    }
-}
-
 /// How often the kick re-probes the store version while the board is open.
 const PROBE_EVERY: Duration = Duration::from_secs(2);
 /// The stacked layout below this width, side-by-side cells at or above it.
@@ -156,6 +148,12 @@ pub(crate) struct BoardView {
     pub(crate) pick: Option<PickState>,
     /// `f` facet picker: cursor per level (facet, then value).
     pub(crate) facet: Option<FacetPick>,
+    /// The column layout (which columns, order, focus width), D4.
+    pub(crate) layout: BoardLayout,
+    /// The `c` column picker's open state.
+    pub(crate) colpick: Option<ColPick>,
+    /// The `?` keys overlay, when open.
+    pub(crate) keys_overlay: bool,
     /// Pending escape bytes in board-key mode (split-arrow safety).
     board_esc: Vec<u8>,
     /// The drill-down overlay, when open (wave 4).
@@ -163,6 +161,12 @@ pub(crate) struct BoardView {
     pub(crate) detail_esc: Vec<u8>,
     /// The write verb queued for the run loop (one at a time).
     pub(crate) write_action: Option<WriteAction>,
+}
+
+/// The `c` column picker's state.
+pub(crate) struct ColPick {
+    /// The cursor.
+    pub(crate) sel: usize,
 }
 
 /// Which one-line input the board's input line is.
@@ -174,6 +178,8 @@ pub(crate) enum BoardInputKind {
     Title,
     /// The `D` details-append text.
     Append,
+    /// The `N` note text.
+    Note,
 }
 
 /// The board's queued write verb.
@@ -248,6 +254,9 @@ impl BoardView {
             input_esc: Vec::new(),
             pick: None,
             facet: None,
+            layout: crate::view_store::load_board_layout(),
+            colpick: None,
+            keys_overlay: false,
             board_esc: Vec::new(),
             detail: None,
             detail_esc: Vec::new(),
@@ -255,6 +264,10 @@ impl BoardView {
         }
     }
 }
+
+/// The board's column layout type lives in the view store next to its
+/// persistence; the board reads it from there.
+pub(crate) use crate::view_store::BoardLayout;
 
 /// At most ONE fold in flight, armed by `want` or by the 2 s probe clock
 /// (the feed fold's discipline). Runs each run-loop turn beside
@@ -344,7 +357,13 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, msg: BoardMsg) {
 /// clamps to the painted (capped) cards.
 pub(crate) fn card_at(b: &BoardView) -> Option<&backlog_model::Card> {
     let board = b.body.as_ref()?;
-    let cell = board.lanes.get(b.lane)?.cells.get(b.col)?;
+    let name = b.layout.columns.get(b.col)?;
+    let cell = board
+        .lanes
+        .get(b.lane)?
+        .cells
+        .iter()
+        .find(|c| &c.column == name)?;
     let total = cell.cards.len();
     if total == 0 {
         return None;
@@ -370,10 +389,13 @@ fn focus_card(b: &mut BoardView, id: Option<&str>) {
         return;
     };
     for (li, lane) in board.lanes.iter().enumerate() {
-        for (ci, cell) in lane.cells.iter().enumerate() {
+        for (shown, name) in b.layout.columns.iter().enumerate() {
+            let Some(cell) = lane.cells.iter().find(|c| &c.column == name) else {
+                continue;
+            };
             for (ri, card) in cell.cards.iter().enumerate() {
                 if card.id == id {
-                    (b.lane, b.col, b.row) = (li, ci, ri);
+                    (b.lane, b.col, b.row) = (li, shown, ri);
                     return;
                 }
             }
@@ -400,15 +422,15 @@ fn first_card(b: &mut BoardView) {
 
 /// Render the overlay body: the lines and the cursor row for the painter's
 /// follow. `w` is the chrome's inner width; every line truncates to it.
-pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<String>, Option<usize>) {
-    let mut lines: Vec<String> = Vec::new();
+pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<BLine>, Option<usize>) {
+    let mut lines: Vec<BLine> = Vec::new();
     let mut follow: Option<usize> = None;
     let Some(board) = b.body.as_ref() else {
         if b.errors.is_empty() {
-            lines.push("reading board...".into());
+            lines.push(BLine::plain("reading board..."));
         } else {
             for e in &b.errors {
-                lines.push(format!("! {e}"));
+                lines.push(BLine::meta(format!("! {e}")));
             }
         }
         return (lines, None);
@@ -416,7 +438,7 @@ pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<String>, Option<usize>) {
     push_stats_line(b, &mut lines, board, w);
     push_query_line(b, &mut lines, board, w);
     for e in &b.errors {
-        lines.push(format!("! {e}"));
+        lines.push(BLine::meta(format!("! {e}")));
     }
     // A filter matching nothing says so over a zeroed board; it never
     // falls back to the unfiltered body (AC11 shape).
@@ -426,17 +448,18 @@ pub(crate) fn render(b: &BoardView, w: usize) -> (Vec<String>, Option<usize>) {
         .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
         .sum();
     if shown == 0 {
-        lines.push(match b.query.q.as_deref() {
+        let line = match b.query.q.as_deref() {
             Some(q) => format!("no cards match: {q}"),
             None => "no cards match".into(),
-        });
+        };
+        lines.push(BLine::meta(line));
     }
     push_lanes(b, &mut lines, &mut follow, board, w);
     (lines, follow)
 }
 
 /// The totals line: each column's open total, then the flow aggregate.
-fn push_stats_line(b: &BoardView, lines: &mut Vec<String>, board: &Board, w: usize) {
+fn push_stats_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usize) {
     let _ = (b, w);
     let mut line = String::new();
     for t in &board.stats.open {
@@ -449,7 +472,7 @@ fn push_stats_line(b: &BoardView, lines: &mut Vec<String>, board: &Board, w: usi
     line.push_str(&format!(" · Done {done}"));
     line.push_str(" │ ");
     line.push_str(&flow_line(&board.stats.flow));
-    lines.push(trunc(&line, w));
+    lines.push(BLine::meta(elide_words(&line, w)));
 }
 
 /// The uncapped Done total, summed from the lanes' own cells.
@@ -508,7 +531,7 @@ fn flow_line(flow: &Value) -> String {
 
 /// The query line: the active lanes/filters, the backend when it is not
 /// the graph, and every feature the backend cannot answer.
-fn push_query_line(b: &BoardView, lines: &mut Vec<String>, board: &Board, w: usize) {
+fn push_query_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usize) {
     let mut line = b.query.describe();
     if board.backend != "graph" {
         line.push_str(&format!(" · backend: {}", board.backend));
@@ -516,7 +539,7 @@ fn push_query_line(b: &BoardView, lines: &mut Vec<String>, board: &Board, w: usi
     for u in &board.unavailable {
         line.push_str(&format!(" · {}: {}", u.feature, u.reason));
     }
-    lines.push(trunc(&line, w));
+    lines.push(BLine::meta(elide_words(&line, w)));
 }
 
 /// Truncate one line to `w` chars (the painter wraps nothing).
@@ -524,12 +547,45 @@ pub(crate) fn trunc(s: &str, w: usize) -> String {
     s.chars().take(w).collect()
 }
 
+/// Truncate a summary to `w` chars, but cut after the last whole word that
+/// fits and mark the cut with an ellipsis: a summary truncated mid-word
+/// (`Nex`) reads as a broken word, not a cut.
+pub(crate) fn elide_words(s: &str, w: usize) -> String {
+    // Walk by display columns, not chars: a wide glyph is two cells and the
+    // ellipsis must stay inside `w` or the painter re-cuts the line and the
+    // marker is lost.
+    if s.chars().map(backlog_style::char_w).sum::<usize>() <= w {
+        return s.to_string();
+    }
+    let mut used = 0usize;
+    let mut cut_byte = s.len();
+    let mut last_space = 0usize;
+    for (i, ch) in s.char_indices() {
+        let cw = backlog_style::char_w(ch);
+        if used + cw > w.saturating_sub(1) {
+            cut_byte = i;
+            break;
+        }
+        used += cw;
+        cut_byte = i + ch.len_utf8();
+        if ch == ' ' {
+            last_space = cut_byte;
+        }
+    }
+    if last_space > 0 {
+        // Drop the space the word boundary sits on, ellipsis takes its slot.
+        format!("{}\u{2026}", &s[..last_space - 1])
+    } else {
+        format!("{}\u{2026}", &s[..cut_byte])
+    }
+}
+
 /// The lanes: an accordion - the cursor's lane expanded below its header,
 /// the rest collapsed to one header line each. With one lane (the model's
 /// `lanes: none`), no header, always expanded.
 fn push_lanes(
     b: &BoardView,
-    lines: &mut Vec<String>,
+    lines: &mut Vec<BLine>,
     follow: &mut Option<usize>,
     board: &Board,
     w: usize,
@@ -537,16 +593,28 @@ fn push_lanes(
     for (li, lane) in board.lanes.iter().enumerate() {
         let expanded = board.lanes.len() == 1 || li == b.lane;
         if board.lanes.len() > 1 {
-            let arrow = if expanded { "▾" } else { "▸" };
-            let mut header = format!("{arrow} {}  ", lane.title);
-            for (ci, cell) in lane.cells.iter().enumerate() {
-                let _ = ci;
-                header.push_str(&cell_total_line(cell));
-                if ci + 1 < lane.cells.len() {
-                    header.push_str(" · ");
-                }
+            let arrow = if expanded { "\u{25be}" } else { "\u{25b8}" };
+            let mut segs: Vec<BSeg> = vec![
+                BSeg {
+                    text: format!("{arrow} "),
+                    role: BRole::Body,
+                },
+                BSeg {
+                    text: lane.title.to_string(),
+                    role: BRole::Head,
+                },
+            ];
+            for name in b.layout.columns.iter() {
+                let Some(cell) = lane.cells.iter().find(|c| &c.column == name) else {
+                    continue;
+                };
+                segs.push(BSeg {
+                    text: format!("  {}", cell_total_line(cell)),
+                    role: BRole::Meta,
+                });
             }
-            lines.push(trunc(&header, w));
+            lines.push(BLine::of(&segs).trunc(w));
+            lines.push(BLine::meta(rule(w)));
         }
         if expanded {
             if w >= WIDE_CELLS_AT {
@@ -557,6 +625,12 @@ fn push_lanes(
         }
     }
 }
+/// The thin rule under a heading (D4/D5).
+pub(crate) fn rule(w: usize) -> String {
+    std::iter::repeat(String::from("\u{2500}"))
+        .take(w)
+        .collect::<String>()
+}
 
 /// `Now 3` per cell, `Done 20/900` when the cap hides cards.
 fn cell_total_line(cell: &backlog_model::Cell) -> String {
@@ -566,211 +640,229 @@ fn cell_total_line(cell: &backlog_model::Cell) -> String {
         format!("{} {}", cell.column, cell.total)
     }
 }
-
-/// One card row: the cursor's `▸`, a claim/block glyph, the short id, and
-/// the title, truncated to the cell width.
-fn card_line(b: &BoardView, li: usize, ci: usize, ri: usize, w: usize) -> String {
-    let sel = li == b.lane && ci == b.col && ri == b.row;
+/// One card row: the cursor `>`, a claim/block glyph, the short id (the
+/// accent slot), and the title, truncated to the cell width.
+fn card_line(b: &BoardView, li: usize, col_name: &str, ri: usize, w: usize) -> BLine {
+    let sel = li == b.lane
+        && col_name
+            == b.layout
+                .columns
+                .get(b.col)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        && ri == b.row;
     let Some(card) = b
         .body
         .as_ref()
         .and_then(|bd| bd.lanes.get(li))
-        .and_then(|l| l.cells.get(ci))
+        .and_then(|l| l.cells.iter().find(|c| c.column == col_name))
         .and_then(|c| c.cards.get(ri))
     else {
-        return String::new();
+        return BLine::plain(String::new());
     };
     let glyph = if card.claimed {
-        "●"
+        "\u{25cf}"
     } else if card.blocked {
-        "⊘"
+        "\u{2298}"
     } else {
         " "
     };
-    let sel_mark = if sel { "▸" } else { " " };
-    trunc(&format!("{sel_mark}{glyph} {} {}", card.id, card.title), w)
+    let sel_mark = if sel { "\u{25b8}" } else { " " };
+    let mut line = BLine::of(&[
+        BSeg {
+            text: format!("{sel_mark}{glyph} "),
+            role: BRole::Body,
+        },
+        BSeg {
+            text: card.id.clone(),
+            role: BRole::Label,
+        },
+        BSeg {
+            text: format!(" {}", card.title),
+            role: BRole::Body,
+        },
+    ]);
+    line.band = sel;
+    line.trunc(w)
 }
 
-/// The expanded lane at `w >= WIDE_CELLS_AT`: the six cells side by side.
+/// The expanded lane at `w >= WIDE_CELLS_AT`: the shown cells side by
+/// side. The cursor's column takes the focus column share of the width
+/// (D4); every other shown column shrinks to an id plus a short title.
 fn push_wide_cells(
     b: &BoardView,
-    lines: &mut Vec<String>,
+    lines: &mut Vec<BLine>,
     follow: &mut Option<usize>,
     lane: &Lane,
     li: usize,
     w: usize,
 ) {
-    let cell_w = (w.saturating_sub(4) / 6).max(12);
-    let mut cols: Vec<Vec<String>> = Vec::new();
-    for (ci, cell) in lane.cells.iter().enumerate() {
-        let mut col: Vec<String> = vec![format!("{} {}", cell.column, cell.total)];
-        for (ri, _) in cell.cards.iter().enumerate() {
-            col.push(card_line(b, li, ci, ri, cell_w));
+    let shown: Vec<(usize, &backlog_model::Cell)> = b
+        .layout
+        .columns
+        .iter()
+        .filter_map(|name| {
+            lane.cells
+                .iter()
+                .enumerate()
+                .find(|(_, c)| &c.column == name)
+                .map(|(ci, c)| (ci, c))
+        })
+        .collect();
+    let gaps = shown.len().saturating_sub(1);
+    let others = shown.len().saturating_sub(1);
+    let mut focus_w = (w * b.layout.focus_pct as usize / 100).max(12);
+    // Every other column keeps a 12-column floor INSIDE `w`: when the focus
+    // share leaves less than that, the focus column shrinks first - a column
+    // squeezed past the row's width paints cut off while the cursor can
+    // still rest on it.
+    let other_w = if others > 0 {
+        let share = w.saturating_sub(focus_w + gaps) / others;
+        if share < 12 {
+            focus_w = w.saturating_sub(12 * others + gaps).max(12);
+            w.saturating_sub(focus_w + gaps) / others
+        } else {
+            share
+        }
+    } else {
+        0
+    };
+    let mut cols: Vec<(usize, usize, Vec<BLine>)> = Vec::new();
+    for (si, (ci, cell)) in shown.iter().enumerate() {
+        let cw = if si == b.col { focus_w } else { other_w };
+        let mut col: Vec<BLine> = vec![BLine::of(&[
+            BSeg {
+                text: cell.column.to_string(),
+                role: BRole::Head,
+            },
+            BSeg {
+                text: format!(" {}", cell_total(cell)),
+                role: BRole::Meta,
+            },
+        ])];
+        for ri in 0..cell.cards.len() {
+            col.push(card_line(b, li, &cell.column, ri, cw));
         }
         if cell.total > cell.cards.len() {
-            col.push(format!("+{} more", cell.total - cell.cards.len()));
+            col.push(BLine::meta(format!(
+                "+{} more",
+                cell.total - cell.cards.len()
+            )));
         }
-        cols.push(col);
+        cols.push((*ci, cw, col));
     }
-    interleave(lines, follow, b, cols, lane, li, w, cell_w);
+    interleave(lines, follow, b, cols, lane, li, w);
 }
 
 /// Row-merge the cells' line columns, tracking the cursor row for follow.
 fn interleave(
-    lines: &mut Vec<String>,
+    lines: &mut Vec<BLine>,
     follow: &mut Option<usize>,
     b: &BoardView,
-    cols: Vec<Vec<String>>,
+    cols: Vec<(usize, usize, Vec<BLine>)>,
     lane: &Lane,
     li: usize,
     w: usize,
-    cell_w: usize,
 ) {
-    let height = cols.iter().map(|c| c.len()).max().unwrap_or(0);
+    let height = cols.iter().map(|(_, _, c)| c.len()).max().unwrap_or(0);
     let start = lines.len();
     for row in 0..height {
-        let mut line = String::new();
-        for col in &cols {
-            let seg = col.get(row).cloned().unwrap_or_default();
-            line.push_str(&pad(&seg, cell_w));
-            line.push(' ');
+        let mut line = BLine::plain(String::new());
+        for (_ci, cw, col) in cols.iter() {
+            let seg = col.get(row).cloned().unwrap_or_else(|| BLine::plain(""));
+            line.push_line(seg.pad_to(*cw));
+            line.push_line(BLine::plain(" "));
         }
-        lines.push(trunc(&line, w));
+        lines.push(line.trunc(w));
     }
     // The cursor's card row sits at: header row (row 0) + the cursor's row.
-    if lane.cells.get(b.col).is_some_and(|c| !c.cards.is_empty()) {
-        let row = b.row.min(lane.cells[b.col].cards.len() - 1);
-        *follow = Some(start + 1 + row);
+    if let Some(cell) = cursor_cell(b, lane) {
+        if !cell.cards.is_empty() {
+            let row = b.row.min(cell.cards.len() - 1);
+            *follow = Some(start + 1 + row);
+        }
     }
     let _ = li;
 }
 
-/// The expanded lane below `WIDE_CELLS_AT`: the cells stacked, the old
-/// `build_kanban`'s shape - a `Now  12` header, card rows, `+N more`.
+/// The model cell under the shown cursor column, if the lane carries it.
+fn cursor_cell<'a>(b: &BoardView, lane: &'a Lane) -> Option<&'a backlog_model::Cell> {
+    let name = b.layout.columns.get(b.col)?;
+    lane.cells.iter().find(|c| &c.column == name)
+}
+
+/// The expanded lane below `WIDE_CELLS_AT`: the shown cells stacked, the
+/// old `build_kanban`'s shape - a `Now  12` header, card rows, `+N more`.
 fn push_stacked_cells(
     b: &BoardView,
-    lines: &mut Vec<String>,
+    lines: &mut Vec<BLine>,
     follow: &mut Option<usize>,
     lane: &backlog_model::Lane,
     li: usize,
     w: usize,
 ) {
-    for (ci, cell) in lane.cells.iter().enumerate() {
+    for si in 0..b.layout.columns.len() {
+        let Some(cell) = shown_cell_at(b, lane, si) else {
+            continue;
+        };
         let header_at = lines.len();
-        lines.push(trunc(&format!("{}  {}", cell.column, cell.total), w));
-        for (ri, _) in cell.cards.iter().enumerate() {
-            lines.push(card_line(b, li, ci, ri, w));
+        lines.push(BLine::of(&[
+            BSeg {
+                text: cell.column.to_string(),
+                role: BRole::Head,
+            },
+            BSeg {
+                text: format!("  {}", cell_total(cell)),
+                role: BRole::Meta,
+            },
+        ]));
+        for ri in 0..cell.cards.len() {
+            lines.push(card_line(b, li, &cell.column, ri, w));
         }
         if cell.total > cell.cards.len() {
-            lines.push(trunc(
-                &format!("+{} more", cell.total - cell.cards.len()),
-                w,
-            ));
+            lines.push(BLine::meta(format!(
+                "+{} more",
+                cell.total - cell.cards.len()
+            )));
         }
-        if ci == b.col && !cell.cards.is_empty() {
+        if si == b.col && !cell.cards.is_empty() {
             let row = b.row.min(cell.cards.len() - 1);
             *follow = Some(header_at + 1 + row);
         }
     }
 }
 
-/// The docked sideline column's width. Below `WIDE_CELLS_AT` of body
-/// width, the board's own render is the one-column list grouped by column
-/// with counts - the dock is that render pinned to a side column, not a
-/// second renderer.
-pub(crate) const BOARD_DOCK_W: u16 = 36;
+/// Just the count part of a header: `12`, or `20/900` when the cap hides
+/// cards. The column name itself is the bold head.
+fn cell_total(cell: &backlog_model::Cell) -> String {
+    if cell.total > cell.cards.len() {
+        format!("{}/{}", cell.cards.len(), cell.total)
+    } else {
+        format!("{}", cell.total)
+    }
+}
+
+/// The shown cell at shown index `si`, or None when the lane lacks it.
+fn shown_cell_at<'a>(
+    b: &BoardView,
+    lane: &'a backlog_model::Lane,
+    si: usize,
+) -> Option<&'a backlog_model::Cell> {
+    let name = b.layout.columns.get(si)?;
+    lane.cells.iter().find(|c| &c.column == name)
+}
 
 impl View {
-    /// Width the docked board consumes left of the content: `BOARD_DOCK_W`
-    /// clamped to what the terminal gives after the agent sideline and the
-    /// feed panel, 0 unless the board is open, docked left, and windowed.
-    pub(super) fn board_left_w(&self) -> u16 {
-        self.dock_w(crate::view_store::BoardDock::Left)
-    }
-
-    /// Width the docked board consumes right of the content (0 otherwise).
-    pub(super) fn board_right_w(&self) -> u16 {
-        self.dock_w(crate::view_store::BoardDock::Right)
-    }
-
-    fn dock_w(&self, side: crate::view_store::BoardDock) -> u16 {
-        if self.backlog_board.is_some() && !self.board_full && self.board_dock == side {
-            BOARD_DOCK_W.min(
-                self.term
-                    .1
-                    .saturating_sub(self.panel_w() + self.feed_panel_w()),
-            )
-        } else {
-            0
-        }
-    }
-
-    /// All chrome left of the content area: the agent sideline plus a
-    /// left-docked board. Every content-to-screen column mapping reads
-    /// this, or a left dock shifts every pane's keys and clicks one column
-    /// band sideways.
+    /// All chrome left of the content area: the agent sideline. The
+    /// backlog no longer docks beside the content - it lives IN the
+    /// sideline column as one of its views - so this is the panel width.
     pub(super) fn left_chrome_w(&self) -> u16 {
-        self.panel_w() + self.board_left_w()
+        self.panel_w()
     }
 
-    /// The docked column's `(origin, dims)` in outer-terminal `(row, col)`
-    /// cells, `None` when the board paints centered or full screen instead.
-    pub(super) fn backlog_dock_rect(&self) -> Option<((usize, usize), (usize, usize))> {
-        if self.backlog_board.is_none() || self.board_full {
-            return None;
-        }
-        let bw = match self.board_dock {
-            crate::view_store::BoardDock::Left => self.board_left_w(),
-            crate::view_store::BoardDock::Right => self.board_right_w(),
-            crate::view_store::BoardDock::Off => return None,
-        };
-        if bw == 0 {
-            return None;
-        }
-        let col = match self.board_dock {
-            crate::view_store::BoardDock::Left => self.panel_w() as usize,
-            // Flush against the feed panel's left edge when it is open,
-            // else the terminal's right edge.
-            _ => (self.term.1 as usize).saturating_sub(self.feed_panel_w() as usize + bw as usize),
-        };
-        let row = TAB_BAR_ROWS as usize;
-        let h = (self.term.0 as usize)
-            .saturating_sub(row + self.status_rows() as usize)
-            .max(1);
-        Some(((row, col), (h, bw as usize)))
-    }
-
-    /// Paint the docked column: the board's own render at the dock's
-    /// narrow width, framed and scrolled by the shared overlay machinery
-    /// and pinned to the dock rect. A drill-down or picker paints over it.
-    pub(super) fn draw_backlog_dock(&self, cells: &mut [Cell], rows: usize, cols: usize) {
-        let Some((origin, dims)) = self.backlog_dock_rect() else {
-            return;
-        };
-        let Some(b) = &self.backlog_board else {
-            return;
-        };
-        let text_w = dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-        let (lines, follow) = render(b, text_w);
-        let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
-            .footer("x side · F full · esc close");
-        let layout = layout_lines_overlay(
-            origin,
-            dims,
-            &chrome,
-            &lines,
-            follow,
-            OverlayAnchor::At {
-                row: origin.0,
-                col: origin.1,
-            },
-        );
-        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
-    }
-
-    /// The board's whole paint: the docked column first (a drill-down or
-    /// picker frames over it), then the drill-down, the pickers, or the
-    /// board itself - centered in the content viewport, or full screen.
+    /// The board's whole paint: the drill-down, the pickers, or the
+    /// full-screen board. Windowed, the backlog paints inside the sideline
+    /// column (the sideline's own draw path), so this paints nothing.
     /// The compose branch in `client.rs` is this one call.
     pub(super) fn draw_board(
         &self,
@@ -780,18 +872,25 @@ impl View {
         overlay_origin: (usize, usize),
         overlay_dims: (usize, usize),
     ) {
-        self.draw_backlog_dock(cells, rows, cols);
         let Some(b) = &self.backlog_board else {
             return;
         };
-        if b.detail.is_some() {
+        if b.keys_overlay {
+            // Checked before the drill-down: `?` opens this from the detail
+            // too, so it must paint over it, and its Esc must land here.
+            let m = board_keys_popup();
+            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
+        } else if b.detail.is_some() {
             let w = overlay_dims
                 .1
                 .saturating_sub(crate::chrome::Chrome::FRAME_COLS);
-            let (lines, follow) = node_detail::overlay_lines(b, w);
+            let (body, follow) = node_detail::overlay_lines(b, w);
+            let lines: Vec<chrome::BodyLine> =
+                body.iter().map(backlog_style::to_body_line).collect();
             let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
-                .footer("enter open · b plan · A king · d details · esc back");
-            draw_lines_overlay(
+                .footer("enter open - e/p/s/S edit - D append - N note - E $EDITOR - esc back")
+                .flat();
+            draw_body_overlay(
                 cells,
                 rows,
                 cols,
@@ -799,52 +898,46 @@ impl View {
                 overlay_dims,
                 &chrome,
                 &lines,
-                &self.theme,
                 follow,
+                follow,
+                &self.theme,
             );
         } else if let Some(m) = pick_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
         } else if let Some(m) = facet_popup(b) {
             draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
-        } else if self.backlog_dock_rect().is_some() {
-            // painted above by draw_backlog_dock
-        } else {
-            let (origin, dims) = if self.board_full {
-                ((0usize, 0usize), (rows, cols))
-            } else {
-                (overlay_origin, overlay_dims)
-            };
-            let w = dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
+        } else if let Some(m) = colpick_popup(b) {
+            draw_popup_overlay(cells, rows, cols, &m, self.term, &self.theme);
+        } else if self.board_full {
+            let w = cols.saturating_sub(crate::chrome::Chrome::FRAME_COLS);
             let (lines, follow) = render(b, w);
-            let footer = if self.board_full {
-                "hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · F window · esc close"
-            } else {
-                "hjkl move · [ ] lane · L lanes · / find · f filter · r re-read · enter detail · x dock · F full · esc close"
-            };
-            let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center).footer(footer);
-            draw_lines_overlay(
+            let body: Vec<chrome::BodyLine> =
+                lines.iter().map(backlog_style::to_body_line).collect();
+            let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
+                .footer("j/k move - enter detail - e/p/s/S/D/N/E edit - c cols - ? keys - F full")
+                .flat();
+            draw_body_overlay(
                 cells,
                 rows,
                 cols,
-                origin,
-                dims,
+                (0usize, 0usize),
+                (rows, cols),
                 &chrome,
-                &lines,
-                &self.theme,
+                &body,
                 follow,
+                follow,
+                &self.theme,
             );
         }
     }
 
     /// The sidebar menu's open action: a fresh board view at the next
-    /// generation (the stale fold of a previous open can never land).
+    /// generation (the stale fold of a previous open can never land), and
+    /// the sideline switched to the backlog view - the board IS that view
+    /// now, not a floating window.
     pub(crate) fn open(view: &mut View) {
-        let gen = view
-            .backlog_board
-            .as_ref()
-            .map(|b| b.gen.wrapping_add(1))
-            .unwrap_or(0);
-        view.backlog_board = Some(BoardView::new(gen));
+        backlog_board_open_fresh(view);
+        set_sideline_view(view, crate::view_store::SidelineView::Backlog);
     }
 
     /// The menu's enable/disable toggle for the whole experimental view.
@@ -859,20 +952,50 @@ impl View {
         };
         if !view.experimental_backlog {
             view.backlog_board = None;
+            set_sideline_view(view, crate::view_store::SidelineView::Agents);
         }
         view.set_notice(format!("experimental backlog view: {on}"));
         view.refresh_open_sideline_menu();
     }
 }
 
-/// `x`: cycle the dock off -> left -> right -> off, persisting the choice.
-/// The dock width enters `content_dims` the same turn, so the server
-/// shrinks the panes around the column while it is docked.
-fn cycle_dock(view: &mut View) {
-    let next = view.board_dock.next();
-    view.board_dock = next;
-    crate::view_store::save_board_dock(next);
-    view.set_notice(format!("board dock: {}", next.as_str()));
+/// `V`: agents <-> backlog. The backlog leg rides the experimental pref
+/// (the off case notices, like every other entry) and opens the board;
+/// the agents leg closes it and drops the full flag.
+pub(crate) fn cycle_sideline_view(view: &mut View) {
+    match view.sideline_view {
+        crate::view_store::SidelineView::Backlog => {
+            view.backlog_board = None;
+            view.board_full = false;
+            crate::view_store::save_board_full(false);
+            set_sideline_view(view, crate::view_store::SidelineView::Agents);
+        }
+        crate::view_store::SidelineView::Agents => {
+            if !view.experimental_backlog {
+                view.set_notice("experimental backlog view is off (sidebar menu)".into());
+                return;
+            }
+            backlog_board_open_fresh(view);
+            set_sideline_view(view, crate::view_store::SidelineView::Backlog);
+        }
+    }
+}
+
+/// A fresh board view at the next generation (the stale fold of a
+/// previous open can never land).
+fn backlog_board_open_fresh(view: &mut View) {
+    let gen = view
+        .backlog_board
+        .as_ref()
+        .map(|b| b.gen.wrapping_add(1))
+        .unwrap_or(0);
+    view.backlog_board = Some(BoardView::new(gen));
+}
+
+/// Point the sideline at `v`, persisting the choice.
+pub(crate) fn set_sideline_view(view: &mut View, v: crate::view_store::SidelineView) {
+    view.sideline_view = v;
+    crate::view_store::save_sideline_view(v);
 }
 
 /// `F`: full-screen the board - the docked column and the centered overlay
@@ -914,10 +1037,18 @@ pub(crate) async fn board_keys(
         facet_keys(view, bytes);
         return Ok(StdinFlow::Continue);
     }
+    if b.colpick.is_some() {
+        colpick_keys(view, bytes);
+        return Ok(StdinFlow::Continue);
+    }
     // A lone-Esc chunk closes at once (the old node-detail contract: the
     // modal fold would otherwise hold the byte pending a sequence).
     if bytes == [0x1b] && b.board_esc.is_empty() {
-        close_board(view);
+        if b.keys_overlay {
+            b.keys_overlay = false;
+        } else {
+            esc_or_close(view);
+        }
         return Ok(StdinFlow::Continue);
     }
     let mut esc = std::mem::take(&mut b.board_esc);
@@ -929,7 +1060,7 @@ pub(crate) async fn board_keys(
             break;
         }
         match tok {
-            ModalKey::Esc | ModalKey::Byte(b'q') => close_board(view),
+            ModalKey::Esc | ModalKey::Byte(b'q') => esc_or_close(view),
             ModalKey::Up | ModalKey::Byte(b'k') => move_row(view, false),
             ModalKey::Down | ModalKey::Byte(b'j') => move_row(view, true),
             ModalKey::Left | ModalKey::Byte(b'h') => move_col(view, false),
@@ -956,7 +1087,10 @@ pub(crate) async fn board_keys(
             ModalKey::Byte(b's') => edit_size(view)?,
             ModalKey::Byte(b'S') => edit_status(view)?,
             ModalKey::Byte(b'D') => append_details(view)?,
-            ModalKey::Byte(b'x') => cycle_dock(view),
+            ModalKey::Byte(b'N') => add_note(view)?,
+            ModalKey::Byte(b'E') => edit_description(view).await?,
+            ModalKey::Byte(b'c') => open_colpick(view),
+            ModalKey::Byte(b'?') => open_keys_overlay(view),
             ModalKey::Byte(b'F') => toggle_full(view),
             ModalKey::Byte(b'T') => rank_move(view, "top", None)?,
             ModalKey::Byte(b'K') => rank_move(view, "before", Some(true))?,
@@ -972,6 +1106,19 @@ pub(crate) async fn board_keys(
 /// overlay, not a panel: no Resize travels.
 fn close_board(view: &mut View) {
     view.backlog_board = None;
+    set_sideline_view(view, crate::view_store::SidelineView::Agents);
+}
+
+/// Full-screen first folds back to the sideline column; the second Esc
+/// closes the board and returns the sideline to the agents view.
+fn esc_or_close(view: &mut View) {
+    if view.board_full {
+        view.board_full = false;
+        crate::view_store::save_board_full(false);
+        view.set_notice("board: column".into());
+    } else {
+        close_board(view);
+    }
 }
 
 /// Move the card cursor within the cell (clamped to the painted cards).
@@ -983,7 +1130,10 @@ fn move_row(view: &mut View, down: bool) {
         .body
         .as_ref()
         .and_then(|bd| bd.lanes.get(b.lane))
-        .and_then(|l| l.cells.get(b.col))
+        .and_then(|l| {
+            let name = b.layout.columns.get(b.col)?;
+            l.cells.iter().find(|c| &c.column == name)
+        })
     else {
         return;
     };
@@ -1007,8 +1157,9 @@ fn move_col(view: &mut View, right: bool) {
     if b.body.is_none() {
         return;
     }
+    let shown = b.layout.columns.len().saturating_sub(1);
     b.col = if right {
-        (b.col + 1).min(5)
+        (b.col + 1).min(shown)
     } else {
         b.col.saturating_sub(1)
     };
@@ -1162,6 +1313,17 @@ fn input_commit(view: &mut View) {
                 return;
             };
             queue_write(b, WriteAction::Append { id, text });
+        }
+        BoardInputKind::Note => {
+            if text.is_empty() {
+                view.set_notice("note: nothing to add".into());
+                return;
+            }
+            let Some(id) = edit_target(b) else {
+                return;
+            };
+            let args: Vec<String> = vec!["backlog".into(), "note".into(), id, text];
+            queue_write(b, WriteAction::Args(args, None));
         }
     }
 }
@@ -1871,3 +2033,330 @@ pub(crate) fn open_detail(view: &mut View) {
 #[cfg(test)]
 #[path = "tests/backlog_board_tests.rs"]
 mod tests;
+
+/// `c`: the column picker (D4). Which columns show, their order, and the
+/// focus width - persisted through the view store on every change.
+fn open_colpick(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    if b.colpick.is_some() {
+        b.colpick = None;
+        return;
+    }
+    b.colpick = Some(ColPick { sel: b.col });
+}
+
+/// The `c` picker's rows: every model column in stored order, a mark for
+/// shown, and the focus-width line the +/- keys edit.
+fn colpick_popup(b: &BoardView) -> Option<Popup> {
+    let pick = b.colpick.as_ref()?;
+    let board = b.body.as_ref()?;
+    let mut rows: Vec<PopupRow> = vec![PopupRow::Header("columns".into()), PopupRow::Rule];
+    for (i, name) in b.layout.columns.iter().enumerate() {
+        let shown = board
+            .lanes
+            .first()
+            .map(|l| l.cells.iter().any(|c| &c.column == name))
+            .unwrap_or(false);
+        let mark = if shown { "*" } else { "o" };
+        rows.push(PopupRow::Entry {
+            glyph: mark.into(),
+            label: if i == b.col {
+                format!("{name}  (focus)")
+            } else {
+                name.clone()
+            },
+            hint: String::new(),
+            enabled: true,
+        });
+    }
+    for cell in board
+        .lanes
+        .first()
+        .map(|l| l.cells.as_slice())
+        .unwrap_or(&[])
+    {
+        if !b.layout.columns.iter().any(|n| n == &cell.column) {
+            rows.push(PopupRow::Entry {
+                glyph: "o".into(),
+                label: cell.column.to_string(),
+                hint: String::new(),
+                enabled: true,
+            });
+        }
+    }
+    let mut popup = Popup::new(rows, Anchor::Center)
+        .title("board columns")
+        .footer(format!(
+            "enter show/hide - h/l order - +/- focus {}% - esc close",
+            b.layout.focus_pct
+        ));
+    popup.sel = pick.sel;
+    Some(popup)
+}
+
+/// The `c` picker's keys. Enter toggles a column in/out of the layout,
+/// h/l reorders it, +/- moves the focus share, esc closes. Every accepted
+/// edit saves through the view store.
+fn colpick_keys(view: &mut View, bytes: &[u8]) {
+    let toks = {
+        let b = view.backlog_board.as_mut().expect("colpick open");
+        let mut esc = std::mem::take(&mut b.board_esc);
+        let toks = fold_modal_keys(&mut esc, bytes);
+        b.board_esc = esc;
+        toks
+    };
+    for tok in toks {
+        let Some(b) = view.backlog_board.as_mut() else {
+            break;
+        };
+        if b.colpick.is_none() {
+            break;
+        }
+        let n = all_column_names(b).len();
+        match tok {
+            ModalKey::Esc => b.colpick = None,
+            ModalKey::Up | ModalKey::Byte(b'k') => {
+                let pick = b.colpick.as_mut().expect("colpick open");
+                pick.sel = pick.sel.saturating_sub(1);
+            }
+            ModalKey::Down | ModalKey::Byte(b'j') => {
+                let pick = b.colpick.as_mut().expect("colpick open");
+                pick.sel = (pick.sel + 1).min(n.saturating_sub(1));
+            }
+            ModalKey::Enter => colpick_toggle(view),
+            ModalKey::Left | ModalKey::Byte(b'h') => colpick_move(view, false),
+            ModalKey::Right | ModalKey::Byte(b'l') => colpick_move(view, true),
+            ModalKey::Byte(b'+') | ModalKey::Byte(b'=') => colpick_width(view, 10),
+            ModalKey::Byte(b'-') => colpick_width(view, -10),
+            _ => {}
+        }
+    }
+}
+
+/// Every model column name (the picker lists all of them, shown or not).
+fn all_column_names(b: &BoardView) -> Vec<String> {
+    let mut names: Vec<String> = b.layout.columns.clone();
+    if let Some(board) = b.body.as_ref() {
+        for lane in &board.lanes {
+            for cell in &lane.cells {
+                if !names.iter().any(|n| n == &cell.column) {
+                    names.push(cell.column.to_string());
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        names = crate::backlog_view::KANBAN_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    names
+}
+
+/// Enter in the picker: show/hide the cursor column. Hiding the focus
+/// column moves the cursor to the next shown column.
+fn colpick_toggle(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    let sel = b.colpick.as_ref().map(|p| p.sel).unwrap_or(0);
+    let names = all_column_names(b);
+    let Some(name) = names.get(sel).cloned() else {
+        return;
+    };
+    if let Some(pos) = b.layout.columns.iter().position(|n| n == &name) {
+        if b.layout.columns.len() <= 1 {
+            view.set_notice("columns: at least one must show".into());
+            return;
+        }
+        b.layout.columns.remove(pos);
+        if b.col >= b.layout.columns.len() {
+            b.col = b.layout.columns.len().saturating_sub(1);
+        }
+    } else {
+        b.layout.columns.push(name);
+    }
+    crate::view_store::save_board_layout(&b.layout);
+    rederive(b);
+}
+
+/// h/l in the picker: move the cursor column one slot in the order.
+fn colpick_move(view: &mut View, right: bool) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    let sel = b.colpick.as_ref().map(|p| p.sel).unwrap_or(0);
+    let names = all_column_names(b);
+    let Some(name) = names.get(sel).cloned() else {
+        return;
+    };
+    let Some(pos) = b.layout.columns.iter().position(|n| n == &name) else {
+        return;
+    };
+    let target = if right {
+        pos + 1
+    } else {
+        pos.saturating_sub(1)
+    };
+    if target >= b.layout.columns.len() || target == pos {
+        return;
+    }
+    b.layout.columns.swap(pos, target);
+    if b.col == pos {
+        b.col = target;
+    } else if b.col == target {
+        b.col = pos;
+    }
+    crate::view_store::save_board_layout(&b.layout);
+}
+
+/// +/- in the picker: the focus share, clamped 25..=75.
+fn colpick_width(view: &mut View, delta: i16) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    let pct = (b.layout.focus_pct as i16 + delta).clamp(25, 75) as u16;
+    b.layout.focus_pct = pct;
+    crate::view_store::save_board_layout(&b.layout);
+}
+
+/// `?` while the board or the drill-down owns the keyboard: the board's
+/// own key table (the edit keys included, D6).
+fn open_keys_overlay(view: &mut View) {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return;
+    };
+    b.keys_overlay = !b.keys_overlay;
+}
+
+fn board_keys_popup() -> Popup {
+    let rows: Vec<PopupRow> = vec![
+        PopupRow::Header("read".into()),
+        PopupRow::Rule,
+        pick_row("hjkl move - [ ] lane - L lanes"),
+        pick_row("/ find - f filter - r re-read"),
+        pick_row("enter node detail - F full screen"),
+        PopupRow::Header("edit".into()),
+        PopupRow::Rule,
+        pick_row("e title - p priority - s size - S status"),
+        pick_row("D append details - N note - E edit description in $EDITOR"),
+        PopupRow::Header("layout".into()),
+        PopupRow::Rule,
+        pick_row("c columns (show, order, focus width)"),
+        PopupRow::Header("write".into()),
+        PopupRow::Rule,
+        pick_row("b blueprint - t target - A ask the king"),
+        pick_row("T top rank - K before - J after"),
+    ];
+    Popup::new(rows, Anchor::Center)
+        .title("backlog keys")
+        .footer("esc close")
+}
+
+/// `N`: a note on the target node through `fno backlog note`.
+pub(crate) fn add_note(view: &mut View) -> Result<(), String> {
+    let Some(b) = view.backlog_board.as_mut() else {
+        return Ok(());
+    };
+    if let Some(reason) = gated(b, unavailable_features::FIELD_EDITS) {
+        view.set_notice(reason);
+        return Ok(());
+    }
+    if edit_target(b).is_some() {
+        b.input = Some((BoardInputKind::Note, String::new()));
+    }
+    Ok(())
+}
+
+/// `E`: the full description in $EDITOR. Suspends the mux around the child
+/// (cooked mode, the primary screen), reads the result back, and queues
+/// the write only when the text actually changed.
+pub(crate) async fn edit_description(view: &mut View) -> Result<(), String> {
+    let Some(id) = view.backlog_board.as_ref().and_then(|b| edit_target(b)) else {
+        return Ok(());
+    };
+    if let Some(reason) = gated(
+        view.backlog_board.as_ref().expect("board open"),
+        unavailable_features::FIELD_EDITS,
+    ) {
+        view.set_notice(reason);
+        return Ok(());
+    }
+    let graph = crate::backlog_view::graph_path();
+    let id_for_read = id.clone();
+    let text = tokio::task::spawn_blocking(move || {
+        crate::store_client::node(&graph, &id_for_read)
+            .ok()
+            .flatten()
+            .and_then(|n| {
+                n.get("details")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let text_before = text.clone();
+    let Some(edited) = tokio::task::spawn_blocking(move || run_editor(&text))
+        .await
+        .ok()
+        .flatten()
+    else {
+        view.set_notice("editor: cancelled".into());
+        return Ok(());
+    };
+    if edited.is_empty() || edited == text_before {
+        view.set_notice("description: unchanged, nothing written".into());
+        return Ok(());
+    }
+    let Some(b) = view.backlog_board.as_mut() else {
+        return Ok(());
+    };
+    let args: Vec<String> = vec![
+        "backlog".into(),
+        "update".into(),
+        id,
+        "--details-file".into(),
+        "-".into(),
+    ];
+    queue_write(b, WriteAction::Args(args, Some(edited)));
+    Ok(())
+}
+
+/// Suspend the mux, run $EDITOR on `text`, restore the mux, return the
+/// edited text. `None` when the editor failed or exited non-zero.
+fn run_editor(text: &str) -> Option<String> {
+    use crossterm::{cursor, execute, terminal};
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    let dir = std::env::temp_dir().join("fno-board-edit");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("details-{}.md", std::process::id()));
+    std::fs::write(&path, text).ok()?;
+    let _ = execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = terminal::disable_raw_mode();
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let status = match std::process::Command::new(&editor).arg(&path).status() {
+        Ok(status) => status,
+        // The terminal is already suspended: restore it on THIS path too,
+        // or the client keeps running cooked and unpainted.
+        Err(_) => {
+            let _ = terminal::enable_raw_mode();
+            let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+            return None;
+        }
+    };
+    let _ = terminal::enable_raw_mode();
+    let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+    let edited = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    let _ = out.flush();
+    match status.success() {
+        true => edited,
+        false => None,
+    }
+}

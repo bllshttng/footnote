@@ -305,6 +305,14 @@ pub enum ProducerEvidence {
     Observed,
 }
 
+/// One timed-out select read the heal lane may still retry: the project the
+/// row's detail named (`-` when none) and the attempt's ts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnmeasuredRetry {
+    pub project: String,
+    pub ts: String,
+}
+
 /// One rendered arm row for the readout.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArmStatus {
@@ -360,6 +368,11 @@ pub struct ArmStatus {
     /// `acted=0` while the newest stayed fresh: the arm ran and produced
     /// nothing. Set by [`mark_starved`].
     pub starved: bool,
+    /// Per-project select-unmeasured attempts still inside twice their
+    /// interval, folded from the journal. Only the `auto_continue` row
+    /// carries them: the heal lane retries each once, keyed per project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retries: Vec<UnmeasuredRetry>,
 }
 
 /// The journal list every arms read folds: the agents home journal plus the
@@ -402,8 +415,9 @@ fn journal_rows(journals: &[PathBuf], types: &[&str]) -> Vec<Value> {
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut newest: HashMap<String, NewestTick> = HashMap::new();
     let mut newest_ok: HashMap<String, NewestTick> = HashMap::new();
+    let mut retries: HashMap<String, NewestTick> = HashMap::new();
     for value in journal_rows(journals, ARM_ROW_TYPES) {
-        fold_arm_row(value, &mut newest, &mut newest_ok);
+        fold_arm_row(value, &mut newest, &mut newest_ok, &mut retries);
     }
 
     // The static spec facts ride the fold; the runtime arm value is filled
@@ -432,6 +446,30 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
         .collect();
     extra.sort_by(|a, b| a.arm.cmp(&b.arm));
     rows.extend(extra);
+
+    // Only the auto_continue row carries the retry candidates. Each attempt
+    // stays retryable for twice its interval, then ages out: a cleared
+    // signal store must not re-fire every old journal row.
+    if let Some(ac) = rows.iter_mut().find(|r| r.arm == "auto_continue") {
+        let interval = if ac.interval_s > 0 {
+            ac.interval_s
+        } else {
+            1800
+        };
+        let mut in_window: Vec<(u64, &String, &NewestTick)> = retries
+            .iter()
+            .filter(|(_, e)| e.ts_unix + 2 * interval >= now_unix)
+            .map(|(project, e)| (e.ts_unix, project, e))
+            .collect();
+        in_window.sort_by_key(|(ts, project, _)| (*ts, project.as_str()));
+        ac.retries = in_window
+            .into_iter()
+            .map(|(_, project, e)| UnmeasuredRetry {
+                project: project.clone(),
+                ts: e.ts.clone(),
+            })
+            .collect();
+    }
     rows
 }
 
@@ -448,6 +486,7 @@ fn fold_arm_row(
     value: Value,
     newest: &mut HashMap<String, NewestTick>,
     newest_ok: &mut HashMap<String, NewestTick>,
+    retries: &mut HashMap<String, NewestTick>,
 ) {
     // The healer's receipt type folds into the `heal` arm here too, so
     // both journal folds agree on what a heal receipt looks like.
@@ -484,12 +523,23 @@ fn fold_arm_row(
     if fresher_than(newest, arm, ts_unix) {
         newest.insert(arm.to_string(), row.clone());
     }
+    // A timed-out select read is a per-project retry candidate: keep the
+    // newest attempt per project, so a later project's healthy tick never
+    // masks an earlier project's timeout (read_arms windows the survivors).
+    let skip_reason = data.get("skip_reason").and_then(Value::as_str);
+    if arm == "auto_continue" && skip_reason == Some("select-unmeasured") {
+        let project = data
+            .get("detail")
+            .and_then(Value::as_str)
+            .and_then(crate::select_read::project_from_detail)
+            .unwrap_or("-");
+        if fresher_than(retries, project, ts_unix) {
+            retries.insert(project.to_string(), row.clone());
+        }
+    }
     // The newest run that did NOT fail anchors `failing_for_s`: how long
     // the arm has been failing, not merely how long since it last spoke.
-    let ok = !data
-        .get("skip_reason")
-        .and_then(Value::as_str)
-        .is_some_and(|r| FAILURE_SKIPS.contains(&r));
+    let ok = !skip_reason.is_some_and(|r| FAILURE_SKIPS.contains(&r));
     if ok && fresher_than(newest_ok, arm, ts_unix) {
         newest_ok.insert(arm.to_string(), row);
     }
@@ -663,6 +713,7 @@ fn arm_status(
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         };
     };
     let interval_s = tick
@@ -703,6 +754,7 @@ fn arm_status(
         arm_value: None,
         reader: None,
         starved: false,
+        retries: Vec::new(),
     }
 }
 
@@ -736,7 +788,11 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
-/// action failed, has not skipped - it has failed. `select-unmeasured` is a
+/// action failed, has not skipped - it has failed. `budget_spent` fails
+/// because the arm stopped before it covered every unit it enumerated (the
+/// king wake's `budget spent after k of N crowns`, the watchdog's skipped
+/// leg, a merge queue whose grant budget spent with nothing merged); its
+/// detail carries the count. `select-unmeasured` is a
 /// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
@@ -749,6 +805,7 @@ const FAILURE_SKIPS: &[&str] = &[
     "select-unmeasured",
     "spawn-failed",
     "env_broken",
+    "budget_spent",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -1461,6 +1518,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::select_read::Kind as SrKind;
 
     fn temp_dir() -> PathBuf {
         // A counter joins pid+nanos: same-process tests can read the same
@@ -2174,6 +2232,7 @@ mod tests {
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         };
         assert!(!needs_attention(&observed_fresh_ok));
         let mut failing = observed_fresh_ok.clone();
@@ -2230,6 +2289,7 @@ mod tests {
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         };
         let cause = stale_cause(&row, &DaemonFacts::Down, false, None).unwrap();
         assert_eq!(cause, "configured_off");
@@ -2345,6 +2405,64 @@ mod tests {
         let line = render_row(ab);
         assert!(line.contains(" ok"), "line: {line}");
         assert!(line.contains("skip=degraded"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn budget_spent_short_pass_reads_fail_with_its_count() {
+        // A king_wake pass that ran out of its slice before covering every
+        // crown it enumerated is a failure, not an ok skip: the detail
+        // carries the shortfall count (evaluated=0/5).
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        let mut short = tick_envelope(
+            "2026-09-04T11:58:00Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("budget_spent"),
+            900,
+        );
+        short["data"]["detail"] =
+            json!("crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "king_wake",
+                    SCHED_DAEMON,
+                    0,
+                    json!("no_trigger"),
+                    900,
+                ),
+                short.clone(),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal.clone()], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        assert!(needs_attention(kw));
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=budget_spent"), "line: {line}");
+        assert!(line.contains("evaluated=0/5"), "line: {line}");
+        assert!(line.contains("failing_for="), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
+
+        // No earlier non-failure row for the arm: still FAIL, and the line
+        // names the missing baseline instead of a failing_for count.
+        let bare = dir.join("bare.jsonl");
+        write_rows(&bare, &[short]);
+        let rows = read_arms(&[bare], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("no_ok_in_journal"), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2525,6 +2643,160 @@ mod tests {
             ac.line.contains("skip=select-unmeasured"),
             "line: {}",
             ac.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The unmeasured detail as the writer shapes it, so the fold tests
+    /// round-trip the real token format instead of a local lookalike.
+    fn ac_detail(project: &str) -> Value {
+        Value::String(crate::select_read::unmeasured_detail(
+            SrKind::Next,
+            &["--project".to_string(), project.to_string()],
+            120,
+            None,
+        ))
+    }
+
+    /// One auto_continue row with an explicit detail: tick_envelope pins
+    /// `detail: null`, and the per-project retry fold reads the detail.
+    fn ac_envelope(ts: &str, skip: Value, acted: u64, detail: Value) -> Value {
+        json!({
+            "ts": ts,
+            "type": EVENT_TYPE,
+            "source": "loop",
+            "data": {
+                "arm": "auto_continue",
+                "scheduler": "session",
+                "acted": acted,
+                "skip_reason": skip,
+                "detail": detail,
+                "interval_s": 1800,
+            }
+        })
+    }
+
+    /// The masked retry: a later project's healthy tick must not
+    /// erase an earlier project's timed-out select read. The per-project
+    /// fold keeps it as a retry candidate while the newest row reads clean.
+    #[test]
+    fn a_healthy_tick_does_not_mask_an_earlier_projects_unmeasured_attempt() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:58:20Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                tick_envelope(
+                    "2026-09-04T11:59:20Z",
+                    "auto_continue",
+                    "session",
+                    1,
+                    json!(null),
+                    1800,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:20Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.failing, "the newest tick is healthy: {}", ac.line);
+        assert!(!ac.stale);
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "alpha".into(),
+                ts: "2026-09-04T11:58:20Z".into(),
+            }]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two attempts for alpha and one for beta: only the newest per project
+    /// survives, sorted by ts ascending.
+    #[test]
+    fn retries_keep_the_newest_attempt_per_project() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:05:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:10:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T11:10:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![
+                UnmeasuredRetry {
+                    project: "beta".into(),
+                    ts: "2026-09-04T11:05:00Z".into(),
+                },
+                UnmeasuredRetry {
+                    project: "alpha".into(),
+                    ts: "2026-09-04T11:10:00Z".into(),
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An attempt older than twice the interval ages out, and a row whose
+    /// detail names no project folds under `-`.
+    #[test]
+    fn retries_age_out_after_twice_the_interval_and_unnamed_projects_read_dash() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:58:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    json!("bound=120s: stalled without a project token"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "-".into(),
+                ts: "2026-09-04T11:58:00Z".into(),
+            }]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

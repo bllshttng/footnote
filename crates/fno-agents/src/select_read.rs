@@ -86,6 +86,15 @@ pub(crate) fn unmeasured_detail(
     detail
 }
 
+/// The project a select-read unmeasured detail names; `None` when it names
+/// none (`-`).
+pub(crate) fn project_from_detail(detail: &str) -> Option<&str> {
+    detail
+        .split_once(PROJECT_TOKEN)
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .filter(|project| *project != "-")
+}
+
 fn enrich_next(mut node: Value, fno_py: &OsStr) -> Result<Value, String> {
     let Some(object) = node.as_object_mut() else {
         return Err("fno backlog next returned an unexpected shape".to_string());

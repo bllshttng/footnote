@@ -170,6 +170,10 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "tests/agents/test_codex_signal_handling.py::"
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
+        (
+            "tests/agents/test_spawn_pane.py::"
+            "test_late_codex_identity_composes_across_every_peer_surface"
+        ),
     }
 )
 
@@ -425,8 +429,8 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     Two layers, because seams differ. One guarded ``Popen`` subclass is set
     on the ``subprocess`` module: ``subprocess.run`` and ``check_output``
     read ``Popen`` from that module global at call time, so one patch covers
-    them plus every direct ``Popen(...)`` call (the bare calls in ``agy``,
-    ``pi`` and ``_acp`` included). The three harness aliases that captured
+    them plus every direct ``Popen(...)`` call (the bare calls in ``agy`` and
+    ``pi`` included). The three harness aliases that captured
     the original class at import time (``claude``, ``codex``,
     ``cursor_agent``) are repointed to the guarded class. A subclass keeps
     ``isinstance`` checks and ``Popen[bytes]`` working.

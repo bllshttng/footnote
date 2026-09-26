@@ -210,7 +210,10 @@ impl View {
         // `shift+HJKL` rather than a bare `HJKL`, naming the modifier in words
         // so it reads as "hjkl, held with shift" rather than an unrelated set
         // of four capital-letter bindings.
-        lines.push(pad_to(" hjkl/arrows move · 1-9 jump · shift+HJKL split", W));
+        lines.push(pad_to(
+            " arrows/hjkl move · 1-9 jump · shift+arrows/HJKL split",
+            W,
+        ));
         lines.push(pad_to(
             " enter/t new tab in › · space/. here · esc/q cancel",
             W,
@@ -280,12 +283,15 @@ impl View {
         };
         lines.push(pad_to(&format!(" {marker} {ord} +   new portal"), W));
         lines.push(pad_to(
-            " hjkl/arrows move · 1-9 jump · enter place · esc/q cancel",
+            " arrows/hjkl move · 1-9 jump · enter place · esc/q cancel",
             W,
         ));
         // The commit axis on the + row, one line below the navigation footer:
         // neither line exceeds W, so nothing ellipsizes.
-        lines.push(pad_to(" on + new portal: shift+HJKL split · t new tab", W));
+        lines.push(pad_to(
+            " on + new portal: shift+arrows/HJKL split · t new tab",
+            W,
+        ));
         lines
     }
 }
@@ -314,7 +320,7 @@ pub(crate) async fn attach_place_keys(
             return Ok(StdinFlow::Continue);
         };
         let mut esc = std::mem::take(&mut picker.esc);
-        let keys = fold_selector_keys(&mut esc, bytes);
+        let keys = fold_selector_keys_with_split_arrows(&mut esc, bytes);
         picker.esc = esc;
         keys
     };
@@ -462,7 +468,7 @@ pub(crate) async fn portal_pick_keys(
             return Ok(StdinFlow::Continue);
         };
         let mut esc = std::mem::take(&mut pick.esc);
-        let keys = fold_selector_keys(&mut esc, bytes);
+        let keys = fold_selector_keys_with_split_arrows(&mut esc, bytes);
         pick.esc = esc;
         keys
     };

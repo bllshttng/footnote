@@ -38,6 +38,40 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
+
+/// Name the reason a harness cannot use the thread spawn lane.
+pub fn thread_substrate_refusal(harness: &str) -> String {
+    use crate::claude_ask::py_repr;
+
+    let head = format!(
+        "substrate 'thread' (detached interactive session) is unavailable on harness {}",
+        py_repr(harness)
+    );
+    let tail = "use --substrate headless for a one-shot";
+    let contract = HarnessContract::packaged().ok();
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    match contract.and_then(|contract| contract.thread_lane(harness).ok()) {
+        Some("none") => {
+            format!("{head}: it declares no resume form, so no thread lane exists for it - {tail}")
+        }
+        Some(lane) => format!(
+            "{head}: fno has not built this harness's {lane} lane spawn arm yet, and that gap is \
+             in fno, never a harness limitation - {tail}"
+        ),
+        None => format!(
+            "{head}: its thread lane could not be resolved from the capability contract - {tail}"
+        ),
+    }
+}
 /// How a probe declaration says a field can be settled. `declared`: the
 /// vendor states it about its own interface (help/version), and reading that
 /// is not inference. `behavioral`: only a scratch-PTY run checking a
@@ -150,6 +184,13 @@ pub struct HarnessCapabilities {
     /// verb absent from this list; absent means the harness declares none.
     #[serde(default)]
     pub native_verbs: Vec<String>,
+    /// Per-verb teaching metadata keyed by the roster verb: when to reach
+    /// for it and the risk class the raw-mail guard enforces. `use_when`
+    /// lines marked name-derived in the TOML comments say so there; the
+    /// risk class is the guard's authority either way. `default` keeps an
+    /// older packaged copy parseable.
+    #[serde(default)]
+    pub native_verb_meta: BTreeMap<String, VerbMeta>,
     /// The subset the mail lane maps to a structured review RPC on a daemon
     /// thread; empty when the harness has no such transport.
     #[serde(default)]
@@ -212,6 +253,46 @@ pub struct ProviderAction {
     pub transport: String,
     pub method: String,
     pub proof: String,
+}
+
+/// The raw-mail guard's risk vocabulary for a native verb. A
+/// `session-ending` or `context-destroying` verb is refused on
+/// `mail send --raw` unless the send names it with `--ack-verb-risk`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerbRisk {
+    Safe,
+    ContextDestroying,
+    SessionEnding,
+}
+
+impl VerbRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerbRisk::Safe => "safe",
+            VerbRisk::ContextDestroying => "context-destroying",
+            VerbRisk::SessionEnding => "session-ending",
+        }
+    }
+
+    /// True when the raw-mail lane refuses the verb without an explicit ack.
+    pub fn is_guarded(self) -> bool {
+        matches!(self, VerbRisk::ContextDestroying | VerbRisk::SessionEnding)
+    }
+}
+
+/// One verb's row in `[harness.<name>.native_verb_meta]`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerbMeta {
+    /// One line: when an agent reaches for this verb.
+    pub use_when: String,
+    pub risk: VerbRisk,
+    /// opencode only: a user-defined command can override a built-in by
+    /// name, so the roster names built-ins and a custom override is
+    /// invisible to this table by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_in: Option<bool>,
 }
 
 /// One harness's `[harness.<name>.conversion]` stanza: HOW a live pane of
@@ -1291,6 +1372,38 @@ mod tests {
         "grok",
         "agy",
     ];
+
+    /// Roster and teaching metadata cannot drift apart: every native verb
+    /// carries a meta row (the render verb promises one line per verb) and
+    /// every meta key names a roster verb (a stale meta row would render a
+    /// verb the harness does not declare).
+    #[test]
+    fn native_verb_meta_covers_the_roster_exactly() {
+        let contract = HarnessContract::packaged().unwrap();
+        for (name, caps) in &contract.harness {
+            for verb in &caps.native_verbs {
+                assert!(
+                    caps.native_verb_meta.contains_key(verb),
+                    "{name}: roster verb {verb} has no native_verb_meta row"
+                );
+            }
+            for verb in caps.native_verb_meta.keys() {
+                assert!(
+                    caps.native_verbs.iter().any(|v| v == verb),
+                    "{name}: native_verb_meta row {verb} is not in the roster"
+                );
+            }
+        }
+        // The mail guard's dangerous classes exist in the packaged table,
+        // so the refusal path is not dead code.
+        let claude = contract.capabilities("claude").unwrap();
+        assert_eq!(
+            claude.native_verb_meta["/clear"].risk,
+            VerbRisk::ContextDestroying
+        );
+        assert!(claude.native_verb_meta["/clear"].risk.is_guarded());
+        assert!(!claude.native_verb_meta["/compact"].risk.is_guarded());
+    }
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
