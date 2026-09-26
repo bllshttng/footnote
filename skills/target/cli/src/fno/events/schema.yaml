@@ -1565,6 +1565,9 @@ event_types:
         age_ms:
           type: integer
           description: "Milliseconds between acquired_at and reap time."
+        basis:
+          type: string
+          description: "The native verdict basis at reap time. live or suspect here means node settlement or the abandonment probe decided."
     consumers: [operator]
 
   - name: registry_row_removed
