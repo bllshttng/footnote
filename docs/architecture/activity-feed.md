@@ -59,6 +59,10 @@ It does NOT borrow the asking row's session. That session asked the question. It
 
 `fno agents feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--kind <k>] [--json]` is the projection. A missing or unreadable store is not fatal. The rows the other stores yielded still emit, with one stderr line naming the store skipped.
 
+## Open questions in the sideline
+
+Open questions also show as a block in the sideline, pinned above the court block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
+
 `e` in the mux client toggles the full-height panel on the right edge. Rows render newest first. The border drags to a width that persists.
 
 ### Two input states, and the header says which
