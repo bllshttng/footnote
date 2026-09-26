@@ -768,7 +768,7 @@ def locks_dir() -> Path:
     HOME so the lock does not strand under the account's home."""
     carrier = os.environ.get("FNO_STATE_DIR")
     if carrier:
-        return Path(os.path.expanduser(carrier)) / "locks"
+        return Path(os.path.expanduser(carrier)).resolve() / "locks"
     return Path.home() / ".fno" / "locks"
 
 
