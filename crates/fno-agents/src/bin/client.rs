@@ -699,6 +699,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
     }
 
+    // `verbs`: hidden claim-style (matches!); the action list is
+    // shrink-only, so the harness-verbs skill teaches the spelling.
+    if matches!(verb, "verbs") {
+        return fno_agents::harness_verbs::run_verbs(&args[1..]);
+    }
+
     // `publish-review`: the reviewer lane's second GitHub identity (see
     // publish_review.rs doc). Direct dispatch; no daemon RPC. Python's emit
     // chokepoint and the hidden `fno do pr publish-review` verb send one JSON
