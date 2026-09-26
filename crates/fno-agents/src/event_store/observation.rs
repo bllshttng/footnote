@@ -89,7 +89,15 @@ fn observation_policy(ty: &str, data: &serde_json::Value) -> Option<ObservationP
             // skip's meaning from another's; the subject carries the fields
             // that name what was polled.
             let mut fp = serde_json::Map::new();
-            for key in ["reason", "provider", "retry_at", "exit_code", "detail"] {
+            for key in [
+                "reason",
+                "provider",
+                "retry_at",
+                "exit_code",
+                "detail",
+                "kind",
+                "attempted",
+            ] {
                 if let Some(v) = data.get(key).filter(|v| !v.is_null()) {
                     fp.insert(key.to_string(), v.clone());
                 }
@@ -138,6 +146,7 @@ pub(super) fn ensure_observation_tables(conn: &Connection) -> Result<(), String>
              fingerprint TEXT NOT NULL,
              window_started_ms INTEGER NOT NULL,
              window_finished_ms INTEGER NOT NULL,
+             flushed_through_ms INTEGER NOT NULL DEFAULT 0,
              PRIMARY KEY (obs_scope, obs_type, subject)
          );
          CREATE TABLE IF NOT EXISTS event_observation_pending (
@@ -213,10 +222,16 @@ pub(super) fn observation_gate(
     }
     match tx
         .query_row(
-            "SELECT fingerprint, window_started_ms FROM event_observation_state
+            "SELECT fingerprint, window_started_ms, flushed_through_ms FROM event_observation_state
              WHERE obs_scope = ?1 AND obs_type = ?2 AND subject = ?3",
             params![scope_key, ty, policy.subject],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .ok()
     {
@@ -232,7 +247,25 @@ pub(super) fn observation_gate(
             .map_err(|e| e.to_string())?;
             Ok(ObservationGate::Insert)
         }
-        Some((fingerprint, window_started)) => {
+        Some((fingerprint, window_started, flushed_through)) => {
+            if fingerprint == policy.fingerprint && flushed_through > 0 && ts_ms <= flushed_through
+            {
+                // The sweep already flushed a summary through this
+                // timestamp: a replayed line is represented, never
+                // re-counted.
+                return Ok(ObservationGate::Suppressed {
+                    pending: pending_count(tx, scope_key, ty, &policy.subject),
+                });
+            }
+            if ts_ms < window_started.saturating_sub(policy.heartbeat_ms) {
+                // A line from an older generation predates the open window
+                // by more than the heartbeat: it must not rewind the window
+                // nor vanish into it, so it stores verbatim. A line only
+                // slightly older than the window start is an out-of-order
+                // poll of the current burst and falls through to the
+                // in-window suppression below.
+                return Ok(ObservationGate::Insert);
+            }
             if fingerprint == policy.fingerprint
                 && ts_ms <= window_started.saturating_add(policy.heartbeat_ms)
             {
@@ -356,4 +389,90 @@ fn flush_pending_window(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Flush every subject whose window has run past its heartbeat with
+/// occurrences still pending, so the events table alone carries the
+/// represented totals even when the subject never polls again. Runs inside
+/// the sync transaction, after the file imports.
+pub(super) fn sweep_expired_windows(tx: &Transaction, now_ms: i64) -> Result<(), String> {
+    let subjects: Vec<(String, String, String, i64)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT s.obs_scope, s.obs_type, s.subject, s.window_finished_ms
+                 FROM event_observation_state s
+                 WHERE EXISTS (
+                     SELECT 1 FROM event_observation_pending p
+                     WHERE p.obs_scope = s.obs_scope AND p.obs_type = s.obs_type
+                       AND p.subject = s.subject
+                 )",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    for (scope, ty, subject, finished) in subjects {
+        let Some((_, heartbeat)) = OBSERVATION_HEARTBEATS.iter().find(|(t, _)| *t == ty) else {
+            continue;
+        };
+        if now_ms > finished.saturating_add(*heartbeat) {
+            flush_pending_window(tx, &scope, &ty, &subject)?;
+            // Stamp what the summary represents: a replayed line at or
+            // before this timestamp is already represented and must not
+            // re-count, and a journal-text tail read can exclude it.
+            tx.execute(
+                "UPDATE event_observation_state SET flushed_through_ms = ?4
+                 WHERE obs_scope = ?1 AND obs_type = ?2 AND subject = ?3",
+                params![scope, ty, subject, finished],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether one unheld raw journal tail line is already represented by a
+/// flushed observation window: same declared type and scope, timestamp at
+/// or before the window's `flushed_through_ms`. Undeclared types and
+/// always-audit shapes are never covered by a window, so they read as
+/// unheld and the tail keeps them verbatim.
+pub(super) fn tail_line_flushed(conn: &Connection, raw: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    let ty = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let data = value
+        .get("data")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let Some(policy) = observation_policy(ty, &data) else {
+        return false;
+    };
+    let Some(ts_ms) = value
+        .get("ts")
+        .and_then(|t| t.as_str())
+        .and_then(super::parse_rfc3339_ms)
+    else {
+        return false;
+    };
+    let scope_key = data.get("scope").and_then(|s| s.as_str()).unwrap_or("");
+    let flushed: i64 = conn
+        .query_row(
+            "SELECT flushed_through_ms FROM event_observation_state
+             WHERE obs_scope = ?1 AND obs_type = ?2 AND subject = ?3",
+            params![scope_key, ty, policy.subject],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    flushed > 0 && ts_ms <= flushed
 }

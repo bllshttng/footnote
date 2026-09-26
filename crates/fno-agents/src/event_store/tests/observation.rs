@@ -22,11 +22,8 @@ fn import_coalesces_identical_allow_polls() {
     let receipt = sync(&live).unwrap();
     assert_eq!(receipt.ingested, 1, "only the transition row is stored");
     assert_eq!(receipt.coalesced, 2, "the identical polls are pending");
-    assert_eq!(count_events(&store_path(&live)), 1);
-    append(&live, &[allow("2026-09-10T12:10:00Z", "Bash")]);
-    sync(&live).unwrap();
     let rows = query_events(&live, &EventQuery::default()).unwrap();
-    assert_eq!(rows.len(), 3, "transition, summary, new transition");
+    assert_eq!(rows.len(), 2, "transition plus the swept summary");
     assert_eq!(rows[1].r#type, "guard_decision");
     assert!(
         rows[1].line.contains("\"occurrence_count\":2"),
@@ -35,6 +32,10 @@ fn import_coalesces_identical_allow_polls() {
     );
     assert!(rows[1].line.contains("\"window_started_ms\":"));
     assert!(rows[1].line.contains("\"window_finished_ms\":"));
+    append(&live, &[allow("2026-09-10T12:10:00Z", "Bash")]);
+    sync(&live).unwrap();
+    let rows = query_events(&live, &EventQuery::default()).unwrap();
+    assert_eq!(rows.len(), 3, "transition, summary, new transition");
 }
 
 #[test]
@@ -204,7 +205,7 @@ fn concurrent_identical_first_polls_yield_one_transition() {
         .iter()
         .filter(|r| matches!(r, Ok(rec) if rec.suppressed))
         .count();
-    assert_eq!(inserted, 1, "exactly one transition row");
+    assert_eq!(inserted, 1, "exactly one transition row: {receipts:?}");
     assert_eq!(suppressed, 7, "the rest are pending occurrences");
     assert_eq!(count_events(&store_path(&live)), 1);
 }
@@ -226,6 +227,21 @@ fn replay_after_cursor_loss_does_not_double_count() {
     assert_eq!(receipt.ingested, 1);
     assert_eq!(receipt.coalesced, 3);
     let store = store_path(&live);
+    // The end-of-sync sweep already flushed the window: one transition plus
+    // one summary carrying the three suppressed polls.
+    assert_eq!(count_events(&store), 2, "transition plus the swept summary");
+    let summary_line: String = Connection::open(&store)
+        .unwrap()
+        .query_row(
+            "SELECT line FROM events WHERE line LIKE '%occurrence_count%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        summary_line.contains("\"occurrence_count\":3"),
+        "{summary_line}"
+    );
     {
         let conn = Connection::open(&store).unwrap();
         conn.execute("DELETE FROM ingest_cursor", []).unwrap();
@@ -243,15 +259,25 @@ fn replay_after_cursor_loss_does_not_double_count() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(guards, 1, "the replayed transition does not insert twice");
+    assert_eq!(
+        guards, 2,
+        "transition plus the swept summary, unchanged by the replay"
+    );
+    let checkins: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE type = 'reign_checkin'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(checkins, 1, "the new checkin imports");
     let pending: i64 = conn
         .query_row("SELECT count(*) FROM event_observation_pending", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(pending, 3, "the replayed polls do not double count");
+    assert_eq!(pending, 0, "the replayed polls do not double count");
     drop(conn);
-    assert_eq!(count_events(&store), 2, "the new checkin imports");
 }
 
 #[test]
@@ -331,5 +357,113 @@ fn flush_with_nothing_pending_closes_the_window_without_a_summary() {
     assert!(
         rows.iter().all(|r| !r.line.contains("occurrence_count")),
         "no summary row exists: {rows:?}"
+    );
+}
+
+#[test]
+fn sweep_flushes_expired_window_on_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(
+        &live,
+        &[
+            allow("2026-09-10T12:00:00Z", "Bash"),
+            allow("2026-09-10T12:01:00Z", "Bash"),
+            allow("2026-09-10T12:02:00Z", "Bash"),
+        ],
+    );
+    sync(&live).unwrap();
+    let rows = query_events(&live, &EventQuery::default()).unwrap();
+    assert_eq!(rows.len(), 2, "transition plus the swept summary");
+    assert!(
+        rows[1].line.contains("\"occurrence_count\":2"),
+        "{}",
+        rows[1].line
+    );
+    assert!(rows[1].line.contains("\"window_started_ms\":"));
+    assert!(rows[1].line.contains("\"window_finished_ms\":"));
+    let store = store_path(&live);
+    let conn = Connection::open(&store).unwrap();
+    let pending: i64 = conn
+        .query_row("SELECT count(*) FROM event_observation_pending", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(pending, 0, "the sweep cleared the pending occurrences");
+    let (flushed, finished): (i64, i64) = conn
+        .query_row(
+            "SELECT flushed_through_ms, window_finished_ms FROM event_observation_state",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(flushed, finished, "the sweep stamped what it flushed");
+    assert!(flushed > 0);
+}
+
+#[test]
+fn late_line_from_older_generation_stores_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(&live, &[allow("2026-09-10T12:10:00Z", "Bash")]);
+    sync(&live).unwrap();
+    assert_eq!(count_events(&store_path(&live)), 1);
+    append(&live, &[allow("2026-09-10T12:00:00Z", "Bash")]);
+    sync(&live).unwrap();
+    let rows = query_events(&live, &EventQuery::default()).unwrap();
+    assert_eq!(rows.len(), 2, "the late line stores verbatim");
+    assert!(
+        rows.iter().all(|r| !r.line.contains("occurrence_count")),
+        "no summary exists: {rows:?}"
+    );
+    let store = store_path(&live);
+    let conn = Connection::open(&store).unwrap();
+    let started: i64 = conn
+        .query_row(
+            "SELECT window_started_ms FROM event_observation_state",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        Some(started),
+        parse_rfc3339_ms("2026-09-10T12:10:00Z"),
+        "the window never rewinds to the late line"
+    );
+    let flushed: i64 = conn
+        .query_row(
+            "SELECT flushed_through_ms FROM event_observation_state",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(flushed, 0);
+}
+
+#[test]
+fn journal_text_tail_excludes_suppressed_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(
+        &live,
+        &[
+            allow("2026-09-10T12:00:00Z", "Bash"),
+            allow("2026-09-10T12:01:00Z", "Bash"),
+            allow("2026-09-10T12:02:00Z", "Bash"),
+        ],
+    );
+    sync(&live).unwrap();
+    let text = journal_text(&live, &["guard_decision"]);
+    assert!(
+        text.contains("2026-09-10T12:00:00Z"),
+        "the transition row reads: {text}"
+    );
+    assert!(
+        text.contains("occurrence_count"),
+        "the summary row reads: {text}"
+    );
+    assert!(
+        !text.contains("2026-09-10T12:01:00Z"),
+        "a suppressed poll never double-represents: {text}"
     );
 }

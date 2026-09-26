@@ -229,6 +229,7 @@ fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {
         total.coalesced += tally.coalesced;
         total.read_bytes += tally.read_bytes;
     }
+    observation::sweep_expired_windows(&tx, now_ms)?;
     tx.commit()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     prune(&mut conn, now_ms)?;
@@ -1229,7 +1230,14 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut held = conn
-        .prepare("SELECT 1 FROM events WHERE row_hash = ?1")
+        .prepare(
+            // A line the store holds either as an event or as a pending
+            // observation is committed knowledge; only the latter exists for a
+            // suppressed poll, and treating it as an uncommitted tail would
+            // double-represent it in every journal-text read.
+            "SELECT EXISTS(SELECT 1 FROM events WHERE row_hash = ?1)
+         OR EXISTS(SELECT 1 FROM event_observation_pending WHERE row_hash = ?1)",
+        )
         .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut text = String::new();
     for line in rows {
@@ -1242,10 +1250,16 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
             continue;
         }
         let hash = Sha256::digest(raw.as_bytes()).to_vec();
-        if held
+        let not_held: bool = held
             .query_row(params![hash], |r| r.get::<_, i64>(0))
-            .is_err()
-        {
+            .map(|found| found == 0)
+            .unwrap_or(false);
+        if not_held && observation::tail_line_flushed(&conn, raw) {
+            // The line is represented by a flushed observation window; a
+            // second copy in the tail would double-represent it.
+            continue;
+        }
+        if not_held {
             text.push_str(raw);
             text.push('\n');
         }
