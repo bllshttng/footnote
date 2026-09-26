@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from fno.agents import dispatch, format as fmt
+from fno.harness_identity import session_identity_key
 from fno.mail import hold as hold_mod
 
 HANDLE = "abcd1234"
@@ -210,6 +211,34 @@ def test_the_gate_finds_a_clock_filed_under_the_canonical_handle(monkeypatch):
     _expire(HANDLE)
     assert dispatch._delivery_policy_refusal(codex) is None
     assert dispatch._delivery_policy_refusal(HANDLE) is None
+
+
+def test_two_same_window_codex_rows_never_share_one_clock():
+    """Writers key the full session identity key.
+
+    Codex UUIDv7 ids opened in one 65.536-second window share their first
+    eight, so two same-window sessions used to share one clock file: one
+    release deleted the shared clock while only the first matching row's
+    policy cleared, leaving the sibling stamped bus-only with no clock, which
+    never lapses.
+    """
+    sid_a = "0198a3f2-77e3-7000-8000-000000000001"
+    sid_b = "0198a3f2-77e3-7000-8000-000000000002"
+    row_a = SimpleNamespace(
+        name="alpha", short_id="", harness_session_id=sid_a, delivery_policy="bus-only"
+    )
+    row_b = SimpleNamespace(
+        name="beta", short_id="", harness_session_id=sid_b, delivery_policy="bus-only"
+    )
+
+    hold_mod.arm(session_identity_key(sid_a), 5)
+
+    assert hold_mod.read_any(row_a) is not None
+    assert hold_mod.read_any(row_b) is None
+    # The sibling's clock cannot satisfy its row either way: B is stamped
+    # with no clock of its own, and that must read as refusing, not as held
+    # on A's clock.
+    assert dispatch._delivery_policy_refusal(row_b) == dispatch.BUS_ONLY_POLICY
 
 
 def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypatch):

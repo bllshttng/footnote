@@ -385,16 +385,12 @@ def addresses(entry) -> tuple:
     """Every token a hold clock for ``entry`` could be filed under.
 
     ONE matching rule, shared by the resolver, the policy write, and the
-    delivery gate's expiry check. The canonical handle is in here because every
-    WRITER keys by it: ``fno agents mail hold`` arms at ``canonical_handle(session_id)``
-    and the release and the turn-boundary tidy read the same key. For a claude
-    row that also happens to be ``short_id``, which is how the omission stayed
-    invisible. A codex ``short_id`` is a daemon worker key and its
-    ``harness_session_id`` is the full id, so neither is the first-eight the
-    clock sits under, and a gate reading only those three looked for a codex
-    hold in a place nothing ever writes.
+    delivery gate's expiry check. Writers key the full session identity key,
+    which is collision-free where the first-eight is not: codex UUIDv7 ids in
+    one 65.536-second window share their first eight. The first-eight token
+    stays in the sweep for clocks written before that migration.
     """
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import canonical_handle, session_identity_key
 
     session_id = getattr(entry, "harness_session_id", None)
     tokens = [
@@ -404,6 +400,7 @@ def addresses(entry) -> tuple:
     ]
     if session_id:
         try:
+            tokens.append(session_identity_key(session_id))
             tokens.append(canonical_handle(session_id))
         except Exception:  # noqa: BLE001 - a malformed id contributes no address
             pass
@@ -677,7 +674,7 @@ def cmd_notify_self() -> None:
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.bus.cursor import advance_cursor, scan_unread
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import canonical_handle, session_identity_key
 
     try:
         ident = require_self_identity()
@@ -688,14 +685,15 @@ def cmd_notify_self() -> None:
         return
 
     handle = canonical_handle(ident.session_id)
+    clock_key = session_identity_key(ident.session_id)
 
     # Busy mode: the hook fires on every UserPromptSubmit - an idle
     # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
     # hold failure must degrade to rendering the mail, never swallowing this turn.
     try:
-        if extend(handle) is not None:
+        if extend(clock_key) is not None:
             return
-        tidy_lapsed(handle)
+        tidy_lapsed(clock_key)
     except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
         pass
 
