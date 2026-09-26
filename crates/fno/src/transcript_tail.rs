@@ -241,54 +241,89 @@ fn transcript_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// The first non-empty line of one prose chunk, control-stripped and capped:
+/// the display shape every harness's assistant text rides to the wire.
+fn tail_line(chunk: &str) -> Option<String> {
+    let Some(first) = chunk.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return None;
+    };
+    // A transcript is UNTRUSTED text that the client paints into the
+    // terminal a character at a time, so an ESC sequence in an assistant
+    // message would be replayed as terminal control rather than shown;
+    // a tab or CR merely wrecks the table's column alignment. Strip
+    // before the wire, matching `sanitize_name` / `sanitize_mail_text`
+    // on the server side. The cap applies AFTER stripping, so control
+    // padding cannot smuggle extra visible width past it.
+    let clean: String = first
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(TAIL_MAX_CHARS)
+        .collect();
+    let clean = clean.trim();
+    (!clean.is_empty()).then(|| clean.to_string())
+}
+
+/// The assistant prose texts of one transcript row: claude writes the block
+/// list at the top level (`message.content`, tagged `text`); codex nests it
+/// under `payload` (`response_item` message rows, tagged `output_text`).
+/// Empty for a row that is not an assistant prose turn - tool output,
+/// reasoning, and codex's encrypted internal `agent_message` rows (no role)
+/// all fall out here.
+fn prose_texts(val: &serde_json::Value) -> Vec<&str> {
+    let (container, tag) = match val.get("type").and_then(|v| v.as_str()) {
+        Some("assistant") => (val.get("message"), "text"),
+        Some("response_item")
+            if val.pointer("/payload/role").and_then(|v| v.as_str()) == Some("assistant")
+                && val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("message") =>
+        {
+            (val.get("payload"), "output_text")
+        }
+        _ => return Vec::new(),
+    };
+    let Some(blocks) = container
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some(tag))
+        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+        .collect()
+}
+
 /// The most recent assistant text in a transcript tail, as one display line.
 ///
 /// Pure over the tail text so the scan is testable without a transcript. Walks
-/// backward to the newest `assistant` turn carrying a `text` block and takes its
-/// first non-empty line: a turn whose content is all tool-use has no prose to
-/// show, so it is skipped rather than rendered as an empty cell that reads like
-/// "no activity". Returns `None` when nothing qualifies - the caller renders an
-/// empty cell, never a placeholder.
+/// backward to the newest row carrying assistant prose and takes its first
+/// non-empty line: a turn whose content is all tool-use has no prose to show,
+/// so it is skipped rather than rendered as an empty cell that reads like "no
+/// activity". A codex rollout whose window holds no prose still carries its
+/// last `task_complete` event - the summary codex's own status line shows -
+/// which answers only after every prose row has failed to qualify. Returns
+/// `None` when nothing qualifies - the caller renders an empty cell, never a
+/// placeholder.
 pub(crate) fn compose_tail(text: &str) -> Option<String> {
+    let mut codex_summary: Option<String> = None;
     for line in text.lines().rev() {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue; // a torn or alien line is skipped, never fatal
         };
-        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
+        if let Some(tail) = prose_texts(&val).into_iter().find_map(tail_line) {
+            return Some(tail);
         }
-        let blocks = val
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array());
-        let prose = blocks.into_iter().flatten().filter_map(|b| {
-            (b.get("type").and_then(|v| v.as_str()) == Some("text"))
-                .then(|| b.get("text").and_then(|v| v.as_str()))
-                .flatten()
-        });
-        for chunk in prose {
-            let Some(first) = chunk.lines().map(str::trim).find(|l| !l.is_empty()) else {
-                continue;
-            };
-            // A transcript is UNTRUSTED text that the client paints into the
-            // terminal a character at a time, so an ESC sequence in an assistant
-            // message would be replayed as terminal control rather than shown;
-            // a tab or CR merely wrecks the table's column alignment. Strip
-            // before the wire, matching `sanitize_name` / `sanitize_mail_text`
-            // on the server side. The cap applies AFTER stripping, so control
-            // padding cannot smuggle extra visible width past it.
-            let clean: String = first
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(TAIL_MAX_CHARS)
-                .collect();
-            let clean = clean.trim();
-            if !clean.is_empty() {
-                return Some(clean.to_string());
-            }
+        if val.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+            && val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("task_complete")
+            && codex_summary.is_none()
+        {
+            codex_summary = val
+                .pointer("/payload/last_agent_message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
         }
     }
-    None
+    codex_summary.as_deref().and_then(tail_line)
 }
 
 /// The most recent assistant line per session, for the extended table's
@@ -425,6 +460,20 @@ mod tests {
     /// One transcript line for an assistant turn carrying `blocks`.
     fn turn(blocks: &str) -> String {
         format!(r#"{{"type":"assistant","message":{{"content":[{blocks}]}}}}"#)
+    }
+
+    /// One codex rollout line for an assistant `response_item` message.
+    fn codex_turn(text: &str) -> String {
+        format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    /// One codex rollout line for the turn-end summary event.
+    fn codex_summary(text: &str) -> String {
+        format!(
+            r#"{{"type":"event_msg","payload":{{"type":"task_complete","last_agent_message":"{text}"}}}}"#
+        )
     }
 
     /// A scratch projects dir holding ONE transcript for `uuid` with `text`
@@ -594,6 +643,63 @@ mod tests {
         // Newest wins, and only its FIRST line rides the wire (a table cell is
         // one line; wrapping is not an option in the sideline).
         assert_eq!(compose_tail(&raw).as_deref(), Some("newest turn"));
+    }
+
+    #[test]
+    fn compose_tail_reads_the_codex_response_item_shape() {
+        // Measured off a live rollout (2026-09-25): codex nests the same
+        // block list under `payload`, tag `output_text`. The newest codex
+        // prose row wins, claude rows around it still parse.
+        let raw = [
+            codex_turn("older codex line"),
+            turn(r#"{"type":"text","text":"claude line"}"#),
+            // The \n rides as a JSON escape: a raw newline inside the string
+            // would tear the row and serde would skip the line whole.
+            codex_turn("newest codex line\\nsecond"),
+        ]
+        .join("\n");
+        assert_eq!(compose_tail(&raw).as_deref(), Some("newest codex line"));
+    }
+
+    #[test]
+    fn compose_tail_falls_back_to_the_codex_task_complete_summary() {
+        // A rollout whose tail window holds no prose (the final turn ended in
+        // tool calls; the summary rode `task_complete`) answers with the
+        // summary codex itself shows, first non-empty line.
+        let raw = [
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"id":"i1"}}}"#.to_string(),
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"output_tokens":91}}}}"#.to_string(),
+            codex_summary("PR #2530 is open: https://github.com/bllshttng/footnote/pull/2530\\n\\nThe body guard passed. RESULT: SUCCESS pr=#2530"),
+        ]
+        .join("\n");
+        assert_eq!(
+            compose_tail(&raw).as_deref(),
+            Some("PR #2530 is open: https://github.com/bllshttng/footnote/pull/2530")
+        );
+    }
+
+    #[test]
+    fn compose_tail_prose_outranks_a_newer_codex_summary() {
+        // The summary is a FALLBACK: any prose in the window wins, even when
+        // the summary row sits after it.
+        let raw = [
+            codex_summary("fresh summary"),
+            codex_turn("stale but real prose"),
+        ]
+        .join("\n");
+        assert_eq!(compose_tail(&raw).as_deref(), Some("stale but real prose"));
+    }
+
+    #[test]
+    fn compose_tail_ignores_the_encrypted_codex_agent_message_rows() {
+        // The collab-mail rows carry `payload.type: agent_message` with
+        // `input_text` + `encrypted_content` and NO role: never display prose.
+        let raw = [
+            r#"{"type":"response_item","payload":{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE"}]}}"#.to_string(),
+            codex_turn("the display line"),
+        ]
+        .join("\n");
+        assert_eq!(compose_tail(&raw).as_deref(), Some("the display line"));
     }
 
     #[test]
