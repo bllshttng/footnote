@@ -139,9 +139,8 @@ pub fn run(args: &[String]) -> i32 {
         // The folded batch read: the engine contract is a leading or
         // trailing `--graph`, several ids without the single-id render
         // flags, or the stdin tracker door (zero positionals: the engine's
-        // own stdin arm decides). Everything else keeps the Python tiers,
-        // renderer, and archive walk. `get`'s typer surface refuses
-        // unknown flags, so a `--graph` here is always the engine door.
+        // own stdin arm decides). The single-id render ladder (field /
+        // grouped / tiers / archive walk) is native.
         "get"
             if leads_with_engine_door(resolved.tail)
                 || carries(resolved.tail, &["--graph"])
@@ -149,8 +148,12 @@ pub fn run(args: &[String]) -> i32 {
                 || (positional_count(resolved.tail) > 1
                     && !carries(resolved.tail, &["--field", "--grouped", "--strict"])) =>
         {
-            super::super::graph_get::run_graph_get(resolved.tail)
+            crate::graph_get::run_graph_get(resolved.tail)
         }
+        "get" => super::get_cli::run(resolved.tail),
+        // The search ladder is native; the FTS cache and the external
+        // backend reads forward from inside.
+        "find" => super::find_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }
@@ -167,12 +170,13 @@ fn positional_count(tail: &[String]) -> usize {
 /// The compatibility forward: exec the wheel's Python CLI with the resolved
 /// `fno backlog <legacy-command> ...` argv, stdio inherited, its exit code
 /// returned. A grouped spelling arrives as the legacy command it resolves
-/// to, so the Python surface sees the shape it has always owned. The one
-/// new seam crossing this fold pays; the resolver is the baselined
-/// `scrape::fno_py`.
-fn forward_python(resolved: &Resolved<'_>) -> i32 {
+/// to, so the Python surface still sees the shape it has always owned. The
+/// one new seam crossing this fold pays; the resolver is the baselined
+/// `scrape::fno_py`. Branch handlers (the native get and find forward their
+/// external-backend and FTS branches through this same door).
+pub fn forward_to_python(legacy: &str, tail: &[String]) -> i32 {
     let mut cmd = std::process::Command::new(crate::scrape::fno_py());
-    cmd.arg("backlog").arg(resolved.legacy).args(resolved.tail);
+    cmd.arg("backlog").arg(legacy).args(tail);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -189,6 +193,10 @@ fn forward_python(resolved: &Resolved<'_>) -> i32 {
             2
         }
     }
+}
+
+fn forward_python(resolved: &Resolved<'_>) -> i32 {
+    forward_to_python(resolved.legacy, resolved.tail)
 }
 
 #[cfg(test)]

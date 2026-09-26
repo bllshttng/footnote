@@ -9,6 +9,10 @@
 pub mod api;
 pub mod cli;
 pub mod commands;
+pub mod find_cli;
+pub mod get_cli;
+pub mod render;
+pub mod settings;
 pub mod comments;
 pub mod costs;
 pub mod decisions;
