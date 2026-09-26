@@ -1821,11 +1821,23 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
+    // `claude_session_uuid` never serializes (skip_serializing), so an adopted
+    // typed row - `serde_json::to_value(&RegistryEntry)`, the manifest adopt
+    // path - carries only `harness_session_id`. Fall back to it, mirroring
+    // `resume_session_id`, instead of refusing the row as inconclusive.
     let uuid = entry
         .get("claude_session_uuid")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            entry
+                .get("harness_session_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("");
     let has_uuid = is_uuid_shaped(uuid);
 
     let socket_live = !short_id.is_empty()
@@ -4639,6 +4651,28 @@ mod tests {
         assert_eq!(
             claude_resume_argv_with_truth(&ch, &entry_idless, "idless", |_| Some("done".into())),
             Err(13)
+        );
+    }
+
+    #[test]
+    fn claude_resume_argv_reads_harness_session_id_when_uuid_is_absent() {
+        // `claude_session_uuid` never serializes, so a row returned by
+        // `serde_json::to_value(&RegistryEntry)` (the manifest adopt path) has
+        // only `harness_session_id`. Resume must still relaunch it.
+        let uuid = "6fb7b615-369e-4a54-bba6-56af7f3cfd8d";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let entry = serde_json::json!({
+            "name": "adopted", "harness": "claude", "short_id": "6fb7b615",
+            "harness_session_id": uuid,
+        });
+        let (argv, claim) =
+            claude_resume_argv_with_truth(&ch, &entry, "adopted", |_| Some("stalled".into()))
+                .expect("a dead adopted row relaunches");
+        assert_eq!(claim.as_deref(), Some(uuid));
+        assert_eq!(
+            argv,
+            vec!["claude".to_string(), "--resume".into(), uuid.into()]
         );
     }
 
