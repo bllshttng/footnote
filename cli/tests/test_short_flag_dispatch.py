@@ -124,18 +124,23 @@ def _native_find(*args: str) -> tuple[int, str, str]:
 
 
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
-    """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
+    """AC4: `backlog find -p X -s Y -d Z -J` is byte-identical to the long form.
+
+    The Phase 2 lowercase table's find pin moved here with the find port:
+    the native binary owns the surface, so the -p/-s/-d decls are readable
+    only at this door.
+    """
     seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
         {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",
-         "domain": "code", "project": "other"},
+         "domain": "docs", "project": "other"},
     ]}) + "\n")
     long_code, long_out, long_err = _native_find(
-        "rollout", "--project", "fno", "--status", "done", "--json",
+        "rollout", "--project", "fno", "--status", "done", "--domain", "code", "--json",
     )
     short_code, short_out, _short_err = _native_find(
-        "rollout", "-p", "fno", "-s", "done", "-J",
+        "rollout", "-p", "fno", "-s", "done", "-d", "code", "-J",
     )
     assert long_code == 0, long_err
     assert short_code == long_code

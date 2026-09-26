@@ -29,8 +29,21 @@ if [[ "$count" != "1" ]]; then
   exit 1
 fi
 
+# `fno backlog find` is native-owned since the find port: the Python leg is
+# deleted, so the find steps drive the fno-agents binary through the same
+# resolver the parity tests use.
+FIND_BIN=$(uv run python -c "
+from fno.rust_binary import find_dev_binary, resolve_binary
+binary = find_dev_binary() or resolve_binary()
+print(str(binary) if binary else '')
+")
+if [[ -z "$FIND_BIN" ]]; then
+  echo "SKIP: no fno-agents dev build (run: cargo build --manifest-path crates/fno-agents/Cargo.toml)"
+  exit 0
+fi
+
 # fno backlog find resolves the entry
-find_out=$(uv run fno-py backlog find "research task" 2>/dev/null)
+find_out=$("$FIND_BIN" backlog find "research task" 2>/dev/null)
 if ! echo "$find_out" | grep -q "$new_id"; then
   echo "FAIL: fno backlog find did not return $new_id:"
   echo "$find_out"
@@ -38,7 +51,7 @@ if ! echo "$find_out" | grep -q "$new_id"; then
 fi
 
 # fno backlog find --json returns valid JSON array
-json_out=$(uv run fno-py backlog find "research task" --json 2>/dev/null)
+json_out=$("$FIND_BIN" backlog find "research task" --json 2>/dev/null)
 python3 -c "
 import json, sys
 data = json.loads('''$json_out''')
@@ -48,7 +61,7 @@ assert data[0]['id'] == '$new_id', f\"expected $new_id, got {data[0]['id']}\"
 
 # fno backlog find for nonexistent exits 1
 set +e
-uv run fno-py backlog find nonexistent-xyzzy-smoke >/dev/null 2>&1
+"$FIND_BIN" backlog find nonexistent-xyzzy-smoke >/dev/null 2>&1
 find_rc=$?
 set -e
 if [[ "$find_rc" -ne 1 ]]; then
