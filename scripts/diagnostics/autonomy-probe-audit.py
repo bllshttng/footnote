@@ -53,6 +53,7 @@ NOISE_PREFIXES = (
     "<EXTREMELY_IMPORTANT",
     "Warning: truncated",
     "<system-reminder>",
+    "<task-notification>",
     "Caveat:",
     "<user_instructions>",
     "<environment_context>",
@@ -217,6 +218,8 @@ def self_check() -> int:
                                           cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
         ("claude-meta-noise", [cl_user("Caveat: the messages below were generated", meta=True),
                                cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
+        ("claude-task-notification-noise", [cl_user("<task-notification>bg task done</task-notification>"),
+                                            cl_tool("Bash", {"command": "/code-review high"})], "autonomous"),
         # codex shapes
         ("codex-user-first", [cx_usermsg("run /code-review"),
                               cx_tool("custom_tool_call", "exec /code-review")], "user-triggered"),
