@@ -6561,6 +6561,7 @@ impl View {
         match self.density {
             Density::Regular => {
                 let (rows, depths) = self.tree_rows_with_depths();
+                let (rows, depths) = self.sort_agent_runs(rows, depths);
                 self.card_rows(rows, depths)
             }
             Density::Slim => {
@@ -6581,14 +6582,19 @@ impl View {
         }
     }
 
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
+    /// Sorts agent runs the way the extended table orders them: each
+    /// contiguous run of agent rows between non-agent rows orders by the
+    /// active column (kings compared against each other, workers ordered
+    /// inside their own lineage level), so the card view and the table read
+    /// in the sorted order and the painted age is the value sorted on.
+    fn sort_agent_runs<'a>(
+        &self,
+        rows: Vec<DisplayRow<'a>>,
+        depths: Vec<usize>,
+    ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
-        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
 
@@ -6617,15 +6623,22 @@ impl View {
             }
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+        out.into_iter().unzip()
+    }
 
-        let has_agent = out
-            .iter()
-            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
-        out.insert(0, (DisplayRow::TableHead, 0));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
+        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
+        rows.insert(0, DisplayRow::TableHead);
+        depths.insert(0, 0);
         if !has_agent {
-            out.insert(1, (DisplayRow::TableEmpty, 0));
+            rows.insert(1, DisplayRow::TableEmpty);
+            depths.insert(1, 0);
         }
-        let (rows, depths) = out.into_iter().unzip();
         self.card_rows(rows, depths)
     }
 
@@ -7046,110 +7059,6 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
-}
-
-#[allow(clippy::type_complexity)]
-fn append_sorted_agent_group<'a>(
-    out: &mut Vec<(DisplayRow<'a>, usize)>,
-    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-    sort: AgentSort,
-    needs: &HashMap<String, NeedKind>,
-    now_secs: u64,
-) {
-    let mut subtrees: Vec<(
-        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-        &'a AgentRow,
-    )> = Vec::new();
-    for item in group.drain(..) {
-        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
-        if depth == 0 || subtrees.is_empty() {
-            let root = item.1;
-            subtrees.push((vec![item], root));
-        } else {
-            subtrees.last_mut().unwrap().0.push(item);
-        }
-    }
-    subtrees.sort_by(|(_, a), (_, b)| {
-        compare_agent_rows(
-            a,
-            b,
-            sort,
-            needs.get(a.name.as_str()).copied(),
-            needs.get(b.name.as_str()).copied(),
-            now_secs,
-        )
-    });
-    for (items, _) in subtrees {
-        for (rows, _) in items {
-            out.extend(rows);
-        }
-    }
-}
-
-fn compare_agent_rows(
-    a: &AgentRow,
-    b: &AgentRow,
-    sort: AgentSort,
-    need_a: Option<NeedKind>,
-    need_b: Option<NeedKind>,
-    now_secs: u64,
-) -> Ordering {
-    let order = match sort.column {
-        AgentSortColumn::Status => {
-            let a_key = attention_key(a, need_a);
-            let b_key = attention_key(b, need_b);
-            let a_state = if a.exited {
-                u8::MAX
-            } else {
-                pane_state(a.badge, a.seen, a.pane_activity) as u8
-            };
-            let b_state = if b.exited {
-                u8::MAX
-            } else {
-                pane_state(b.badge, b.seen, b.pane_activity) as u8
-            };
-            apply_direction(
-                a_state
-                    .cmp(&b_state)
-                    .then_with(|| a_key.0.cmp(&b_key.0))
-                    .then_with(|| a_key.1.cmp(&b_key.1))
-                    .then_with(|| a_key.2.cmp(&b_key.2)),
-                sort.direction,
-            )
-        }
-        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
-        AgentSortColumn::LastMessage => cmp_optional(
-            a.tail.as_deref().filter(|value| !value.is_empty()),
-            b.tail.as_deref().filter(|value| !value.is_empty()),
-            sort.direction,
-        ),
-        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
-        AgentSortColumn::Age => {
-            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
-        }
-    };
-    order
-}
-
-fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
-    }
-}
-
-fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
-    match direction {
-        SortDirection::Ascending => order,
-        SortDirection::Descending => order.reverse(),
-    }
-}
-
-fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
-    a.last_activity_age_s
-        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
 /// (US3) The project basename a section is keyed by (the squad's
@@ -14618,3 +14527,8 @@ mod glyph_legend;
 
 #[path = "client/sideline.rs"]
 mod sideline;
+
+#[path = "client/agent_sort.rs"]
+mod agent_sort;
+
+use agent_sort::append_sorted_agent_group;

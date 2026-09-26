@@ -5445,16 +5445,8 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Err(interrupt_report) = rm_teardown::end_codex_thread(ctx, &name).await {
-            return Response::err(
-                req.id,
-                ErrorCode::Busy,
-                format!(
-                    "agent {name}: the codex thread's turn did not settle \
-                     ({interrupt_report}); the registry row and the codex index \
-                     entry are kept"
-                ),
-            );
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+            return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
