@@ -187,7 +187,18 @@ One contract, one primary owner, already true lane by lane; the campaign found n
 
 ## Preservation
 
-(TBD at cutover: per-contract mutations and the coverage-containment result.)
+Review pass: every D and C row was compared against its named keeper lane by lane before the edit; no contract lost its only proof. Two mutations prove the strengthened and consolidated keepers can fail:
+
+| Mutation | Keeper that went red |
+|---|---|
+| `claims/events.py` `emit_claim_released` drops the `duration_held_ms` field | `test_claims_core.py::TestRelease::test_AC2_FR_release_emits_duration` fails ("missing required data field: duration_held_ms"); three sibling release tests fail on the same typed-schema enforcement. Restored byte-identical (`git diff` empty). |
+| `claims/cli.py` `_parse_ttl` minutes arm returns seconds (`n * 1000`) | `test_claims_cli.py::test_ttl_parser_table[5m-300000]` fails (`assert 5000 == 300000`); three CLI tests using minute TTLs fail with it. Restored byte-identical (`git diff` empty). |
+
+The one Rust D (the `classify` delegation restatement) needed no mutation: it names no contract of its own; the real classifier arms stay covered by `classify_basis_names_each_cause` and `liveness_matches_python_classify_including_hybrid_arm`, both green in the post-cutover run.
+
+Coverage containment (`--cov=fno.claims`, owner suite, before vs after the cutover): the executed-line sets are IDENTICAL. 1,978 / 2,732 lines covered at baseline and after, zero lines lost, zero gained. No production line lost its coverage, and no dead-code deletion was unlocked.
+
+Post-cutover runs: the six edited Python files pass (261 passed, 5 skipped). Rust `claim` filter reads 297 passed with the same two pre-existing out-of-scope `cargo_build_dirs` failures as baseline (28/2 under the narrow filter); the delta is exactly the one deleted delegation test.
 
 ## Reconcile
 
