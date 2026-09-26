@@ -177,8 +177,8 @@ fn sideline_selection_scrolls_into_view_and_paints_the_band() {
     let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
     assert_eq!(
         frame.cells[sel_row * cols].bg,
-        Color::Indexed(7),
-        "the selected row scrolls into view and paints the hover band"
+        Color::Indexed(0),
+        "the selected row scrolls into view and paints the cursor band"
     );
     assert_ne!(
         frame.cells[0].c, '\u{25be}',
@@ -343,8 +343,8 @@ fn list_hover_band_is_one_color_across_every_column_gap() {
     let cells = &frame.cells[row * cols..row * cols + text_w];
     assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
     for cell in cells {
-        assert_eq!(cell.bg, Color::Indexed(7), "one band bg, gaps included");
-        assert_eq!(cell.fg, crate::theme::BAND_TEXT, "one band text color");
+        assert_eq!(cell.bg, Color::Indexed(0), "one band bg, gaps included");
+        assert_eq!(cell.fg, Color::Indexed(3), "one band accent text");
         assert_eq!(cell.flags, 0, "no INVERSE inside the band");
     }
 }
