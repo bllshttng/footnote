@@ -119,9 +119,10 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     monkeypatch.setattr(claude, "_SPAWN_UUID_RETRY_BACKOFF_SEC", 0.0)
     monkeypatch.setattr(claude, "resolve_session_uuid", lambda short_id: None)
     monkeypatch.setattr(_claude_session_registry, "seed_unverified_reason", lambda *a, **k: None)
-    # The revival liveness gate polls real claude roots for a transcript; the
-    # fake-claude journeys write none, so the suite auto-passes it. Tests that
-    # exercise the gate re-arm the real function and fake its readers instead.
+    # The revival liveness gate (the fno-agents binary's revive-proof op)
+    # polls real claude roots for a transcript; the fake-claude journeys
+    # write none, so the suite auto-passes it. Tests that exercise the gate
+    # re-arm the real function and fake the verdict instead.
     monkeypatch.setattr(
         _claude_session_registry, "revive_proof_or_refuse", lambda *a, **k: None
     )
