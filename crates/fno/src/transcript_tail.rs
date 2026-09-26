@@ -315,13 +315,12 @@ pub(crate) fn compose_tail(text: &str) -> Option<String> {
         }
         if val.get("type").and_then(|v| v.as_str()) == Some("event_msg")
             && val.pointer("/payload/type").and_then(|v| v.as_str()) == Some("task_complete")
+            && codex_summary.is_none()
         {
-            if codex_summary.is_none() {
-                codex_summary = val
-                    .pointer("/payload/last_agent_message")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-            }
+            codex_summary = val
+                .pointer("/payload/last_agent_message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
         }
     }
     codex_summary.as_deref().and_then(tail_line)
