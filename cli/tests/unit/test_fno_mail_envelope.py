@@ -209,12 +209,16 @@ def test_wrap_uses_the_full_session_for_claude_and_reads_rank_by_session(
         "hi", from_="king", from_session="session-king"
     )
     assert wrapped.startswith(
-        '<fno_mail from="session-king" from_rank="L1 fno" from_name="king">'
+        '<fno_mail from="session-king" harness="claude-code" '
+        'from_rank="L1 fno" from_name="king">'
     )
-    # from_rank with NO resolvable session renders nothing.
-    plain = envelope.wrap_fno_mail("hi", from_="king")
-    assert plain.startswith('<fno_mail from="king">')
+    # A handle that resolves to no live row stays bare: no session upgrade,
+    # no rank, no name. A resolvable handle upgrades even without a session
+    # (the renderer proves the reply address off the registry row).
+    plain = envelope.wrap_fno_mail("hi", from_="stranger")
+    assert plain.startswith('<fno_mail from="stranger">')
     assert "from_rank" not in plain
+    assert "from_name" not in plain
 
 
 def test_wrap_accepts_the_codex_full_session_reply_address(monkeypatch, tmp_path):
@@ -265,8 +269,9 @@ def test_envelope_overhead_budget(monkeypatch, tmp_path):
     )
     assert 'from_rank="L2 epic-scope"' in wrapped
     assert 'to_rank="L1 fno"' in wrapped
-    # Crowned overhead, measured 176 at the reshaping (537 before the compaction).
-    assert len(wrapped) - len(body) <= 200
+    # Crowned overhead, measured 208 once from_name and to_name joined the
+    # header (176 at the reshaping, 537 before the compaction).
+    assert len(wrapped) - len(body) <= 210
 
     sender.pop("crown_level")
     sender.pop("crown_scope")
