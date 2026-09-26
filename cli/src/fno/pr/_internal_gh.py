@@ -8,10 +8,11 @@ read into the coverage reserve.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Callable, Sequence
 
-from fno.pr import _quota, _rest, _status
+from fno.pr import _quota, _rest
 from fno.pr._proc import Result, run
 
 _METADATA_FIELDS = {
@@ -96,15 +97,6 @@ def _metadata(
     return Result(0, json.dumps(payload) + "\n", "")
 
 
-def _bucket(check: dict) -> str:
-    raw = str(check.get("conclusion") or check.get("state") or "").upper()
-    if raw == "CANCELLED":
-        return "cancel"
-    if raw in {"SKIPPED", "NEUTRAL"}:
-        return "skipping"
-    return _status._classify(check)
-
-
 def _checks(
     args: Sequence[str], *, cwd: str | None, real_gh: str, runner: Callable
 ) -> Result:
@@ -112,20 +104,13 @@ def _checks(
     number, reason = _pr_number(args, cwd=cwd, runner=rest_runner)
     if number is None:
         return Result(1, "", reason)
-    payload, reason = _rest.fetch_pr_rest(str(number), cwd=cwd, runner=rest_runner)
-    if payload is None:
-        return Result(1, "", reason)
-    rows = []
-    for check in payload.get("statusCheckRollup") or []:
-        rows.append(
-            {
-                "name": check.get("name") or check.get("context") or "",
-                "state": check.get("conclusion") or check.get("state") or "",
-                "bucket": _bucket(check),
-                "startedAt": check.get("startedAt") or check.get("createdAt") or "",
-                "workflow": "",
-            }
-        )
+    # The bucketed rows are the Rust reader's status-ci op; classify lives there.
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        rows = verb_call("authorized-merge", {"op": "status-ci", "cwd": cwd or os.getcwd(), "pr": int(number)}, timeout=120)
+    except VerbUnavailable as exc:
+        return Result(1, "", str(exc))
     return Result(0, json.dumps(rows) + "\n", "")
 
 

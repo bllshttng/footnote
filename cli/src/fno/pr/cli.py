@@ -172,14 +172,10 @@ def status(
         ),
     ),
 ) -> None:
-    from fno.pr import _status
-
-    # main() routes through the coalescing cache: the watcher
-    # recipe polls this verb every 60s per session, and N sessions polling one
-    # PR must collapse to one network read per TTL or they trip the REST
-    # secondary limit (which counts request rate, not budget).
-    rc = _status.main([str(pr_number)] + (["--refresh"] if refresh else []))
-    raise typer.Exit(code=rc)
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-read", "cwd": os.getcwd(), "pr": pr_number, "refresh": refresh})],
+    )
 
 
 @pr_app.command(
@@ -208,22 +204,10 @@ def wait(
     timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
 ) -> None:
-    from fno.pr import _wait
-
-    # No ToolMissing handler here: `_wait.main` maps it to 127 itself, and a
-    # second handler for the same exception is a copy that drifts.
-    rc = _wait.main(
-        [
-            str(pr_number),
-            "--until",
-            until,
-            "--timeout",
-            timeout,
-            "--interval",
-            interval,
-        ]
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-wait", "cwd": os.getcwd(), "pr": pr_number, "until": until, "timeout": timeout, "interval": interval})],
     )
-    raise typer.Exit(code=rc)
 
 
 @pr_app.command(
@@ -386,20 +370,11 @@ def logs(
     lines: int = typer.Option(40, "--lines", help="Tail length."),
     full: bool = typer.Option(False, "--full", help="Print the whole log, not a tail."),
 ) -> None:
-    from fno.pr import _logs
-    from fno.pr._proc import ToolMissing
-
-    try:
-        rc = _logs.run_logs(
-            str(pr_number) if pr_number is not None else None,
-            job=job,
-            lines=lines,
-            full=full,
-        )
-    except ToolMissing as exc:
-        typer.echo(f"fno do pr logs: {exc.tool} not found on PATH", err=True)
-        rc = 127
-    raise typer.Exit(code=rc)
+    # pr 0 asks the door to resolve the current branch's PR.
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-logs", "cwd": os.getcwd(), "pr": pr_number or 0, "job": job, "lines": lines, "full": full})],
+    )
 
 
 def _forward_to_binary(verb: str, args: list[str]) -> None:

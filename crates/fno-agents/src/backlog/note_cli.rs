@@ -4,11 +4,12 @@
 //! wave, terminal), and the combined-prose budget; the bridge keeps the
 //! shipped recipient walk (`note_notify`, its test contract), evidence
 //! checks, identity, archived refusal, and the mail transport.
+use crate::backlog::model::Node;
 use crate::backlog::node_state::{self, StateError, StateWriteInput};
 use crate::backlog::note_history;
 use crate::graph_store::{self};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::graph_get::default_graph_path;
 
@@ -29,6 +30,7 @@ struct NoteArgs {
     graph: Option<PathBuf>,
     self_session: Option<String>,
     reads: Option<String>,
+    import_record: Option<String>,
     blocking: bool,
     resolve: Option<String>,
     block_cmd: Option<String>,
@@ -52,6 +54,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         graph: None,
         self_session: None,
         reads: None,
+        import_record: None,
         blocking: false,
         resolve: None,
         block_cmd: None,
@@ -113,6 +116,14 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
                     .into();
             }
             "--blocking" => out.blocking = true,
+            "--import-record" => {
+                i += 1;
+                out.import_record = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--import-record needs a path or -".to_string())?
+                        .clone(),
+                );
+            }
             "--resolve" => {
                 i += 1;
                 out.resolve = Some(
@@ -177,6 +188,11 @@ pub fn run_note(args: &[String]) -> i32 {
     // is routed after entry resolution below. Neither touches current state.
     if let Some(finding_id) = parsed.resolve.clone() {
         return run_finding_resolve(&parsed, &graph, &finding_id);
+    }
+    // The import route: restore one captured node record. Like `--resolve`
+    // it needs no node argument and reads no body.
+    if let Some(source) = parsed.import_record.clone() {
+        return run_import_record(&parsed, &graph, &source);
     }
     let body = match read_body(&parsed) {
         Ok(b) => b,
@@ -695,6 +711,105 @@ fn emit_human(json_out: bool, receipt: &Value) {
     crate::backlog::receipt::emit_line(&line);
 }
 
+/// The --import-record route: read, validate, refuse-or-write, emit the
+/// receipt. Exit 0 written, 1 refused or failed (nothing written), 2 usage
+/// (handled at the parse layer).
+fn run_import_record(parsed: &NoteArgs, graph: &Path, source: &str) -> i32 {
+    let record = match read_record_source(source) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            return 1;
+        }
+    };
+    match import_record(graph, &record) {
+        Ok(receipt) => {
+            emit_human(parsed.json_out, &receipt);
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents backlog-note: {e}");
+            1
+        }
+    }
+}
+
+/// The record source: `-` reads stdin, a path reads the file.
+fn read_record_source(source: &str) -> Result<Value, String> {
+    let text = if source == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| format!("record stdin read failed: {e}"))?;
+        s
+    } else {
+        std::fs::read_to_string(source).map_err(|e| format!("record file read failed: {e}"))?
+    };
+    serde_json::from_str(&text).map_err(|e| format!("record is not valid JSON: {e}"))
+}
+
+/// Validate and import one captured record under its original id and slug.
+/// The receipt carries the restored identity and the store's mutation
+/// counter; a refusal is the self-teaching message and the guarantee that
+/// nothing was written.
+fn import_record(graph: &Path, record: &Value) -> Result<Value, String> {
+    let db = crate::backlog::database_path(graph);
+    if !db.exists() {
+        return Err(format!(
+            "no store at {}; nothing was written. An import repairs an \
+             existing store, it never creates one",
+            db.display()
+        ));
+    }
+    let node = Node::from_json(record).map_err(|e| {
+        format!(
+            "record does not validate: {e}. Nothing was written. A captured \
+             record is the `fno backlog get` output"
+        )
+    })?;
+    let id = node.id.clone();
+    let slug = node.slug.clone();
+    let mut refusal: Option<String> = None;
+    let ok = crate::backlog::mutate_single_row(graph, "node_import", |rows| {
+        if rows
+            .iter()
+            .any(|r| graph_store::entry_id(r) == Some(id.as_str()))
+        {
+            refusal = Some(format!(
+                "refusing: node {id} is already live in the store; nothing was \
+                 written. Read it: fno backlog get {id}. An import restores a \
+                 lost record, it never overwrites"
+            ));
+            return Ok(false);
+        }
+        if rows.iter().any(|r| {
+            graph_store::entry_id(r) != Some(id.as_str())
+                && r.get("slug").and_then(Value::as_str) == Some(slug.as_str())
+        }) {
+            refusal = Some(format!(
+                "refusing: slug {slug} is already held by another node; nothing \
+                 was written. Slugs are unique in the store"
+            ));
+            return Ok(false);
+        }
+        rows.push(record.clone());
+        Ok(true)
+    })?;
+    if !ok {
+        return Err(refusal.unwrap_or_else(|| "import refused".to_string()));
+    }
+    let version = crate::backlog::api_version(graph)?;
+    Ok(json!({
+        "status": "ok",
+        "routed": "import",
+        "id": id,
+        "slug": slug,
+        "version": version,
+        "line": format!("imported {id} (slug {slug})"),
+    }))
+}
+
 /// Map a state-write error to the verb's exit code.
 fn map_state_err(e: &StateError) -> i32 {
     match e {
@@ -790,5 +905,111 @@ mod tests {
         assert!(
             encounter_hint("t-1", &json!(null), None, Some(&view(3, Some("sess-a")))).is_none()
         );
+    }
+
+    // -- import route -----------------------------------------------------
+
+    fn fixture(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let graph = dir.path().join(name);
+        (dir, graph)
+    }
+
+    /// The captured-record shape: what `fno backlog get` emits, sessions and
+    /// provenance included.
+    fn captured_record(id: &str, slug: &str) -> Value {
+        serde_json::json!({
+            "id": id, "slug": slug, "title": "Lost", "type": "feature",
+            "status": "in_progress", "priority": "p1", "project": "fno",
+            "domain": "code", "difficulty": "medium",
+            "details": "restored from a captured record",
+            "created_at": "2026-09-16T04:38:39.696103+00:00",
+            "source_kind": "operator_request",
+            "sessions": [
+                {"phase": "do", "harness": "claude", "session_id": "s-1"}
+            ],
+        })
+    }
+
+    fn seed_one_node(graph: &std::path::Path) {
+        let rows = serde_json::json!({"entries": [
+            {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
+             "status": "idea", "priority": "p2", "domain": "code",
+             "created_at": "2026-09-11T00:00:00+00:00"}
+        ]});
+        graph_store::seed_rows(graph, rows["entries"].as_array().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_import_lands_the_record_under_its_original_id_and_slug() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let receipt = import_record(&graph, &captured_record("ab-lost", "lost")).unwrap();
+        assert_eq!(receipt["id"], "ab-lost");
+        assert_eq!(receipt["slug"], "lost");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        let restored = rows
+            .iter()
+            .find(|r| graph_store::entry_id(r) == Some("ab-lost"))
+            .expect("the imported node is live");
+        assert_eq!(restored["slug"], "lost");
+        assert_eq!(restored["title"], "Lost");
+        assert_eq!(
+            restored["sessions"][0]["session_id"], "s-1",
+            "the aggregate's child rows ride the import"
+        );
+    }
+
+    #[test]
+    fn an_import_refuses_when_the_id_is_already_live() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let error = import_record(&graph, &captured_record("ab-one", "renamed")).unwrap_err();
+        assert!(error.contains("ab-one is already live"), "{error}");
+        assert!(error.contains("fno backlog get ab-one"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_when_the_slug_is_held_elsewhere() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let error = import_record(&graph, &captured_record("ab-other", "one")).unwrap_err();
+        assert!(error.contains("slug one is already held"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_a_record_that_fails_the_schema() {
+        let (_dir, graph) = fixture("graph.json");
+        seed_one_node(&graph);
+        let mut record = captured_record("ab-bad", "bad");
+        record.as_object_mut().unwrap().remove("title");
+        let error = import_record(&graph, &record).unwrap_err();
+        assert!(error.contains("record does not validate"), "{error}");
+        let rows = graph_store::read_rows(&graph).unwrap();
+        assert_eq!(rows.len(), 1, "nothing was written");
+    }
+
+    #[test]
+    fn an_import_refuses_a_missing_store() {
+        let (_dir, graph) = fixture("graph.json");
+        let error = import_record(&graph, &captured_record("ab-lost", "lost")).unwrap_err();
+        assert!(error.contains("no store at"), "{error}");
+        assert!(
+            !crate::backlog::database_path(&graph).exists(),
+            "created nothing"
+        );
+    }
+
+    #[test]
+    fn usage_refuses_an_unknown_flag() {
+        let args: Vec<String> = ["record.json", "--dry-run"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_args(&args).is_err());
     }
 }
