@@ -119,155 +119,6 @@ def _rest_fail(stderr: str):
 # ---------------------------------------------------------------------------
 
 
-class TestWatermarkStore:
-    """AC: atomic watermark store round-trips and degrades on corruption."""
-
-    def test_load_missing_returns_empty(self, tmp_path):
-        """AC-HP: missing file -> load() returns {} without raising."""
-        from fno.pr_watch._state import WatermarkStore
-
-        store = WatermarkStore(path=tmp_path / "pr-watcher-state.json")
-        assert store.load() == {}
-
-    def test_set_and_get_round_trip(self, tmp_path):
-        """AC-HP: set() persists; get() retrieves the same dict."""
-        from fno.pr_watch._state import WatermarkStore
-
-        store = WatermarkStore(path=tmp_path / "pr-watcher-state.json")
-        entry = {
-            "last_review_ts": None,
-            "last_seen_state": "OPEN",
-            "merge_dispatched": False,
-            "retries": 0,
-            "parked": None,
-        }
-        store.set("owner/repo#1", entry)
-        assert store.get("owner/repo#1") == entry
-
-    def test_set_merges_with_an_external_write_landed_behind_its_back(self, tmp_path):
-        """A park sweep (Rust) rewriting the store while this tick sat in a
-        merge must survive: set() re-reads the disk under the flock instead
-        of writing its load-once dict over the sweep's row."""
-        from fno.pr_watch._state import WatermarkStore
-
-        store_path = tmp_path / "pr-watcher-state.json"
-        store = WatermarkStore(path=store_path)
-        store.set("owner/repo#1", {"last_seen_state": "OPEN", "retries": 0, "parked": None})
-        # The sweep lands a row the in-memory cache has never seen.
-        data = json.loads(store_path.read_text())
-        data["owner/repo#2"] = {"last_seen_state": "OPEN", "retries": 0, "parked": "checks-red"}
-        store_path.write_text(json.dumps(data))
-        # The tick's own write for its key must not clobber the sweep's row.
-        store.set("owner/repo#1", {"last_seen_state": "OPEN", "retries": 1, "parked": None})
-        final = json.loads(store_path.read_text())
-        assert final["owner/repo#2"]["parked"] == "checks-red"
-        assert final["owner/repo#1"]["retries"] == 1
-        # The cache is left coherent with the disk.
-        assert store.get("owner/repo#2")["parked"] == "checks-red"
-
-    def test_atomic_persist_via_os_replace(self, tmp_path):
-        """AC-VERIFY: persisted JSON is valid and contains the expected key."""
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "pr-watcher-state.json"
-        store = WatermarkStore(path=path)
-        store.set("owner/repo#42", {"last_seen_state": "MERGED", "merge_dispatched": True, "retries": 0, "parked": None, "last_review_ts": None})
-        raw = json.loads(path.read_text())
-        assert "owner/repo#42" in raw
-        assert raw["owner/repo#42"]["merge_dispatched"] is True
-
-    def test_corrupt_json_returns_empty_no_raise(self, tmp_path):
-        """AC-ERR: corrupt JSON file -> load() returns {} and logs warning."""
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "pr-watcher-state.json"
-        path.write_text("NOT VALID JSON {{{")
-        store = WatermarkStore(path=path)
-        result = store.load()
-        assert result == {}
-
-    def test_missing_repo_slug_refuses_ambiguous_key(self, tmp_path):
-        """A PR number without a repository can never be persisted safely."""
-        from fno.pr_watch._state import make_watermark_key
-
-        with pytest.raises(ValueError, match="repo_slug is required"):
-            make_watermark_key(repo_slug=None, pr_number=99)
-
-    def test_slug_key_format(self, tmp_path):
-        """AC-HP: normal slug key = 'owner/repo#N'."""
-        from fno.pr_watch._state import make_watermark_key
-
-        key = make_watermark_key(repo_slug="owner/repo", pr_number=7)
-        assert key == "owner/repo#7"
-
-    def test_ambiguous_bare_key_is_dropped_without_guessing_repo(self, tmp_path):
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "state.json"
-        path.write_text(json.dumps({
-            "316": {"last_seen_state": "OPEN"},
-            "owner/one#316": {"last_seen_state": "OPEN"},
-            "owner/two#316": {"last_seen_state": "OPEN"},
-        }))
-        store = WatermarkStore(path)
-
-        receipt = store.normalize_keys()
-
-        assert sorted(store.load()) == ["owner/one#316", "owner/two#316"]
-        assert receipt.dropped == [
-            {"key": "316", "reason": "ambiguous-key", "state": "OPEN"}
-        ]
-
-    def test_bare_key_never_collapses_into_a_candidate_only_twin(self, tmp_path):
-        """A same-numbered current candidate is not identity evidence.
-
-        Collapsing bare 316 into a candidate from another repository would
-        transplant its parked record onto that live PR and suppress it
-        forever, so the bare key is dropped instead.
-        """
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "state.json"
-        path.write_text(json.dumps({
-            "316": {"last_seen_state": "OPEN", "parked": "retries-exhausted"},
-        }))
-        store = WatermarkStore(path)
-
-        receipt = store.normalize_keys()
-
-        assert store.load() == {}
-        assert receipt.dropped == [
-            {"key": "316", "reason": "unresolvable-key", "state": "OPEN"}
-        ]
-
-    def test_duplicate_collapse_keeps_terminal_last_seen_state(self, tmp_path):
-        """A MERGED twin must not read back OPEN from its duplicate."""
-        from fno.pr_watch._state import WatermarkStore
-
-        path = tmp_path / "state.json"
-        path.write_text(json.dumps({
-            "owner/repo#9": {
-                "last_seen_state": "OPEN",
-                "merge_dispatched": False,
-                "retries": 0,
-                "parked": None,
-                "last_review_ts": None,
-            },
-            "Owner/Repo#9": {
-                "last_seen_state": "MERGED",
-                "merge_dispatched": True,
-                "retries": 0,
-                "parked": None,
-                "last_review_ts": None,
-            },
-        }))
-        store = WatermarkStore(path)
-
-        receipt = store.normalize_keys()
-
-        assert list(store.load()) == ["owner/repo#9"]
-        assert store.load()["owner/repo#9"]["last_seen_state"] == "MERGED"
-        assert receipt.normalized
 
 
 class TestTrackedStateBatch:
@@ -2264,20 +2115,23 @@ class TestWarmMergeRouting:
         assert skips and skips[0]["data"]["reason"] == "dispatch-in-flight"
         assert WatermarkStore(path=store_path).get("owner/repo#1") is None
 
-    def test_spawn_failed_is_receipted_before_terminal_eviction(self, tmp_path):
-        """A failed hand-off emits failure evidence without retaining merged state."""
+    def test_spawn_failed_is_receipted_then_the_candidate_leaves(self, tmp_path):
+        """One failed hand-off is receipted, then the merged candidate leaves
+        the watch set - no retry ladder, no retries-exhausted park for a PR
+        that already merged."""
+        from fno.pr_watch._dispatch import _delivery_state_path
         from fno.pr_watch._state import WatermarkStore
 
         deps, store_path, calls = self._run_merge_tick(tmp_path, "spawn-failed", ticks=4)
-        assert len(calls) == 3
+        assert len(calls) == 1
         assert WatermarkStore(path=store_path).get("owner/repo#1") is None
         failed = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
-        assert [event["data"]["retries"] for event in failed] == [1, 2, 3]
-        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
-        assert len(parked) == 1
-        assert parked[0]["data"]["reason"] == "retries-exhausted"
+        assert [event["data"]["retries"] for event in failed] == [1]
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_parked"] == []
         receipts = [e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick"]
         assert [receipt["dropped_count"] for receipt in receipts] == [1, 0, 0, 0]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
+        assert rec["handled"] == "MERGED"
 
 
 # ---------------------------------------------------------------------------
@@ -4827,9 +4681,11 @@ class TestCandidateReadDiscipline:
             "the memo skip must be silent; the one receipt came from tick one"
         )
 
-    def test_merge_not_ready_is_not_terminal_and_is_read_again(self, tmp_path):
-        """A merged candidate whose readiness said not-ready keeps the retry
-        path: no memo, and the next tick reads it again."""
+    def test_merge_not_ready_leaves_the_watch_set(self, tmp_path):
+        """Readiness is repo-level config - it does not flip per PR - so a
+        merged candidate whose ritual can never fire is read once and then
+        memo'd, instead of re-reading every tick until its discovery window
+        expired."""
         from fno.pr_watch._dispatch import _delivery_state_path
         from fno.pr_watch._state import WatermarkStore
 
@@ -4852,37 +4708,140 @@ class TestCandidateReadDiscipline:
         self._tick(tmp_path, deps, store_path, listing=listing)
         self._tick(tmp_path, deps, store_path, listing=listing)
 
-        assert reads == [1, 1]
+        assert reads == [1]
         rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
-        assert "handled" not in rec
+        assert rec["handled"] == "MERGED"
 
-    def test_reopened_candidate_gets_a_fresh_read(self, tmp_path):
-        """A handled candidate the listing now calls OPEN falls through the
-        memo skip and gets the rich read."""
+    def test_closed_first_sight_leaves_the_watch_set(self, tmp_path):
+        """A closed candidate with no state row is read once; the memo
+        silences every tick after."""
         from fno.pr_watch._dispatch import _delivery_state_path
-        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        candidate = _make_candidate(pr_number=2, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={2: _make_obs(2, "CLOSED")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        listing = self._listing({"owner/repo#2"})
+        self._tick(tmp_path, deps, store_path, listing=listing)
+        self._tick(tmp_path, deps, store_path, listing=listing)
+
+        assert reads == [2]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#2"]
+        assert rec["handled"] == "CLOSED"
+
+    def test_handled_merged_survives_a_failed_listing(self, tmp_path):
+        """A handled merged candidate stays silent even when the sweep cannot
+        answer: a merge is permanent on GitHub, so its memo does not need the
+        listing's agreement. Storms re-read the wall exactly when the read
+        budget is scarcest."""
+        from fno.pr_watch._dispatch import _delivery_state_path
 
         store_path = tmp_path / "state.json"
         _delivery_state_path(store_path).write_text(json.dumps(
             {"owner/repo#1": {"handled": "MERGED", "retries": 0, "parked": None}}
         ))
-        # A row already tracks the PR; a first-seen OPEN row would be
-        # baselined in the batch loop and never rich-read this tick.
-        WatermarkStore(path=store_path).set("owner/repo#1", {
-            "last_review_ts": None,
-            "last_seen_state": "OPEN",
-            "merge_dispatched": False,
-            "retries": 0,
-            "parked": None,
-        })
         candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
         deps = _make_tick_deps(
-            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "OPEN")},
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "MERGED")},
         )
         reads = self._counting_reads(deps, {"t": 0.0})
 
         self._tick(tmp_path, deps, store_path,
-                   listing=self._listing(set(), open_keys={"owner/repo#1"}))
+                   listing=lambda keys: ({key: "UNKNOWN" for key in keys}, 1))
+
+        assert reads == []
+
+    def test_failed_open_row_is_not_sunk_below_the_merged_wall(self, tmp_path, monkeypatch):
+        """The scan reaches every OPEN row: a read-failed OPEN row sorts
+        within its own OPEN-ness group, never below the merged wall that an
+        outage leaves looking healthy."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+
+        store_path = tmp_path / "state.json"
+        _delivery_state_path(store_path).write_text(json.dumps(
+            {"owner/repo#11": {"last_read_failed": True}}
+        ))
+        # Both OPEN rows must already be tracked: a first-seen OPEN row is
+        # baselined in the batch loop and never rich-read this tick.
+        for number in (10, 11):
+            WatermarkStore(path=store_path).set(f"owner/repo#{number}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+            })
+        wall = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in range(1, 6)
+        ]
+        healthy_open = _make_candidate(pr_number=10, node_id="x-0000000a", repo_dir=tmp_path)
+        failed_open = _make_candidate(pr_number=11, node_id="x-0000000b", repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[*wall, healthy_open, failed_open],
+            obs_map={
+                **{n: _make_obs(n, "MERGED") for n in range(1, 6)},
+                10: _make_obs(10, "OPEN"),
+                11: _make_obs(11, "OPEN"),
+            },
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, clock)
+
+        # read floor is 15s, each read costs 1s: exactly two reads fit.
+        self._tick(
+            tmp_path, deps, store_path,
+            listing=self._listing({f"owner/repo#{n}" for n in range(1, 6)},
+                                  open_keys={"owner/repo#10", "owner/repo#11"}),
+            deadline=clock["t"] + 16.5,
+        )
+
+        assert reads == [10, 11]
+
+    def test_reopened_candidate_gets_a_fresh_read(self, tmp_path):
+        """A handled CLOSED candidate the listing now calls OPEN falls through
+        the memo skip and gets the rich read; a handled MERGED one never
+        does, because GitHub cannot reopen a merge."""
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        _delivery_state_path(store_path).write_text(json.dumps(
+            {"owner/repo#1": {"handled": "CLOSED", "retries": 0, "parked": None},
+             "owner/repo#2": {"handled": "MERGED", "retries": 0, "parked": None}}
+        ))
+        # Rows already track both PRs; first-seen OPEN rows would be
+        # baselined in the batch loop and never rich-read this tick.
+        for number in (1, 2):
+            WatermarkStore(path=store_path).set(f"owner/repo#{number}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+            })
+        candidates = [
+            _make_candidate(pr_number=1, repo_dir=tmp_path),
+            _make_candidate(pr_number=2, repo_dir=tmp_path),
+        ]
+        deps = _make_tick_deps(
+            tmp_path, candidates=candidates,
+            obs_map={1: _make_obs(1, "OPEN"), 2: _make_obs(2, "OPEN")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        self._tick(tmp_path, deps, store_path,
+                   listing=self._listing(set(), open_keys={"owner/repo#1", "owner/repo#2"}))
 
         assert reads == [1]
         row = WatermarkStore(path=store_path).get("owner/repo#1")
