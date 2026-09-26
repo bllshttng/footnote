@@ -346,6 +346,7 @@ pub mod state_path;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
+pub mod subagent_hold;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
