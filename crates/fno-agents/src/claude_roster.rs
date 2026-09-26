@@ -61,6 +61,15 @@ impl ClaudeAgentRow {
         self.pid = pid;
         self
     }
+
+    /// A hosted process stands behind this row. A session that died keeps
+    /// its last state (`blocked`, `working`) with no pid, so the state
+    /// alone lies. `carries_pids` is false for a listing whose rows carry
+    /// no pid field at all; that listing keeps the state-only reading.
+    pub fn has_live_process(&self, carries_pids: bool) -> bool {
+        let terminal = self.state.as_deref().is_some_and(is_terminal_roster_state);
+        !terminal && (!carries_pids || self.pid.is_some())
+    }
 }
 
 /// The one terminal-state set, shared by every death-evidence reader (rm's
@@ -110,6 +119,18 @@ impl ClaudeAgentsSnapshot {
     /// not - gate those on [`Self::warning_text`] being empty.
     pub fn is_known(&self) -> bool {
         matches!(self, Self::Known { .. })
+    }
+
+    /// Whether ANY row in this listing carries a pid. A listing with no pid
+    /// anywhere (an older claude that omits the field) keeps the state-only
+    /// liveness reading; a listing that carries pids makes a missing pid a
+    /// death witness.
+    pub fn carries_pids(&self) -> bool {
+        match self {
+            Self::Known { rows, .. } | Self::Unknown { rows, .. } => {
+                rows.iter().any(|row| row.pid.is_some())
+            }
+        }
     }
 
     pub fn warning_text(&self) -> String {
@@ -795,6 +816,44 @@ mod tests {
             Some(std::path::Path::new("/")),
             "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
+    }
+
+    // A session that died while blocked keeps its `blocked` row with no
+    // pid and no process. In a listing that carries pids the missing pid
+    // is the death witness; the state alone reads live and lies.
+    #[test]
+    fn a_pid_less_blocked_row_reads_dead_when_the_listing_carries_pids() {
+        let dead = ClaudeAgentRow::new("deadbeef", Some("blocked"));
+        let live_peer = ClaudeAgentRow::new("c0ffee00", Some("working")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![dead.clone(), live_peer]);
+        assert!(snapshot.carries_pids());
+        assert!(!dead.has_live_process(snapshot.carries_pids()));
+    }
+
+    #[test]
+    fn the_same_row_with_a_pid_reads_live() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("blocked")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(snapshot.carries_pids());
+        assert!(row.has_live_process(snapshot.carries_pids()));
+    }
+
+    #[test]
+    fn a_done_row_with_a_pid_still_reads_dead() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("done")).with_pid(Some(5001));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(snapshot.carries_pids());
+        assert!(!row.has_live_process(snapshot.carries_pids()));
+    }
+
+    // An older claude whose listing omits the pid field everywhere keeps
+    // today's state-only reading: absence of the column is not death.
+    #[test]
+    fn a_listing_without_pids_keeps_the_state_only_reading() {
+        let row = ClaudeAgentRow::new("deadbeef", Some("blocked"));
+        let snapshot = ClaudeAgentsSnapshot::known(vec![row.clone()]);
+        assert!(!snapshot.carries_pids());
+        assert!(row.has_live_process(snapshot.carries_pids()));
     }
 
     #[test]

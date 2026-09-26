@@ -1687,6 +1687,10 @@ enum MenuAction {
     /// overlay on `RenameTarget::Agent`. Built only for a non-external,
     /// unambiguous agent row.
     RenameAgent,
+    /// Open the portal PICKER for this row - the same numbered picker
+    /// sideline `P` opens (open portals plus a new-portal row), so a
+    /// right-click offers a portal choice where it offers placement.
+    PortalPicker,
 }
 
 impl MenuAction {
@@ -1720,6 +1724,7 @@ impl MenuAction {
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
             MenuAction::ClosePortal => Some("close-portal"),
+            MenuAction::PortalPicker => Some("open-in-portal"),
             _ => None,
         }
     }
@@ -1975,9 +1980,11 @@ mod input_folds;
 mod mail_input;
 mod overlay_keys;
 
+mod bottom_row;
+
 use input_folds::{
-    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys, ModalKey, NavKey,
-    SearchKey,
+    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys,
+    fold_selector_keys_with_split_arrows, ModalKey, NavKey, SearchKey,
 };
 
 use mail_input::peek_input_keys;
@@ -5991,33 +5998,6 @@ impl View {
         }
     }
 
-    /// The bottom chrome line (US4). While a prefix chord is pending past
-    /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
-    /// held - even with the status row toggled off, discoverability does not
-    /// die with the toggle; tmux's message-line behavior). Otherwise it is
-    /// the status row (AC4-UI): session name, focused pane cwd, the focused
-    /// pane's scroll offset (the canonical `[+N]` home; the per-pane inline
-    /// indicator stays so a scrolled UNFOCUSED pane is still observable),
-    /// and `? for keys`. Too-short terminals draw neither (AC4-ERR).
-    /// The bottom terminal row is chrome (search line / which-key hint / status
-    /// row, painted last by `draw_bottom_row`) rather than content or a sideline
-    /// row drawn underneath. Below minimum geometry both auto-hide (AC4-ERR) and
-    /// the row is content (`content_dims` handed the server the full height, a
-    /// pane tiled into it, so blanking would erase it). The single truth shared
-    /// by the renderer and `chrome_hit` so a click matches what's painted
-    /// (codex P2).
-    fn bottom_row_is_chrome(&self) -> bool {
-        self.term.0 >= MIN_ROWS_FOR_STATUS
-            && (self.confirm.is_some()
-                || self.create.is_some()
-                || self.rename.is_some()
-                || self.move_to.is_some()
-                || self.recruit.is_some()
-                || self.search.is_some()
-                || self.hint
-                || self.status_on)
-    }
-
     /// A centered, inverse-video name-entry modal for the create / rename /
     /// recruit inputs. Those used to paint the bottom-left chrome row, where they
     /// sat outside the operator's field of view and read as "nothing happened";
@@ -6085,169 +6065,6 @@ impl View {
         }
         let layout = self.name_modal_layout(label, name, hint);
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
-    }
-
-    fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
-        if !self.bottom_row_is_chrome() {
-            return;
-        }
-        // A card-dispatch confirm is modal - it owns the row above everything
-        // else while the operator decides.
-        if let Some(c) = &self.confirm {
-            self.draw_confirm_line(cells, rows, cols, c);
-            return;
-        }
-        // The new-workspace name input is a centered modal; the operator
-        // is mid-entry, so it sits above search/hint/status.
-        if let Some(name) = &self.create {
-            self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
-            return;
-        }
-        // The rename input (tab; widened to squads): the noun tracks
-        // the target so the operator sees what they are renaming, and the hint
-        // spells out the blank-clears semantics.
-        if let Some((target, name)) = &self.rename {
-            let noun = match target {
-                RenameTarget::Tab(_) => "tab",
-                RenameTarget::Squad(_) => "workspace",
-                RenameTarget::Agent(_) => "row",
-            };
-            let hint = match target {
-                RenameTarget::Agent(_) => Some("a-z 0-9 - _ (1-64 chars)"),
-                _ => Some("empty resets to auto"),
-            };
-            self.draw_name_modal(cells, rows, cols, &format!("rename {noun}"), name, hint);
-            return;
-        }
-        // The move-to prompt: the typed number IS the body; the hint
-        // names the grammar so a `4` never reads as "move 4 left".
-        if let Some((_, buf)) = &self.move_to {
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                "move tab to position",
-                buf,
-                Some("1-based; Enter moves"),
-            );
-            return;
-        }
-        // The recruit workspace-name input: the hint names how many
-        // marked agents will join (create-if-absent).
-        if let Some(name) = &self.recruit {
-            let n = self.marks.len();
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                &format!("recruit {n} into"),
-                name,
-                Some("create-if-absent"),
-            );
-            return;
-        }
-        // Search line takes the bottom row when active (precedence: search >
-        // which-key hint > status row). It OVERLAYS whatever held the row - no
-        // reserved row, so opening search never triggered a Resize/reflow.
-        if let Some(sv) = &self.search {
-            self.draw_search_line(cells, rows, cols, sv);
-            return;
-        }
-        let r = rows - 1;
-        // We own the row: blank it first so the divider-fill pass in `compose`
-        // (which treats this uncovered row as content and paints '─' glyphs)
-        // cannot bleed through the gaps between the segments below.
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
-        let put = |cells: &mut [Cell], c: usize, ch: char, flags: u8| {
-            if c < cols {
-                cells[r * cols + c] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags,
-                };
-            }
-        };
-        if self.hint {
-            let text = crate::keys::prefix_hint();
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                put(cells, i, ch, 0);
-            }
-            return;
-        }
-        let mut c = 0usize;
-        for ch in format!(" {} ", self.session).chars() {
-            put(cells, c, ch, cell_flags::BOLD);
-            c += 1;
-        }
-        // Active squad's name, only when there is more than one squad to be
-        // ambiguous about - the always-visible answer to "which
-        // squad?" when the sideline is toggled off or auto-hidden. BOLD: it
-        // is identity, like the session cell, not context like the cwd.
-        if self.layout.squads.len() > 1 {
-            if let Some(s) = self
-                .layout
-                .squads
-                .iter()
-                .find(|s| s.id == self.layout.active_squad)
-            {
-                for ch in format!("│ {} ", s.name).chars() {
-                    put(cells, c, ch, cell_flags::BOLD);
-                    c += 1;
-                }
-            }
-        }
-        let cwd = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .map(|s| abbrev_home(&s.canonical_cwd))
-            .unwrap_or_default();
-        for ch in format!("│ {cwd} ").chars() {
-            put(cells, c, ch, cell_flags::DIM);
-            c += 1;
-        }
-        // Provenance cell for the focused pane: config-free `⚑ <node>`,
-        // shown only when the focused pane was node-driven. Absent for an ad-hoc
-        // pane, so a plain shell reads clean.
-        if let Some(node) = &self.layout.focus_node {
-            for ch in format!("⚑ {node} ").chars() {
-                put(cells, c, ch, cell_flags::BOLD);
-                c += 1;
-            }
-        }
-        if let Some(f) = self.frames.get(&self.layout.focus) {
-            if f.scroll_offset != 0 {
-                for ch in format!("[+{}] ", f.scroll_offset).chars() {
-                    put(cells, c, ch, cell_flags::INVERSE);
-                    c += 1;
-                }
-            }
-        }
-        // The whole-machine meter, when toggled on: the latest one-line
-        // reading, or an explicit "sensor unavailable" until a sample lands.
-        // A dark sensor is named - the row never shows a zero or a blank as
-        // if it were a reading.
-        if self.resource_meter_on {
-            let text = self
-                .resource_meter_text
-                .clone()
-                .unwrap_or_else(|| "meter: sensor unavailable".into());
-            for ch in format!("│ {text} ").chars() {
-                put(cells, c, ch, cell_flags::DIM);
-                c += 1;
-            }
-        }
-        let help = "? keys · glyphs ";
-        let start = cols.saturating_sub(help.chars().count());
-        if start > c {
-            for (i, ch) in help.chars().enumerate() {
-                put(cells, start + i, ch, cell_flags::DIM);
-            }
-        }
     }
 
     /// Paint the confirm prompt over the bottom row (dispatch;
@@ -6744,6 +6561,7 @@ impl View {
         match self.density {
             Density::Regular => {
                 let (rows, depths) = self.tree_rows_with_depths();
+                let (rows, depths) = self.sort_agent_runs(rows, depths);
                 self.card_rows(rows, depths)
             }
             Density::Slim => {
@@ -6764,14 +6582,19 @@ impl View {
         }
     }
 
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
+    /// Sorts agent runs the way the extended table orders them: each
+    /// contiguous run of agent rows between non-agent rows orders by the
+    /// active column (kings compared against each other, workers ordered
+    /// inside their own lineage level), so the card view and the table read
+    /// in the sorted order and the painted age is the value sorted on.
+    fn sort_agent_runs<'a>(
+        &self,
+        rows: Vec<DisplayRow<'a>>,
+        depths: Vec<usize>,
+    ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
-        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
 
@@ -6800,15 +6623,22 @@ impl View {
             }
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+        out.into_iter().unzip()
+    }
 
-        let has_agent = out
-            .iter()
-            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
-        out.insert(0, (DisplayRow::TableHead, 0));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
+        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
+        rows.insert(0, DisplayRow::TableHead);
+        depths.insert(0, 0);
         if !has_agent {
-            out.insert(1, (DisplayRow::TableEmpty, 0));
+            rows.insert(1, DisplayRow::TableEmpty);
+            depths.insert(1, 0);
         }
-        let (rows, depths) = out.into_iter().unzip();
         self.card_rows(rows, depths)
     }
 
@@ -7229,110 +7059,6 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
-}
-
-#[allow(clippy::type_complexity)]
-fn append_sorted_agent_group<'a>(
-    out: &mut Vec<(DisplayRow<'a>, usize)>,
-    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-    sort: AgentSort,
-    needs: &HashMap<String, NeedKind>,
-    now_secs: u64,
-) {
-    let mut subtrees: Vec<(
-        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
-        &'a AgentRow,
-    )> = Vec::new();
-    for item in group.drain(..) {
-        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
-        if depth == 0 || subtrees.is_empty() {
-            let root = item.1;
-            subtrees.push((vec![item], root));
-        } else {
-            subtrees.last_mut().unwrap().0.push(item);
-        }
-    }
-    subtrees.sort_by(|(_, a), (_, b)| {
-        compare_agent_rows(
-            a,
-            b,
-            sort,
-            needs.get(a.name.as_str()).copied(),
-            needs.get(b.name.as_str()).copied(),
-            now_secs,
-        )
-    });
-    for (items, _) in subtrees {
-        for (rows, _) in items {
-            out.extend(rows);
-        }
-    }
-}
-
-fn compare_agent_rows(
-    a: &AgentRow,
-    b: &AgentRow,
-    sort: AgentSort,
-    need_a: Option<NeedKind>,
-    need_b: Option<NeedKind>,
-    now_secs: u64,
-) -> Ordering {
-    let order = match sort.column {
-        AgentSortColumn::Status => {
-            let a_key = attention_key(a, need_a);
-            let b_key = attention_key(b, need_b);
-            let a_state = if a.exited {
-                u8::MAX
-            } else {
-                pane_state(a.badge, a.seen, a.pane_activity) as u8
-            };
-            let b_state = if b.exited {
-                u8::MAX
-            } else {
-                pane_state(b.badge, b.seen, b.pane_activity) as u8
-            };
-            apply_direction(
-                a_state
-                    .cmp(&b_state)
-                    .then_with(|| a_key.0.cmp(&b_key.0))
-                    .then_with(|| a_key.1.cmp(&b_key.1))
-                    .then_with(|| a_key.2.cmp(&b_key.2)),
-                sort.direction,
-            )
-        }
-        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
-        AgentSortColumn::LastMessage => cmp_optional(
-            a.tail.as_deref().filter(|value| !value.is_empty()),
-            b.tail.as_deref().filter(|value| !value.is_empty()),
-            sort.direction,
-        ),
-        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
-        AgentSortColumn::Age => {
-            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
-        }
-    };
-    order
-}
-
-fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
-    }
-}
-
-fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
-    match direction {
-        SortDirection::Ascending => order,
-        SortDirection::Descending => order.reverse(),
-    }
-}
-
-fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
-    a.last_activity_age_s
-        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
 /// (US3) The project basename a section is keyed by (the squad's
@@ -12078,6 +11804,14 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("close portal send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::PortalPicker => {
+            // One decision path with sideline `P`: the picker itself refuses
+            // what it cannot show (not attachable, no open portals to keep).
+            match view.portal_pick_decision(Some(&a)) {
+                PortalPickDecision::Open(id) => view.open_portal_pick(id),
+                PortalPickDecision::Refuse(text) => view.set_notice(text),
+            }
+        }
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
                 // Recomputed at execute (a workspace added or removed between
@@ -14793,3 +14527,8 @@ mod glyph_legend;
 
 #[path = "client/sideline.rs"]
 mod sideline;
+
+#[path = "client/agent_sort.rs"]
+mod agent_sort;
+
+use agent_sort::append_sorted_agent_group;

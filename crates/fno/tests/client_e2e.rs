@@ -334,12 +334,15 @@ fn wait_ready_split_marker(h: &mut ClientHarness) {
 #[test]
 fn a_lone_esc_closes_the_which_key_table() {
     // R1: a raw-fed overlay stalls on a lone Esc until the next key
-    // on main; the client's quiet-window flush releases it.
+    // on main; the client's quiet-window flush releases it. The marker is
+    // the `a` binding's label: the global (no prefix) section pushed the
+    // `?` row below the 24-row fold at scroll 0, so the old marker
+    // ("this key table") no longer renders at this height.
     let scratch = Scratch::new("esc-which-key");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
     wait_ready_split_marker(&mut h);
-    assert_overlay_closes_on_lone_esc(&mut h, b"\x02?", "this key table");
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02?", "answer queue");
 }
 
 #[test]
