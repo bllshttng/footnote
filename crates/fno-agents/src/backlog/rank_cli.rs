@@ -664,9 +664,9 @@ mod tests {
     fn wellformed_cases() -> Vec<(&'static str, bool)> {
         vec![
             ("x-aaaa1111", true),
-            ("ab-12345678", true),
+            ("ab-1234000", true),
             ("ab-1234", true),
-            ("x-a123", true),
+            ("x-a1230", true),
             ("abcdefgh-1234", true), // prefix may run 8 chars
             ("1abc-1234", false),    // prefix not letter-led
             ("x-nope", false),       // suffix not hex
@@ -754,16 +754,14 @@ mod tests {
 
     #[test]
     fn find_node_index_ambiguity_names_the_candidates() {
-        let entries = vec![json!({"id": "ab-12345678"}), json!({"id": "ab-1234abcd"})];
+        let entries = vec![json!({"id": "ab-1234000"}), json!({"id": "ab-1234abcd"})];
         let (hit, line) = crate::backlog_ready::find_node_index(&entries, "ab-1234");
         assert!(hit.is_none());
         assert_eq!(
             line,
-            Some(
-                "[graph] ambiguous prefix 'ab-1234' matches: ab-12345678, ab-1234abcd".to_string()
-            )
+            Some("[graph] ambiguous prefix 'ab-1234' matches: ab-1234000, ab-1234abcd".to_string())
         );
-        let (hit, line) = crate::backlog_ready::find_node_index(&entries, "ab-12345678");
+        let (hit, line) = crate::backlog_ready::find_node_index(&entries, "ab-1234000");
         assert_eq!(hit, Some(0));
         assert!(line.is_none());
     }
@@ -789,24 +787,24 @@ mod tests {
     }
 
     fn outside_node() -> Value {
-        json!({"id": "x-0bad", "title": "Outside", "status": "ready", "priority": "p1"})
+        json!({"id": "x-0bad0", "title": "Outside", "status": "ready", "priority": "p1"})
     }
 
     #[test]
     fn a_mission_reaching_the_node_prints_no_note() {
-        let report = receipt(json!([mission_row("x-beef")]), 1, None);
+        let report = receipt(json!([mission_row("x-beef0")]), 1, None);
         let entries = vec![
-            json!({"id": "x-beef", "type": "epic", "status": "in_progress", "parent": null}),
-            json!({"id": "x-0cab", "parent": "x-beef", "status": "ready"}),
+            json!({"id": "x-beef0", "type": "epic", "status": "in_progress", "parent": null}),
+            json!({"id": "x-0cab0", "parent": "x-beef0", "status": "ready"}),
         ];
-        let note = note_from_receipt("x-0cab", &entries, &report).unwrap();
+        let note = note_from_receipt("x-0cab0", &entries, &report).unwrap();
         assert_eq!(note, None);
     }
 
     #[test]
     fn an_outside_loose_node_gets_the_epic_activation_remedy() {
-        let report = receipt(json!([mission_row("x-beef")]), 1, None);
-        let note = note_from_receipt("x-0bad", &[outside_node()], &report)
+        let report = receipt(json!([mission_row("x-beef0")]), 1, None);
+        let note = note_from_receipt("x-0bad0", &[outside_node()], &report)
             .unwrap()
             .unwrap();
         assert!(note.contains("no live dispatcher will take it"));
@@ -814,23 +812,23 @@ mod tests {
         // note names the per-epic activation axis and prints no command that
         // cannot work.
         assert!(note.contains("no epic to activate"));
-        assert!(!note.contains("advance --epic x-0bad"));
+        assert!(!note.contains("advance --epic x-0bad0"));
     }
 
     #[test]
     fn an_outside_child_names_its_epic_activation_command() {
-        let report = receipt(json!([mission_row("x-beef")]), 1, None);
-        let child = json!({"id": "x-0dad", "parent": "x-feed", "status": "ready"});
-        let note = note_from_receipt("x-0dad", &[child], &report)
+        let report = receipt(json!([mission_row("x-beef0")]), 1, None);
+        let child = json!({"id": "x-0dad0", "parent": "x-feed0", "status": "ready"});
+        let note = note_from_receipt("x-0dad0", &[child], &report)
             .unwrap()
             .unwrap();
-        assert!(note.contains("Activate its epic: fno backlog advance --epic x-feed"));
+        assert!(note.contains("Activate its epic: fno backlog advance --epic x-feed0"));
     }
 
     #[test]
     fn a_disabled_drain_prescribes_the_config_fix() {
         let report = receipt(json!([]), 6, Some("drain_disabled"));
-        let note = note_from_receipt("x-0eef", &[outside_node()], &report)
+        let note = note_from_receipt("x-0eef0", &[outside_node()], &report)
             .unwrap()
             .unwrap();
         assert!(note.contains("the drain is disabled in config"));
@@ -847,10 +845,10 @@ mod tests {
             skip_reason: None,
             failure: Some("territory: graph unreadable".to_string()),
         };
-        let exc = note_from_receipt("x-0bad", &[outside_node()], &report).unwrap_err();
+        let exc = note_from_receipt("x-0bad0", &[outside_node()], &report).unwrap_err();
         assert_eq!(exc, "active-backlog: territory: graph unreadable");
         // The caller wraps any inner failure in the unavailable note.
-        let note = match note_from_receipt("x-0bad", &[outside_node()], &report) {
+        let note = match note_from_receipt("x-0bad0", &[outside_node()], &report) {
             Err(exc) => Some(format!("dispatcher scope unavailable ({exc})")),
             Ok(note) => note,
         };
@@ -860,7 +858,7 @@ mod tests {
     #[test]
     fn mission_lists_dedupe_and_sort() {
         let report = receipt(json!([mission_row("z-c"), mission_row("a-a")]), 2, None);
-        let note = note_from_receipt("x-0bad", &[outside_node()], &report)
+        let note = note_from_receipt("x-0bad0", &[outside_node()], &report)
             .unwrap()
             .unwrap();
         assert!(note.contains("outside active mission scopes: a-a, z-c"));

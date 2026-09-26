@@ -1174,16 +1174,18 @@ mod tests {
             }
         }
 
-        // The five allowed files: production binary repair (install_verify),
-        // a production dir mode (paths), two dir-mode restores in tests
-        // (claims, operator_turns), and the bin test target that cannot see a
-        // cfg(test) lib fn (client_tests).
+        // The allowed files: production binary repair (install_verify), a
+        // production dir mode (paths), two dir-mode restores in tests
+        // (claims, operator_turns), the bin test target that cannot see a
+        // cfg(test) lib fn (client_tests), and the plan writer's production
+        // mode-preserve on its atomic plan-file replace (plan_doc/codec).
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
             ("king_board/claims.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
+            ("plan_doc/codec.rs", 1),
         ];
         let allowed_counts: std::collections::HashMap<&str, usize> =
             ALLOWED.iter().copied().collect();
