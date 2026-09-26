@@ -157,7 +157,7 @@ def init_cmd(
     typer.echo(f"scope:  {fields['scope']}")
     _print_settled_children(scope)
     _warn_uncrowned_row(scope)
-    _reign_hold(_reign_hold_argv())
+    _reign_hold()
 
 
 def _reign_hold(argv: list[str] | None = None) -> None:
