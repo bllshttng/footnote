@@ -126,6 +126,7 @@ FIELD_META: dict[str, Meta] = {
         "Age (days) before an unmoved ready node is quarantined from selection.",
     ),
     "backlog.epic_max_open_children": Meta("advanced", "Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install."),
+    "backlog.max_open_ideas": Meta("advanced", "Most unplanned, machine-filed ideas one nearest-epic or project scope may hold (default 25; 0 is off). Operator asks are never capped. The graph store reads it from the config.toml beside graph.json."),
     "backlog.id_prefix": Meta(
         "always", "Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).",
         question="Backlog node-ID prefix?", default_source="repo-slug",
