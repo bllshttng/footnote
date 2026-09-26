@@ -479,7 +479,7 @@ pub fn apply(
                 (code, stdout, code == 0, false)
             };
             if resumed_exit == Some(crate::resume_gate::RESUME_PAUSED_EXIT) {
-                record_pause(home, emitter, row, state_param.clone(), state_param, now);
+                record_pause(home, emitter, row, state, state_param, now);
                 return;
             }
             state.attempts += 1;
@@ -1035,6 +1035,21 @@ mod tests {
         });
         assert_eq!(planned[0].1, "paused");
         assert!(!status_read, "a held nudge skips the PR-status read");
+    }
+
+    #[test]
+    fn pause_after_a_durable_nudge_preserves_its_delivery_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(tmp.path());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let row = row(false);
+        let mut state = LadderState::default();
+        state.mail_durable = true;
+        state.last_pause_emit_at = Some(1900);
+
+        record_pause(&home, &emitter, &row, state, &LadderState::default(), 1900);
+
+        assert!(load_state(&home, &row.session_id).mail_durable);
     }
 
     /// The status payload the real verb writes to stdout whatever the exit

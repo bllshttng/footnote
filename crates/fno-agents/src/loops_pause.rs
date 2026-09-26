@@ -495,17 +495,21 @@ enum MailLeg {
     Failed(String),
 }
 
-fn run_mail_hold(extra: &[&str]) -> MailLeg {
-    let binary = std::env::var_os("FNO_LOOPS_MAIL_BIN")
+fn fno_cli_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("fno")))
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("fno"))
+}
+
+fn mail_hold_binary() -> PathBuf {
+    std::env::var_os("FNO_LOOPS_MAIL_BIN")
         .map(PathBuf::from)
-        .or_else(|| {
-            let executable = std::env::current_exe().ok()?;
-            let candidate = executable.parent()?.join("fno");
-            candidate.is_file().then_some(candidate)
-        })
-        .unwrap_or_else(|| PathBuf::from("fno"));
-    let mut cmd = std::process::Command::new(binary);
-    cmd.args(["agents", "mail", "hold"]).args(extra);
+        .unwrap_or_else(|| fno_cli_binary())
+}
+
+fn run_mail_command(cmd: std::process::Command) -> MailLeg {
     match crate::bounded_cmd::output_with_timeout_result(cmd, 10) {
         Ok(output) => match output.status.code() {
             Some(0) => MailLeg::Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
@@ -519,6 +523,77 @@ fn run_mail_hold(extra: &[&str]) -> MailLeg {
         },
         Err(error) => MailLeg::Failed(crate::evidence::truncate_chars(&error.to_string(), 200)),
     }
+}
+
+fn run_mail_hold(extra: &[&str]) -> MailLeg {
+    let mut cmd = std::process::Command::new(mail_hold_binary());
+    cmd.args(["agents", "mail", "hold"]).args(extra);
+    run_mail_command(cmd)
+}
+
+fn run_mail_hold_for(session_id: &str, extra: &[&str]) -> MailLeg {
+    let binary = std::env::var_os("FNO_LOOPS_MAIL_BIN")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from("fno-agents"));
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(["mail-hold", "--session", session_id]).args(extra);
+    run_mail_command(cmd)
+}
+
+fn is_full_mail_session_id(session_id: &str) -> bool {
+    crate::resume_wake::is_uuid_shaped(session_id) || session_id.starts_with("ses_")
+}
+
+fn mail_session_id_from_whoami(payload: &Value) -> Option<String> {
+    let session = payload.get("session");
+    let raw = session.and_then(|value| value.get("raw"));
+    [
+        payload.get("harness_session_id").and_then(Value::as_str),
+        session
+            .and_then(|value| value.get("harness_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("harness_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("codex_thread_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("codex_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("claude_session_uuid"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("claude_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("gemini_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("opencode_session_id"))
+            .and_then(Value::as_str),
+        raw.and_then(|value| value.get("cc_session_id"))
+            .and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|id| is_full_mail_session_id(id))
+    .map(str::to_string)
+}
+
+fn current_mail_session_id() -> Result<String, String> {
+    if let Ok(session_id) = std::env::var("FNO_SESSION_ID") {
+        if is_full_mail_session_id(&session_id) {
+            return Ok(session_id);
+        }
+    }
+    let mut cmd = std::process::Command::new(fno_cli_binary());
+    cmd.args(["whoami", "--json"]);
+    let output = crate::bounded_cmd::output_with_timeout_result(cmd, 10)
+        .map_err(|error| format!("cannot resolve current session: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(crate::evidence::truncate_chars(&detail, 200));
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("fno whoami returned bad JSON: {error}"))?;
+    mail_session_id_from_whoami(&payload)
+        .ok_or_else(|| "whoami did not return a full harness session id".to_string())
 }
 
 const NO_IDENTITY_DETAIL: &str = "no session identity - no mail to hold";
@@ -550,36 +625,50 @@ fn remaining_hold_minutes(detail: &str) -> Option<u64> {
         })
 }
 
-fn mail_before_pause(ttl_ms: u64, previously_armed: bool) -> (String, String, bool) {
+fn mail_before_pause(
+    ttl_ms: u64,
+    session_id: &str,
+    previously_armed_by: Option<&str>,
+) -> (String, String, bool, Option<String>) {
     let requested_minutes = ttl_ms.div_ceil(60_000).max(1);
+    let previously_armed = previously_armed_by == Some(session_id);
     match run_mail_hold(&["--status"]) {
-        MailLeg::NoIdentity(detail) => ("skipped".into(), no_identity_detail(detail), false),
-        MailLeg::Failed(detail) => ("failed".into(), detail, false),
-        MailLeg::Ok(status) if status.contains(": no hold - ") => arm_mail(requested_minutes),
+        MailLeg::NoIdentity(detail) => ("skipped".into(), no_identity_detail(detail), false, None),
+        MailLeg::Failed(detail) => ("failed".into(), detail, false, None),
+        MailLeg::Ok(status) if status.contains(": no hold - ") => {
+            arm_mail(requested_minutes, session_id)
+        }
         MailLeg::Ok(status) if previously_armed => {
             let minutes = remaining_hold_minutes(&status)
                 .map(|remaining| remaining.max(requested_minutes))
                 .unwrap_or(requested_minutes);
-            arm_mail(minutes)
+            arm_mail(minutes, session_id)
         }
-        MailLeg::Ok(status) => ("kept".into(), status, false),
+        MailLeg::Ok(status) => ("kept".into(), status, false, None),
     }
 }
 
-fn arm_mail(minutes: u64) -> (String, String, bool) {
+fn arm_mail(minutes: u64, session_id: &str) -> (String, String, bool, Option<String>) {
     match run_mail_hold(&["--for", &minutes.to_string()]) {
-        MailLeg::Ok(detail) => ("armed".into(), detail, true),
-        MailLeg::NoIdentity(detail) => ("skipped".into(), no_identity_detail(detail), false),
-        MailLeg::Failed(detail) => ("failed".into(), detail, false),
+        MailLeg::Ok(detail) => ("armed".into(), detail, true, Some(session_id.to_string())),
+        MailLeg::NoIdentity(detail) => ("skipped".into(), no_identity_detail(detail), false, None),
+        MailLeg::Failed(detail) => ("failed".into(), detail, false, None),
     }
 }
 
-fn release_mail(owned: bool) -> (String, String) {
-    if !owned {
+fn release_mail(owned_session: Option<&str>) -> (String, String) {
+    let Some(session_id) = owned_session else {
         return ("left".into(), "not armed by pause-all".into());
-    }
-    match run_mail_hold(&["--off"]) {
-        MailLeg::Ok(detail) => ("lifted".into(), detail),
+    };
+    match run_mail_hold_for(session_id, &["--off"]) {
+        MailLeg::Ok(detail) => (
+            "lifted".into(),
+            if detail.is_empty() {
+                format!("released hold for {session_id}")
+            } else {
+                detail
+            },
+        ),
         MailLeg::NoIdentity(detail) => ("skipped".into(), no_identity_detail(detail)),
         MailLeg::Failed(detail) => ("failed".into(), detail),
     }
@@ -640,8 +729,19 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
             let reason = options
                 .reason
                 .unwrap_or_else(|| format!("pause-all by {}", options.who));
-            let mail_owned = previous_pause && previous.mail.as_deref() == Some("armed");
-            let (mail_state, mail_detail, armed_now) = mail_before_pause(ttl_ms, mail_owned);
+            let previous_mail_owner = (previous_pause && previous.mail.as_deref() == Some("armed"))
+                .then(|| previous.mail_session_id.as_deref())
+                .flatten();
+            let (mail_state, mail_detail, armed_now, mail_session_id) =
+                match current_mail_session_id() {
+                    Ok(session_id) => mail_before_pause(ttl_ms, &session_id, previous_mail_owner),
+                    Err(detail) => (
+                        "skipped".into(),
+                        crate::evidence::truncate_chars(&detail, 200),
+                        false,
+                        None,
+                    ),
+                };
             match crate::fleet_incident::write_transition_with_metadata(
                 &path,
                 "stopped",
@@ -653,6 +753,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                     expires_at: Some(expires_at),
                     origin: Some("pause-all".into()),
                     mail: Some(mail_state.clone()),
+                    mail_session_id: mail_session_id.clone(),
                 },
             ) {
                 Ok(record) => json!({
@@ -669,7 +770,9 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 }),
                 Err(error) => {
                     if armed_now {
-                        let _ = run_mail_hold(&["--off"]);
+                        if let Some(owner) = mail_session_id.as_deref() {
+                            let _ = run_mail_hold_for(owner, &["--off"]);
+                        }
                     }
                     json!({"error": error})
                 }
@@ -686,7 +789,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 }
             };
             let mut resumed = false;
-            let mut mail_owned = false;
+            let mut mail_owner = None;
             if record.state == "stopped" {
                 if record.origin.as_deref() != Some("pause-all") {
                     return Ok((
@@ -694,7 +797,9 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                         json!({"error": "fleet incident owns the breaker; clear it with fno agents incident clear"}),
                     ));
                 }
-                mail_owned = record.mail.as_deref() == Some("armed");
+                if record.mail.as_deref() == Some("armed") {
+                    mail_owner = record.mail_session_id.clone();
+                }
                 if let Err(error) = crate::fleet_incident::write_transition_with_metadata(
                     &path,
                     "clear",
@@ -704,6 +809,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                     crate::fleet_incident::RecordMetadata {
                         origin: Some("pause-all".into()),
                         mail: record.mail.clone(),
+                        mail_session_id: record.mail_session_id.clone(),
                         ..crate::fleet_incident::RecordMetadata::default()
                     },
                 ) {
@@ -716,7 +822,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Ok((action.to_string(), json!({"error": error.to_string()}))),
             };
-            let (mail_state, mail_detail) = release_mail(mail_owned);
+            let (mail_state, mail_detail) = release_mail(mail_owner.as_deref());
             json!({
                 "resumed": resumed || legacy_sentinel_removed,
                 "legacy_sentinel_removed": legacy_sentinel_removed,
@@ -1112,6 +1218,7 @@ mod tests {
             expires_at: None,
             origin: None,
             mail: None,
+            mail_session_id: None,
         }
     }
 
@@ -1136,6 +1243,7 @@ mod tests {
             expires_at: None,
             origin: None,
             mail: None,
+            mail_session_id: None,
         };
         let combined = combine(&paused, crate::fleet_incident::Verdict::Clear(clear_record));
         assert_eq!(
@@ -1257,6 +1365,25 @@ mod tests {
         assert_eq!(status["who"], "op");
         assert_eq!(status["paused_at"], 1_789_261_620_000_u64);
         assert_eq!(status["expires_at"], 1_789_265_220_000_u64);
+    }
+
+    #[test]
+    fn mail_owner_uses_the_full_harness_session_id() {
+        let id = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        assert_eq!(
+            mail_session_id_from_whoami(&json!({"harness_session_id": id})),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            mail_session_id_from_whoami(&json!({
+                "session": {"raw": {"codex_thread_id": "ses_MixedCase"}}
+            })),
+            Some("ses_MixedCase".to_string())
+        );
+        assert_eq!(
+            mail_session_id_from_whoami(&json!({"fno_id":"short"})),
+            None
+        );
     }
 
     /// The done probe: end-to-end through the env-resolved readers. Pins HOME

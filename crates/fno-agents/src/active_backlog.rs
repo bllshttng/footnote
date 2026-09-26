@@ -3411,6 +3411,7 @@ mod tests {
                 expires_at: stopped.then(|| "2099-12-31T00:00:00Z".into()),
                 origin: None,
                 mail: None,
+                mail_session_id: None,
             })
             .unwrap(),
         )
@@ -3578,6 +3579,7 @@ mod tests {
             expires_at: None,
             origin: None,
             mail: None,
+            mail_session_id: None,
         };
         std::fs::write(
             crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home)),

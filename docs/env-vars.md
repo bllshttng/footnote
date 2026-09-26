@@ -113,7 +113,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_LOOPCHECK_NO_COMMENT` | rs | unclear: crates/fno-agents/src/loopcheck.rs:3533 |
 | `FNO_LOOPCHECK_NO_NOTIFY` | rs | unclear: crates/fno-agents/src/loopcheck.rs:3514 |
 | `FNO_LOOPCHECK_READ_TIMEOUT_MS` | rs | unclear: crates/fno-agents/src/loopcheck.rs:7900 |
-| `FNO_LOOPS_MAIL_BIN` | rs | Overrides the binary `loops pause-all`/`resume-all` shells for the mail leg (`agents mail hold`); default is `fno` beside the running binary, then `fno` on PATH. Lets a test point it at a stub. |
+| `FNO_LOOPS_MAIL_BIN` | rs | Overrides the mail-hold helper for `loops pause-all`/`resume-all`; status and arm default to `fno` beside the running binary, then PATH, while owner release uses the current `fno-agents` binary. Lets a test point it at a stub. |
 | `FNO_MCP_SIDECAR_LOG` | py | unclear: cli/src/fno/mcp/sidecar.py:646 |
 | `FNO_MUX_ADMISSION_NAMESPACE` | rs | unclear: crates/fno/src/process_admission.rs:733 |
 | `FNO_MUX_DIR` | rs | unclear: crates/fno/src/mux_cli.rs:1533 |

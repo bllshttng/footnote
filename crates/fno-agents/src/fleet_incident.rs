@@ -93,6 +93,9 @@ pub struct IncidentRecord {
     /// Mail-hold ownership reported by the pause-all alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail: Option<String>,
+    /// Full session id whose mail policy the pause-all alias armed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_session_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -101,6 +104,7 @@ pub(crate) struct RecordMetadata {
     pub(crate) expires_at: Option<String>,
     pub(crate) origin: Option<String>,
     pub(crate) mail: Option<String>,
+    pub(crate) mail_session_id: Option<String>,
 }
 
 /// What an admission reader is told. `Unavailable` carries the read error.
@@ -553,6 +557,7 @@ pub fn read_at(path: &Path) -> Verdict {
                 expires_at: None,
                 origin: None,
                 mail: None,
+                mail_session_id: None,
             });
         }
         Err(e) => return Verdict::Unavailable(format!("unreadable: {e}")),
@@ -606,6 +611,7 @@ pub fn verdict() -> Verdict {
             expires_at: None,
             origin: None,
             mail: None,
+            mail_session_id: None,
         }),
     }
 }
@@ -902,6 +908,7 @@ fn write_transition_locked(
         expires_at: metadata.expires_at,
         origin: metadata.origin,
         mail: metadata.mail,
+        mail_session_id: metadata.mail_session_id,
     };
     write_record(path, &record)?;
     Ok(record)

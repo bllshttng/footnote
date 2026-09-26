@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
 
-/// Every test in this file mutates process-global env vars (HOME,
-/// FNO_LOOPS_MAIL_BIN); this binary's tests run on separate threads by
-/// default, so the mutation must be serialized against itself.
+/// Every test in this file mutates process-global env vars; serialize them
+/// and restore the prior values even if a test panics.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+const TEST_SESSION_ID: &str = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+const OTHER_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
 struct EnvReset {
     home: Option<std::ffi::OsString>,
     agents_home: Option<std::ffi::OsString>,
     bin: Option<std::ffi::OsString>,
+    session_id: Option<std::ffi::OsString>,
     _guard: MutexGuard<'static, ()>,
 }
 
@@ -26,6 +28,7 @@ impl Drop for EnvReset {
             ("HOME", self.home.take()),
             ("FNO_AGENTS_HOME", self.agents_home.take()),
             ("FNO_LOOPS_MAIL_BIN", self.bin.take()),
+            ("FNO_SESSION_ID", self.session_id.take()),
         ] {
             match value {
                 Some(value) => std::env::set_var(key, value),
@@ -52,12 +55,14 @@ fn with_env(home: &Path, mail_bin: Option<&Path>, body: impl FnOnce()) {
         home: std::env::var_os("HOME"),
         agents_home: std::env::var_os("FNO_AGENTS_HOME"),
         bin: std::env::var_os("FNO_LOOPS_MAIL_BIN"),
+        session_id: std::env::var_os("FNO_SESSION_ID"),
         _guard: guard,
     };
     let agents_home = home.join(".fno/agents");
     fs::create_dir_all(&agents_home).unwrap();
     std::env::set_var("HOME", home);
     std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+    std::env::set_var("FNO_SESSION_ID", TEST_SESSION_ID);
     match mail_bin {
         Some(bin) => std::env::set_var("FNO_LOOPS_MAIL_BIN", bin),
         None => std::env::remove_var("FNO_LOOPS_MAIL_BIN"),
@@ -70,7 +75,7 @@ fn owned(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 
-fn seed_pause_all_record(home: &Path, mail: &str) {
+fn seed_pause_all_record(home: &Path, mail: &str, mail_session_id: Option<&str>) {
     let agents = home.join(".fno/agents");
     fs::create_dir_all(&agents).unwrap();
     fs::write(
@@ -88,6 +93,7 @@ fn seed_pause_all_record(home: &Path, mail: &str) {
             "expires_at": "2099-12-31T00:00:00Z",
             "origin": "pause-all",
             "mail": mail,
+            "mail_session_id": mail_session_id,
         })
         .to_string(),
     )
@@ -152,6 +158,7 @@ fn ac1_pause_all_holds_mail_with_a_ttl_and_a_reason() {
         assert_eq!(breaker["holds"], serde_json::json!(["spawns", "loops"]));
         assert_eq!(breaker["origin"], "pause-all");
         assert_eq!(breaker["mail"], "armed");
+        assert_eq!(breaker["mail_session_id"], TEST_SESSION_ID);
         assert!(breaker["expires_at"].is_string());
         assert!(!home.join(".fno/loops-paused.json").exists());
         let calls: Vec<_> = fs::read_to_string(calls)
@@ -189,6 +196,7 @@ fn ac2_a_stub_reporting_no_identity_skips_the_mail_leg_and_still_pauses() {
         assert_eq!(breaker["state"], "stopped");
         assert_eq!(breaker["origin"], "pause-all");
         assert_eq!(breaker["mail"], "skipped");
+        assert!(breaker["mail_session_id"].is_null());
         let mail_leg = output["silenced"]
             .as_array()
             .unwrap()
@@ -290,14 +298,11 @@ fn ac6_resume_all_lifts_the_mail_leg() {
         r#"{"who":"op","paused_at":1,"expires_at":null,"reason":null}"#,
     )
     .unwrap();
-    seed_pause_all_record(&home, "armed");
+    seed_pause_all_record(&home, "armed", Some(TEST_SESSION_ID));
     let calls = tmp.path().join("mail-calls.txt");
     let bin = stub(
         tmp.path(),
-        &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\necho 'hold off: delivered 2 held message(s) (0 deduped) - delivered'",
-            calls.display()
-        ),
+        &format!("printf '%s\\n' \"$*\" >> '{}'", calls.display()),
     );
 
     with_env(&home, Some(&bin), || {
@@ -315,17 +320,46 @@ fn ac6_resume_all_lifts_the_mail_leg() {
         assert!(mail_leg["detail"]
             .as_str()
             .unwrap()
-            .contains("delivered 2 held message(s)"));
+            .contains(TEST_SESSION_ID));
         let breaker: serde_json::Value =
             serde_json::from_slice(&fs::read(home.join(".fno/agents/fleet-stop.json")).unwrap())
                 .unwrap();
         assert_eq!(breaker["state"], "clear");
         assert_eq!(breaker["origin"], "pause-all");
         assert_eq!(breaker["mail"], "armed");
+        assert_eq!(breaker["mail_session_id"], TEST_SESSION_ID);
         assert_eq!(
             fs::read_to_string(calls).unwrap().trim(),
-            "agents mail hold --off"
+            format!("mail-hold --session {TEST_SESSION_ID} --off")
         );
+    });
+}
+
+#[test]
+fn resume_all_releases_the_session_that_armed_the_mail_hold() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    seed_pause_all_record(&home, "armed", Some(TEST_SESSION_ID));
+    let calls = tmp.path().join("mail-calls.txt");
+    let bin = stub(
+        tmp.path(),
+        &format!("printf '%s\\n' \"$*\" >> '{}'", calls.display()),
+    );
+
+    with_env(&home, Some(&bin), || {
+        std::env::set_var("FNO_SESSION_ID", OTHER_SESSION_ID);
+        let (code, output) = run_loops_capture(&owned(&["resume-all", "--json"]));
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(
+            fs::read_to_string(calls).unwrap().trim(),
+            format!("mail-hold --session {TEST_SESSION_ID} --off")
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join(".fno/agents/fleet-stop.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["state"], "clear");
+        assert_eq!(record["mail_session_id"], TEST_SESSION_ID);
     });
 }
 
@@ -339,7 +373,7 @@ fn ac7_a_failing_stub_still_lifts_the_sentinel() {
         r#"{"who":"op","paused_at":1,"expires_at":null}"#,
     )
     .unwrap();
-    seed_pause_all_record(&home, "armed");
+    seed_pause_all_record(&home, "armed", Some(TEST_SESSION_ID));
     let bin = stub(tmp.path(), "echo boom 1>&2\nexit 1");
 
     with_env(&home, Some(&bin), || {
@@ -469,7 +503,7 @@ fn renewing_our_mail_hold_does_not_shorten_its_remaining_window() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     fs::create_dir_all(&home).unwrap();
-    seed_pause_all_record(&home, "armed");
+    seed_pause_all_record(&home, "armed", Some(TEST_SESSION_ID));
     let calls = tmp.path().join("mail-calls.txt");
     let bin = stub(
         tmp.path(),
