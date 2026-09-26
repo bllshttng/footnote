@@ -13,8 +13,7 @@ Design constraints (locked):
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
     Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
   - PATH rendered from fixed install locations (default_agent_path), never the
-    caller's environment: a caller-dependent PATH re-renders different bytes on
-    every refresh, and macOS posts a notice on every re-registration
+    caller's environment, whose variation re-registered agents on every refresh
 """
 
 from __future__ import annotations
@@ -97,8 +96,7 @@ _PLIST_TEMPLATE = """\
   </array>
 
   <!-- launchd launches with a minimal PATH.  Fixed install-location PATH
-       (default_agent_path) so gh / claude / uv are resolvable without a login
-       shell and the rendered bytes never depend on who ran the refresh. -->
+       (default_agent_path) so the rendered bytes never depend on the caller. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -160,14 +158,8 @@ _SYSTEM_PATH_ENTRIES = ["/usr/local/bin", "/usr/bin", "/bin"]
 
 
 def default_agent_path(fno_binary: str = "fno") -> str:
-    """Caller-independent PATH for rendered launchd plists.
-
-    Capturing the caller's ``$PATH`` made every refresh re-render different
-    bytes (a Codex caller bakes its own cryptexd entry), and macOS posts a
-    background-activity notice on every re-registration. launchd only needs to
-    resolve fno, gh, claude and uv, so derive the entries from fixed install
-    locations; nothing is read from the caller's environment.
-    """
+    """Caller-independent PATH: launchd must resolve fno/gh/claude without
+    reading the caller's environment, whose variation re-registered agents."""
     entries: list[str] = []
     if "/" in fno_binary:
         entries.append(str(Path(fno_binary).parent))
@@ -182,12 +174,7 @@ def default_agent_path(fno_binary: str = "fno") -> str:
 
 
 def _write_if_changed(plist_path: Path, plist_text: str) -> bool:
-    """Write the plist only when the rendered bytes differ from disk.
-
-    launchd posts a background-activity notice on every re-registration, so
-    rewriting identical bytes would cost the user a macOS notice for nothing.
-    Returns True when the file was written.
-    """
+    """Write only when bytes differ; launchd charges a notice per re-registration."""
     try:
         if plist_path.read_text(encoding="utf-8") == plist_text:
             return False
@@ -506,12 +493,9 @@ def refresh_watcher(
     by ``fno do pr watch refresh`` at the tail of ``fno doctor update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
-
-    Rendered bytes identical to the installed plist skip both the write and
-    the bounce: launchd posts a background-activity notice on every
-    re-registration, so an unchanged refresh must not re-register.
-    ``force_bounce=True`` overrides the skip when the job is already reported
-    dead or wedged - re-bootstrapping is then the cure, not the noise.
+    Identical rendered bytes skip the write and bounce (launchd charges a
+    notice per re-registration); ``force_bounce=True`` overrides for a job
+    already reported dead or wedged.
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     try:

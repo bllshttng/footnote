@@ -4441,10 +4441,7 @@ def doctor_command(
         pw = result.get("pr_watch") or {}
         if pw.get("verdict") in ("dead", "wedged") and not json_out:
             from fno.pr_watch._install import (
-                _LAUNCH_AGENTS_DIR,
-                default_agent_path,
-                heal_watcher,
-                refresh_watcher,
+                _LAUNCH_AGENTS_DIR, default_agent_path, heal_watcher, refresh_watcher,
             )
 
             if pw.get("verdict") == "wedged":
@@ -4457,7 +4454,7 @@ def doctor_command(
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
                     caller="doctor-fix",
-                    force_bounce=True,  # wedged verdict: the re-bootstrap is the cure
+                    force_bounce=True,
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:

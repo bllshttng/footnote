@@ -470,8 +470,7 @@ _GROOM_PLIST = """\
   </array>
 
   <!-- launchd launches with a minimal PATH; fixed install-location PATH
-       (default_agent_path) so fno / gh / claude resolve without a login shell
-       and the rendered bytes never depend on who ran the refresh. -->
+       (default_agent_path) so the rendered bytes never depend on the caller. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -564,9 +563,6 @@ def install_groom_agent(
 
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
-    # Caller-independent default: a PATH captured from the caller's environment
-    # re-renders different bytes per harness, and macOS posts a notice on every
-    # re-registration.
     install_path = (
         install_path if install_path is not None else default_agent_path(fno_binary)
     )
@@ -592,8 +588,6 @@ def install_groom_agent(
             workdir=workdir,
         )
         if not _write_if_changed(plist_path, plist_text):
-            # Identical bytes: skipping the bootstrap skips a launchd
-            # re-registration, which is what costs the user a macOS notice.
             return {
                 "status": "unchanged",
                 "plist": str(plist_path),

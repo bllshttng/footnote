@@ -1611,7 +1611,7 @@ def heal() -> None:
             interval=settings.pr_watch.interval_seconds,
             defer_when_ticking=True,
             caller="heal",
-            force_bounce=True,  # a dead verdict re-registers; that is the cure
+            force_bounce=True,
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:
