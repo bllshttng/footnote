@@ -1709,13 +1709,13 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let _env = AgentsHomeEnvGuard::set(home.path());
         let agents_home = crate::paths::AgentsHome::at(home.path());
-        let target = "territory:x-b04e,x-c001";
+        let target = "territory:x-epic,x-child";
         write_target_for_test(&agents_home, target, &["spawns", "loops"]);
         let cwd = Path::new(".");
         let matching = Subject {
             session_ids: Vec::new(),
             node: None,
-            territory: Some("x-c001, x-b04e".to_string()),
+            territory: Some("x-child, x-epic".to_string()),
             cwd,
         };
         let other = Subject {
