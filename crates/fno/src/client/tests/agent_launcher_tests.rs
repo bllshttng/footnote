@@ -703,21 +703,15 @@ fn provider_and_model_choices_come_from_configured_rows() {
     sync_catalog(&mut v);
 
     let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Provider;
-    let (body, actions) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
-    let provider_row = body
-        .iter()
-        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter"))
-        .unwrap();
-    assert!(body.iter().all(|row| {
-        !matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "zai")
-    }));
-    let action = actions[provider_row].clone().unwrap();
-    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
-    assert_eq!(l.draft.provider, "openrouter");
-
     l.focus = Focus::Model;
     let (body, actions) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
+    // The opencode ids group under provider headers, per the ruling.
+    assert!(body
+        .iter()
+        .any(|row| matches!(row, crate::popup::PopupRow::Header(h) if h == "openrouter")));
+    assert!(body
+        .iter()
+        .any(|row| matches!(row, crate::popup::PopupRow::Header(h) if h == "local")));
     let model_row = body
         .iter()
         .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter/qwen/qwen3-coder"))
@@ -772,8 +766,8 @@ fn account_rows_supply_model_and_provider_options() {
     let l = v.launcher.as_ref().unwrap();
     let sl = l.sheet_layout(&v).unwrap();
     assert!(
-        sl.tabs.iter().any(|(f, _)| *f == Focus::Provider),
-        "two providers give the bar a Provider tab"
+        !sl.tabs.iter().any(|(f, _)| f.tab_title() == "Provider"),
+        "no Provider tab: providers group in the Model body"
     );
 }
 

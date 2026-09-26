@@ -104,7 +104,6 @@ pub(crate) enum CatalogOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
     Harness,
-    Provider,
     Model,
     Project,
     Permission,
@@ -114,27 +113,24 @@ pub(crate) enum Focus {
 }
 
 impl Focus {
-    fn tab_order(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
-        let mut order = vec![Focus::Harness];
-        if has_multiple_providers(catalog, &launcher.draft.harness()) {
-            order.push(Focus::Provider);
-        }
-        order.extend([
-            Focus::Model,
-            Focus::Project,
-            Focus::Permission,
-            Focus::Placement,
-            Focus::ExtraFlags,
-            Focus::Message,
-        ]);
-        order
+    fn tab_order(_launcher: &Launcher, _catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
+        // The ruling's bar: no Provider tab. Providers group inside the
+        // Model body, in opencode's provider_id/model_id shape.
+        vec![
+            Self::Harness,
+            Self::Model,
+            Self::Project,
+            Self::Permission,
+            Self::Placement,
+            Self::ExtraFlags,
+            Self::Message,
+        ]
     }
 
     /// The tab bar's label for this axis.
-    fn tab_title(self) -> &'static str {
+    pub(crate) fn tab_title(self) -> &'static str {
         match self {
             Self::Harness => "Harness",
-            Self::Provider => "Provider",
             Self::Model => "Model",
             Self::Project => "Project",
             Self::Permission => "Mode",
@@ -220,8 +216,6 @@ pub(crate) enum PickerAction {
     /// The "<harness> decides" first row: clear the pin.
     Clear,
     ClearModel,
-    SetProvider(String),
-    ClearProvider,
     /// A configured routing row: pin its harness, provider and model together.
     PickRow {
         harness: String,
@@ -542,10 +536,6 @@ pub(crate) fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutco
                 l.draft.harness_idx = 0;
             }
         }
-    }
-    if l.focus == Focus::Provider && !has_multiple_providers(catalog, &l.draft.harness()) {
-        l.focus = Focus::Model;
-        l.picker = None;
     }
 }
 
@@ -1249,6 +1239,11 @@ pub(crate) async fn launcher_keys(
                             }
                         }
                         Focus::ExtraFlags => move_extra_flag_cursor(&mut l.draft, delta),
+                        Focus::Model => {
+                            // Effort rides the selected model row, like
+                            // opencode's per-model variants.
+                            cycle_effort(l, delta, &view.launcher_catalog);
+                        }
                         f if f.is_list() => {
                             // The tab switch: the arrows walk the tab bar.
                             let focus = if delta > 0 {
@@ -1479,34 +1474,6 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         _ => {}
     }
 }
-
-fn catalog_models<'a>(catalog: &'a Option<CatalogOutcome>, harness: &str) -> Vec<&'a ModelChoice> {
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
-        return Vec::new();
-    };
-    rows.iter()
-        .find(|row| row.name == harness)
-        .map(|row| row.models.iter().collect())
-        .unwrap_or_default()
-}
-
-fn providers_for_harness(catalog: &Option<CatalogOutcome>, harness: &str) -> Vec<String> {
-    let mut providers: Vec<String> = catalog_models(catalog, harness)
-        .into_iter()
-        .filter_map(|model| model.provider.clone())
-        .collect();
-    providers.sort();
-    providers.dedup();
-    providers
-}
-
-fn has_multiple_providers(catalog: &Option<CatalogOutcome>, harness: &str) -> bool {
-    let models = catalog_models(catalog, harness);
-    let explicit = providers_for_harness(catalog, harness).len();
-    let default = usize::from(models.iter().any(|model| model.provider.is_none()));
-    explicit + default > 1
-}
-
 // -- catalog -----------------------------------------------------------------
 
 /// The harness capability contract the mux already ships and the spawn door
@@ -1762,9 +1729,6 @@ fn open_picker_at(
     let Some((row, col)) = anchor else {
         return false;
     };
-    if field == Focus::Provider && !has_multiple_providers(catalog, &l.draft.harness()) {
-        return false;
-    }
     let (rows, actions) = picker_rows(l, catalog, backlog);
     let (all_rows, all_actions) = (rows.clone(), actions.clone());
     // The model picker names its effort-cycling grammar in the footer.
@@ -1860,7 +1824,6 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
 fn title_for(field: Focus) -> String {
     match field {
         Focus::Harness => "harness".to_string(),
-        Focus::Provider => "provider".to_string(),
         Focus::Model => "model".to_string(),
         Focus::Project => "project".to_string(),
         _ => String::new(),
@@ -1967,48 +1930,6 @@ fn picker_rows(
                 None,
             ),
         },
-        Focus::Provider => {
-            push_entry(
-                &mut rows,
-                &mut actions,
-                if l.draft.provider.is_empty() {
-                    "\u{2713}"
-                } else {
-                    "\u{2022}"
-                },
-                "any provider",
-                "",
-                true,
-                Some(PickerAction::ClearProvider),
-            );
-            let providers = providers_for_harness(catalog, &harness);
-            for provider in providers {
-                push_entry(
-                    &mut rows,
-                    &mut actions,
-                    if provider == l.draft.provider {
-                        "\u{2713}"
-                    } else {
-                        "\u{2022}"
-                    },
-                    &provider,
-                    "",
-                    true,
-                    Some(PickerAction::SetProvider(provider.clone())),
-                );
-            }
-            if rows.len() == 1 {
-                push_entry(
-                    &mut rows,
-                    &mut actions,
-                    "\u{2022}",
-                    "no configured providers",
-                    "from this harness",
-                    false,
-                    None,
-                );
-            }
-        }
         Focus::Model => match catalog {
             Some(CatalogOutcome::Ok(rows_found, models_err)) => {
                 let models = rows_found
@@ -2053,8 +1974,6 @@ fn picker_rows(
                         );
                     }
                 }
-                rows.push(PopupRow::Header("configured".to_string()));
-                actions.push(None);
                 push_entry(
                     &mut rows,
                     &mut actions,
@@ -2069,34 +1988,48 @@ fn picker_rows(
                     Some(PickerAction::ClearModel),
                 );
                 if let Some(models) = models {
-                    for m in models.iter().filter(|m| {
-                        l.draft.provider.is_empty()
-                            || m.provider.as_deref() == Some(l.draft.provider.as_str())
-                    }) {
-                        let check = Some(&m.name) == l.draft.model_row.as_ref()
-                            && !l.draft.model.is_empty();
-                        let hint = if m.route.is_empty() && m.model != m.name {
-                            m.model.clone()
-                        } else if m.route == m.model {
-                            String::new()
-                        } else {
-                            m.route.clone()
-                        };
-                        push_entry(
-                            &mut rows,
-                            &mut actions,
-                            if check { "\u{2713}" } else { "\u{2022}" },
-                            &m.name,
-                            &hint,
-                            m.verdict == "ok",
-                            (m.verdict == "ok").then(|| PickerAction::PickRow {
-                                harness: harness.clone(),
-                                name: m.name.clone(),
-                                model: m.model.clone(),
-                                route: m.route.clone(),
-                                provider: m.provider.clone(),
-                            }),
-                        );
+                    // The Model body groups by provider (the opencode
+                    // ruling): one header per connected provider with its
+                    // provider/model ids under it; a model with no provider
+                    // groups under the harness itself.
+                    let mut groups: Vec<(String, Vec<&ModelChoice>)> = Vec::new();
+                    for m in models.iter() {
+                        let key = m.provider.clone().unwrap_or_else(|| harness.clone());
+                        match groups.iter_mut().find(|(k, _)| *k == key) {
+                            Some((_, list)) => list.push(m),
+                            None => groups.push((key, vec![m])),
+                        }
+                    }
+                    groups.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (key, list) in &groups {
+                        rows.push(PopupRow::Header(key.clone()));
+                        actions.push(None);
+                        for m in list.iter() {
+                            let check = Some(&m.name) == l.draft.model_row.as_ref()
+                                && !l.draft.model.is_empty();
+                            let hint = if m.route.is_empty() && m.model != m.name {
+                                m.model.clone()
+                            } else if m.route == m.model {
+                                String::new()
+                            } else {
+                                m.route.clone()
+                            };
+                            push_entry(
+                                &mut rows,
+                                &mut actions,
+                                if check { "\u{2713}" } else { "\u{2022}" },
+                                &m.name,
+                                &hint,
+                                m.verdict == "ok",
+                                (m.verdict == "ok").then(|| PickerAction::PickRow {
+                                    harness: harness.clone(),
+                                    name: m.name.clone(),
+                                    model: m.model.clone(),
+                                    route: m.route.clone(),
+                                    provider: m.provider.clone(),
+                                }),
+                            );
+                        }
                     }
                 }
                 let harness_error = rows_found
@@ -2340,24 +2273,6 @@ pub(crate) fn apply_picker_action(
             l.recent_models.truncate(5);
             l.draft.bump();
             clear_unoffered_pins(&mut l.draft, catalog);
-        }
-        PickerAction::SetProvider(provider) => {
-            l.draft.provider = provider;
-            if let Some(name) = &l.draft.model_row {
-                if !catalog_models(catalog, &l.draft.harness()).iter().any(|m| {
-                    &m.name == name && m.provider.as_deref() == Some(l.draft.provider.as_str())
-                }) {
-                    l.draft.model.clear();
-                    l.draft.model_row = None;
-                }
-            }
-            l.draft.bump();
-        }
-        PickerAction::ClearProvider => {
-            l.draft.provider.clear();
-            l.draft.model.clear();
-            l.draft.model_row = None;
-            l.draft.bump();
         }
         PickerAction::ClearModel => {
             l.draft.model.clear();
@@ -2931,6 +2846,10 @@ impl Launcher {
         match self.focus {
             Focus::Message => {
                 "\u{21b5} launch \u{b7} ^j newline \u{b7} type message \u{b7} esc close".to_string()
+            }
+            Focus::Model => {
+                "\u{2191}\u{2193} choose \u{b7} \u{21b5} pick \u{b7} \u{2190}\u{2192} effort \u{b7} ^j launch \u{b7} esc close"
+                    .to_string()
             }
             Focus::ExtraFlags => {
                 "type flags \u{b7} \u{2190}\u{2192} tab \u{b7} esc close".to_string()

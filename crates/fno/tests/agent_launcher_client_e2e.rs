@@ -71,7 +71,13 @@ fn open_composer(h: &mut ClientHarness) {
 /// it, then step one tab right to the Model body. This follows the tabbed
 /// modal's grammar - the body is always visible, there is nothing to open.
 fn pick_claude_and_open_model_tab(h: &mut ClientHarness) {
+    // The body lists rows once the catalog read lands; the current harness
+    // (agy) wears the check glyph, the others the bullet.
+    h.wait_screen(10, |s| s.contains("\u{2713} agy"));
     type_and_settle(h, b"claude");
+    h.wait_screen(10, |s| {
+        !s.contains("\u{2713} agy") && s.contains("\u{2022} claude")
+    });
     type_and_settle(h, b"\r");
     h.wait_screen(10, |s| s.contains("claude · default"));
     type_and_settle(h, RIGHT);
