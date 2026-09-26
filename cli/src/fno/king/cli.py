@@ -157,6 +157,40 @@ def init_cmd(
     typer.echo(f"scope:  {fields['scope']}")
     _print_settled_children(scope)
     _warn_uncrowned_row(scope)
+    _arm_reign_hold()
+
+
+def _arm_reign_hold() -> None:
+    """Hold this crowned session's mail for one check-in interval (x-0e09).
+
+    One shell-out to the existing hold verb (law d-b6cc1a2a: no new Python):
+    the reign beat's `hold --off` drains it as one digest and re-arms. Fire
+    and forget; a failed arm only means the crown receives mail live, the
+    pre-hold behavior.
+    """
+    import os
+    import re
+    import shutil
+    import subprocess
+
+    from fno.config import load_settings
+
+    match = re.match(r"(\d+)([smhd])", str(load_settings().king.checkin_interval))
+    count, unit = match.groups() if match else ("55", "m")
+    minutes = max(1, int(count) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] // 60)
+    binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
+    if not binary:
+        return
+    try:
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [binary, "agents", "mail", "hold", "--for", str(minutes)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
 
 
 def _print_settled_children(scope: str) -> None:
@@ -505,9 +539,40 @@ def cancel_cmd(
             sentinel.touch()
             _emit_cancel_signal(sentinel, scope)
             typer.echo(f"king: cancel signal set: {sentinel}")
+            _clear_reign_hold(manifest)
     except OSError as exc:
         typer.echo(f"king: could not update cancel signal {sentinel}: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _clear_reign_hold(manifest: Path) -> None:
+    """Lift the crowned session's hold when its reign is cancelled (x-0e09).
+
+    One shell-out to the Rust cross-session action (law d-b6cc1a2a): the
+    clock goes and the bus-only stamp leaves the row, so a cancelled
+    crown's mail delivers normally instead of holding forever on a stamped
+    row with no clock. Best effort; the sentinel above is the real signal.
+    """
+    import subprocess
+
+    from fno.king.state import parse_manifest
+    from fno.rust_binary import resolve_binary
+
+    session_id = parse_manifest(manifest).get("harness_session_id") or ""
+    if not session_id:
+        return
+    binary = resolve_binary()
+    if binary is None:
+        return
+    try:
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [str(binary), "mail-hold", "--session", session_id, "--off"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
 
 
 def _own_crown_argv(verb: str, scope: str) -> tuple[list[str], str]:

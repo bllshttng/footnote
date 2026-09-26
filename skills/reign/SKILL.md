@@ -72,6 +72,8 @@ A king names its crown at the first beat: `fno agents king checkin --name <name>
 
 Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact. Past the compaction ceiling (default 3), a doc older than 24 hours blocks the stop gate. The beat refresh is what keeps the reign exitable.
 
+Lift the mail hold first, every beat: `fno agents mail hold --off`, then re-arm `fno agents mail hold --for <king.checkin_interval minutes>`. The crown holds delivery between beats (`fno agents king init` arms the wall clock; the server re-arms it while you type), and `--off` is the drain: everything the hold kept lands in this turn as one digest, operator-origin rows first. Control mail never waited - it lands immediately by law.
+
 Then run `fno agents king checkin` (bare from the crowned session, or `--scope <scope>` elsewhere). The board read inside it defaults to this crown's manifest, so its rows are your scope. It prints, one line each, and this is the verb's documented output contract:
 
 - `User notes:` the canon doc's user block (read through `fno config paths handoff --scope <scope>`), verbatim. Never summarized or paraphrased. Nothing when the block is empty or placeholder-only.

@@ -387,7 +387,9 @@ def addresses(entry) -> tuple:
     ONE matching rule, shared by the resolver, the policy write, and the
     delivery gate's expiry check. The canonical handle is in here because every
     WRITER keys by it: ``fno agents mail hold`` arms at ``canonical_handle(session_id)``
-    and the release and the turn-boundary tidy read the same key. For a claude
+    and the release and the turn-boundary tidy read the same key. The mux
+    server's keystroke arm writes through ``fno-agents mail-hold``, the same
+    key and the same clock shape. For a claude
     row that also happens to be ``short_id``, which is how the omission stayed
     invisible. A codex ``short_id`` is a daemon worker key and its
     ``harness_session_id`` is the full id, so neither is the first-eight the
