@@ -1025,6 +1025,18 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
             cache.display()
         )),
         _ => {
+            // A bare removed-path line reads as an install failure (x-448f),
+            // so the receipt names the live root the harness loads instead.
+            // Rides the second channel: call sites print its lines verbatim.
+            let live = live_roots
+                .iter()
+                .map(|r| r.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            refused.push(format!(
+                "claude loads fno in place from {live}; removed the unused cache copy {}",
+                cache.display()
+            ));
             let _ = std::fs::remove_dir_all(&cache);
             removed.push(cache);
         }
@@ -2474,11 +2486,18 @@ mod tests {
             origin: "marketplace",
         }];
 
-        // HP: directory marketplace + live stage + existing cache -> removed.
+        // HP: directory marketplace + live stage + existing cache -> removed,
+        // and the receipt names the live root so a removed copy does not
+        // read as a failure.
         write_marketplace(&home, "directory", &stage, &stage);
         let (removed, refused) = remove_stale_copies(&home, &live_stage);
         assert_eq!(removed, vec![cache.clone()], "removed: {removed:?}");
-        assert!(refused.is_empty());
+        assert!(
+            refused.iter().any(|l| l.contains("in place from")
+                && l.contains(stage.display().to_string().as_str())
+                && l.contains("unused cache copy")),
+            "{refused:?}"
+        );
         assert!(!cache.exists());
         fs::create_dir_all(&cache).unwrap();
 
