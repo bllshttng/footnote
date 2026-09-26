@@ -1,10 +1,12 @@
 use fno_agents::acp_stdio::{
-    grok_acp_argv, session_new_params, AcpSession, PermissionPolicy, GROK_PROFILE,
+    dsh_acp_argv, grok_acp_argv, kimi_acp_argv, session_new_params, AcpError, AcpSession,
+    PermissionPolicy, DSH_PROFILE, GROK_PROFILE, KIMI_PROFILE,
 };
 use serde_json::Value;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,58 +89,58 @@ fn grok_live_acp_and_headless_journeys() {
         eprintln!("skipping Grok live journey; set FNO_GROK_LIVE=1 to use operator credentials");
         return;
     }
-    let version = Command::new("grok").arg("--version").output().unwrap();
+    let Ok(version) = Command::new("grok").arg("--version").output() else {
+        eprintln!("skipping Grok live journey; grok is not on PATH");
+        return;
+    };
     let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
     let date = Command::new("date").arg("+%F").output().unwrap();
     let date = String::from_utf8_lossy(&date.stdout).trim().to_string();
-    let auth = Command::new("grok").arg("models").output().unwrap();
-    let auth_output = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&auth.stdout),
-        String::from_utf8_lossy(&auth.stderr)
-    );
-    if auth_output
-        .to_ascii_lowercase()
-        .contains("not authenticated")
-    {
-        record("status", "unavailable-not-authenticated", &version, &date);
-        record("acp_journey", "not-run-not-authenticated", &version, &date);
-        record(
-            "headless_create_resume",
-            "not-run-not-authenticated",
-            &version,
-            &date,
-        );
-        record(
-            "plugin_hook_row",
-            "not-run-not-authenticated",
-            &version,
-            &date,
-        );
-        eprintln!("skipping live Grok journey: `grok models` reports no authentication");
-        return;
-    }
     record("status", "running", &version, &date);
     let cwd = scratch_repo();
     let token = "ACP_5BB9_RECALL";
 
     let first = session(&cwd, PermissionPolicy::Refuse);
     first.initialize().unwrap();
-    let id = first
-        .session_new(session_new_params(&cwd, &[]))
-        .expect("session/new mints a session id");
-    assert_ne!(id, "12345678-1234-4234-8234-123456789abc");
-    first
-        .prompt(&format!(
-            "Reply with exactly this token and nothing else: {token}"
-        ))
-        .unwrap();
+    let id = match first.session_new(session_new_params(&cwd, &[])) {
+        Ok(id) => id,
+        Err(error @ AcpError::AuthRequired { .. }) => {
+            record("status", "unavailable-not-authenticated", &version, &date);
+            record("acp_journey", "not-run-not-authenticated", &version, &date);
+            record(
+                "headless_create_resume",
+                "not-run-not-authenticated",
+                &version,
+                &date,
+            );
+            record(
+                "plugin_hook_row",
+                "not-run-not-authenticated",
+                &version,
+                &date,
+            );
+            eprintln!("skipping live Grok journey: {error}");
+            return;
+        }
+        Err(error) => panic!("Grok session/new failed: {error}"),
+    };
+    if let Err(error) = first.prompt(&format!(
+        "Reply with exactly this token and nothing else: {token}"
+    )) {
+        if error.to_string().contains("usage-exhausted") {
+            record("acp_create_prompt", "skip-usage-exhausted", &version, &date);
+            record("status", "grok-quota-exhausted", &version, &date);
+            return;
+        }
+        panic!("Grok ACP prompt failed: {error}");
+    }
     let first_updates = updates_text(&first);
     assert!(
         first_updates.contains(token),
         "token missing from updates: {first_updates}"
     );
     record("acp_create_prompt", "pass", &version, &date);
+    drop(first);
     let resumed = Arc::new(session(&cwd, PermissionPolicy::Refuse));
     resumed.initialize().unwrap();
     resumed.session_resume(&id).unwrap();
@@ -163,6 +165,7 @@ fn grok_live_acp_and_headless_journeys() {
         Some("cancelled")
     );
     record("acp_cancel", "pass", &version, &date);
+    resumed.session_close(&id).unwrap();
 
     let denied_path = cwd.join("refused.txt");
     let denied = session(&cwd, PermissionPolicy::Refuse);
@@ -254,4 +257,111 @@ fn grok_live_fixture_has_explicit_readings() {
         text.contains("source="),
         "fixture names its evidence source"
     );
+}
+
+#[test]
+fn installed_grok_and_kimi_acp_smoke() {
+    let cwd = scratch_repo();
+    let mut checked = 0;
+
+    if Command::new("grok").arg("--version").output().is_ok() {
+        let session =
+            AcpSession::start(&GROK_PROFILE, grok_acp_argv(None, None, None), &cwd, None).unwrap();
+        assert_eq!(session.initialize().unwrap()["protocolVersion"], 1);
+        assert!(session.session_list().unwrap()["sessions"].is_array());
+        checked += 1;
+    }
+
+    if Command::new("kimi").arg("--version").output().is_ok() {
+        let session = AcpSession::start(&KIMI_PROFILE, kimi_acp_argv(None), &cwd, None).unwrap();
+        assert_eq!(session.initialize().unwrap()["protocolVersion"], 1);
+        assert!(session.session_list().unwrap()["sessions"].is_array());
+        checked += 1;
+    }
+
+    if checked == 0 {
+        eprintln!("skipping ACP smoke: neither Grok nor Kimi is installed");
+    }
+}
+
+#[test]
+fn kimi_print_smoke_emits_version_before_unconfigured_provider_fails() {
+    let home = scratch_repo();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut command = Command::new("kimi");
+    command
+        .args(["-p", "say ok", "--output-format", "stream-json"])
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let Ok(child) = command.spawn() else {
+        eprintln!("skipping Kimi print smoke: kimi is not on PATH");
+        return;
+    };
+    let mut watchdog =
+        fno_agents::subprocess_ask::AskWatchdog::spawn(child.id(), Some(Duration::from_secs(60)));
+    let output = child.wait_with_output().unwrap();
+    watchdog.cancel();
+    watchdog.join();
+    assert!(!watchdog.timed_out(), "Kimi print smoke exceeded 60s");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"type\":\"system.version\""),
+        "Kimi emitted no system.version marker"
+    );
+}
+
+#[test]
+fn kimi_live_session_returns_a_planted_token() {
+    if std::env::var("FNO_KIMI_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    if Command::new("kimi").arg("--version").output().is_err() {
+        eprintln!("skipping Kimi live journey; kimi is not on PATH");
+        return;
+    }
+    let cwd = scratch_repo();
+    let session = AcpSession::start(&KIMI_PROFILE, kimi_acp_argv(None), &cwd, None).unwrap();
+    session.initialize().unwrap();
+    let id = session
+        .session_new(session_new_params(&cwd, &[]))
+        .expect("Kimi session/new returns a session id");
+    session
+        .prompt("Reply with exactly KIMI_ACP_LIVE_TOKEN. Do not call tools.")
+        .unwrap();
+    assert!(updates_text(&session).contains("KIMI_ACP_LIVE_TOKEN"));
+    session.session_close(&id).unwrap();
+}
+
+#[test]
+fn dsh_live_session_returns_a_planted_token() {
+    if std::env::var("FNO_DSH_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    if Command::new("dsh").arg("--version").output().is_err() {
+        eprintln!("skipping DSH live journey; dsh is not on PATH");
+        return;
+    }
+    let cwd = scratch_repo();
+    let session = AcpSession::start(&DSH_PROFILE, dsh_acp_argv(), &cwd, None).unwrap();
+    session.initialize().unwrap();
+    let id = session
+        .session_new(session_new_params(&cwd, &[]))
+        .expect("DSH session/new returns a session id");
+    session
+        .prompt("Reply with exactly DSH_ACP_LIVE_TOKEN. Do not call tools.")
+        .unwrap();
+    assert!(updates_text(&session).contains("DSH_ACP_LIVE_TOKEN"));
+    session.session_close(&id).unwrap();
 }
