@@ -698,6 +698,18 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                     return Err(2);
                 }
             };
+            let legacy = read_state();
+            if legacy.is_paused() {
+                return Ok((
+                    action.to_string(),
+                    json!({
+                        "error": format!(
+                            "legacy pause sentinel is active; run fno agents loops resume-all before pause-all: {}",
+                            legacy.message()
+                        )
+                    }),
+                ));
+            }
             let home = crate::paths::AgentsHome::from_env();
             let path = crate::fleet_incident::fleet_stop_path(&home);
             let previous = match crate::fleet_incident::read_at(&path) {
@@ -713,6 +725,17 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 return Ok((
                     action.to_string(),
                     json!({"error": "fleet incident owns the breaker; inspect with fno agents incident status and clear with fno agents incident clear"}),
+                ));
+            }
+            if previous.state == "clear"
+                && previous.origin.as_deref() == Some("pause-all")
+                && previous.mail.as_deref() == Some("armed")
+            {
+                return Ok((
+                    action.to_string(),
+                    json!({
+                        "error": "a pause-all mail release is pending; run fno agents loops resume-all to retry before pausing again"
+                    }),
                 ));
             }
             let ttl_defaulted = options.ttl_ms.is_none();
@@ -789,7 +812,11 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 }
             };
             let mut resumed = false;
-            let mut mail_owner = None;
+            let mail_owner = (record.origin.as_deref() == Some("pause-all")
+                && record.mail.as_deref() == Some("armed"))
+            .then(|| record.mail_session_id.clone())
+            .flatten();
+            let mut mail_generation = record.generation;
             if record.state == "stopped" {
                 if record.origin.as_deref() != Some("pause-all") {
                     return Ok((
@@ -797,10 +824,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                         json!({"error": "fleet incident owns the breaker; clear it with fno agents incident clear"}),
                     ));
                 }
-                if record.mail.as_deref() == Some("armed") {
-                    mail_owner = record.mail_session_id.clone();
-                }
-                if let Err(error) = crate::fleet_incident::write_transition_with_metadata(
+                let cleared = match crate::fleet_incident::write_transition_with_metadata(
                     &path,
                     "clear",
                     Some("resume-all"),
@@ -813,8 +837,10 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                         ..crate::fleet_incident::RecordMetadata::default()
                     },
                 ) {
-                    return Ok((action.to_string(), json!({"error": error})));
-                }
+                    Ok(record) => record,
+                    Err(error) => return Ok((action.to_string(), json!({"error": error}))),
+                };
+                mail_generation = cleared.generation;
                 resumed = true;
             }
             let legacy_sentinel_removed = match std::fs::remove_file(sentinel_path()) {
@@ -822,7 +848,23 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Ok((action.to_string(), json!({"error": error.to_string()}))),
             };
-            let (mail_state, mail_detail) = release_mail(mail_owner.as_deref());
+            let (mail_state, mut mail_detail) = release_mail(mail_owner.as_deref());
+            if mail_state == "lifted" {
+                if let Some(owner) = mail_owner.as_deref() {
+                    if let Err(error) = crate::fleet_incident::mark_pause_mail_released(
+                        &path,
+                        mail_generation,
+                        owner,
+                    ) {
+                        let note = format!("could not record mail release: {error}");
+                        mail_detail = if mail_detail.is_empty() {
+                            note
+                        } else {
+                            format!("{mail_detail}; {note}")
+                        };
+                    }
+                }
+            }
             json!({
                 "resumed": resumed || legacy_sentinel_removed,
                 "legacy_sentinel_removed": legacy_sentinel_removed,

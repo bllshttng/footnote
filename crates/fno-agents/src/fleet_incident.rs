@@ -914,6 +914,43 @@ fn write_transition_locked(
     Ok(record)
 }
 
+/// Record successful mail release without creating another breaker
+/// generation. The compare fields prevent a stale resume from marking a newer
+/// pause as released.
+pub(crate) fn mark_pause_mail_released(
+    path: &Path,
+    expected_generation: u64,
+    owner_session_id: &str,
+) -> Result<(), String> {
+    let lock_path = path.with_extension("json.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
+    let result = match read_at(path) {
+        Verdict::Clear(mut record) | Verdict::Stopped(mut record)
+            if record.state == "clear"
+                && record.origin.as_deref() == Some("pause-all")
+                && record.mail.as_deref() == Some("armed")
+                && record.mail_session_id.as_deref() == Some(owner_session_id)
+                && record.generation == expected_generation =>
+        {
+            record.mail = Some("lifted".to_string());
+            write_record(path, &record).map(|()| ())
+        }
+        Verdict::Unavailable(detail) => Err(format!("breaker became unreadable: {detail}")),
+        Verdict::Clear(_) | Verdict::Stopped(_) => {
+            Err("pause-all breaker changed before recording mail release".to_string())
+        }
+    };
+    let _ = lock.unlock();
+    result
+}
+
 /// Parse a `--hold` value: comma-separated scope words, resolved to
 /// [`SCOPES`] order with duplicates dropped. An unknown word refuses by
 /// name, so a typo can never arm a scope the operator did not mean.
@@ -1020,6 +1057,43 @@ fn parse_check_flags(rest: &[String]) -> Result<(bool, &str), i32> {
         i += 1;
     }
     Ok((as_json, scope))
+}
+
+fn check_json(verdict: &Verdict, scope: &str) -> Value {
+    let (state, generation, reason, holds, admits) = match verdict {
+        Verdict::Clear(record) => (
+            "clear",
+            Some(record.generation),
+            record.reason.clone(),
+            Vec::new(),
+            SCOPES.iter().map(|scope| scope.to_string()).collect(),
+        ),
+        Verdict::Stopped(record) => {
+            let (holds, admits) = reach(record);
+            (
+                "stopped",
+                Some(record.generation),
+                record.reason.clone(),
+                holds,
+                admits,
+            )
+        }
+        Verdict::Unavailable(detail) => (
+            "unavailable",
+            None,
+            detail.clone(),
+            SCOPES.iter().map(|scope| scope.to_string()).collect(),
+            Vec::new(),
+        ),
+    };
+    serde_json::json!({
+        "state": state,
+        "generation": generation,
+        "reason": reason,
+        "scope": scope,
+        "holds": holds,
+        "admits": admits,
+    })
 }
 
 /// Binary entry: `fleet-incident stop|clear|status|check`.
@@ -1280,30 +1354,7 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             };
             let v = verdict_for(scope);
             if as_json {
-                let (state, generation, reason) = match &v {
-                    Verdict::Clear(r) => ("clear", Some(r.generation), r.reason.clone()),
-                    Verdict::Stopped(r) => ("stopped", Some(r.generation), r.reason.clone()),
-                    Verdict::Unavailable(d) => ("unavailable", None, d.clone()),
-                };
-                // The reach answers for the readable record; an unreadable
-                // one fails closed, so it holds every scope and admits none.
-                let (holds, admits) = match &v {
-                    Verdict::Clear(r) | Verdict::Stopped(r) => reach(r),
-                    Verdict::Unavailable(_) => {
-                        (SCOPES.iter().map(|s| s.to_string()).collect(), Vec::new())
-                    }
-                };
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "state": state,
-                        "generation": generation,
-                        "reason": reason,
-                        "scope": scope,
-                        "holds": holds,
-                        "admits": admits,
-                    })
-                );
+                println!("{}", check_json(&v, scope));
             }
             match v {
                 Verdict::Clear(_) => 0,
@@ -1361,6 +1412,36 @@ mod tests {
             "an unknown scope refuses with usage"
         );
         assert_eq!(super::parse_check_flags(&args(&["--scope"])), Err(2));
+    }
+
+    #[test]
+    fn expired_check_json_reports_clear_reach() {
+        let path = tmp_path("expired-check");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": STATE_VERSION,
+                "state": "stopped",
+                "generation": 3,
+                "changed_at": "2000-01-01T00:00:00Z",
+                "changed_by": "op",
+                "reason": "temporary hold",
+                "holds": ["loops"],
+                "expires_at": "2000-01-01T01:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let verdict = scope_verdict(read_at(&path), "loops");
+        let payload = check_json(&verdict, "loops");
+        assert_eq!(payload["state"], "clear");
+        assert_eq!(payload["holds"], serde_json::json!([]));
+        assert_eq!(
+            payload["admits"],
+            serde_json::json!(SCOPES.iter().map(|scope| *scope).collect::<Vec<_>>())
+        );
+        cleanup(&path);
     }
 
     use super::*;

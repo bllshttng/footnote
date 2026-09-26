@@ -612,3 +612,87 @@ fn legacy_sentinel_still_drives_status_and_resume_removes_it() {
         assert!(!sentinel.exists());
     });
 }
+
+#[test]
+fn pause_all_refuses_to_stack_an_active_legacy_sentinel() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".fno")).unwrap();
+    let sentinel = home.join(".fno/loops-paused.json");
+    fs::write(&sentinel, r#"{"who":"op","paused_at":1,"expires_at":null}"#).unwrap();
+    let calls = tmp.path().join("mail-calls.txt");
+    let bin = stub(
+        tmp.path(),
+        &format!("printf '%s\\n' \"$*\" >> '{}'", calls.display()),
+    );
+
+    with_env(&home, Some(&bin), || {
+        let (code, output) = run_loops_capture(&owned(&["pause-all", "--ttl", "5m", "--json"]));
+        assert_eq!(code, 1, "{output}");
+        assert!(output["error"]
+            .as_str()
+            .unwrap()
+            .contains("legacy pause sentinel is active"));
+        assert!(sentinel.exists(), "refusal preserves the old hold");
+        assert!(!home.join(".fno/agents/fleet-stop.json").exists());
+        assert!(!calls.exists(), "refusal precedes the mail leg");
+    });
+}
+
+#[test]
+fn resume_all_retries_a_failed_owned_mail_release_without_releasing_twice() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    seed_pause_all_record(&home, "armed", Some(TEST_SESSION_ID));
+    let calls = tmp.path().join("mail-calls.txt");
+    let failing_bin = stub(
+        tmp.path(),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'; echo transient >&2; exit 1",
+            calls.display()
+        ),
+    );
+
+    with_env(&home, Some(&failing_bin), || {
+        let (code, output) = run_loops_capture(&owned(&["resume-all", "--json"]));
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(output["lifted"][1]["state"], "failed");
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join(".fno/agents/fleet-stop.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["state"], "clear");
+        assert_eq!(record["mail"], "armed");
+        assert_eq!(record["mail_session_id"], TEST_SESSION_ID);
+    });
+
+    let successful_bin = stub(
+        tmp.path(),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'; echo 'hold off'",
+            calls.display()
+        ),
+    );
+    with_env(&home, Some(&successful_bin), || {
+        let (code, output) = run_loops_capture(&owned(&["resume-all", "--json"]));
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(output["lifted"][1]["state"], "lifted");
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join(".fno/agents/fleet-stop.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["state"], "clear");
+        assert_eq!(record["mail"], "lifted");
+        assert_eq!(record["mail_session_id"], TEST_SESSION_ID);
+    });
+
+    with_env(&home, None, || {
+        let (code, output) = run_loops_capture(&owned(&["resume-all", "--json"]));
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(output["lifted"][1]["state"], "left");
+    });
+    assert_eq!(
+        fs::read_to_string(calls).unwrap().lines().count(),
+        2,
+        "a successful owner release is not repeated"
+    );
+}
