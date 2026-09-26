@@ -386,6 +386,7 @@ pub enum Event {
     /// `experimental: backlog view` pref gates it, and the chord degrades to
     /// a notice while the pref is off.
     OpenBacklogBoard,
+    CycleSidelineView,
     /// (redefined by) Toggle the court block on the left
     /// sideline between its three-line glance and the full reading: load
     /// against the cap, what saturates the box, the working/idle/dead
@@ -1195,6 +1196,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             OpenBacklogBoard,
             Global,
             "open the backlog board (experimental pref)",
+        ),
+        b(
+            b'V',
+            "cycle-sideline-view",
+            CycleSidelineView,
+            Global,
+            "cycle sideline view (agents, backlog)",
         ),
         b(
             b'b',
