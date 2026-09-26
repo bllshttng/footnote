@@ -371,6 +371,94 @@ fn snapshot_errors_and_staleness_ride_inputs_errors() {
 }
 
 #[test]
+fn type_filter_keeps_only_that_kind_and_facets_name_both() {
+    // AC1-HP: `type=bug` keeps only the bug cards; facets.kinds lists both.
+    let rows = vec![
+        json!({"id": "x-f", "status": "ready", "priority": "p2", "type": "feature"}),
+        json!({"id": "x-b", "status": "ready", "priority": "p2", "type": "bug"}),
+        json!({"id": "x-e", "status": "ready", "priority": "p2", "type": "epic"}),
+    ];
+    let inp = fixture(rows);
+    let q = Query::from_pairs(&[("type".into(), "bug".into())]).unwrap();
+    let b = board(&inp, &q);
+    let kept: Vec<&str> = b
+        .lanes
+        .iter()
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter())
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(kept, ["x-b"], "only the bug card stays");
+    let q = Query::default();
+    let b = board(&inp, &q);
+    assert_eq!(b.facets.kinds, ["bug", "epic", "feature"], "sorted kinds");
+}
+
+#[test]
+fn search_matches_details_text_not_id_slug_title_only() {
+    // AC2-HP: the needle appears only in one node's details; the board
+    // keeps that card and drops one whose fields all lack it.
+    let rows = vec![
+        json!({
+            "id": "x-hit", "slug": "hit", "title": "Unrelated title",
+            "status": "ready", "priority": "p2",
+            "details": "the launch code is needle-in-pocket"
+        }),
+        json!({"id": "x-miss", "slug": "miss", "title": "Another card",
+               "status": "ready", "priority": "p2"}),
+    ];
+    let inp = fixture(rows);
+    let q = Query::from_pairs(&[("q".into(), "needle".into())]).unwrap();
+    let b = board(&inp, &q);
+    let kept: Vec<&str> = b
+        .lanes
+        .iter()
+        .flat_map(|l| l.cells.iter())
+        .flat_map(|c| c.cards.iter())
+        .map(|c| c.id.as_str())
+        .collect();
+    assert_eq!(kept, ["x-hit"], "the details-only match stays");
+}
+
+#[test]
+fn tag_facet_stays_empty_while_no_row_carries_one() {
+    // AC3-EDGE model half: no row carries a tag, so facets.tags is empty
+    // and a tag query keeps nothing.
+    let rows = vec![
+        json!({"id": "x-a", "status": "ready", "priority": "p2"}),
+        json!({"id": "x-b", "status": "ready", "priority": "p2", "tags": []}),
+    ];
+    let inp = fixture(rows);
+    let b = board(&inp, &Query::default());
+    assert!(b.facets.tags.is_empty(), "no tags to facet");
+    let q = Query::from_pairs(&[("tag".into(), "infra".into())]).unwrap();
+    let b = board(&inp, &q);
+    let kept: usize = b
+        .lanes
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.total).sum::<usize>())
+        .sum();
+    assert_eq!(kept, 0, "a tag filter over no tags keeps nothing");
+}
+
+#[test]
+fn node_parent_link_resolves_from_a_single_string_id() {
+    // The parent group's data: a row whose `parent` is one id resolves to
+    // one navigable link.
+    let rows = vec![
+        json!({"id": "x-p", "status": "in_progress", "priority": "p1", "title": "Parent"}),
+        json!({"id": "x-c", "status": "ready", "priority": "p2", "parent": "x-p"}),
+    ];
+    let inp = fixture(rows);
+    let view = node(&inp, "x-c").expect("the child resolves");
+    assert_eq!(view.parent.len(), 1, "one parent link");
+    assert_eq!(view.parent[0].id, "x-p");
+    assert_eq!(view.parent[0].title.as_deref(), Some("Parent"));
+    let orphan = node(&inp, "x-p").expect("the parent resolves");
+    assert!(orphan.parent.is_empty(), "no parent of its own");
+}
+
+#[test]
 fn backlog_view_column_rule_follows_the_authority() {
     // AC21-HP rows, through the model's card path and the rule itself.
     use crate::backlog_view::kanban_column;
