@@ -1368,7 +1368,6 @@ def test_state_roots_rule_b_fires_on_a_zero_arg_cache_over_a_resolver(
     assert (rel, symbol) == ("cli/src/fno/new_reader.py", "_cached_graph")
     # The refusal must TEACH THE REMEDY, not only name the offence.
     assert "_cached_graph_at(root: Path)" in message
-    assert "fleet_has_crown_at" in message
 
 
 def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
@@ -1377,7 +1376,7 @@ def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
     `_running_from_source` is keyed on `Path(__file__)` ON PURPOSE and its
     docstring says so; `_gh_executable`, `_codex_cli_version` and `machine_id`
     cache a PATH lookup, a subprocess and a host id, none of which resolve a
-    state root; `fleet_has_crown_at` already takes the root as an argument,
+    state root; `_load_settings_at` already takes the root as an argument,
     which is the remedy this rule prescribes.
     """
     from fno.lint_cli import _zero_arg_root_cache_violations
@@ -1390,8 +1389,6 @@ def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
             "_gh_executable",
             "_codex_cli_version",
             "machine_id",
-            "fleet_has_crown_at",
-            "fleet_has_crown",
         }
     )
 

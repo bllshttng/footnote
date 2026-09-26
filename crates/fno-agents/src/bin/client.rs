@@ -265,6 +265,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
+    if matches!(verb, "mail-envelope") {
+        return fno_agents::mail_envelope::run(&args[1..]);
+    }
+
     // Binary-direct mail transport for the events and note Python adapters.
     // It is intentionally not a routable `fno agents` verb.
     if matches!(verb, "machine-mail-send") {
