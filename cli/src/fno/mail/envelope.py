@@ -43,7 +43,16 @@ def _render_in_rust(payload: dict) -> str:
     )
     if result.returncode:
         raise ForgedEnvelopeError(result.stderr.strip())
-    return result.stdout.removesuffix("\n")
+    rendered = result.stdout.removesuffix("\n")
+    # An envelope always opens with its own tag. A successful render without
+    # one is a silent or version-skewed renderer; paste is the byte transport
+    # below this line, so fail the send instead of typing an unattributed body.
+    if "<fno_mail" not in rendered:
+        raise ForgedEnvelopeError(
+            f"mail-envelope render produced no envelope ({rendered[:80]!r}); "
+            "refusing to deliver a body without its attribution frame."
+        )
+    return rendered
 
 
 # A quote closes the attribute early; an angle bracket forges a tag boundary
