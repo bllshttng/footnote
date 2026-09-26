@@ -1042,14 +1042,45 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = AgentsHome::at(tmp.path());
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
-        let row = row(false);
-        let mut state = LadderState::default();
-        state.mail_durable = true;
-        state.last_pause_emit_at = Some(1900);
+        let row = row(true);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"send".to_string()) {
+                (
+                    0,
+                    "msg-1 queued (durable) [live-miss]".into(),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
+                (
+                    crate::resume_gate::RESUME_PAUSED_EXIT,
+                    String::new(),
+                    "loop halt active".into(),
+                )
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
 
-        record_pause(&home, &emitter, &row, state, &LadderState::default(), 1900);
+        apply(
+            &home,
+            &emitter,
+            &row,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
 
-        assert!(load_state(&home, &row.session_id).mail_durable);
+        let saved = load_state(&home, &row.session_id);
+        assert!(saved.mail_durable);
+        assert_eq!(saved.attempts, 0, "a paused resume is not a nudge attempt");
     }
 
     /// The status payload the real verb writes to stdout whatever the exit
