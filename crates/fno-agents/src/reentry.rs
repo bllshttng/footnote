@@ -2512,9 +2512,11 @@ mod tests {
         .unwrap();
         let saved_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &home_dir);
-        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(0o555));
+        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod the staged home read-only");
         let plan = resolve_reentry(&reg_path, "bare-glm", ReentryTransition::Resume, None, None);
-        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the staged home writable again");
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
         match &saved_home {
             Some(h) => std::env::set_var("HOME", h),
