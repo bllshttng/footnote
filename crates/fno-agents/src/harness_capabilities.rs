@@ -38,6 +38,40 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
+
+/// Name the reason a harness cannot use the thread spawn lane.
+pub fn thread_substrate_refusal(harness: &str) -> String {
+    use crate::claude_ask::py_repr;
+
+    let head = format!(
+        "substrate 'thread' (detached interactive session) is unavailable on harness {}",
+        py_repr(harness)
+    );
+    let tail = "use --substrate headless for a one-shot";
+    let contract = HarnessContract::packaged().ok();
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    match contract.and_then(|contract| contract.thread_lane(harness).ok()) {
+        Some("none") => {
+            format!("{head}: it declares no resume form, so no thread lane exists for it - {tail}")
+        }
+        Some(lane) => format!(
+            "{head}: fno has not built this harness's {lane} lane spawn arm yet, and that gap is \
+             in fno, never a harness limitation - {tail}"
+        ),
+        None => format!(
+            "{head}: its thread lane could not be resolved from the capability contract - {tail}"
+        ),
+    }
+}
 /// How a probe declaration says a field can be settled. `declared`: the
 /// vendor states it about its own interface (help/version), and reading that
 /// is not inference. `behavioral`: only a scratch-PTY run checking a

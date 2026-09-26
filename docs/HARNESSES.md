@@ -22,7 +22,7 @@ Not for: per-CLI command syntax or hook wiring detail. Those are the harness's o
 | Antigravity CLI (`agy`) | Native `Stop`-hook adapter (world-gated, `decision:"continue"` re-drive). Claude-shaped hook events, Gemini-family wire format. | Sequential |
 | pi (`@earendil-works/pi-coding-agent`) | Pane-hosted TUI today, with the `pi --mode rpc` driving transport built and tested but not yet wired to a spawn arm. | Sequential |
 | cursor-agent (Cursor CLI agent) | fno drives the hosted TUI: a mux pane attended, the keeper-hosted thread lane dispatched. The `--print` stream is output-only; no rpc, acp, serve, or stdio transport exists. | Sequential |
-| grok CLI | fno drives the hosted TUI: a mux pane attended, the keeper-hosted thread lane dispatched. grok's daemon, WebSocket and ACP-stdio transports live in the Python driver (`fno.agents.harnesses.grok`), not in the dispatch lane. | Sequential |
+| grok CLI | fno drives its hosted TUI. Rust ACP is separate. Headless `grok -p` awaits signed-in create/resume proof. | Sequential |
 
 Other CLIs (Cursor's GUI editor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 
@@ -40,7 +40,7 @@ What each CLI can DO - a review command, a spawn arm, rpc, plugins, MCP - is the
 - **Context file:** footnote makes `AGENTS.md` canonical; `CLAUDE.md` and `GEMINI.md` are one-line stubs that import it, so every CLI inlines identical content.
 
 - **cursor-agent is pty-hosted, never print-driven.** Its only fno driving lane is a hosted TUI. That is a mux pane attended, or the keeper-hosted thread lane dispatched. `--print --output-format stream-json` is output-only. No rpc, acp, serve, or stdio transport exists. The chat store is remote: the id appears in no file under `~/.cursor`. That state root also mixes GUI and CLI files (`argv.json` is a VS Code file). Its credential belongs to the operator and is never synthesized. Driving pitfalls are tabled under [Per-harness pitfall tables](#per-harness-pitfall-tables).
-- **grok is pty-hosted with a caller-assigned id, the pi shape.** Its fno driving lane is a hosted TUI. That is a mux pane attended, or the keeper-hosted thread dispatched. fno mints the `--session-id` uuid grok adopts for the new conversation. grok's own transports are built and unit-tested in the Python driver. They are a leader daemon on a unix socket, a WebSocket listener, and `agent stdio` ACP. A drive lane is not the dispatch lane: the row records the keeper TUI. Driving pitfalls are tabled under [Per-harness pitfall tables](#per-harness-pitfall-tables).
+- **grok is pty-hosted with a caller-assigned id, the pi shape.** Its fno driving lane is a hosted TUI. That is a mux pane attended, or the keeper-hosted thread dispatched. fno mints the `--session-id` uuid grok adopts for the new conversation. The Rust ACP stdio client is separate from dispatch: the row records the keeper TUI. Headless `grok -p` stays disabled until signed-in create and resume pass. The default sandbox is off, and `--always-approve` is the bypass axis. Driving pitfalls are tabled under [Per-harness pitfall tables](#per-harness-pitfall-tables).
 
 ## Per-harness pitfall tables
 

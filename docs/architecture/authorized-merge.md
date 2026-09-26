@@ -52,7 +52,7 @@ After a main merge, only PRs with overlapping changed files become stale. While 
 6. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
 7. **The pin.** The covered head comes from the caller's own coverage gate, or from the `review_coverage` journal. An unreadable head is `Unknown`. There is no unpinned fallback. A head that no longer matches the PR's is `HeadChanged`.
 8. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
-9. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
+9. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. The same merge tree also runs the repo's preamble budget from its own copy. Two PRs that each pass their own base can no longer merge into a main over the byte ceiling. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
 10. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
 
 ## The effect

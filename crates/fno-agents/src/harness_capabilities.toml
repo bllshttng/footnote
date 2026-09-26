@@ -1182,11 +1182,9 @@ kind = "declared"
 authority = "{bin} --help"
 pattern = '(?i)\bacp\b'
 
-# grok joins on the same keeper lane pi and cursor-agent use. Its
-# drive transports (leader daemon on a unix socket, WebSocket listener, ACP
-# stdio) are built and unit-tested in the Python driver
-# (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
-# keeper-hosted TUI, and the row is a statement about THAT lane.
+# grok joins on the same keeper lane pi and cursor-agent use. The shared ACP
+# stdio client is in Rust at crates/fno-agents/src/acp_stdio.rs; this row still
+# describes the keeper-hosted TUI, not the separate ACP client.
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). `carries`
 # names the launch axes this lane has a measured spelling for; every other
@@ -1266,8 +1264,8 @@ session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, ti
 # bypass - a one-shot grok wrote a file outside its cwd. The --sandbox
 # <PROFILE> axis exists but is opt-in (env GROK_SANDBOX unset on this
 # machine), so the keeper child is an ordinary user process with the
-# operator's own reach. headless stays unmeasured: one -p probe ran, but no
-# fno one-shot lane is built and nothing has ever spawned there.
+# operator's own reach. Headless needs a signed-in live journey before it is
+# declared measured.
 pane = "unsandboxed"
 thread = "unsandboxed"
 headless = "unmeasured"
@@ -1315,9 +1313,8 @@ tokens = ["grok", "--resume", "{session_id}"]
 kind = "unsupported"
 tokens = []
 
-# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but
-# no fno one-shot lane is built on it; the forms stay unsupported until that
-# lane ships and state_root_grant.headless stops reading unmeasured.
+# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but the
+# live create-and-resume journey is unavailable until operator auth is present.
 [harness.grok.resume_strategy.forms.headless_create]
 kind = "unsupported"
 tokens = []
@@ -1347,11 +1344,12 @@ state = "native"
 # spent `--session-id` is a grok refusal, never a resume, so the arm refuses
 # `spawn --resume` rather than render a create form with a used id.
 [harness.grok.keeper]
-once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok has no one-shot lane - its headless stance is unmeasured"
+once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok's headless one-shot is unmeasured"
 carries = ["model", "yolo", "permission_mode", "effort"]
 passthrough = ["*"]
 ready_marker = "Shift+Tab:mode"
 resume_refusal = "is not supported on the grok thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than spawning a fresh session."
+headless_refusal = "grok's headless lane is unmeasured: a signed-in live create-and-resume journey is required before it can be enabled"
 bypass_flag = "--always-approve"
 takes_model = true
 takes_effort = true
