@@ -112,6 +112,12 @@ pub struct GcRow {
     /// nothing, so a fresh mtime without a living writer is an artifact -
     /// but an absent or unanswerable pid never does: only ESRCH is death.
     pub pid_gone: bool,
+    /// The claude roster row exists, is non-terminal by state, and carries
+    /// no pid in a listing that carries pids (change 9): a stale
+    /// pre-death row. State alone reads live and lies; the hosted process
+    /// is the truth. False for every non-claude row and for a snapshot
+    /// that answered Unknown or carried warnings.
+    pub process_gone: bool,
     /// A `reap --release` ruling for THIS row: the release lifts
     /// the transcript-unresolved gate, so an absent transcript age retires
     /// instead of holding. Set only when the verb's ruling matched the row;
@@ -249,6 +255,12 @@ pub enum KeepReason {
     /// `merge_status` not `merged`): a retirement here strands the PR with
     /// nothing left to drive it. The remedy is merge, not reap.
     OpenPr { node: String, pr: u64 },
+    /// The node reads in_progress and the row's claude roster row is a
+    /// stale pre-death row (non-terminal state, no pid): the worker died
+    /// with uncommitted work on the node (law d-71d03643: resumed, never
+    /// stranded). The keep holds the row so the nudge ladder's Resume rung
+    /// can run `fno agents resume` on it.
+    DeadOpenWork { node: String },
 }
 
 impl KeepReason {
@@ -275,6 +287,7 @@ impl KeepReason {
             KeepReason::GraphUnreadable => "graph unreadable",
             KeepReason::OpenDoRow { .. } => "open do row on done node",
             KeepReason::OpenPr { .. } => "open pr",
+            KeepReason::DeadOpenWork { .. } => "dead open work",
         }
     }
 }
@@ -415,6 +428,23 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                         }),
                     );
                 }
+            }
+            // Law d-71d03643: a node that lost its worker is resumed,
+            // never stranded. A stale pre-death roster row on in_progress
+            // work keeps under this reason BEFORE the session-shaped
+            // releases below, so a roster `failed` state does not retire
+            // open work, and the nudge ladder's Resume rung is its owner.
+            // A live newer peer on the node still releases: that peer is
+            // the successor this row must not double-drive.
+            if status == "in_progress"
+                && row.process_gone
+                && row.superseded_by_live_peer.is_none()
+                && !row.node_merged
+            {
+                return (
+                    GcAction::Keep,
+                    Some(KeepReason::DeadOpenWork { node: node.clone() }),
+                );
             }
             // changes 1, 3, 6, 8: open NODE state alone is not
             // evidence a SESSION is alive. Four positive facts say this
@@ -710,7 +740,11 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         .map(|row| (row.node, row.harness, row.session_id))
         .collect();
     // The ladder's DRY-RUN plan: decisions only, no effect, no state write.
-    summary.open_pr_nudge = crate::pr_nudge::plan(home, &summary.open_pr_rows, grace_secs);
+    // The ladder's input is the concatenation: open-PR rows first, then the
+    // dead-worker rows, in one slice so `cleanup_state_files` sees both.
+    let mut ladder_rows = summary.open_pr_rows.clone();
+    ladder_rows.extend(summary.dead_work_rows.iter().cloned());
+    summary.open_pr_nudge = crate::pr_nudge::plan(home, &ladder_rows, grace_secs);
     summary
 }
 
@@ -1114,8 +1148,12 @@ pub fn maybe_retirement_sweep(
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         // Locked Decision 5: the nudge ladder rides the daemon's retire arm
         // only, after the sweep that classified the open-PR rows. A manual
-        // verb run never nudges; its dry run only prints the plan.
-        crate::pr_nudge::run_ladder(&home, &emitter, &summary.open_pr_rows, grace_secs);
+        // verb run never nudges; its dry run prints the plan. The ladder's
+        // input is the concatenation: open-PR rows first, then the
+        // dead-worker rows, in one slice so `cleanup_state_files` sees both.
+        let mut ladder_rows = summary.open_pr_rows.clone();
+        ladder_rows.extend(summary.dead_work_rows.iter().cloned());
+        crate::pr_nudge::run_ladder(&home, &emitter, &ladder_rows, grace_secs);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // The roster sweep runs AFTER the registry sweep: a row the registry
         // sweep retires this pass is already gone from the registry the
@@ -2398,6 +2436,7 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
@@ -3671,6 +3710,7 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
@@ -3706,6 +3746,7 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: Some((node.into(), pr)),
             peer_drives_pr: false,

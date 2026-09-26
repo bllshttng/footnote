@@ -936,13 +936,207 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
     assert_eq!(summary.open_pr_rows.len(), 1, "{:?}", summary.open_pr_rows);
     let ladder_row = &summary.open_pr_rows[0];
     assert_eq!(ladder_row.node, "x-node");
-    assert_eq!(ladder_row.pr, 1943);
+    assert_eq!(ladder_row.pr, Some(1943));
     assert_eq!(ladder_row.session_id, sid);
     // A stopped roster state reads as not live: the ladder's resume arm.
     assert!(!ladder_row.live);
     assert!(!ladder_row.busy, "a stopped row is never mid-turn");
     assert_eq!(summary.retired, vec![], "nothing retires");
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the dead-worker keep (dead open work) through the sweep ────────────────
+
+/// The staged shape every dead-open-work test varies: a spawn row whose
+/// session has a do row on an in_progress node with no PR, a transcript
+/// quiet past the grace, and a roster the test stages. The peer roster row
+/// carries a pid so the listing provably carries pids: the missing pid on
+/// the target row is then a death witness, not a missing column.
+fn dead_work_sweep(
+    tag: &str,
+    roster: crate::claude_roster::ClaudeAgentsSnapshot,
+    peer_row: bool,
+) -> crate::gc_sweep::GcSummary {
+    let home = tmp_home(tag);
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    // The live-peer map only trusts a peer whose transcript is inside the
+    // grace window, so the peer row reads fresh while the dead row stays
+    // quiet past it.
+    let fresh = quiet_transcript(transcripts.path(), "fresh.jsonl", 60);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("dead-row", "cccc9999");
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+        if peer_row {
+            let mut peer = claude_worker_row("fresh-row", "dddd0000");
+            peer.origin = Some("spawn".into());
+            peer.created_at = "2026-09-26T00:00:00Z".into();
+            r.entries.push(peer);
+        }
+    })
+    .unwrap();
+    let sid = "cccc9999-1111-2222-3333-444444444444";
+    let mut index = HashMap::from([(
+        sid.to_string(),
+        vec![("x-node".to_string(), "in_progress".to_string())],
+    )]);
+    let mut do_nodes = HashMap::from([(
+        sid.to_string(),
+        std::collections::HashSet::from(["x-node".to_string()]),
+    )]);
+    if peer_row {
+        let peer_sid = "dddd0000-1111-2222-3333-444444444444";
+        index.insert(
+            peer_sid.to_string(),
+            vec![("x-node".to_string(), "in_progress".to_string())],
+        );
+        do_nodes.insert(
+            peer_sid.to_string(),
+            std::collections::HashSet::from(["x-node".to_string()]),
+        );
+    }
+    let graph = Some(GraphRead {
+        index: index.clone(),
+        work_index: index,
+        statuses: HashMap::from([("x-node".to_string(), "in_progress".to_string())]),
+        pr_state: HashMap::from([("x-node".to_string(), (None, 0, 0))]),
+        pr_number: HashMap::from([("x-node".to_string(), None)]),
+        do_nodes,
+        pr_reads: HashMap::new(),
+        ..Default::default()
+    });
+    evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph,
+        &|e: &crate::state::RegistryEntry| {
+            if e.name == "fresh-row" {
+                Some(vec![fresh.clone()])
+            } else {
+                Some(vec![quiet.clone()])
+            }
+        },
+        roster,
+        &|_| true,
+    )
+}
+
+/// AC2-HP: the worker's process is gone (blocked row, no pid, in a listing
+/// that carries pids), the node is in_progress with no PR. The row is kept
+/// under `dead open work`, projected into `dead_work_rows` with pr: null and
+/// live: false, and nothing retires: law d-71d03643, resumed never stranded.
+#[test]
+fn ac2_hp_dead_worker_on_in_progress_node_is_kept_and_laddered() {
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("blocked")),
+        crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working")).with_pid(Some(5001)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work", agents, false);
+    assert!(
+        summary
+            .kept_open_work
+            .iter()
+            .any(|(id, node, status, _)| id == "cccc9999"
+                && node == "x-node"
+                && status == "in_progress"),
+        "kept buckets: {:?}",
+        summary.kept_open_work
+    );
+    let hold = find_hold(&summary, "cccc9999");
+    assert_eq!(hold.reason, "dead open work");
+    assert_eq!(summary.retired, vec![], "nothing retires");
+    assert_eq!(
+        summary.dead_work_rows.len(),
+        1,
+        "{:?}",
+        summary.dead_work_rows
+    );
+    let dead = &summary.dead_work_rows[0];
+    assert_eq!(dead.id, "cccc9999");
+    assert_eq!(dead.node, "x-node");
+    assert_eq!(dead.pr, None, "no PR exists yet");
+    assert_eq!(dead.session_id, "cccc9999-1111-2222-3333-444444444444");
+    assert!(!dead.live, "the ladder's Resume rung reads this");
+    assert!(summary.open_pr_rows.is_empty(), "not an open-PR row");
+}
+
+/// AC2-EDGE, failed: the death of the worker does not finish the node's
+/// work. A `failed` roster state keeps under dead open work and is
+/// laddered, instead of releasing through the terminal arm. No registry
+/// peer: a live newer peer releases any dead row, which is AC2-ERR's shape.
+#[test]
+fn ac2_edge_a_failed_state_still_keeps_and_ladders_the_dead_worker() {
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("failed")),
+        crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working")).with_pid(Some(5001)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work-failed", agents, false);
+    assert_eq!(find_hold(&summary, "cccc9999").reason, "dead open work");
+    assert_eq!(summary.dead_work_rows.len(), 1);
+    assert_eq!(summary.retired, vec![]);
+}
+
+/// AC2-EDGE, done and stopped: those states take today's terminal paths.
+/// `done` retires through the session-shaped release; a raw `stopped` (no
+/// fno stop record) is terminal and retires too - both keep
+/// `dead_work_rows` empty, because neither shape is a resume candidate.
+#[test]
+fn ac2_edge_done_and_stopped_states_take_todays_path() {
+    let done = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("done")),
+        crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working")).with_pid(Some(5001)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work-done", done, false);
+    assert_eq!(summary.dead_work_rows, vec![]);
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+
+    let stopped = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("stopped")),
+        crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working")).with_pid(Some(5001)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work-stopped", stopped, false);
+    assert_eq!(summary.dead_work_rows, vec![]);
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+}
+
+/// AC2-ERR: a newer live registry row on the same node releases the old
+/// row exactly as before - the peer is the successor, and the stale row is
+/// not laddered over it.
+#[test]
+fn ac2_err_a_live_newer_peer_releases_the_dead_row() {
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("blocked")),
+        crate::claude_roster::ClaudeAgentRow::new("dddd0000", Some("working")).with_pid(Some(5002)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work-peer", agents, true);
+    assert_eq!(summary.dead_work_rows, vec![]);
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+}
+
+/// A blocked row WITH a pid is a live session: it keeps under the ordinary
+/// open-work reasons and is never laddered as a dead worker.
+#[test]
+fn a_blocked_row_with_a_pid_stays_open_work_and_is_not_laddered() {
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("blocked")).with_pid(Some(5003)),
+        crate::claude_roster::ClaudeAgentRow::new("peer0001", Some("working")).with_pid(Some(5001)),
+    ]);
+    let summary = dead_work_sweep("gc-dead-work-alive", agents, false);
+    assert_eq!(summary.dead_work_rows, vec![]);
+    assert_eq!(summary.retired, vec![]);
+    // A live row on open work keeps under either open-work reason: the
+    // 2h-old fixture transcript sits inside the retire window, so the stale
+    // bucket is the one that names it.
+    assert!(
+        !summary.kept_open_work.is_empty() || !summary.kept_open_work_stale.is_empty(),
+        "the ordinary open-work keep holds: {:?} / {:?}",
+        summary.kept_open_work,
+        summary.kept_open_work_stale
+    );
 }
 
 // ── the open-PR keep asks the PR ─────────────────────────────────────────

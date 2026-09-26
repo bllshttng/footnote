@@ -103,6 +103,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         superseded_by_live_peer: None,
         node_merged: false,
         pid_gone: false,
+        process_gone: false,
         release_quiet: false,
         open_pr: None,
         peer_drives_pr: false,
