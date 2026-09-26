@@ -1005,19 +1005,22 @@ struct View {
     /// options, resolved liveness) from both the MINE lane and the bare
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
-    questions_fold: Option<Vec<crate::needs_overlay::QuestionItem>>,
+    questions_fold: Option<crate::needs_overlay::QuestionsFold>,
     /// The questions command failed/timed out; same degrade contract as
     /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
-    /// (task 2.3) The free-text answer buffer for a no-options
-    /// question: `Some((question_id, text))` while open, `None` when closed.
-    /// Same keyboard-ownership contract as `mine_adding`.
-    question_answering: Option<(String, String)>,
-    /// (task 2.3) A queued question answer, mirroring
+    /// The questions detail overlay, `Some` while open. Keys divert to
+    /// [`questions::detail_keys`], the draw chain arm renders it.
+    question_detail: Option<questions::Detail>,
+    /// The questions block's refresh: the last kick and the in-flight flag
+    /// (the feed fold's single-flight discipline), every 10 s.
+    questions_kick_at: Option<Instant>,
+    questions_inflight: bool,
+    /// A queued question answer, mirroring
     /// `mine_action`/`mine_acting` exactly (its own single-flight guard - a
     /// question answer and a MINE write are independent, so one in flight
     /// never blocks the other).
-    question_action: Option<(String, String)>,
+    question_action: Option<(String, crate::needs_overlay::AnswerPick)>,
     question_acting: bool,
     /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
@@ -1437,6 +1440,7 @@ mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
+mod questions;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
 mod pane_paint;
@@ -2146,7 +2150,9 @@ impl View {
             mine_acting: false,
             questions_fold: None,
             questions_degraded: false,
-            question_answering: None,
+            question_detail: None,
+            questions_kick_at: None,
+            questions_inflight: false,
             question_action: None,
             question_acting: false,
             needs_want: false,
@@ -2455,18 +2461,6 @@ impl View {
         match result {
             Ok(()) => self.needs_want = true,
             Err(msg) => self.set_notice(format!("mine: {msg}")),
-        }
-    }
-
-    /// (task 2.3) Same contract as [`Self::apply_mine_action_result`]
-    /// for a question answer: success re-folds so the row leaves the queue on
-    /// the next fold (AC1-HP), a failure shows the reason and leaves the
-    /// question open (AC3-ERR).
-    fn apply_question_action_result(&mut self, result: Result<(), String>) {
-        self.question_acting = false;
-        match result {
-            Ok(()) => self.needs_want = true,
-            Err(msg) => self.set_notice(format!("outstanding: {msg}")),
         }
     }
 
@@ -4278,6 +4272,13 @@ impl View {
         if let Some(hit) = self.chrome_hit_feed(row, col) {
             return Some(hit);
         }
+        // The questions block pins above the court block: a click on its
+        // rows opens the detail overlay on that question.
+        if col < panel_w {
+            if let Some(id) = questions::hit_at(self, self.term.0 as usize, row) {
+                return Some(ChromeHit::OpenQuestionDetail(id));
+            }
+        }
         // Tab strip (row 0, scoped to the content columns since US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
@@ -5499,6 +5500,13 @@ impl View {
                 overlay_origin,
                 overlay_dims,
             );
+        } else if questions::draw_detail(
+            self,
+            &mut cells,
+            (rows, cols),
+            overlay_origin,
+            overlay_dims,
+        ) {
         } else if let Some(lines) = &self.digest {
             // catch-up overlay: any key dismisses (handle_stdin, like the
             // key-table overlay). Framed chrome so it reads as one product with
@@ -7083,6 +7091,9 @@ enum ChromeHit {
     /// BY VALUE: a later fold replaces the row list, so an index would open
     /// the view onto a different event than the one clicked.
     OpenFeedDetail(crate::feed_overlay::FeedItem),
+    /// Open the questions detail overlay on one block row. Carries the id,
+    /// not the index: a fold between click and open must not retarget it.
+    OpenQuestionDetail(String),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -7389,7 +7400,7 @@ impl NeedsOverlayRow {
     fn label(&self) -> &str {
         match self {
             Self::Mine(item) => &item.text,
-            Self::Question(q) => q.ask.as_deref().unwrap_or(&q.question),
+            Self::Question(q) => &q.title,
             Self::Need(row) => &row.name,
         }
     }
@@ -8504,12 +8515,17 @@ async fn attach_and_run(
     let (mine_act_tx, mut mine_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
-    // task 2.3: a queued question answer, same shape and independence
+    // A queued question answer, same shape and independence
     // as the MINE mutation channel above - its own single-flight
     // (`question_acting`) so an answer and a MINE write never block each
     // other.
     let (question_act_tx, mut question_act_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
+        tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
+    // The questions block's fold channel: the 10s kick spawns the projection
+    // read off the UI loop; the arm applies it under no gen guard (the block
+    // always shows the latest fold).
+    let (questions_tx, mut questions_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Option<crate::needs_overlay::QuestionsFold>>();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -8676,10 +8692,13 @@ async fn attach_and_run(
         // task 2.3: kick a queued question answer off the UI loop.
         // `question_acting` is set by the stdin handler at enqueue time,
         // same discipline as the MINE mutation above.
-        if let Some((qid, answer)) = view.question_action.take() {
+        // The questions block's kick: one fold every 10 s while the sideline
+        // is shown, single-flight like the feed fold.
+        questions::maybe_kick(&mut view, &questions_tx);
+        if let Some((qid, pick)) = view.question_action.take() {
             let tx = question_act_tx.clone();
             tokio::spawn(async move {
-                let result = crate::needs_overlay::answer_question(&qid, &answer).await;
+                let result = crate::needs_overlay::answer(&qid, pick).await;
                 let _ = tx.send(result);
             });
         }
@@ -9244,12 +9263,12 @@ async fn attach_and_run(
                         }
                     }
                     match outcome.questions {
-                        Some(items) => {
-                            view.questions_fold = Some(items);
+                        Some(fold) => {
+                            view.questions_fold = Some(fold);
                             view.questions_degraded = false;
                         }
                         None => {
-                            view.questions_fold = Some(Vec::new());
+                            view.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
                             view.questions_degraded = true;
                         }
                     }
@@ -9288,8 +9307,16 @@ async fn attach_and_run(
                 }
             }
             Some(result) = question_act_rx.recv() => {
-                // task 2.3: a queued question answer finished.
+                // A queued question answer finished: success closes the
+                // detail, a refusal keeps it open on the door's line.
                 view.apply_question_action_result(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(fold) = questions_rx.recv() => {
+                // The questions block's fold landed: apply and repaint.
+                view.apply_questions_fold(fold);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10934,8 +10961,10 @@ async fn apply_hit(
             view.open_sideline_menu(Anchor::At { row, col })
         }
         // Inspect first. The deep link is this view's own action, not the
-        // click that opened it.
+        // click path that opened it.
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
+        // The questions detail overlay: opens on the clicked question.
+        ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
     }
     Ok(())
 }
@@ -13781,29 +13810,6 @@ async fn answer_keys(
             }
             continue;
         }
-        // Same keyboard-ownership contract for the free-text question answer
-        // (task 2.3): opened by Enter on a no-options question, so it
-        // is checked right alongside `mine_adding`.
-        if let Some((qid, buf)) = view.question_answering.as_mut() {
-            match k {
-                b'\r' | b'\n' => {
-                    let text = std::mem::take(buf).trim().to_string();
-                    let qid = qid.clone();
-                    view.question_answering = None;
-                    if !text.is_empty() && !view.question_acting {
-                        view.question_action = Some((qid, text));
-                        view.question_acting = true;
-                    }
-                }
-                0x1b => view.question_answering = None,
-                0x7f | 0x08 => {
-                    buf.pop();
-                }
-                0x20..=0x7e => buf.push(k as char),
-                _ => {}
-            }
-            continue;
-        }
         // `a` opens the add entry unconditionally - unlike every other key it
         // has a meaning on an empty overlay (start the operator's first
         // item), so it is handled ahead of the empty-dismisses-all rule.
@@ -13847,23 +13853,12 @@ async fn answer_keys(
                 }
             }
             b'0'..=b'9' => {
-                // A question with options answers first (task 2.3):
-                // the digit picks `options[n-1]`, closed via `outstanding
-                // clear --answer`. A no-options question falls through to
-                // the BEL below - Enter is its answer path. A MINE row has
-                // no `NeedRow` to answer either - `.need()` is None and this
-                // always beeps too, same as a non-answerable NEED row.
+                // A question row: a digit opens the full-context detail
+                // overlay with that option preselected, where the answer is
+                // reviewed and sent. A NEED row answers as before; a MINE row
+                // has no options and beeps below.
                 if let Some(q) = projection.rows[cur].question() {
-                    let n = (k - b'0') as usize;
-                    match n.checked_sub(1).and_then(|i| q.options.get(i)) {
-                        Some(opt) if !view.question_acting => {
-                            view.question_action = Some((q.id.clone(), opt.clone()));
-                            view.question_acting = true;
-                        }
-                        _ => {
-                            let _ = raw_out(b"\x07");
-                        }
-                    }
+                    view.open_detail_on(&q.id);
                     continue;
                 }
                 let picked = projection.rows[cur].need().and_then(|sel| {
@@ -13904,16 +13899,12 @@ async fn answer_keys(
                 }
             }
             b'\r' | b'\n' => {
-                // A no-options question (task 2.3): Enter opens the
-                // free-text answer entry, typed below the row like the MINE
-                // add box. A with-options question stays digit-only here -
-                // Enter on it falls through to the goto arm below, which
-                // (having no pane) shows the same notice a MINE row does.
+                // A question row: Enter opens the full-context detail
+                // overlay (the answer gestures live there now, for every
+                // kind - options, free text, pins).
                 if let Some(q) = projection.rows[cur].question() {
-                    if q.options.is_empty() {
-                        view.question_answering = Some((q.id.clone(), String::new()));
-                        continue;
-                    }
+                    view.open_detail_on(&q.id);
+                    continue;
                 }
                 // Goto the row's target: SelectSquad/SelectTab only when
                 // they change the view, then FocusPane; a paneless watch-only row

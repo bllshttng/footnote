@@ -62,8 +62,10 @@ pub trait SinkIo {
         sink_name: &str,
         answer: &FileAnswer,
     ) -> Result<String, String>;
-    /// `fno inbox outstanding clear` with the answer text.
-    fn clear(&mut self, id: &str, answer_text: &str) -> Result<(), String>;
+    /// `fno inbox outstanding clear` with the answer text. `Ok` carries the
+    /// clear's posture line (the last stderr line, e.g. `... delivered
+    /// (hosted) ...` / `... queued (durable)`), the ladder's mail-rung read.
+    fn clear(&mut self, id: &str, answer_text: &str) -> Result<String, String>;
     fn notify(&mut self, title: &str, body: &str);
 }
 
@@ -361,7 +363,7 @@ fn settle_page(
                 return;
             }
             match io.clear(&id, &bs.answer) {
-                Ok(()) => {
+                Ok(_) => {
                     let receipt = format!("Recorded: {} (file)", short_answer(&bs.answer));
                     close_and_move(
                         page,
@@ -1032,6 +1034,21 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             skip = http.skip.clone();
         }
         detail.extend(http.detail);
+        // The mux pass: every unsuperseded attention_answer row, whatever its
+        // sink, drives one reply ladder (clear while open, mail, resume,
+        // crown). Runs with no sinks configured - the answer rows are the
+        // input, not the sink config.
+        mark("answers");
+        let (ans_acted, ans_detail) = crate::attention_reply::tick_answers(
+            &items,
+            &cwd,
+            &attention_dir().unwrap_or_else(|_| dir.join(".state")),
+            started + std::time::Duration::from_secs(ATTENTION_TICK_BUDGET_S),
+            &mut RealIo::new(&cwd),
+            &|argv: &[String]| crate::attention_reply::real_runner_pub(argv),
+        );
+        acted += ans_acted;
+        detail.extend(ans_detail);
         if acted == 0 && skip.is_none() {
             // An idle beat must say which kind of idle: a folder of open
             // pages is not an empty projection.
@@ -1083,13 +1100,16 @@ fn read_items(cwd: &Path) -> (Vec<AttentionItem>, Vec<String>, String) {
     read_items_at(&fno_dir, cwd)
 }
 
-fn read_items_at(fno_dir: &Path, cwd: &Path) -> (Vec<AttentionItem>, Vec<String>, String) {
+pub(crate) fn read_items_at(
+    fno_dir: &Path,
+    cwd: &Path,
+) -> (Vec<AttentionItem>, Vec<String>, String) {
     let mut journals_raw = String::new();
     let mut unreadable: Vec<String> = Vec::new();
     for path in crate::needs::question_journals(fno_dir, cwd) {
         match crate::event_store::journal_text_checked(
             &path,
-            &crate::event_store::EventQuery::of_types(crate::needs::QUESTION_TYPES),
+            &crate::event_store::EventQuery::of_types(crate::needs::PROJECTION_TYPES),
         ) {
             Ok(content) => {
                 journals_raw.push_str(&content);
@@ -1295,95 +1315,139 @@ impl SinkIo for RealIo {
         sink_name: &str,
         answer: &FileAnswer,
     ) -> Result<String, String> {
-        let (option, words, done) = match answer {
-            FileAnswer::Option(n) => (Some(*n as i64), String::new(), false),
-            FileAnswer::Words(w) => (None, w.clone(), false),
-            FileAnswer::Done => (None, String::new(), true),
-            FileAnswer::None | FileAnswer::TwoTicked => (None, String::new(), false),
-        };
-        let answered_at = chrono::Utc::now().to_rfc3339();
-        // First answer wins across writers: an earlier unsuperseded row for
-        // this item makes this one a superseded marker that changes nothing.
-        let home = crate::paths::AgentsHome::from_env();
-        let path = crate::provider_cap::questions_path(&home);
-        let already_won = crate::event_store::journal_text(&path, &[])
-            .lines()
-            .any(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .is_some_and(|v| {
-                        v.get("type").and_then(serde_json::Value::as_str)
-                            == Some("attention_answer")
-                            && v.get("data")
-                                .and_then(|d| d.get("item_id"))
-                                .and_then(serde_json::Value::as_str)
-                                == Some(item.id.as_str())
-                            && v.get("data")
-                                .and_then(|d| d.get("superseded"))
-                                .and_then(serde_json::Value::as_bool)
-                                != Some(true)
-                    })
-            });
-        let receipt = match (answer, already_won) {
-            (FileAnswer::Option(n), false) => format!("Recorded: option {n} (file)"),
-            (FileAnswer::Words(_), false) => "Recorded: words (file)".to_string(),
-            (FileAnswer::Done, false) => "Recorded: done (file)".to_string(),
-            (FileAnswer::None | FileAnswer::TwoTicked, false) => String::new(),
-            (_, true) => "Recorded: superseded by an earlier answer".to_string(),
-        };
-        let row = json!({
-            "ts": answered_at,
-            "type": "attention_answer",
-            "source": "daemon",
-            "data": {
-                "item_id": item.id,
-                "sink": sink_name,
-                "option": option,
-                "words": words,
-                "done": done,
-                "answered_at": answered_at,
-                "authority": "file_edit",
-                "attested_by": format!("file:{}", item.id),
-                "mapped_by": "attention_arm",
-                "superseded": already_won,
-                "decision_id": null,
-            }
-        });
-        // The row is the durable half of the contract: an append that fails
-        // must fail the record so the settle state never marks it recorded.
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
-        writeln!(f, "{row}").map_err(|e| e.to_string())?;
+        let (receipt, _) = append_answer_row(
+            &item.id,
+            sink_name,
+            answer,
+            "file_edit",
+            &format!("file:{}", item.id),
+        )?;
         Ok(receipt)
     }
 
-    fn clear(&mut self, id: &str, answer_text: &str) -> Result<(), String> {
+    fn clear(&mut self, id: &str, answer_text: &str) -> Result<String, String> {
         let mut cmd = crate::loop_dispatch::fno_cmd("fno");
         cmd.args(["inbox", "outstanding", "clear", id, "--answer", answer_text]);
         // A kill past ATTENTION_CLEAR_TIMEOUT_S reads as a nonzero status,
         // so it lands in the caller's bounded retry (AC4-ERR) instead of
         // parking the tick on one wedged Python clear.
-        crate::bounded_cmd::output_with_timeout_result(cmd, ATTENTION_CLEAR_TIMEOUT_S)
-            .map_err(|e| e.to_string())
-            .and_then(|out| {
-                if out.status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("clear exited {}", out.status.code().unwrap_or(-1)))
-                }
-            })
+        let out = crate::bounded_cmd::output_with_timeout_result(cmd, ATTENTION_CLEAR_TIMEOUT_S)
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(last_line(&String::from_utf8_lossy(&out.stderr)))
+        } else {
+            Err(format!("clear exited {}", out.status.code().unwrap_or(-1)))
+        }
     }
 
     fn notify(&mut self, title: &str, body: &str) {
         crate::operator_notice::notify_operator_confirmed(title, body, None);
     }
+}
+
+/// The last non-empty line, trimmed: the posture line a clear prints.
+fn last_line(text: &str) -> String {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The shared durable half of every answer lane: the first-answer-wins check
+/// against `questions.jsonl`, then the `attention_answer` append. Both the
+/// file arm and the `needs --answer` door call this, so the two writers can
+/// never disagree on the row shape. Returns `(receipt, superseded)`. A failed
+/// append fails the caller, so no settle state ever marks a row that did not
+/// land.
+pub(crate) fn append_answer_row(
+    item_id: &str,
+    sink: &str,
+    answer: &crate::attention_file::FileAnswer,
+    authority: &str,
+    attested_by: &str,
+) -> Result<(String, bool), String> {
+    let (option, words, done) = match answer {
+        crate::attention_file::FileAnswer::Option(n) => (Some(*n as i64), String::new(), false),
+        crate::attention_file::FileAnswer::Words(w) => (None, w.clone(), false),
+        crate::attention_file::FileAnswer::Done => (None, String::new(), true),
+        crate::attention_file::FileAnswer::None | crate::attention_file::FileAnswer::TwoTicked => {
+            (None, String::new(), false)
+        }
+    };
+    let answered_at = chrono::Utc::now().to_rfc3339();
+    // First answer wins across writers: an earlier unsuperseded row for
+    // this item makes this one a superseded marker that changes nothing.
+    let home = crate::paths::AgentsHome::from_env();
+    let path = crate::provider_cap::questions_path(&home);
+    let already_won = crate::event_store::journal_text(&path, &[])
+        .lines()
+        .any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_some_and(|v| {
+                    v.get("type").and_then(serde_json::Value::as_str) == Some("attention_answer")
+                        && v.get("data")
+                            .and_then(|d| d.get("item_id"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some(item_id)
+                        && v.get("data")
+                            .and_then(|d| d.get("superseded"))
+                            .and_then(serde_json::Value::as_bool)
+                            != Some(true)
+                })
+        });
+    let receipt = match (answer, already_won) {
+        (crate::attention_file::FileAnswer::Option(n), false) => {
+            format!("Recorded: option {n} ({sink})")
+        }
+        (crate::attention_file::FileAnswer::Words(_), false) => {
+            format!("Recorded: words ({sink})")
+        }
+        (crate::attention_file::FileAnswer::Done, false) => format!("Recorded: done ({sink})"),
+        (
+            crate::attention_file::FileAnswer::None | crate::attention_file::FileAnswer::TwoTicked,
+            false,
+        ) => String::new(),
+        (_, true) => "Recorded: superseded by an earlier answer".to_string(),
+    };
+    let mapped_by = if authority == "file_edit" {
+        "attention_arm"
+    } else {
+        "needs_door"
+    };
+    let row = json!({
+        "ts": answered_at,
+        "type": "attention_answer",
+        "source": "daemon",
+        "data": {
+            "item_id": item_id,
+            "sink": sink,
+            "option": option,
+            "words": words,
+            "done": done,
+            "answered_at": answered_at,
+            "authority": authority,
+            "attested_by": attested_by,
+            "mapped_by": mapped_by,
+            "superseded": already_won,
+            "decision_id": null,
+        }
+    });
+    // The row is the durable half of the contract: an append that fails
+    // must fail the record so the settle state never marks it recorded.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{row}").map_err(|e| e.to_string())?;
+    Ok((receipt, already_won))
 }
 
 #[cfg(test)]
@@ -1657,8 +1721,8 @@ mod tests {
         ) -> Result<String, String> {
             Ok("Recorded: option 1 (file)".to_string())
         }
-        fn clear(&mut self, _id: &str, _answer_text: &str) -> Result<(), String> {
-            Ok(())
+        fn clear(&mut self, _id: &str, _answer_text: &str) -> Result<String, String> {
+            Ok(String::new())
         }
         fn notify(&mut self, _title: &str, _body: &str) {}
     }

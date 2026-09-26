@@ -10,7 +10,7 @@ use super::{
     recruit_keys, rename_keys, row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow,
     View,
 };
-use super::{aux_keys, sideline};
+use super::{aux_keys, questions, sideline};
 
 /// Route one stdin chunk to the overlay that owns the keyboard, in
 /// precedence order. `None` when no overlay owns it: the caller falls
@@ -104,6 +104,9 @@ pub(super) async fn route(
     }
     if view.selector.is_some() {
         return Some(selector_keys(view, bytes, sock_w).await);
+    }
+    if view.question_detail.is_some() {
+        return Some(questions::detail_keys(view, bytes, sock_w).await);
     }
     if view.answers.is_some() {
         return Some(answer_keys(view, bytes, sock_w).await);
