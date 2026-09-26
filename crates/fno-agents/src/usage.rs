@@ -40,6 +40,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "trace [options]",
     "registry-json",
     "ping",
+    "verbs [--harness <name>|<name>] [--json]   # one line per native verb: verb, risk class, when to use it; bare form detects your own harness from the session env",
     // The `--substrate thread` arm is a LIFECYCLE move, not a re-entry: it
     // converts a live pane into a persistent thread under the same session
     // id. The three flags that belong to it are spelled out here because

@@ -171,6 +171,7 @@ pub mod graph_store;
 pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
+pub mod harness_verbs;
 pub mod heal;
 pub mod honesty_sweep;
 pub mod hook;

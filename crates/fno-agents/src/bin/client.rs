@@ -130,6 +130,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "territory-verdict",
     "trace",
     "verify-evidence",
+    "verbs",
     "version",
     "wait",
 ];
@@ -691,6 +692,16 @@ async fn run(args: Vec<String>) -> i32 {
     // and spawn flags.
     if verb == "fallback-chain" {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
+    }
+
+    // `verbs`: the agent-facing render of the capability table's native
+    // verbs (see harness_verbs.rs doc). Direct dispatch; no daemon RPC.
+    // The node that asked for it names the verb shape (operator-filed
+    // 2026-09-25, after the d-fe66560a shrink law), so the verb exists
+    // there and nowhere else; every later teaching surface is a field or
+    // a flag on something that already exists.
+    if verb == "verbs" {
+        return fno_agents::harness_verbs::run_verbs(&args[1..]);
     }
 
     // `publish-review`: the reviewer lane's second GitHub identity (see
