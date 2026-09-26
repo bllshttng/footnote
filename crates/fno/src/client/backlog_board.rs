@@ -472,7 +472,7 @@ fn push_stats_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usiz
     line.push_str(&format!(" · Done {done}"));
     line.push_str(" │ ");
     line.push_str(&flow_line(&board.stats.flow));
-    lines.push(BLine::meta(trunc(&line, w)));
+    lines.push(BLine::meta(elide_words(&line, w)));
 }
 
 /// The uncapped Done total, summed from the lanes' own cells.
@@ -539,12 +539,26 @@ fn push_query_line(b: &BoardView, lines: &mut Vec<BLine>, board: &Board, w: usiz
     for u in &board.unavailable {
         line.push_str(&format!(" · {}: {}", u.feature, u.reason));
     }
-    lines.push(BLine::meta(trunc(&line, w)));
+    lines.push(BLine::meta(elide_words(&line, w)));
 }
 
 /// Truncate one line to `w` chars (the painter wraps nothing).
 pub(crate) fn trunc(s: &str, w: usize) -> String {
     s.chars().take(w).collect()
+}
+
+/// Truncate a summary to `w` chars, but cut after the last whole word that
+/// fits and mark the cut with an ellipsis: a summary truncated mid-word
+/// (`Nex`) reads as a broken word, not a cut.
+pub(crate) fn elide_words(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(w.saturating_sub(1)).collect();
+    match cut.rfind(' ') {
+        Some(i) if i > 0 => format!("{}\u{2026}", &cut[..i]),
+        _ => format!("{cut}\u{2026}"),
+    }
 }
 
 /// The lanes: an accordion - the cursor's lane expanded below its header,
@@ -846,7 +860,8 @@ impl View {
             let lines: Vec<chrome::BodyLine> =
                 body.iter().map(backlog_style::to_body_line).collect();
             let chrome = crate::chrome::Chrome::new("node", Anchor::Center)
-                .footer("enter open - e/p/s/S edit - D append - N note - E $EDITOR - esc back");
+                .footer("enter open - e/p/s/S edit - D append - N note - E $EDITOR - esc back")
+                .flat();
             draw_body_overlay(
                 cells,
                 rows,
@@ -871,7 +886,8 @@ impl View {
             let body: Vec<chrome::BodyLine> =
                 lines.iter().map(backlog_style::to_body_line).collect();
             let chrome = crate::chrome::Chrome::new("backlog", Anchor::Center)
-                .footer("j/k move - enter detail - e/p/s/S/D/N/E edit - c cols - ? keys - F full");
+                .footer("j/k move - enter detail - e/p/s/S/D/N/E edit - c cols - ? keys - F full")
+                .flat();
             draw_body_overlay(
                 cells,
                 rows,

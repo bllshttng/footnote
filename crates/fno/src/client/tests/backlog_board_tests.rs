@@ -710,3 +710,65 @@ fn colpick_hides_and_rewides_the_focus_column() {
     let b = v.backlog_board.as_ref().expect("board");
     assert_eq!(b.layout.focus_pct, 75, "focus clamps at 75");
 }
+
+// The crown's finding: a wide row merged its columns' role walks out of
+// lockstep, so a header's style landed mid-word (`No|w`). Each header word
+// carries exactly one style.
+#[test]
+fn wide_cell_headers_carry_one_style_per_header() {
+    let b = board_with(board_inputs());
+    let (lines, _) = render(&b, 200);
+    // The stats and flow lines also name every column but carry `·`; the
+    // merged wide header row does not.
+    let header = lines
+        .iter()
+        .filter(|l| !l.contains('\u{b7}'))
+        .find(|l| l.starts_with("In Progress") && l.contains("Triage"))
+        .expect("the wide row merges the cell headers onto one line");
+    for word in ["In Progress", "Now", "Next", "Later", "Triage"] {
+        let at = header.find(word).expect(word);
+        let roles = &header.roles[at..at + word.len()];
+        assert!(
+            roles.iter().all(|&r| r == roles[0]),
+            "{word} must carry one style, got {roles:?}"
+        );
+    }
+}
+
+// The crown's finding: a summary cut mid-word (`Nex`) reads as a broken
+// word; the cut lands after a whole word and carries an ellipsis.
+#[test]
+fn summary_lines_elide_at_a_word_with_an_ellipsis() {
+    assert_eq!(
+        elide_words(
+            "In Progress 1 \u{b7} Now 1 \u{b7} Next 279 \u{b7} Later 30",
+            26
+        ),
+        "In Progress 1 \u{b7} Now 1 \u{b7}\u{2026}"
+    );
+    assert_eq!(elide_words("short", 26), "short");
+    // One long word: no boundary exists, so the ellipsis follows a hard cut.
+    assert_eq!(elide_words("abcdefgh", 4), "abc\u{2026}");
+}
+
+// D5: a detail field's label reads dim and its value stays normal.
+#[test]
+fn detail_field_labels_go_dim_and_values_stay_normal() {
+    use crate::client::backlog_style::BRole;
+    let mut v = key_view(board_with(board_inputs()));
+    focus_card(&mut v.backlog_board.as_mut().expect("board"), Some("x-1"));
+    open_detail(&mut v);
+    let b = v.backlog_board.as_ref().expect("detail opened");
+    let (lines, _) = node_detail::overlay_lines(b, 120);
+    let field = lines
+        .iter()
+        .find(|l| l.starts_with("kind:"))
+        .expect("the kind field line");
+    let colon = field.find(':').expect("label ends with a colon");
+    assert!(
+        field.roles[..=colon].iter().all(|&r| r == BRole::Meta),
+        "label chars go dim, got {:?}",
+        &field.roles[..=colon]
+    );
+    assert_eq!(field.roles[colon + 2], BRole::Body, "value stays normal");
+}

@@ -67,20 +67,21 @@ pub enum Role {
     /// theme.
     PanelBody,
     /// A backlog panel's heading (lane name, column header, section label,
-    /// node title): bold, on the terminal's own bg. A named theme lifts the
-    /// fg to its `title` slot; `terminal` leaves Default and lets BOLD
-    /// carry the rank.
+    /// node title): bold in the emulator's index-4 slot, on the terminal's
+    /// own bg. The index follows whatever palette the emulator runs, so the
+    /// heading never resolves to a fixed color that can wash out.
     PanelHead,
-    /// A backlog panel's handle (node id) or field label: the distinct
-    /// accent slot. `Indexed(3)` follows the emulator's palette under
-    /// `terminal`, so no hard color enters.
+    /// A backlog panel's handle (node id) or field label: the emulator's
+    /// index-3 accent slot, so no hard color enters under any theme.
     PanelLabel,
-    /// A backlog panel's meta line: DIM. A named theme adds its `dim` fg.
+    /// A backlog panel's meta line: the emulator's index-8 dim slot. Index
+    /// 8, not the DIM flag: DIM washes the default fg out on a light
+    /// terminal, while index 8 stays a readable gray under both.
     PanelMeta,
     /// A pill: the bracketed `status · priority` token on a detail title
-    /// line. Accent fg, bold, on the terminal's own bg.
+    /// line. The emulator's index-3 accent slot, on the terminal's own bg.
     PanelPill,
-    /// A thin rule under a heading or lane name.
+    /// A thin rule under a heading or lane name: the index-8 dim slot.
     PanelRule,
 }
 
@@ -120,6 +121,22 @@ impl Theme {
 /// becomes concrete style, so a new chrome element adds a variant here and is
 /// colored consistently by both overlay families.
 pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
+    // The backlog panel's slots sit above the theme split and stay
+    // palette-following under EVERY theme: attributes plus emulator-palette
+    // indexes, never a fixed color. A named theme's `title` is a fixed Rgb -
+    // pale blue on a light terminal is the exact wash-out the Solarized Light
+    // screenshots showed - while an index resolves through whatever palette
+    // the emulator runs, so the same render reads on dark and light both.
+    match role {
+        Role::PanelBody => return (Color::Default, Color::Default, 0),
+        Role::PanelHead => return (Color::Indexed(4), Color::Default, cell_flags::BOLD),
+        Role::PanelLabel | Role::PanelPill => return (Color::Indexed(3), Color::Default, 0),
+        // Index 8, not the DIM flag: the merged band evidence showed DIM
+        // washing the default fg out on a light terminal, while index 8 stays
+        // a readable gray under both.
+        Role::PanelMeta | Role::PanelRule => return (Color::Indexed(8), Color::Default, 0),
+        _ => {}
+    }
     if t.inherit {
         // terminal: Default everywhere, the flags carry every distinction. This
         // branch is what keeps pre-theme renders byte-identical.
@@ -139,15 +156,7 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
             ),
-            // The backlog panel sits on the terminal's own bg: attributes
-            // and the accent index only, never INVERSE, never a fixed pair.
-            // Meta uses index 8, not the DIM flag: the merged band evidence
-            // showed DIM washing the default fg out on a light terminal,
-            // while index 8 stays a readable gray under both.
-            Role::PanelBody | Role::PanelRule => (Color::Default, Color::Default, 0),
-            Role::PanelHead => (Color::Default, Color::Default, cell_flags::BOLD),
-            Role::PanelLabel | Role::PanelPill => (t.accent, Color::Default, 0),
-            Role::PanelMeta => (Color::Indexed(8), Color::Default, 0),
+            // The backlog panel's slots resolved above the theme split.
             // Body, Border: plain inverse.
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
@@ -156,13 +165,6 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     // stays the inverse block so content reads in the emulator's own colors.
     match role {
         Role::Body => (Color::Default, Color::Default, cell_flags::INVERSE),
-        // The backlog panel matches the terminal exactly: its bg, its fg,
-        // the theme's own slots for rank. No standing bg, no INVERSE.
-        Role::PanelBody => (Color::Default, Color::Default, 0),
-        Role::PanelHead => (t.title, Color::Default, cell_flags::BOLD),
-        Role::PanelLabel | Role::PanelPill => (t.accent, Color::Default, 0),
-        Role::PanelMeta => (t.dim, Color::Default, 0),
-        Role::PanelRule => (t.dim, Color::Default, 0),
         // The selected row's fg is the theme's `title` (a light color in every
         // shipped palette), not `Color::Default`: every shipped `sel` is a dark
         // background, so a `Default` fg would read dark-on-dark on a light
@@ -187,6 +189,9 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         Role::Footer => (t.dim, Color::Default, 0),
         Role::ScrollTrack => (t.dim, Color::Default, cell_flags::DIM),
         Role::ScrollThumb => (t.border, Color::Default, cell_flags::BOLD),
+        // The panel slots resolved above the theme split; unreachable keeps
+        // a future role from silently inheriting a body style.
+        _ => unreachable!("panel roles resolve above the theme split"),
     }
 }
 
@@ -445,7 +450,38 @@ mod tests {
             assert_ne!(meta, body, "meta vs body under {}", t.name);
             assert_ne!(head, label, "head vs label under {}", t.name);
             assert_ne!(head, meta, "head vs meta under {}", t.name);
-            assert_ne!(label, meta, "label vs meta under {}", t.name);
+            assert_ne!(label, meta, "label/pill vs meta under {}", t.name);
+        }
+    }
+
+    #[test]
+    fn panel_slots_stay_palette_following_under_named_themes() {
+        // D1: attributes and palette indexes only. A fixed Rgb in a panel
+        // slot washes out the moment the emulator's palette disagrees with
+        // the theme's - the pale-blue lane names on Solarized Light.
+        for t in [theme_catppuccin(), theme_tokyo_night(), theme_gruvbox()] {
+            for role in [
+                Role::PanelBody,
+                Role::PanelHead,
+                Role::PanelLabel,
+                Role::PanelMeta,
+                Role::PanelPill,
+                Role::PanelRule,
+            ] {
+                let (fg, bg, flags) = cell_style(role, &t);
+                assert!(
+                    !matches!(fg, Color::Rgb(..)),
+                    "{role:?} fg must stay palette-following under {}",
+                    t.name
+                );
+                assert_eq!(bg, Color::Default, "{role:?} bg under {}", t.name);
+                assert_eq!(
+                    flags & cell_flags::INVERSE,
+                    0,
+                    "{role:?} INVERSE under {}",
+                    t.name
+                );
+            }
         }
     }
 }

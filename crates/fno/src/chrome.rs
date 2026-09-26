@@ -58,6 +58,10 @@ pub struct Chrome {
     pub tabs: Vec<(String, bool)>,
     pub footer: Option<String>,
     level: Level,
+    /// The flat frame: chrome rows wear the backlog panel's palette-following
+    /// slots instead of the inverse chrome, so a framed surface sits on the
+    /// terminal's own bg under every theme.
+    flat: bool,
 }
 
 impl Chrome {
@@ -70,7 +74,16 @@ impl Chrome {
             tabs: Vec::new(),
             footer: None,
             level: Self::level_for(anchor),
+            flat: false,
         }
+    }
+
+    /// The flat frame (construction-time, like [`Self::full`]): border,
+    /// title, chip and footer resolve through the panel slots - thin rules,
+    /// bold head, dim meta - with no INVERSE band anywhere on the frame.
+    pub fn flat(mut self) -> Self {
+        self.flat = true;
+        self
     }
     pub fn subtitle(mut self, s: impl Into<String>) -> Self {
         self.subtitle = Some(s.into());
@@ -335,7 +348,32 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     }
     out.push(bottom_border(chrome, inner_w));
 
+    // The flat frame maps its chrome rows to the panel slots after building,
+    // so every row helper keeps one shape and the mapping lives here, once.
+    if chrome.flat {
+        for line in &mut out {
+            for role in &mut line.roles {
+                *role = flat_role(*role);
+            }
+        }
+    }
+
     Framed { lines: out, width }
+}
+
+/// The flat frame's role map: chrome rank becomes panel rank. INVERSE
+/// disappears with the roles that carried it - a border reads as a thin
+/// rule, a footer as dim text, and no row of the frame is a band.
+fn flat_role(r: Role) -> Role {
+    match r {
+        Role::Border => Role::PanelRule,
+        Role::Title => Role::PanelHead,
+        Role::Chip => Role::PanelLabel,
+        Role::Subtitle | Role::Footer | Role::Tab(_) => Role::PanelMeta,
+        Role::ScrollTrack => Role::PanelRule,
+        Role::ScrollThumb => Role::PanelHead,
+        other => other,
+    }
 }
 
 /// The hit target marking a chrome esc-close span - a footer's `esc close`
@@ -1186,5 +1224,35 @@ mod tests {
         blit(&mut cells, 10, 40, (0, 0), &framed, &theme);
         assert_eq!(cells[0].c, '┌');
         assert_eq!(cells[0].fg, theme.border);
+    }
+
+    #[test]
+    fn flat_frame_carries_no_inverse_or_bg_under_any_theme() {
+        // The backlog surfaces' frame: every chrome row resolves through the
+        // panel slots - thin rule, bold head, dim meta - so the framed board
+        // sits on the terminal's own bg under every theme, cursor band
+        // aside (that pair is explicit and readable by design).
+        let chrome = Chrome::new("backlog", Anchor::Center)
+            .footer("j/k move - esc back")
+            .flat();
+        // The board's body lines arrive with panel segs (to_body_line), so
+        // the body chars resolve through pad_role, never Role::Body.
+        let mut body_line = bl("row");
+        body_line.pad_role = Role::PanelBody;
+        let framed = frame(&[body_line], &chrome, 20, None);
+        for name in ["", "catppuccin", "tokyo-night", "gruvbox"] {
+            let t = crate::theme::Theme::from_name(name).0;
+            for line in &framed.lines {
+                for &r in &line.roles {
+                    let (_, bg, flags) = cell_style(r, &t);
+                    assert_eq!(bg, crate::proto::Color::Default, "{r:?} bg under {name:?}");
+                    assert_eq!(
+                        flags & crate::proto::cell_flags::INVERSE,
+                        0,
+                        "{r:?} INVERSE under {name:?}"
+                    );
+                }
+            }
+        }
     }
 }

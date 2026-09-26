@@ -17,7 +17,6 @@ pub(crate) enum BRole {
     Meta,
     Body,
     Pill,
-    Rule,
 }
 
 /// One styled segment.
@@ -93,10 +92,17 @@ impl BLine {
         }
     }
 
-    /// Append another line's chars and roles.
+    /// Append another line's chars and roles. Text and roles grow in
+    /// lockstep: a merged-in plain line contributes no role entries, so the
+    /// walk pads the gap with that line's default role - without this, every
+    /// later column's roles shift and a header's style lands mid-word.
     pub(crate) fn push_line(&mut self, other: BLine) {
         self.text.push_str(&other.text);
         self.roles.extend(other.roles);
+        let chars = self.text.chars().count();
+        while self.roles.len() < chars {
+            self.roles.push(other.default_role);
+        }
     }
 
     /// Pad with spaces to `w` display columns.
@@ -178,7 +184,6 @@ pub(crate) fn role_of(role: BRole) -> Role {
         BRole::Meta => Role::PanelMeta,
         BRole::Body => Role::PanelBody,
         BRole::Pill => Role::PanelPill,
-        BRole::Rule => Role::PanelRule,
     }
 }
 /// Compress the per-char walk into `(start, len, theme Role)` spans for the

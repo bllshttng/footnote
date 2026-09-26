@@ -9,12 +9,12 @@ use crate::vt::frame_text;
 #[test]
 fn client_compose_keys_modal_renders_the_which_key_reference() {
     // prefix+? opens the centered which-key modal, built from the single-source binding table.
-    // 44 rows: the table is 48 chords, so the panes header sits at body row
-    // 40 and needs this height to render from scroll 0. Shorter terminals
+    // 45 rows: the table is 49 chords, so the panes header sits at body row
+    // 41 and needs this height to render from scroll 0. Shorter terminals
     // scroll to it (the title says so); the 64-row notes pin upstream is the
     // budget the notes themselves must stay honest against.
     let mut view = two_pane_view();
-    view.term = (44, 80);
+    view.term = (45, 80);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     assert!(text.contains("keybinds"), "modal title present");
