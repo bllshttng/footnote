@@ -1,8 +1,8 @@
 //! The rm tombstone: one JSON file beside the registry naming the sessions
 //! `fno agents rm` removed, so the harness-store healer refuses to adopt a
-//! removed session back under a fresh short-id name (x-976b: rm dropped the
-//! row, a resolve healed the same codex session, and the adopted duplicate
-//! blocked resume).
+//! removed session back under a fresh short-id name (rm dropped the row, a
+//! resolve healed the same codex session, and the adopted duplicate blocked
+//! resume).
 //!
 //! One producer (the Rust daemon's rm), one consumer (the Python healer in
 //! `cli/src/fno/agents/store_fallback.py`, reached through the daemon's
@@ -51,7 +51,7 @@ pub(crate) fn record_at(
     entries.retain(|row| {
         row.get("removed_at")
             .and_then(Value::as_i64)
-            .is_some_and(|at| at + GRACE_SECS > now)
+            .is_some_and(|at| now.saturating_sub(at) <= GRACE_SECS)
     });
     entries.push(json!({
         "harness": harness,
