@@ -162,7 +162,7 @@ Exit is blocked while actionable rows exist. That is the stop hook doing its job
 
 Three halts have three scopes. Run `fno agents incident stop --reason "<why>"` to arm the fleet breaker. From the next tick, fleet admission refuses new spawns, dispatches, and `fno doctor test` runs. Keep admission closed until `fno agents incident clear --reason "<why>"` reopens it. A hand-run `pytest` bypasses admission and is not gated. This does not kill running work. Mail remains open so the stop can be announced. `fno agents incident status` prints the state and generation. `fno agents king cancel --scope <scope>` ends one scope's walk. `fno agents king done` ends one crown. Arming the fleet breaker affects others. No standing law grants this authority to an agent. The king names evidence and escalates. Arm only on user order unless a later law grants the authority.
 
-A quiet window is not a halt. When the operator asks you not to interrupt them, run `/fno:dnd` (codex: `$fno:dnd`) on your own session. It arms `fno agents mail hold --for <minutes>` and holds only your inbound mail. The halts and `fno agents loops pause-all` stop fleet work, which is not what they asked for.
+A quiet window is not a halt. When the user asks you not to interrupt them, run `/fno:dnd` (codex: `$fno:dnd`) on your own session. It arms `fno agents mail hold --for <minutes>` and holds only your inbound mail. The halts and `fno agents loops pause-all` stop fleet work, which is not what they asked for.
 
 ## Abdicate
 

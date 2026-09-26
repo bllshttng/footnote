@@ -1,6 +1,6 @@
 ---
 name: dnd
-description: "Do-not-disturb (DND) for this session: hold incoming agent mail on a fixed wall clock while the operator talks to you, then deliver it as one digest. Use when: 'turn on DND', 'do not disturb', 'do not interrupt me', 'hold my mail', 'quiet window', 'I need your time for 20 minutes', or 'DND off'."
+description: "Do-not-disturb (DND) for this session: hold incoming agent mail on a fixed wall clock while the user talks to you, then deliver it as one digest. Use when: 'turn on DND', 'do not disturb', 'do not interrupt me', 'hold my mail', 'quiet window', 'I need your time for 20 minutes', or 'DND off'."
 argument-hint: "[minutes | off | status | idle <minutes>]"
 metadata:
   internal: false
@@ -15,7 +15,7 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 
 ## Route
 
-| The operator says | You run |
+| The user says | You run |
 |---|---|
 | A duration: "20", "for 20 minutes", "I need your time for 20 minutes" | `fno agents mail hold --for <N>` |
 | A range: "10-15 minutes" | `fno agents mail hold --for 15` (the upper bound, so the hold cannot lift inside the window) |
@@ -36,7 +36,7 @@ The hold applies to the session that runs the command. When the ask arrives by c
 
 ## Not a pause
 
-`fno agents loops pause-all` and the reign halts stop fleet work. They are not the answer to an operator who wants quiet. Codex invokes this skill as `$fno:dnd`.
+`fno agents loops pause-all` and the reign halts stop fleet work. They are not the answer to a user who wants quiet. Codex invokes this skill as `$fno:dnd`.
 
 ## Known Limitations and Deferred Work
 
