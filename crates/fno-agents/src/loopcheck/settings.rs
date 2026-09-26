@@ -785,7 +785,7 @@ pub(crate) fn parse_settings(content: &str) -> Settings {
 // ── ledger parsing ────────────────────────────────────────────────────────────
 
 /// Sum cost_usd for entries matching session_id. Tolerate missing/malformed as 0.
-pub(super) fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
+pub(crate) fn session_cost_from_ledger(ledger_path: &Path, session_id: &str) -> f64 {
     let Ok(content) = std::fs::read_to_string(ledger_path) else {
         return 0.0;
     };
