@@ -334,6 +334,7 @@ pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
 pub mod session_names_fold;
+pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
 pub mod slot_cutover;

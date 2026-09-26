@@ -106,6 +106,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "review-start",
     "rm",
     "scratch",
+    "session-report",
     "session-start-bytes",
     "spawn",
     "spawn-gate",
@@ -847,6 +848,12 @@ async fn run(args: Vec<String>) -> i32 {
     // converge engine per the ship-phase ruling.
     if verb == "plugin-install" {
         return fno_agents::plugin_install::run_plugin_install(&args[1..]);
+    }
+    // `session-report`: the thin SessionStart transport. Raw hook payload on
+    // stdin; never lazy-starts a daemon; spools when it is down.
+    if verb == "session-report" {
+        return fno_agents::session_report::run_session_report(&args[1..], &AgentsHome::from_env())
+            .await;
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
