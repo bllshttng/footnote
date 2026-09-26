@@ -115,12 +115,14 @@ check(bool(cli_events.get("schedule")),
       "cli-ci schedules a full run even when main is quiet")
 cli_jobs = cli["jobs"]
 for name in ("smoke-pytest", "smoke-rest"):
-    check(cli_jobs.get(name, {}).get("if") ==
-          "needs.pr-affected.outputs.python_full == 'true'",
+    job_if = str(cli_jobs.get(name, {}).get("if", ""))
+    check("needs.pr-affected.outputs.python_full" in job_if
+          and "!cancelled()" in job_if,
           f"cli-ci {name} is eligible when the non-PR selector says full")
 for name in ("test-agents", "test-agents-integration", "test-mux"):
-    check(cli_jobs.get(name, {}).get("if") ==
-          "needs.pr-affected.outputs.cargo == 'true'",
+    job_if = str(cli_jobs.get(name, {}).get("if", ""))
+    check("needs.pr-affected.outputs.cargo" in job_if
+          and "!cancelled()" in job_if,
           f"cli-ci {name} is eligible when the non-PR selector says full")
 
 publish = load(".github/workflows/crates-publish.yml")
