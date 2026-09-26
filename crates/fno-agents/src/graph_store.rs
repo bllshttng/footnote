@@ -205,6 +205,31 @@ pub enum StoreError {
 /// unconstructible.
 pub const PRESENCE_TEXT_FIELDS: &[&str] = &["details", "completion_note", "title"];
 
+/// Refuse a write that introduces an empty presence field. A row that
+/// already held the same value passes: refusing it would stop every write
+/// over a value nobody is writing.
+pub(crate) fn refuse_new_empty_presence(before: &[Value], after: &[Value]) -> Result<(), String> {
+    let pre = index_by_id(before);
+    for e in after {
+        let Some(obj) = e.as_object() else {
+            continue;
+        };
+        let id = entry_id(e).unwrap_or("<no id>");
+        for field in PRESENCE_TEXT_FIELDS {
+            if let Some(Value::String(s)) = obj.get(*field) {
+                if s.trim().is_empty() && pre.get(id).and_then(|b| b.get(*field)) != obj.get(*field)
+                {
+                    return Err(format!(
+                        "refusing to persist an empty '{field}' on entry '{id}': \
+                         pass real content, or remove the key to clear it"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A non-empty text value. `TextField::parse` is the only constructor, so a
 /// `FieldUpdate::Set` can never carry the empty overwrite: the caller that
 /// tried is refused with [`StoreError::EmptyFieldUpdate`] naming the field.
@@ -2325,27 +2350,9 @@ pub fn locked_mutate_with_hook(
     // The presence invariant holds at the STORE boundary, not only at the
     // typed update path: the Python mutator runs client-side against plain
     // dicts, so `FieldUpdate` alone cannot see everything a commit carries.
-    // An entry that arrives with an empty/whitespace-only presence field is
-    // refused outright -- the measured `--details ""` wipe (3,036 characters,
-    // 2026-09-02) is unrepresentable even from a hand-built payload. Clearing
-    // a populated field stays expressible the explicit way: remove the key
-    // ([`FieldUpdate::Clear`]), never write an empty string.
-    for e in entries.iter() {
-        let Some(obj) = e.as_object() else {
-            continue;
-        };
-        let id = entry_id(e).unwrap_or("<no id>");
-        for field in PRESENCE_TEXT_FIELDS {
-            if let Some(Value::String(s)) = obj.get(*field) {
-                if s.trim().is_empty() {
-                    return Err(StoreError::EmptyFieldUpdate(format!(
-                        "refusing to persist an empty '{field}' on entry '{id}': \
-                         pass real content, or remove the key to clear it"
-                    )));
-                }
-            }
-        }
-    }
+    // The guard refuses an empty value the write introduces; an unchanged
+    // stored value passes.
+    refuse_new_empty_presence(&raw, &entries).map_err(StoreError::EmptyFieldUpdate)?;
 
     // Slug assignment on EVERY persisted mutation.
     ensure_slugs(&mut entries);
@@ -3009,6 +3016,80 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn commit_passes_a_legacy_empty_field_it_does_not_change() {
+        // A row the store itself persisted with details:"" is a legal stored
+        // state; refusing every later write over it turns that state into a
+        // permanent trap. Only an empty value this write introduces refuses.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        // Seed through the store, then rewrite the raw-carried body behind
+        // the store's back: it refuses details:"" from any mutator, so the
+        // legacy stored state (a pre-guard import) can only exist there.
+        locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-legacy", "title": "t", "details": "real"})],
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        {
+            let connection = crate::backlog::open(&graph).unwrap();
+            let body: String = connection
+                .query_row(
+                    "SELECT body FROM nodes_raw WHERE id = 'ab-legacy'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut seeded: Value = serde_json::from_str(&body).unwrap();
+            let obj = seeded.as_object_mut().unwrap();
+            obj.insert("status".into(), json!("done"));
+            obj.insert("details".into(), json!(""));
+            connection
+                .execute(
+                    "UPDATE nodes_raw SET body = ?1 WHERE id = 'ab-legacy'",
+                    rusqlite::params![seeded.to_string()],
+                )
+                .unwrap();
+        }
+        let legacy = || json!({"id": "ab-legacy", "title": "t", "status": "done", "details": ""});
+        locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![legacy(), json!({"id": "ab-new", "title": "n"})],
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let rows = crate::backlog::read_entries(&graph).unwrap();
+        let stored = rows
+            .iter()
+            .find(|r| entry_id(r) == Some("ab-legacy"))
+            .unwrap();
+        assert_eq!(stored.get("details"), Some(&Value::String(String::new())));
+        // A populated field wiped to "" IS a value this write introduces.
+        let err = locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-new", "title": "n", "details": ""})],
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::EmptyFieldUpdate(_)), "{err}");
     }
 
     #[test]
