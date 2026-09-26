@@ -91,7 +91,7 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
     },
     ("graph/cli.py", "cmd_next"): {"--project": "-p"},
     ("graph/cli.py", "cmd_ready"): {"--project": "-p"},
-    # cmd_find's row moved with the find port (PR 2564): the native binary owns
+    # cmd_find's row moved with the find port: the native binary owns
     # the surface now, and its -p/-s/-d pins live in
     # test_short_flag_dispatch.py's native-find parity test, the only scan
     # that can see a Rust flag decl.
