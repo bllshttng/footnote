@@ -242,9 +242,58 @@ fn short(sha: &Option<String>) -> String {
         .map_or("?".to_string(), |s| s[..s.len().min(12)].to_string())
 }
 
+/// One in-progress git operation that makes the checkout unshippable, named
+/// for the refusal. While MERGE_HEAD, CHERRY_PICK_HEAD or a rebase dir is
+/// present, HEAD and the index hold a half-done operation: installing from
+/// that tree ships a state the checkout never committed (a stray two-parent
+/// merge sat in exactly this state on the canonical checkout while a deploy
+/// installed it). Refused even under an explicit --source: the operation, not
+/// the branch choice, is the hazard.
+fn in_progress_operation(path: &str) -> Option<&'static str> {
+    let git_path = |name: &str| -> Option<std::path::PathBuf> {
+        let raw = git_ok(path, &["rev-parse", "--git-path", name])?;
+        let p = std::path::PathBuf::from(raw.trim());
+        Some(if p.is_absolute() {
+            p
+        } else {
+            std::path::Path::new(path).join(p)
+        })
+    };
+    for (probe, is_file, label) in [
+        (
+            "MERGE_HEAD",
+            true,
+            "a merge in progress (MERGE_HEAD present)",
+        ),
+        (
+            "CHERRY_PICK_HEAD",
+            true,
+            "a cherry-pick in progress (CHERRY_PICK_HEAD present)",
+        ),
+        (
+            "rebase-merge",
+            false,
+            "a rebase in progress (rebase-merge dir present)",
+        ),
+        (
+            "rebase-apply",
+            false,
+            "a rebase in progress (rebase-apply dir present)",
+        ),
+    ] {
+        let Some(p) = git_path(probe) else { continue };
+        let present = if is_file { p.is_file() } else { p.is_dir() };
+        if present {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// The safety classification for one validated candidate. Live probes only:
 /// nothing here reads the cached companion record.
 fn classify(path: &str, origin: &str) -> ResolveAnswer {
+    let mid_operation = in_progress_operation(path);
     let kind = worktree_kind(path);
     let heads = head_evidence(path);
     let rref = remote_ref(path);
@@ -299,10 +348,26 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         (_, Some(false)) => "divergent",
         _ => "eligible",
     };
+    let eligibility = if mid_operation.is_some() {
+        "mid_operation"
+    } else {
+        eligibility
+    };
 
     let explicit = origin == "explicit";
     let state = branch_label(heads.branch.as_deref(), heads.detached);
-    let (decision, mut warning, refusal) = match eligibility {
+    let (decision, mut warning, refusal) = if let Some(op) = mid_operation {
+        (
+            Decision::Refuse,
+            None,
+            Some(format!(
+                "refusing source {path}: {op}. A checkout mid-operation holds conflict resolutions \
+                 HEAD never committed; installing ships a half-done tree. Finish or abort the \
+                 operation, then re-run fno doctor update."
+            )),
+        )
+    } else {
+        match eligibility {
         "eligible" => (Decision::Allow, None, None),
         "divergent" if explicit && kind == WorktreeKind::MainCheckout => (
             Decision::Allow,
@@ -357,6 +422,7 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
             )),
         ),
         _ => (Decision::Allow, None, None),
+        }
     };
 
     // Distance and guidance come from `sync`, the one staleness reader - no
@@ -1476,5 +1542,82 @@ mod tests {
         });
         assert_eq!(a.origin, Some("cache".to_string()));
         assert_eq!(a.path, Some(cli));
+    }
+
+    /// Clean-ancestry main checkout with a started-but-uncommitted merge:
+    /// HEAD still equals the remote-default ref, so WITHOUT the mid-operation
+    /// gate this classify run would answer eligible.
+    fn main_checkout_mid_merge(base: &std::path::Path) -> String {
+        let (clone, _wt) = clone_with_worktree(base);
+        let root = std::path::PathBuf::from(clone.clone());
+        git_in(&root, &["checkout", "-q", "-b", "other"]);
+        fs::write(root.join("g.txt"), "other\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "other"]);
+        git_in(&root, &["checkout", "-q", "main"]);
+        let out = Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap(),
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                "other",
+            ])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git binary available");
+        assert!(
+            out.status.success(),
+            "fixture merge must start clean: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        root.join("cli").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn merge_in_progress_refuses_even_with_clean_ancestry() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = main_checkout_mid_merge(&base.path().join("mop"));
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: None,
+            cache: None,
+            candidate_paths: vec![cli.clone()],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert_eq!(
+            a.ancestor,
+            Some(true),
+            "ancestry alone was never the problem"
+        );
+        let refusal = a.refusal.unwrap();
+        assert!(
+            refusal.contains("merge in progress"),
+            "names the state: {refusal}"
+        );
+        assert_eq!(a.eligibility, "mid_operation");
+    }
+
+    #[test]
+    fn mid_operation_refusal_holds_under_explicit_source() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = main_checkout_mid_merge(&base.path().join("mox"));
+        let a = resolve(&ResolveArgs {
+            override_path: Some(cli.clone()),
+            env_source: None,
+            checkout: None,
+            cache: None,
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert!(
+            a.refusal.unwrap().contains("merge in progress"),
+            "explicit --source does not bypass a mid-operation tree"
+        );
     }
 }
