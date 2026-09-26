@@ -1481,10 +1481,11 @@ fn an_adopted_row_retires_once_the_roster_sweep_removed_its_session() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// The failed read: the same corpse row with a snapshot that reads unknown
-/// keeps under `not a spawn row` - an unread instrument is never absence.
+/// An unread roster snapshot no longer shields a terminal adopted row: the
+/// registry's own exited status is the death fact the carve-out needs, so
+/// the row takes the normal pipeline and its quiet transcript retires it.
 #[test]
-fn an_adopted_row_with_an_unknown_snapshot_keeps() {
+fn an_adopted_row_with_an_unknown_snapshot_takes_the_retire_path() {
     let home = tmp_home("gc-corpse-unknown");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
@@ -1511,21 +1512,28 @@ fn an_adopted_row_with_an_unknown_snapshot_keeps() {
         &|_| true,
     );
 
-    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
     assert_eq!(
-        summary.kept_not_spawn,
-        vec![("aurow000".to_string(), "adopted".to_string())],
+        summary.needs_live_stop.len(),
+        1,
+        "the phantom-forever keep is gone: the row reaches the pipeline and holds at the stop proof, which a dry run never promises: {summary:?}"
+    );
+    assert_eq!(summary.needs_live_stop[0].0, "aurow000");
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert!(
+        summary.kept_not_spawn.is_empty(),
         "{:?}",
         summary.kept_not_spawn
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// Presence in a known snapshot keeps, whatever the node reads; and a codex
-/// row (no claude roster, no pid) with no death marker keeps too - the
-/// corpse predicate has exactly two legs and nothing else satisfies it.
+/// Presence in a known snapshot keeps, whatever the registry's stale status
+/// reads: the listing is the live fact, so the roster-listed adopted row
+/// stays under `not a spawn row`. A codex row (no claude roster governs it)
+/// with a terminal registry status takes the adopted-retire carve-out, and
+/// its quiet transcript retires it.
 #[test]
-fn an_adopted_row_with_a_live_roster_row_or_no_probe_keeps() {
+fn a_roster_listed_adopted_row_keeps_and_an_unlisted_one_takes_the_carve_out() {
     let home = tmp_home("gc-corpse-live");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
@@ -1564,15 +1572,17 @@ fn an_adopted_row_with_a_live_roster_row_or_no_probe_keeps() {
         &|_| true,
     );
 
-    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
-    let kept: Vec<&str> = summary
-        .kept_not_spawn
-        .iter()
-        .map(|(id, _)| id.as_str())
-        .collect();
-    assert_eq!(kept.len(), 2, "{:?}", summary.kept_not_spawn);
-    assert!(kept.contains(&"prrow000"), "{:?}", summary.kept_not_spawn);
-    assert!(kept.contains(&"cxrow000"), "{:?}", summary.kept_not_spawn);
+    assert_eq!(
+        summary.needs_live_stop.len(),
+        1,
+        "the unlisted codex row reaches the pipeline and holds at the stop proof: {summary:?}"
+    );
+    assert_eq!(summary.needs_live_stop[0].0, "cxrow000", "{summary:?}");
+    assert_eq!(
+        summary.kept_not_spawn,
+        vec![("prrow000".to_string(), "adopted".to_string())],
+        "the roster-listed row keeps: {summary:?}"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
 
