@@ -4858,18 +4858,25 @@ async fn attach_stopped_claims_release(
         return;
     };
     // A stop leaves the row (terminal); an rm removes it, so the caller
-    // passes the resolved identity instead of re-reading the registry.
+    // passes the resolved identity instead of re-reading the registry. The
+    // requested token may be a session id rather than the row name (a
+    // stop-by-id, or a cross-project heal that just minted the row), so
+    // resolve through the same finder the lifecycle verbs resolve with; an
+    // exact-name miss here dropped the healed row's claims on the floor.
     let identity = load_registry_offloaded(ctx.home.registry_json())
         .await
         .ok()
         .and_then(|registry| {
-            registry
-                .entries
-                .iter()
-                .find(|e| e.name == name)
-                .map(|e| (e.harness_session_id.clone(), Some(e.cwd.clone())))
+            registry.find_name_or_full_session_id(name).map(|e| {
+                (
+                    Some(e.name.clone()),
+                    e.harness_session_id.clone(),
+                    Some(e.cwd.clone()),
+                )
+            })
         });
-    let (session_id, cwd) = identity.unwrap_or((None, None));
+    let (resolved_name, session_id, cwd) = identity.unwrap_or((None, None, None));
+    let name: &str = resolved_name.as_deref().unwrap_or(name);
     release_stopped_claims_into(&ctx.emitter, name, session_id, cwd, verb, response);
 }
 
