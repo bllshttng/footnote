@@ -4708,7 +4708,9 @@ mod tests {
         assert_eq!(e.claude_session_uuid, None);
         assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
         assert!(!e.short_id.is_empty());
-        assert_eq!(e.name, format!("t-{}", e.short_id));
+        // The name prefers the linked node id over the bare t- form (a
+        // transcript title would outrank both; this test env has none).
+        assert_eq!(e.name, "20260804T202518Z-cl99002-4e0236");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }
