@@ -26,19 +26,20 @@ fn wait_input(h: &mut ClientHarness) {
     h.wait_prompt(15);
 }
 
-/// A routing row the isolated home's config carries, so the agent list has a
-/// real zai row under harness claude (AC4-HP).
+/// A configured account row the isolated home exposes to the model chip.
 fn seed_routing_config(scratch: &Scratch) {
     let dir = scratch.0.join("home").join(".fno");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.toml"),
-        "[[routing.models]]\n\
-         name = \"zai-flash\"\n\
+        "[accounts]\n\
+         active = \"zai-main\"\n\
+         [[accounts.records]]\n\
+         id = \"zai-main\"\n\
          harness = \"claude\"\n\
-         model = \"glm-5.3-flash[1m]\"\n\
-         route = \"zai/glm-5.3-flash[1m]\"\n\
-         band = \"high\"\n",
+         route_provider_id = \"zai\"\n\
+         model_name = \"glm-5.3-flash[1m]\"\n\
+         route = \"zai/glm-5.3-flash[1m]\"\n",
     )
     .unwrap();
 }
@@ -63,6 +64,19 @@ fn with_fake_harnesses(scratch: &Scratch) -> Vec<(&'static str, String)> {
 fn open_composer(h: &mut ClientHarness) {
     type_and_settle(h, PREFIX);
     type_and_settle(h, OPEN);
+}
+
+fn open_claude_model_picker(h: &mut ClientHarness) {
+    // The composer starts on Harness. Filter to the installed Claude row,
+    // then tab to Model; this follows the separate chip axes.
+    type_and_settle(h, DOWN);
+    h.wait_screen(10, |s| s.contains("claude") && s.contains("codex"));
+    type_and_settle(h, b"claude");
+    h.wait_screen(10, |s| s.contains("filter: claude"));
+    type_and_settle(h, b"\r");
+    h.wait_screen(10, |s| s.contains("claude▾"));
+    type_and_settle(h, TAB);
+    type_and_settle(h, DOWN);
 }
 
 fn pane_region(screen: &str) -> String {
@@ -94,9 +108,9 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     // The chip's value comes from the compile-time capability table (agy
     // sorts first), not the fake PATH bins; it lands when the catalog read
     // does, so wait for it instead of reading once.
-    let screen = h.wait_screen(10, |s| s.contains("agy default"));
+    let screen = h.wait_screen(10, |s| s.contains("agy▾") && s.contains("default▾"));
     assert!(
-        screen.contains("agy default"),
+        screen.contains("agy▾ default▾"),
         "the harness value shows in full: {screen}"
     );
 }
@@ -111,6 +125,7 @@ fn project_chip_down_opens_a_list_and_never_launches() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
+    type_and_settle(&mut h, TAB);
     type_and_settle(&mut h, TAB);
     type_and_settle(&mut h, DOWN);
     let screen = h.wait_screen(10, |s| s.contains("type to filter"));
@@ -130,8 +145,8 @@ fn project_chip_down_opens_a_list_and_never_launches() {
 
 #[test]
 fn agent_list_offers_default_rows_and_no_free_text_model_row() {
-    // AC5-HP / open question 2: every launchable model comes from a routing
-    // row; the agent list carries `<harness> default` rows and no
+    // AC5-HP / open question 2: every launchable model comes from a configured
+    // account row; the model list carries the harness default and no
     // "type a model..." free-text entry, and a typed query can never become
     // the value.
     let scratch = Scratch::new("composer-agent-list");
@@ -141,11 +156,11 @@ fn agent_list_offers_default_rows_and_no_free_text_model_row() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    type_and_settle(&mut h, DOWN);
-    let screen = h.wait_screen(10, |s| s.contains("default"));
+    open_claude_model_picker(&mut h);
+    let screen = h.wait_screen(10, |s| s.contains("harness default"));
     assert!(
-        screen.contains("default"),
-        "the agent list names the default rows: {screen}"
+        screen.contains("harness default"),
+        "the model list names the harness default: {screen}"
     );
     assert!(
         !screen.contains("type a model"),
@@ -178,10 +193,8 @@ fn focus_report_then_arrow_never_lands_as_text() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
-    // Tab to the message editor (agent -> project -> message), where stray
-    // bytes would be visible as text.
-    type_and_settle(&mut h, TAB);
-    type_and_settle(&mut h, TAB);
+    // The separate axes add visible stops before Message.
+    type_and_settle(&mut h, b"\t\t\t\t\t\t");
     type_and_settle(&mut h, b"\x1b[I");
     type_and_settle(&mut h, DOWN);
     std::thread::sleep(Duration::from_millis(300));
@@ -231,9 +244,8 @@ fn arrows_inside_the_repeat_window_type_letters_not_resizes() {
     type_and_settle(&mut h, PREFIX);
     type_and_settle(&mut h, b"L");
     open_composer(&mut h);
-    // Tab to the message editor, then hold L inside the window.
-    type_and_settle(&mut h, TAB);
-    type_and_settle(&mut h, TAB);
+    // The separate axes add visible stops before Message.
+    type_and_settle(&mut h, b"\t\t\t\t\t\t");
     type_and_settle(&mut h, b"L");
     std::thread::sleep(Duration::from_millis(300));
     let screen = h.screen();
@@ -319,14 +331,8 @@ fn prefix_hint_bar_shows_at_once() {
 
 #[test]
 fn agent_list_shows_route_hint_for_a_routing_row() {
-    // AC4-HP: the agent list shows the routing row under its harness with
-    // the route as the hint, so a glm launch is reachable from the composer.
-    // The door underneath is the python CLI's inventory, which the CI mux
-    // job deliberately does not install (no python steps there). Probe the
-    // same door the client runs, against the same scratch env: when it
-    // answers with rows, pin the routing row and its hint; when it answers
-    // empty or not at all, pin the surface the client shows instead - the
-    // row and hint rendering are pinned by the unit suite either way.
+    // AC4-HP: the model list uses the configured account row and shows its
+    // route as the hint, so a glm launch is reachable from the composer.
     let scratch = Scratch::new("composer-route-hint");
     seed_routing_config(&scratch);
     let envs = with_fake_harnesses(&scratch);
@@ -334,77 +340,20 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    type_and_settle(&mut h, DOWN);
-    match probe_inventory_models(&scratch, &env_refs) {
-        DoorShape::Rows => {
-            // The inventory read has measured 22s wall on a loaded machine;
-            // the list refills the moment the read lands.
-            let screen = h.wait_screen(35, |s| s.contains("zai-flash"));
-            assert!(
-                screen.contains("zai-flash"),
-                "the routing row is listed: {screen}"
-            );
-            // The hint carries the route when the door's row has one and
-            // falls back to the model id when it does not.
-            assert!(
-                screen.contains("glm-5.3-flash[1m]"),
-                "the row's hint names what a launch carries: {screen}"
-            );
-        }
-        DoorShape::EmptyModels => {
-            let screen = h.wait_screen(35, |s| s.contains("default"));
-            assert!(
-                screen.contains("default"),
-                "the default rows stand with no routing rows declared: {screen}"
-            );
-        }
-        DoorShape::Unavailable => {
-            let screen = h.wait_screen(35, |s| s.contains("model list unavailable"));
-            assert!(
-                screen.contains("model list unavailable"),
-                "the missing door is named: {screen}"
-            );
-            assert!(
-                screen.contains("default"),
-                "the default rows still launch: {screen}"
-            );
-        }
-    }
-}
-
-/// The three answers the inventory door can give the composer.
-enum DoorShape {
-    Rows,
-    EmptyModels,
-    Unavailable,
-}
-
-/// What the inventory door answers when the client's catalog read runs it.
-/// A missing python CLI, slot server, or unreadable answer reads as
-/// `Unavailable`, never as a panic in the test process.
-fn probe_inventory_models(scratch: &Scratch, envs: &[(&str, &str)]) -> DoorShape {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["config", "route", "inventory", "--json"])
-        .env("HOME", scratch.0.join("home"))
-        .envs(envs.iter().copied())
-        .output();
-    let Ok(out) = out else {
-        return DoorShape::Unavailable;
-    };
-    if !out.status.success() {
-        return DoorShape::Unavailable;
-    }
-    let Ok(text) = String::from_utf8(out.stdout) else {
-        return DoorShape::Unavailable;
-    };
-    match serde_json::from_str::<serde_json::Value>(text.trim_start())
-        .ok()
-        .and_then(|v| v.get("models").and_then(|m| m.as_array()).cloned())
-    {
-        Some(rows) if !rows.is_empty() => DoorShape::Rows,
-        Some(_) => DoorShape::EmptyModels,
-        None => DoorShape::Unavailable,
-    }
+    open_claude_model_picker(&mut h);
+    let screen = h.wait_screen(10, |s| {
+        s.contains("glm-5.3-flash[1m]") && s.contains("zai/glm-5.3-flash[1m]")
+    });
+    assert!(screen.contains("glm-5.3-flash[1m]"), "model row: {screen}");
+    assert!(
+        screen.contains("zai/glm-5.3-flash[1m]"),
+        "configured route is visible as the model hint: {screen}"
+    );
+    // Escape closes the model popover first, then the composer itself.
+    type_and_settle(&mut h, b"\x1b");
+    type_and_settle(&mut h, b"\x1b");
+    let screen = h.wait_screen(10, |s| !s.contains("new agent"));
+    assert!(!screen.contains("new agent"), "the composer closes: {screen}");
 }
 
 #[test]
