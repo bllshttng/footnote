@@ -2,9 +2,9 @@
 
 Sources are on disk only: the graph (``read_graph``) and the pr-status cache
 (``newest_row_offline``). This module must never import the status REST
-reader, or any cache helper that reaches a live GitHub read - a verb whose
-job is showing the board must never be the thing that exhausts the quota
-(test_board.py pins both the raising-subprocess probe and this import list).
+reader or any cache helper that reaches a live read - showing the board must
+never exhaust the quota (test_board.py pins both the raising-subprocess
+probe and this import list).
 
 An unreadable source resolves to unknown, never to an empty section: an empty
 Just-finished section must mean nothing landed, not that the read failed.

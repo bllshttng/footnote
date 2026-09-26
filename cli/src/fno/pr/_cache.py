@@ -1,10 +1,8 @@
-"""Offline readers for the pr-status cache rows.
+"""Offline readers for the pr-status cache rows (`fno.graph.board`).
 
-The cache itself (the coalescing chokepoint, the stale serve, the
-`--refresh` escape) is the Rust owner now: crates/fno-agents/src/pr_status/
-cache.rs, answered through the `authorized-merge` status door. What survives
-here is the offline row reading `fno.graph.board` renders from - no network,
-ever. The full narrative lives in docs/architecture/pr-status-verdict.md.
+The cache itself is the Rust owner now (pr_status/cache.rs, through the
+authorized-merge status door); what survives here reads rows offline. The
+narrative lives in docs/architecture/pr-status-verdict.md.
 """
 
 from __future__ import annotations

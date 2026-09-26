@@ -228,7 +228,38 @@ pub(crate) fn run_logs_with<P: GhProbe>(
     }
 }
 
-/// The `status-logs` door op: `{cwd, pr, job, lines, full}`.
+/// The current branch's open PR, the `_rest.resolve_current_pr_number_rest`
+/// read: one REST query, no `gh pr view` GraphQL spend.
+fn resolve_current_pr<P: GhProbe>(probe: &P, cwd: &Path, slug: &str) -> Result<u64, String> {
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD")
+        .ok_or_else(|| "no current branch".to_string())?;
+    let args = vec![
+        "api".to_string(),
+        format!("repos/{slug}/pulls?head={slug}:{branch}&state=open"),
+    ];
+    let (ok, stdout, _) = probe.run_gh(cwd, &args)?;
+    if !ok {
+        return Err("pulls lookup failed".to_string());
+    }
+    let rows: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("unparseable pulls list: {e}"))?;
+    Ok(rows
+        .as_array()
+        .and_then(|r| r.first())
+        .and_then(|r| r.get("number"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "no pull requests found for branch".to_string())?)
+}
+
+/// The `status-logs` door op: `{cwd, pr, job, lines, full}`. A zero pr asks
+/// for the current branch's PR.
 pub(crate) fn run_logs_door(payload: &Value) -> (i32, String, String) {
     let cwd_str = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
     let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
@@ -255,6 +286,20 @@ pub(crate) fn run_logs_door(payload: &Value) -> (i32, String, String) {
     let probe = CountingProbe {
         inner: RealGhProbe,
         calls: AtomicUsize::new(0),
+    };
+    let pr = if pr == 0 {
+        match resolve_current_pr(&probe, cwd, &slug) {
+            Ok(n) => n,
+            Err(why) => {
+                return (
+                    4,
+                    String::new(),
+                    format!("fno do pr logs: cannot read CI state: {why}\n"),
+                )
+            }
+        }
+    } else {
+        pr
     };
     run_logs_with(&probe, cwd, &slug, pr, job, lines, full, &repo_root(cwd))
 }
