@@ -95,9 +95,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # developer's Rust build directory; Cargo supplies its own value to build
     # scripts when it invokes them.
     "OUT_DIR",
-    # The board editor (crates/fno/src/client/backlog_board.rs spawns $EDITOR);
-    # a developer's choice of editor is not a test input.
-    "EDITOR",
+    "EDITOR",  # the board editor (backlog_board.rs spawns it); a developer's editor is not a test input
     # Colour suppression, scrubbed rather than kept, which splits it from its
     # siblings TERM and COLORTERM in _ENVIRONMENT below. Those two DESCRIBE a
     # terminal's capability; this one SUPPRESSES output, so its mere presence
