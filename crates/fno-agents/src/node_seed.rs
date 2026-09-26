@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+use crate::law_match::matches_node_id_shape;
 use crate::provider::parse_verb_token;
 
 /// The node's verb as one canonical `/word`, reusing the seed parser so no
@@ -181,6 +182,9 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // A node the payload named (not the --node flag) gets refusals that
+    // point at the payload, so the remedy names what to fix.
+    let from_payload = payload.get("node_source").and_then(Value::as_str) == Some("payload");
 
     // 1. Crown and resume spawns pass unchanged: their flags already name
     //    the work profile, and the payload carries them as facts.
@@ -230,8 +234,17 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
     //    derivation error, or a node with no verb is not evidence of
     //    /target.
     if payload.get("row_found").and_then(Value::as_bool) != Some(true) {
-        return json!({"action": "refuse", "message": format!(
-            "--node {node} names no readable backlog row; an unknown node is not evidence of a verb")});
+        let message = if from_payload {
+            format!(
+                "the payload names {node}, but no readable backlog row has that id; \
+                 fix the id, or pass the work as prose"
+            )
+        } else {
+            format!(
+                "--node {node} names no readable backlog row; an unknown node is not evidence of a verb"
+            )
+        };
+        return json!({"action": "refuse", "message": message});
     }
     if let Some(err) = payload
         .get("derive_error")
@@ -275,9 +288,19 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
                 if format!("/{first}") == node_verb {
                     return json!({"action": "pass"});
                 }
-                return json!({"action": "refuse", "message": format!(
-                    "--node {node} derives {node_verb}; the payload names /{first}. \
-                     Drop the verb from the payload: --node supplies it.")});
+                let message = if from_payload {
+                    let word = node_verb.trim_start_matches('/');
+                    format!(
+                        "the payload names /{first} {node}, but {node} derives {node_verb}; \
+                         spawn /fno:{word} {node} instead"
+                    )
+                } else {
+                    format!(
+                        "--node {node} derives {node_verb}; the payload names /{first}. \
+                         Drop the verb from the payload: --node supplies it."
+                    )
+                };
+                return json!({"action": "refuse", "message": message});
             }
         }
     }
@@ -307,6 +330,46 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
         }
         _ => json!({"action": "profile", "verb": word}),
     }
+}
+
+/// Which node does this spawn work, answered with the source that named it:
+/// a non-empty `flag_node` wins, then the first node-shaped token on the
+/// seed's first line (modifier tokens such as `L` never match the shape),
+/// then a non-empty `env_node`. Pure over the payload: row resolution stays
+/// a graph lookup on the caller's side, so a null answer routes nothing.
+pub fn resolve_node(payload: &Value) -> Value {
+    let named = |key: &str| -> Option<String> {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(flag) = named("flag_node") {
+        return json!({"node": flag, "source": "flag"});
+    }
+    if let Some(text) = seed_text(payload) {
+        let toks: Vec<&str> = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        if toks.first().is_some_and(|t| parse_verb_token(t).is_some()) {
+            for tok in toks.iter().skip(1) {
+                let word = tok
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if matches_node_id_shape(&word) {
+                    return json!({"node": word, "source": "payload"});
+                }
+            }
+        }
+    }
+    if let Some(env) = named("env_node") {
+        return json!({"node": env, "source": "env"});
+    }
+    json!({"node": Value::Null, "source": Value::Null})
 }
 
 #[cfg(test)]
@@ -653,5 +716,137 @@ mod tests {
     fn slug_argument_is_not_a_node_id() {
         let out = decide_map(base_derive("/fno:target x-marks-the-spot", 1));
         assert_eq!(out["action"], "pass");
+    }
+
+    // --- resolve_node: which node, and who named it ---------------------- //
+
+    fn resolved(payload: Value) -> Map<String, Value> {
+        resolve_node(&payload)
+            .as_object()
+            .cloned()
+            .expect("answer is an object")
+    }
+
+    fn resolve_payload(seed: &str, flag: Value, env: Value) -> Value {
+        json!({
+            "argv": ["spawn", "--name", "w", seed],
+            "seed_index": 3,
+            "seed_form": "positional",
+            "flag_node": flag,
+            "env_node": env,
+        })
+    }
+
+    #[test]
+    fn a_seed_named_node_answers_with_source_payload() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-75e3",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-75e3");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn modifier_tokens_are_skipped_on_the_scan() {
+        let out = resolved(resolve_payload(
+            "$fno:blueprint L x-1be2",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-1be2");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn trailing_punctuation_is_trimmed_on_the_scan() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-1234,",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], "x-1234");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn flag_wins_over_payload_and_env() {
+        let out = resolved(resolve_payload(
+            "/fno:target x-2",
+            json!("x-1"),
+            json!("x-3"),
+        ));
+        assert_eq!(out["node"], "x-1");
+        assert_eq!(out["source"], "flag");
+    }
+
+    #[test]
+    fn payload_wins_over_env() {
+        // Shape-valid ids: a one-hex suffix like x-2 is not node-shaped, so
+        // the payload arm declines and env would answer.
+        let out = resolved(resolve_payload(
+            "/fno:target x-2222",
+            Value::Null,
+            json!("x-3333"),
+        ));
+        assert_eq!(out["node"], "x-2222");
+        assert_eq!(out["source"], "payload");
+    }
+
+    #[test]
+    fn env_answers_when_the_seed_names_nothing() {
+        let out = resolved(resolve_payload("say hi", Value::Null, json!("x-3")));
+        assert_eq!(out["node"], "x-3");
+        assert_eq!(out["source"], "env");
+    }
+
+    #[test]
+    fn unshaped_seeds_answer_null() {
+        for seed in [
+            "/fno:target \"add a flag\"",
+            "work on x-1234",
+            "/fno:target\n\nx-1234 later",
+        ] {
+            let out = resolved(resolve_payload(seed, Value::Null, Value::Null));
+            assert_eq!(out["node"], Value::Null, "{seed}");
+            assert_eq!(out["source"], Value::Null, "{seed}");
+        }
+    }
+
+    // --- node_source: refusals name the payload -------------------------- //
+
+    #[test]
+    fn a_payload_sourced_disagreement_names_the_payload() {
+        let mut p = base();
+        p["node_source"] = json!("payload");
+        p["argv"] = json!(["spawn", "w", "/fno:target x-1", "--node", "x-1"]);
+        p["seed_index"] = json!(2);
+        p["seed_form"] = json!("positional");
+        let out = decide_map(p);
+        assert_eq!(out["action"], "refuse");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("the payload names /target x-1"), "{msg}");
+        assert!(msg.contains("spawn /fno:blueprint x-1"), "{msg}");
+        assert!(!msg.contains("--node"), "{msg}");
+    }
+
+    #[test]
+    fn a_payload_sourced_unknown_node_names_the_payload() {
+        let mut p = base();
+        p["node_source"] = json!("payload");
+        p["row_found"] = json!(false);
+        let msg = decide_map(p)["message"].as_str().unwrap().to_string();
+        assert!(msg.contains("the payload names x-1"), "{msg}");
+        assert!(!msg.contains("--node"), "{msg}");
+    }
+
+    #[test]
+    fn a_flag_sourced_node_keeps_the_flag_wording() {
+        let mut p = base();
+        p["node_source"] = json!("flag");
+        p["row_found"] = json!(false);
+        let msg = decide_map(p)["message"].as_str().unwrap().to_string();
+        assert!(msg.starts_with("--node x-1"), "{msg}");
     }
 }
