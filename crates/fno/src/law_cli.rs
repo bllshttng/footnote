@@ -1,13 +1,16 @@
 //! Native law-door verbs under `fno inbox law`.
 //!
 //! The Python `fno inbox` group keeps every other name; `law set`, `law
-//! stage`, and `law match` run natively. The door's machinery lives in the
-//! runtime crate (`fno_agents::law_match`), shared with question_intake's
-//! matcher; these verbs are thin stdin-to-library pipes. No top-level verb
-//! exists (law d-fe66560a); the group stays nested under `inbox`.
+//! stage`, and `law match` run natively. The door's machinery stays in the
+//! runtime crate, reached through the worker's one-shot `--law-exec` lane:
+//! the mux never links the runtime (crates/fno/tests/product_boundary.rs),
+//! so these verbs spawn the worker exactly the way the store's `--store-exec`
+//! clients do. No top-level verb exists (law d-fe66560a); the group stays
+//! nested under `inbox`.
 
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 
 /// The verbs the native surface serves. The Python `fno inbox law` group
 /// forwards here instead of holding its own write path.
@@ -66,7 +69,7 @@ pub fn run(args: &[OsString]) -> i32 {
                 "stdin": stdin_text,
             })
             .to_string();
-            fno_agents::law_match::run_law_match_str(&request)
+            law_exec(&request)
         }
         "stage" | "match" => {
             // The caller shapes the request (the hook wraps its payload as a
@@ -77,11 +80,55 @@ pub fn run(args: &[OsString]) -> i32 {
                 eprintln!("fno inbox law {sub}: could not read the request from stdin");
                 return 2;
             }
-            fno_agents::law_match::run_law_match_str(&buf)
+            law_exec(&buf)
         }
         _ => {
             eprintln!("error: expected a subcommand (set | stage | match)");
             2
+        }
+    }
+}
+
+/// One request through the worker's `--law-exec` one-shot lane. The child
+/// owns stdout and the exit code; the request rides stdin. A missing worker
+/// is the door's refused exit (3), never an empty answer.
+fn law_exec(request: &str) -> i32 {
+    let Some(binary) = crate::store_client::worker_binary() else {
+        eprintln!(
+            "fno inbox law: refused: the fno-agents-worker binary is unavailable (set FNO_AGENTS_WORKER, or install the worker beside fno)."
+        );
+        return 3;
+    };
+    let mut child = match Command::new(&binary)
+        .arg("--law-exec")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("fno inbox law: refused: cannot spawn the law worker: {e}");
+            return 3;
+        }
+    };
+    let sent = child
+        .stdin
+        .take()
+        .ok_or(())
+        .and_then(|mut stdin| stdin.write_all(request.as_bytes()).map_err(|_| ()));
+    if sent.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("fno inbox law: refused: could not send the law request");
+        return 3;
+    }
+    // stdin dropped here: the child sees EOF and answers.
+    match child.wait() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("fno inbox law: refused: {e}");
+            3
         }
     }
 }

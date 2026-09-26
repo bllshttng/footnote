@@ -2325,13 +2325,14 @@ mod tests {
                 "args": "high https://github.com/o/r/pull/1"
             }
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         assert_eq!(answer["stage"], "review");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
@@ -2370,13 +2371,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "$fno:review low"
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         assert_eq!(answer["stage"], "review");
         assert_eq!(
@@ -2434,13 +2436,14 @@ mod tests {
                 "prompt": "/fno:reviewer"
             }),
         ] {
+            let graph = node_graph(&dir);
             let answer = stage_answer_with(
                 StageRequest {
                     hook: hook.clone(),
                     paths: vec![],
                 },
                 Some(&path),
-                None,
+                Some(&graph),
             );
             assert_eq!(answer["stage"], Value::Null, "{hook}");
             assert_eq!(answer["hook_output"], Value::Null, "{hook}");
@@ -2456,13 +2459,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         assert_eq!(answer["stage"], "review");
         assert_eq!(answer["hook_output"], Value::Null);
@@ -2487,13 +2491,14 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -2544,13 +2549,14 @@ mod tests {
                 "args": "x-aaaa"
             }
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -2698,6 +2704,22 @@ mod tests {
         assert!(line.contains("sits near live law d-777e7d1f"), "{line}");
     }
 
+    /// A hermetic graph naming x-aaaa with project fno, so a stage read's node
+    /// scope resolves from the fixture and never from the live machine graph
+    /// (`default_graph_path` is `$FNO_HOME/graph.json`, or `$HOME/.fno`).
+    fn node_graph(dir: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        let graph = dir.as_ref().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [{"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}]
+            })
+            .to_string(),
+        )
+        .expect("writes");
+        graph
+    }
+
     fn write_index(dir: &std::path::Path, rows: &[String]) -> std::path::PathBuf {
         let path = dir.join("decisions.jsonl");
         std::fs::write(&path, rows.join("\n") + "\n").expect("writes");
@@ -2804,13 +2826,14 @@ mod tests {
             "tool_name": "Skill",
             "tool_input": {"skill": "fno:blueprint", "args": "x-aaaa"}
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         assert_eq!(answer["stage"], "blueprint");
     }
@@ -2864,13 +2887,14 @@ mod tests {
                 "args": "x-aaaa"
             }
         });
+        let graph = node_graph(&dir);
         let answer = stage_answer_with(
             StageRequest {
                 hook,
                 paths: vec![],
             },
             Some(&path),
-            None,
+            Some(&graph),
         );
         assert_eq!(answer["stage"], "blueprint");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
@@ -2965,13 +2989,14 @@ mod tests {
                 "prompt": "$fno:execute a-plan-path"
             }),
         ] {
+            let graph = node_graph(&dir);
             let answer = stage_answer_with(
                 StageRequest {
                     hook,
                     paths: vec![],
                 },
                 Some(&path),
-                None,
+                Some(&graph),
             );
             assert_eq!(answer["stage"], "target");
             let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]

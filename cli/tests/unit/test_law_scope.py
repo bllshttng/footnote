@@ -13,12 +13,21 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit._front_dev import front_dev_binary
+from tests.unit._front_dev import front_dev_binary, worker_dev_binary
 
 pytestmark = pytest.mark.skipif(
     front_dev_binary() is None,
     reason="compiled fno front binary not present (build with `cargo build --manifest-path crates/fno/Cargo.toml --bin fno)`",
 )
+
+
+@pytest.fixture(autouse=True)
+def _point_the_front_at_the_dev_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The front serves the law door by spawning the runtime worker; a dev
+    checkout's front must never answer from an installed worker."""
+    worker = worker_dev_binary()
+    if worker is not None:
+        monkeypatch.setenv("FNO_AGENTS_WORKER", str(worker))
 
 
 def _work_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str = "demo") -> Path:

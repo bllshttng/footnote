@@ -18,6 +18,11 @@
 //!   leave a resident process behind (the leak shape recorded 2026-09-17: a
 //!   keeper grows with requests served) still gets the full dispatch.
 //!   Callers build this argv; humans never type it.
+//! - `--law-exec`: the one-shot law-door lane (law_match.rs). Serves ONE
+//!   law request on stdin, prints the door's own answer, and exits with the
+//!   door's code. The front's `fno inbox law` verbs spawn it, because the
+//!   mux never links the runtime (product boundary). Callers build this
+//!   argv; humans never type it.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
 //! terminal going away) cannot take it - and therefore the PTY child -
@@ -67,6 +72,10 @@ fn main() {
         }
         return;
     }
+    if args.iter().any(|a| a == "--law-exec") {
+        law_exec_lane();
+        return;
+    }
     if args.iter().any(|a| a == "--keeper" || a == "--pane") {
         if let Err(msg) = pane_keeper_lane(&args) {
             eprintln!("fno-agents-worker: {msg}");
@@ -77,8 +86,8 @@ fn main() {
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
-             (claude stream-json adoption), --store-keeper (graph store), or \
-             --store-exec (one store request)"
+             (claude stream-json adoption), --store-keeper (graph store), \
+             --store-exec (one store request), or --law-exec (one law request)"
         );
         std::process::exit(2);
     }
@@ -99,6 +108,21 @@ fn store_keeper_lane(args: &[String]) -> Result<(), String> {
 fn store_exec_lane(args: &[String]) -> Result<(), String> {
     let cfg = fno_agents::store_exec::parse_store_exec_args(args)?;
     fno_agents::store_exec::run_exec(cfg)
+}
+
+/// `--law-exec` entrypoint: one law-door request on stdin, the door's own
+/// stdout and exit code out. The front's `fno inbox law` verbs spawn this
+/// lane; the child reads stdin to EOF and answers, so write-then-read
+/// cannot deadlock.
+fn law_exec_lane() {
+    use std::io::Read;
+
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("fno-agents-worker: --law-exec could not read stdin");
+        std::process::exit(2);
+    }
+    std::process::exit(fno_agents::law_match::run_law_match_str(&input));
 }
 
 /// `--keeper` / `--pane` entrypoint: parse, fill the build-dir env (before any

@@ -652,7 +652,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
- "fno-agents",
  "libc",
  "portable-pty",
  "ratatui-core",

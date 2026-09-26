@@ -24,9 +24,6 @@ name = "fno"
 path = "src/main.rs"
 
 [dependencies]
-# The law door's machinery lives in the runtime crate (question_intake
-# shares the matcher); the front verbs are thin stdin-to-library pipes.
-fno-agents = { path = "../fno-agents" }
 # `fno mux serve --web`: the read-only web bridge's HTTP + WebSocket
 # surface. axum handles the untrusted-input HTTP parsing and WS handshake so
 # the web-facing bridge does not hand-roll that security-sensitive code.
