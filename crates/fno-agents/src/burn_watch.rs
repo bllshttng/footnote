@@ -92,20 +92,23 @@ pub enum Decision {
     /// No prior sample: record one and wait an interval. A worker with no
     /// history can never fire on its first sighting.
     FirstSight,
-    /// Progress landed on some axis, or the burn evidence withdrew: reset
-    /// the ladder, close any filed task.
+    /// Progress landed on a sampled axis: reset the ladder, close any
+    /// filed task.
     StandDown,
     /// Flat sample, budget not spent: wake the worker.
     Wake(String),
     /// Flat sample, budget spent, operator not yet asked: file one task.
     Escalate(String),
-    /// Flat sample, already escalated: wait for progress or the operator.
+    /// Wait: an already-escalated flat row, or a probe that died this pass
+    /// (git hung, ledger unreadable). The ladder and the last good sample
+    /// are carried; nothing resets and nothing fires on unknown.
     Hold,
 }
 
-/// The pure decision. Progress is ANY change on the sampled axes; a flat
+/// The pure decision. Progress is POSITIVE change on a sampled axis; a flat
 /// sample burns when spend grew past `spend_min` or the node's
-/// `touched_at` aged past `idle_s`. Unknown inputs never fire.
+/// `touched_at` aged past `idle_s`. A probe that died carries the last
+/// good sample and decides nothing. Unknown inputs never fire.
 pub fn decide(
     prev: Option<&BurnState>,
     sample: &Sample,
@@ -125,12 +128,46 @@ pub fn decide(
     };
     next.task_key = prev.task_key.clone();
     next.task_cwd = prev.task_cwd.clone();
-    let flat = prev.head == sample.head
-        && prev.commits == sample.commits
-        && prev.touched_at == sample.touched_at;
-    if !flat {
+    // A probe that died this pass flips an axis Some -> None: carry the
+    // last good sample and hold the ladder, never decide on unknown.
+    let probe_died = matches!((prev.cost_usd, sample.cost_usd), (Some(_), None))
+        || matches!((prev.commits, sample.commits), (Some(_), None))
+        || matches!((&prev.head, &sample.head), (Some(_), None));
+    if probe_died {
+        next = BurnState {
+            cost_usd: prev.cost_usd,
+            head: prev.head.clone(),
+            commits: prev.commits,
+            touched_at: prev.touched_at,
+            attempts: prev.attempts,
+            escalated: prev.escalated,
+            last_wake_at: prev.last_wake_at,
+            task_key: prev.task_key.clone(),
+            task_cwd: prev.task_cwd.clone(),
+        };
+        return (Decision::Hold, next);
+    }
+    // Progress is POSITIVE change: (Some, Some) that differ, or an axis
+    // APPEARING (None -> Some) where real work became measurable.
+    let moved = |before: &Option<String>, after: &Option<String>| match (before, after) {
+        (Some(a), Some(b)) => a != b,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let stringified = |n: Option<i64>| n.map(|t| t.to_string());
+    let head_moved = moved(&prev.head, &sample.head);
+    let count_moved = moved(
+        &prev.commits.map(|c| c.to_string()),
+        &sample.commits.map(|c| c.to_string()),
+    );
+    let touch_moved = moved(
+        &stringified(prev.touched_at),
+        &stringified(sample.touched_at),
+    );
+    if head_moved || count_moved || touch_moved {
         return (Decision::StandDown, next);
     }
+    // Flat, probes read: the two burn arms.
     let spend_grew = match (prev.cost_usd, sample.cost_usd) {
         (Some(before), Some(now)) => now - before >= spend_min,
         _ => false,
@@ -718,6 +755,56 @@ mod tests {
         );
         assert_eq!(d, Decision::FirstSight);
         assert_eq!(next.cost_usd, Some(9.0));
+    }
+
+    #[test]
+    fn a_probe_that_died_carries_the_last_good_sample_and_holds() {
+        let prev = BurnState {
+            cost_usd: Some(1.0),
+            head: Some("a".into()),
+            commits: Some(1),
+            touched_at: Some(1000),
+            attempts: 3,
+            escalated: true,
+            task_key: Some("burning worker on x-1".into()),
+            task_cwd: Some("/w".into()),
+            ..Default::default()
+        };
+        // git and the ledger die this pass; the graph probe still reads.
+        let sample = Sample {
+            cost_usd: None,
+            head: None,
+            commits: None,
+            touched_at: Some(1000),
+        };
+        let (d, next) = decide(Some(&prev), &sample, 2000, 1000, 0.01);
+        assert_eq!(d, Decision::Hold);
+        assert_eq!(next.attempts, 3);
+        assert!(next.escalated);
+        assert_eq!(next.head.as_deref(), Some("a"));
+        assert_eq!(next.cost_usd, Some(1.0));
+        assert_eq!(next.task_key.as_deref(), Some("burning worker on x-1"));
+    }
+
+    #[test]
+    fn an_axis_appearing_after_a_dead_first_sight_is_progress() {
+        let prev = BurnState {
+            cost_usd: Some(1.0),
+            head: None,
+            commits: None,
+            touched_at: Some(1000),
+            attempts: 2,
+            ..Default::default()
+        };
+        let (d, next) = decide(
+            Some(&prev),
+            &sample(Some(1.0), Some("b"), Some(1000)),
+            2000,
+            7200,
+            0.01,
+        );
+        assert_eq!(d, Decision::StandDown);
+        assert_eq!(next.attempts, 0);
     }
 
     #[test]
