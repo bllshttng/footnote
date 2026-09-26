@@ -351,7 +351,7 @@ jobs:
   # raise either cap.
   smoke-pytest:
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.python_full == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.python_full == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -428,7 +428,7 @@ jobs:
 
   smoke-rest:
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.python_full == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.python_full == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -588,7 +588,7 @@ jobs:
   hook-latency:
     name: per-turn hook latency budgets
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.cargo == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     runs-on: ubuntu-latest
     # Widest of 14 passing runs sampled 2026-09-24: 6.9m.
     timeout-minutes: 10
@@ -639,7 +639,7 @@ jobs:
   test-agents:
     name: cargo test (fno-agents) + schema parity
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.cargo == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     runs-on: ubuntu-latest
     # This job once held the whole cargo suite, and on 2026-09-17 two runs
     # (main at 37da45e9, PR 2137) that could pass were cancelled at its cap.
@@ -884,7 +884,7 @@ jobs:
 
   test-agents-integration:
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.cargo == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     name: cargo test integration (fno-agents) ${{ matrix.shard }}/4
     strategy:
       fail-fast: false
@@ -981,7 +981,7 @@ jobs:
 
   test-mux:
     needs: [pr-affected]
-    if: needs.pr-affected.outputs.cargo == 'true'
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     name: cargo test (fno mux)
     runs-on: ubuntu-latest
     # 20 against a load measured in single minutes: the mux lib suite, the
