@@ -48,11 +48,11 @@ def test_glob_star_in_state_dir_rejected(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_glob_question_in_paths_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR: paths.graph_json with '?' raises ValidationError at load time."""
+    """AC1-ERR: paths.ledger_json with '?' raises ValidationError at load time."""
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     settings_file = _write_settings(
         tmp_path,
-        "schema_version: 1\nconfig:\n  paths:\n    graph_json: '~/.fno/graph?.json'\n",
+        "schema_version: 1\nconfig:\n  paths:\n    ledger_json: '~/.fno/ledger?.json'\n",
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
@@ -594,4 +594,3 @@ def test_blueprint_max_prs_per_epic_rejects_non_positive(
 
     with pytest.raises(Exception, match=r"max_prs_per_epic|>= ?1|positive"):
         config_mod.load_settings()
-

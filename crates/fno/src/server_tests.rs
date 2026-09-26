@@ -1,11 +1,10 @@
 use super::*;
-use crate::proto::AgentRow;
+use crate::proto::{AgentRow, TemplateName};
 use crate::pty::ChildGuard;
 use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
 #[path = "server/server_thread_viewer_tests.rs"]
 mod thread_viewer_tests;
-use crate::proto::TemplateName;
 // The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;
@@ -6768,9 +6767,8 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
     assert_eq!(core.agent_rows()[0].tail, None);
 
     core.handle_msg(CoreMsg::AgentTails {
-        tails: [("uuid-live".to_string(), "said something new".to_string())]
-            .into_iter()
-            .collect(),
+        tails: HashMap::from([("uuid-live".into(), "said something new".into())]),
+        ctx: HashMap::new(),
     });
     assert_eq!(
         core.agent_rows()[0].tail.as_deref(),
@@ -8660,6 +8658,7 @@ pub(super) fn empty_core() -> Core {
         launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
+        ctx_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
         truth_seq: 0,
         backlog: Vec::new(),
@@ -8671,6 +8670,7 @@ pub(super) fn empty_core() -> Core {
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),

@@ -33,14 +33,6 @@ Traps a fresh agent re-hits because no lint, guard or refusal catches them yet. 
 
 AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test): `kdc-delivery-sentinel-1932`.
 
-### A capability probe delivered over the mail bus can only ever return yes
-
-`fno agents mail send` injects as user-shaped text, indistinguishable from superuser typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
-
-- specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe separating user-shaped injection from an autonomous tool call, or a lint demanding evidence beyond a mail probe.
-- added: 2026-08-05
-
 ### Codex RPC
 
 `fno agents mail send <full-session-id> --raw <payload>` types any single-line payload verbatim. /fno:verb and $fno:verb both name an fno verb. The lane rewrites the verb to the form of the receiving harness. The codex app-server lane sends a non-review payload over turn/start.
@@ -125,7 +117,7 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
-| `paths.graph_db()` | `~/.fno/graph.db` (+ `.md` Kanban) | Feature dependency graph | backlog |
+| `paths.graph_json()` | `~/.fno/graph.db` | SQLite; stable `graph.json` path anchor | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |

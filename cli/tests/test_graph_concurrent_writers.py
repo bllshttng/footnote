@@ -1,5 +1,6 @@
 """Concurrent writer regression coverage for row-scoped graph commits."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import multiprocessing as mp
@@ -58,8 +59,7 @@ def _run_pair(
     from fno.graph import store
 
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {"id": "x-left", "title": "left", "progress_notes": []},
@@ -67,8 +67,7 @@ def _run_pair(
                 ]
             }
         )
-        + "\n"
-    )
+        + "\n")
     store._client_for(graph).request("read_file", {})
     context = mp.get_context("fork")
     barrier = context.Barrier(2)

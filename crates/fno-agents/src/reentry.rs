@@ -353,6 +353,29 @@ pub fn resolve_reentry_with(
     claude_home: &crate::claude_ask::ClaudeHome,
     cwd_override: Option<&str>,
 ) -> Result<ReentryPlan, String> {
+    resolve_reentry_inner(
+        registry,
+        name,
+        transition,
+        select_session,
+        account_binding,
+        claude_home,
+        cwd_override,
+    )
+    .map(|(plan, _)| plan)
+}
+
+/// The resolver's body: the plan plus the route recovery it performed, so the
+/// registry-writing wrapper can persist what a bare row's transcript proved.
+fn resolve_reentry_inner(
+    registry: &Registry,
+    name: &str,
+    transition: ReentryTransition,
+    select_session: Option<&str>,
+    account_binding: &AccountBinding,
+    claude_home: &crate::claude_ask::ClaudeHome,
+    cwd_override: Option<&str>,
+) -> Result<(ReentryPlan, Option<crate::route_recovery::Recovered>), String> {
     if name.trim().is_empty() {
         return Err("no agent named".to_string());
     }
@@ -478,17 +501,46 @@ pub fn resolve_reentry_with(
         ));
     }
 
+    // A bare row (no recorded route, default-or-absent launch account) that
+    // starts a process recovers its birth route from the transcript and the
+    // recorded route files. `?` turns a refusal into the resolver's Err, so
+    // no argv is ever built for a default-endpoint launch. An attach starts
+    // no process - a live session's route was fixed at its launch.
+    let recovered = if transition.starts_a_process()
+        && entry
+            .route_settings_path
+            .as_deref()
+            .is_none_or(|p| p.is_empty())
+        && matches!(entry.launch_account.as_deref(), None | Some("default"))
+    {
+        crate::route_recovery::recover(
+            crate::resume_pin::RowPins::from_entry(entry),
+            &session_id,
+            &claude_home.projects_dir(),
+        )?
+    } else {
+        None
+    };
+    let plan_route: Option<String> = recovered
+        .as_ref()
+        .map(|r| r.route_settings_path.clone())
+        .or_else(|| entry.route_settings_path.clone().filter(|p| !p.is_empty()));
+
     // The account axis. Routed or non-Anthropic rows refuse on an unknown
     // account; a proven default row keeps the historical bare behavior.
-    let routed = entry
-        .route_settings_path
-        .as_deref()
-        .is_some_and(|p| !p.is_empty());
+    let routed = recovered.is_some()
+        || entry
+            .route_settings_path
+            .as_deref()
+            .is_some_and(|p| !p.is_empty());
     let non_anthropic = entry
         .provider
         .as_deref()
         .is_some_and(|p| !p.is_empty() && p != "anthropic");
-    let launch_account = entry.launch_account.clone();
+    let launch_account = entry
+        .launch_account
+        .clone()
+        .or_else(|| recovered.as_ref().map(|_| "default".to_string()));
     let claude_config_dir = match launch_account.as_deref() {
         None if transition.starts_a_process() && (routed || non_anthropic) => {
             return Err(format!(
@@ -573,7 +625,20 @@ pub fn resolve_reentry_with(
                      no transport key for respawn or bg-resume"
                 ));
             }
-            if matches!(listing, JobListing::Listed(_)) {
+            let listed = matches!(listing, JobListing::Listed(_));
+            // Respawn replays the job's SAVED launch, so a routed plan may
+            // take it only when the saved launch still carries the plan's
+            // route. A job whose saved flags name no settings file (a bad
+            // relaunch rewrote them) takes bg-resume, which pushes the
+            // recorded route itself.
+            let job_keeps_route = match &plan_route {
+                None => true,
+                Some(route) => {
+                    saved_job_settings(&claude_home.jobs_dir_for(&short_id).join("state.json"))
+                        .is_some_and(|saved| &saved == route)
+                }
+            };
+            if listed && job_keeps_route {
                 mechanism = "respawn".to_string();
                 argv.push("claude".into());
                 argv.push("respawn".into());
@@ -596,11 +661,7 @@ pub fn resolve_reentry_with(
     // start a process from the ambient namespace, so the recorded route must
     // ride along.
     if mechanism != "respawn" {
-        if let Some(path) = entry
-            .route_settings_path
-            .as_deref()
-            .filter(|p| !p.is_empty())
-        {
+        if let Some(path) = plan_route.as_deref() {
             argv.push("--settings".into());
             argv.push(path.to_string());
         }
@@ -661,24 +722,43 @@ pub fn resolve_reentry_with(
         argv = relaunch_then_attach(argv, &short_id);
     }
 
-    Ok(ReentryPlan {
-        resolved: true,
-        transition: transition.as_str().to_string(),
-        mechanism,
-        name: entry.name.clone(),
-        fno_id: entry.fno_id.clone(),
-        node: entry.node.clone(),
-        session_id,
-        short_id,
-        launch_account: launch_account.unwrap_or_else(|| "unknown".to_string()),
-        claude_config_dir,
-        route_settings_path: entry.route_settings_path.clone().filter(|p| !p.is_empty()),
-        cwd: cwd.to_string(),
-        substrate: substrate_of(entry).to_string(),
-        mux: entry.mux.clone(),
-        argv,
-        env,
-    })
+    Ok((
+        ReentryPlan {
+            resolved: true,
+            transition: transition.as_str().to_string(),
+            mechanism,
+            name: entry.name.clone(),
+            fno_id: entry.fno_id.clone(),
+            node: entry.node.clone(),
+            session_id,
+            short_id,
+            launch_account: launch_account.unwrap_or_else(|| "unknown".to_string()),
+            claude_config_dir,
+            route_settings_path: plan_route,
+            cwd: cwd.to_string(),
+            substrate: substrate_of(entry).to_string(),
+            mux: entry.mux.clone(),
+            argv,
+            env,
+        },
+        recovered,
+    ))
+}
+
+/// The `--settings <path>` a saved claude job replays, read from
+/// `jobs/<short>/state.json`'s `respawnFlags`. `None` on any read or parse
+/// miss, or when the saved flags name no settings file.
+fn saved_job_settings(state: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(state).ok()?;
+    let v = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let flags = v.get("respawnFlags")?.as_array()?;
+    let mut it = flags.iter().filter_map(|f| f.as_str());
+    while let Some(tok) = it.next() {
+        if tok == "--settings" {
+            return it.next().map(str::to_string);
+        }
+    }
+    None
 }
 
 /// One argv that runs the relaunch, then becomes `claude attach <short>`:
@@ -731,7 +811,7 @@ pub fn resolve_reentry(
 ) -> Result<ReentryPlan, String> {
     let registry = load_registry(registry_path)
         .map_err(|e| format!("registry unreadable at {}: {e}", registry_path.display()))?;
-    resolve_reentry_with(
+    let (plan, recovered) = resolve_reentry_inner(
         &registry,
         name,
         transition,
@@ -739,7 +819,21 @@ pub fn resolve_reentry(
         &shell_account_binding,
         &crate::claude_ask::ClaudeHome::from_env(),
         cwd_override,
-    )
+    )?;
+    if let Some(r) = &recovered {
+        match crate::route_recovery::persist(registry_path, &plan.session_id, r) {
+            Ok(true) => eprintln!(
+                "fno agents: restored route {} ({}) from the transcript's birth identity; recorded on the row",
+                r.provider, r.model
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "fno agents: restored route {} ({}); row not updated: {e}",
+                r.provider, r.model
+            ),
+        }
+    }
+    Ok(plan)
 }
 
 /// The `holder <session-id>...` action: recognized when the first arg is the
@@ -943,6 +1037,45 @@ mod tests {
         std::fs::write(path, serde_json::json!({"env": env}).to_string()).unwrap();
     }
 
+    /// A usable zai route file for glm-5.3-flash[1m]: what route_file_for
+    /// and provider_from_route_settings both search for.
+    fn write_glm_route(path: &std::path::Path) {
+        let env = serde_json::json!({
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_BASE_URL": "https://repro.invalid/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": SECRET,
+            "FNO_ROUTE_PROVIDER": "zai",
+        });
+        std::fs::write(path, serde_json::json!({"env": env}).to_string()).unwrap();
+    }
+
+    /// Stage the saved claude job state the respawn guard reads: the
+    /// `respawnFlags` its state.json carries.
+    fn stage_job_flags(home: &std::path::Path, short: &str, flags: &[&str]) {
+        let jobs = ClaudeHome::at(home).jobs_dir_for(short);
+        std::fs::create_dir_all(&jobs).unwrap();
+        let payload = serde_json::json!({ "state": "idle", "respawnFlags": flags });
+        std::fs::write(jobs.join("state.json"), payload.to_string()).unwrap();
+    }
+
+    /// A glm-born transcript for `sid` under a projects base, as the birth
+    /// pin this whole feature reads.
+    fn stage_glm_birth_transcript(projects: &std::path::Path, sid: &str) -> std::path::PathBuf {
+        let slug = projects.join("staged-project");
+        std::fs::create_dir_all(&slug).unwrap();
+        let path = slug.join(format!("{sid}.jsonl"));
+        std::fs::write(
+            &path,
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"glm-5.3-flash[1m]","marketingName":null}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    fn dir_str(p: &std::path::Path) -> &str {
+        p.to_str().unwrap()
+    }
+
     #[test]
     fn reentry_plan_resolves_a_complete_routed_glm_row() {
         let dir = std::env::temp_dir().join("reentry-test-route-a.json");
@@ -955,7 +1088,14 @@ mod tests {
         e.route_settings_path = Some(dir.to_string_lossy().to_string());
         e.cwd = std::env::temp_dir().to_string_lossy().to_string();
 
-        let (_tmp, home) = staged_home(&["aaaaaaaa"]);
+        let (tmp, home) = staged_home(&["aaaaaaaa"]);
+        // The saved launch still carries the row's route, so the respawn
+        // guard lets `claude respawn` replay it (AC5-HP's healthy half).
+        stage_job_flags(
+            tmp.path(),
+            "aaaaaaaa",
+            &["--settings", &dir.to_string_lossy()],
+        );
         let plan = resolve_reentry_with(
             &reg(vec![e]),
             "glm",
@@ -2057,6 +2197,340 @@ mod tests {
         assert_eq!(plan.mechanism, "respawn");
         assert!(!plan.argv.iter().any(|t| t == "--model"));
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn bare_glm_row_with_poisoned_job_recovers_route_as_bg_resume() {
+        // AC3-HP: a bare glm row, a saved job replaying the poisoned
+        // `--model claude-opus-5-5` launch, and a usable zai route file:
+        // the plan takes bg-resume, carries `--settings <route>` and no
+        // `--model`, and the plan records the recovered route and the
+        // default launch account. (On origin/main this runs respawn with a
+        // bare argv - the silent opus launch.)
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("reentry-test-recover-route.json");
+        write_glm_route(&dir);
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", std::env::temp_dir());
+        let mut e = row("bare-glm");
+        e.harness_session_id = Some("77770007-2222-3333-4444-555555555555".into());
+        e.short_id = "77770007".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let (tmp, home) = staged_home(&["77770007"]);
+        stage_job_flags(tmp.path(), "77770007", &["--model", "claude-opus-5-5"]);
+        stage_glm_birth_transcript(&home.projects_dir(), "77770007-2222-3333-4444-555555555555");
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare-glm",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(plan.route_settings_path.as_deref(), Some(dir_str(&dir)));
+        assert_eq!(plan.launch_account, "default");
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|w| w[0] == "--settings" && w[1] == dir_str(&dir)),
+            "{:?}",
+            plan.argv
+        );
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+    }
+
+    #[test]
+    fn bare_glm_row_without_usable_route_refuses_with_recipe() {
+        // AC3-ERR: the same bare row over only a sandboxed zai route file:
+        // the resolver refuses naming the spawn --resume override, and no
+        // argv is built.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let routes = std::env::temp_dir().join(format!(
+            "reentry-sand-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&routes).unwrap();
+        let mut sand = serde_json::json!({
+            "env": {
+                "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+                "ANTHROPIC_BASE_URL": "https://repro.invalid/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": SECRET,
+                "FNO_ROUTE_PROVIDER": "zai",
+            }
+        });
+        sand["sandbox"] = serde_json::json!({"workspace": "/w"});
+        std::fs::write(routes.join("zai.json"), sand.to_string()).unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &routes);
+        let mut e = row("bare-glm");
+        e.harness_session_id = Some("77770008-2222-3333-4444-555555555555".into());
+        e.short_id = "77770008".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let (tmp, home) = staged_home(&["77770008"]);
+        stage_job_flags(tmp.path(), "77770008", &["--model", "claude-opus-5-5"]);
+        stage_glm_birth_transcript(&home.projects_dir(), "77770008-2222-3333-4444-555555555555");
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare-glm",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&routes).ok();
+        assert!(
+            err.contains(
+                "fno agents spawn --resume 77770008-2222-3333-4444-555555555555 -P zai -m 'glm-5.3-flash[1m]'"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bare_anthropic_row_keeps_mechanism_and_pins_birth_model() {
+        // AC3-EDGE: a bare row born on an Anthropic model recovers nothing;
+        // the mechanism choice is unchanged, no --settings is added, and the
+        // birth model rides --model on the bg-resume arm.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("bare-anthropic");
+        e.harness_session_id = Some("77770009-2222-3333-4444-555555555555".into());
+        e.short_id = "77770009".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let (_tmp, home) = staged_home(&[]);
+        let projects = home.projects_dir();
+        let slug = projects.join("staged-project");
+        std::fs::create_dir_all(&slug).unwrap();
+        std::fs::write(
+            slug.join("77770009-2222-3333-4444-555555555555.jsonl"),
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-opus-5","marketingName":"Opus 5"}},"type":"attachment"}"#,
+        )
+        .unwrap();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare-anthropic",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(plan.route_settings_path, None);
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "claude-opus-5"),
+            "{:?}",
+            plan.argv
+        );
+        assert!(!plan.argv.iter().any(|t| t == "--settings"));
+    }
+
+    #[test]
+    fn attach_on_bare_glm_row_recovers_nothing() {
+        // AC3-EDGE: an attach starts no process, so a live session's route
+        // was fixed at its launch: recovery neither fires nor refuses.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("bare-glm");
+        e.harness_session_id = Some("77770010-2222-3333-4444-555555555555".into());
+        e.short_id = "77770010".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let (_tmp, home) = staged_home(&[]);
+        stage_glm_birth_transcript(&home.projects_dir(), "77770010-2222-3333-4444-555555555555");
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare-glm",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(plan.mechanism, "attach");
+        assert_eq!(plan.route_settings_path, None);
+        assert!(!plan.argv.iter().any(|t| t == "--settings"));
+    }
+
+    #[test]
+    fn routed_row_with_job_missing_route_takes_bg_resume() {
+        // AC5-ERR: a routed row whose saved job's respawnFlags carry
+        // `--model claude-opus-5-5` and no --settings takes bg-resume, which
+        // pushes the row's own route.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let dir = std::env::temp_dir().join("reentry-test-route-c.json");
+        write_route(&dir, false);
+        let mut e = row("glm");
+        e.harness_session_id = Some("77770011-2222-3333-4444-555555555555".into());
+        e.short_id = "77770011".into();
+        e.provider = Some("zai".into());
+        e.launch_account = Some("makers".into());
+        e.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        let (tmp, home) = staged_home(&["77770011"]);
+        stage_job_flags(tmp.path(), "77770011", &["--model", "claude-opus-5-5"]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "glm",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|w| w[0] == "--settings" && w[1] == dir_str(&dir)),
+            "{:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
+    fn resolve_reentry_persists_recovered_route_on_the_row() {
+        // AC4-HP: the registry-writing wrapper records the recovered route
+        // on the row found by session id; `model` stays untouched.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("reentry-test-recover-route.json");
+        write_glm_route(&dir);
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", std::env::temp_dir());
+        let home_dir = std::env::temp_dir().join(format!(
+            "reentry-persist-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home_dir).unwrap();
+        stage_glm_birth_transcript(
+            &ClaudeHome::at(&home_dir).projects_dir(),
+            "77770012-2222-3333-4444-555555555555",
+        );
+        let mut e = row("bare-glm");
+        e.harness_session_id = Some("77770012-2222-3333-4444-555555555555".into());
+        e.short_id = "77770012".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let reg_path = home_dir.join("registry.json");
+        crate::state::update_registry(&reg_path, |r| {
+            r.entries.push(e);
+        })
+        .unwrap();
+        let saved_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home_dir);
+        let plan = resolve_reentry(&reg_path, "bare-glm", ReentryTransition::Resume, None, None);
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        match &saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let plan = plan.unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        let loaded = crate::state::load_registry(&reg_path).unwrap();
+        let stored = loaded
+            .entries
+            .iter()
+            .find(|x| {
+                x.harness_session_id.as_deref() == Some("77770012-2222-3333-4444-555555555555")
+            })
+            .unwrap();
+        assert_eq!(stored.provider.as_deref(), Some("zai"));
+        assert_eq!(stored.requested_model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(stored.launch_account.as_deref(), Some("default"));
+        assert_eq!(stored.route_settings_path.as_deref(), Some(dir_str(&dir)));
+        assert_eq!(stored.model, None);
+        std::fs::remove_dir_all(&home_dir).ok();
+    }
+
+    #[test]
+    fn unwritable_registry_still_returns_recovered_plan() {
+        // AC4-ERR: a registry the wrapper cannot write still returns the
+        // recovered plan; the stderr line names the failed write.
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("reentry-test-recover-route.json");
+        write_glm_route(&dir);
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", std::env::temp_dir());
+        let home_dir = std::env::temp_dir().join(format!(
+            "reentry-unwritable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home_dir).unwrap();
+        stage_glm_birth_transcript(
+            &ClaudeHome::at(&home_dir).projects_dir(),
+            "77770013-2222-3333-4444-555555555555",
+        );
+        let mut e = row("bare-glm");
+        e.harness_session_id = Some("77770013-2222-3333-4444-555555555555".into());
+        e.short_id = "77770013".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let reg_path = home_dir.join("registry.json");
+        crate::state::update_registry(&reg_path, |r| {
+            r.entries.push(e);
+        })
+        .unwrap();
+        let saved_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home_dir);
+        let original_mode = std::fs::metadata(&home_dir)
+            .expect("stat the staged home")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod the staged home read-only");
+        let plan = resolve_reentry(&reg_path, "bare-glm", ReentryTransition::Resume, None, None);
+        std::fs::set_permissions(&home_dir, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore the staged home's mode");
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        match &saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let plan = plan.unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(plan.route_settings_path.as_deref(), Some(dir_str(&dir)));
+        std::fs::remove_dir_all(&home_dir).ok();
     }
 
     #[test]

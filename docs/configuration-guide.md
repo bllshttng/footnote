@@ -10,7 +10,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
 | `plans_filename` | str | `%Y%m%d-{slug}-{node}.md` | advanced | Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name. |
 | `branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
-| `paths.graph_json` | str (optional) | _(none)_ | never | Override path to the backlog graph.json. |
 | `paths.ledger_json` | str (optional) | _(none)_ | never | Override path to ledger.json. |
 | `paths.evals_history` | str (optional) | _(none)_ | never | Override path to the evals-history.jsonl bank-run ledger. |
 | `paths.briefs_dir` | str (optional) | _(none)_ | never | Override path to the sidecar briefs dir. |
@@ -49,6 +48,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
 | `backlog.staleness_days` | int | `21` | advanced | Age (days) before an unmoved ready node is quarantined from selection. |
 | `backlog.epic_max_open_children` | int (optional) | _(none)_ | advanced | Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install. |
+| `backlog.max_open_ideas` | int | `25` | advanced | Most unplanned, machine-filed ideas one nearest-epic or project scope may hold (default 25; 0 is off). Operator asks are never capped. The graph store reads it from the config.toml beside graph.json. |
 | `backlog.render_targets` | list[RenderTargetConfig] | `[]` | advanced | Auto-rendered projections (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local\|backlog\|roadmap} target; public targets use the leak gate and local is full-detail. |
 | `backlog.page_reload_s` | int | `60` | advanced | Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off). |
 | `batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |

@@ -1185,8 +1185,7 @@ mod tests {
     fn write_graph(entries: &[Value]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("graph.json");
-        let mut f = std::fs::File::create(&path).expect("create graph.json");
-        write!(f, "{}", serde_json::json!({ "entries": entries })).expect("write graph.json");
+        crate::graph_store::seed_rows(&path, entries).expect("seed graph.db");
         (dir, path)
     }
 
@@ -1543,8 +1542,7 @@ mod tests {
     fn a_slug_resolves_and_an_ambiguous_token_refuses_naming_candidates() {
         let a = node("x-1", json!({ "slug": "same-slug" }));
         let b = node("x-2", json!({ "slug": "same-slug" }));
-        let (_d, graph) = write_graph(&[a, b]);
-        let message = refusal_of(&graph, &req("same-slug", Some("ready"), &[]));
+        let message = resolve_index(&[a, b], "same-slug").unwrap_err().message;
         assert!(
             message.contains("x-1") && message.contains("x-2"),
             "{message}"
@@ -1617,11 +1615,7 @@ mod tests {
                 "status": "deferred",
             }),
         );
-        std::fs::write(
-            &graph,
-            serde_json::json!({ "entries": [target] }).to_string(),
-        )
-        .unwrap();
+        graph_store::seed_rows(&graph, &[target]).expect("seed graph.db");
         // Hold the store's own lock well past three 100ms deadlines.
         let holder = {
             let graph = graph.clone();

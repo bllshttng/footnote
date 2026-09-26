@@ -344,11 +344,9 @@ jobs:
   # true. `Sync + build` deliberately runs in every leg: it costs about 3s and
   # removes any question of whether pytest can rely on `uv build`.
   #
-  # The last four-way pytest run reached only 38%, 42%, 39% and 54% before its
-  # 15-minute cap, so the lane doubled to eight. An eight-way PR run later hit
-  # the 12-minute step cap at 727s with 97% complete. Split to ten; keep both
-  # caps fixed. The rest lane stays at four because its measured legs finish
-  # below the cap.
+  # The 10-way run hit the 12-minute step cap at 724s with tests at 86%. Split
+  # to thirteen; keep both caps fixed. The rest lane stays at four because its
+  # measured legs finish below the cap.
   # If a shard approaches the step cap below, split again or cut work. Do not
   # raise either cap.
   smoke-pytest:
@@ -357,11 +355,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     runs-on: ubuntu-latest
     # The latest two-leg main run measured 27m35s for pytest. Eight legs were not
-    # enough for the current tree, so ten matrix legs share the work. Each leg
-    # remains capped at 12 minutes, with the 15-minute job cap as a backstop.
+    # enough for the current tree, so thirteen matrix legs share the work.
+    # Keep the 12-minute shard cap and 15-minute job backstop.
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -380,7 +378,7 @@ jobs:
         # relink seconds.
         run: cargo build --quiet --manifest-path crates/fno/Cargo.toml --bin fno
 
-      - name: "Smoke shard: pytest (${{ matrix.shard }}/10)"
+      - name: "Smoke shard: pytest (${{ matrix.shard }}/13)"
         # The step carries its own cap so a hang dies on the clock that can
         # name it: a step-level timeout-minutes kill reports `failure`, where a
         # job-level kill reports `cancelled` - the same word a superseding push
@@ -426,7 +424,7 @@ jobs:
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 12 || true' EXIT
           : "$start"
-          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/10
+          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/13
 
   smoke-rest:
     needs: [pr-affected]
@@ -610,7 +608,13 @@ jobs:
       - name: Install strace
         run: sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
-        run: cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+        # The copy onto PATH installs the build for the freshness step below:
+        # `fno doctor harness-matrix` execs the *installed* binary by design
+        # (resolve_installed_binary), and the freshness verdict is only honest
+        # when that binary was built from this checkout.
+        run: |
+          cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+          cp crates/fno-agents/target/release/fno-agents "$HOME/.cargo/bin/"
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -778,7 +782,11 @@ jobs:
         # minutes, not after the 26-minute integration shard. The package clean
         # above still makes this binary and the tests share one fresh source
         # build. Dependencies stay cached.
-        run: cargo build --bin fno-agents
+        # The PATH copy installs the build for the freshness step below:
+        # `fno doctor harness-matrix` execs the *installed* binary by design.
+        run: |
+          cargo build --bin fno-agents
+          cp target/debug/fno-agents "$HOME/.cargo/bin/"
 
       - name: Generated copies match their sources
         # The ONE freshness gate for every build-generated copy. build.rs
@@ -1033,7 +1041,11 @@ jobs:
         # shard split from got that binary for free because its fno-agents
         # legs ran first in the same workspace; the shard has no fno-agents
         # test steps, so it builds the bins itself.
-        run: cargo build --bins
+        run: |
+          cargo build --bins
+          worker="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/debug/fno-agents-worker"
+          test -x "$worker"
+          echo "FNO_AGENTS_WORKER=$worker" >> "$GITHUB_ENV"
 
       - name: cargo test --lib --bins (fno mux)
         working-directory: crates/fno

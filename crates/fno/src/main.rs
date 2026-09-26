@@ -137,6 +137,10 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno inbox law set|stage|match`: the native law-door verbs, classified
+    /// lexically the way `fno doctor event` is, because the Python CLI owns
+    /// the rest of the `inbox` tree.
+    InboxLaw(Vec<OsString>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -171,10 +175,12 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
+            "--attention-api" => args.attention_api = true,
+            "--attention-port" => args.attention_port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
         }
     }
-    (web || args.stop || args.status).then_some(args)
+    (web || args.stop || args.status || args.attention_api).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -184,6 +190,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
+        return Role::InboxLaw(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -341,6 +350,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup

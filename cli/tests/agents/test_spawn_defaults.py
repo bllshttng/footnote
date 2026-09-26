@@ -225,9 +225,24 @@ def test_route_resolved_empty_is_recorded_not_warned(journal: Path) -> None:
     assert rows[0]["resolved"]["route"] == {"value": "", "rung": None}
 
 
-def test_route_applied_names_source_and_no_skip(journal: Path) -> None:
+def test_route_applied_names_source_and_no_skip(journal: Path, monkeypatch) -> None:
     """AC19. No suppression: the route is injected with its source rung."""
     import io as _io  # noqa: F401 - kept local for symmetry with siblings
+
+    # The node answer is the grid resolver's business, not this test's: a
+    # verb binary that resolves the seed's shape-valid id would add the
+    # stand-down receipt segment. Only the resolver call degrades.
+    import fno.rust_binary as _rb
+    from fno.rust_binary import VerbUnavailable as _Unavailable
+
+    _real_verb_call = _rb.verb_call
+
+    def _no_node_answer(verb, payload, unavailable_cls, **kw):
+        if "spawn_node" in payload:
+            raise _Unavailable("no node answer in this test")
+        return _real_verb_call(verb, payload, unavailable_cls, **kw)
+
+    monkeypatch.setattr(_rb, "verb_call", _no_node_answer)
 
     err = _io.StringIO()
     out = _inject(

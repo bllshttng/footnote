@@ -330,7 +330,7 @@ def test_notification_dispatches_outside_a_hermetic_run(monkeypatch, tmp_path):
 # conftest chain resolved the operator root in silence. On 2026-09-06 one of
 # them overwrote the live graph with a 64-byte fixture payload.
 
-_OUTSIDE = Path("/nonexistent-operator-root/.fno/graph.json")
+_OUTSIDE = Path("/nonexistent-operator-root/.fno/ledger.json")
 
 
 def test_undeclared_root_refuses_under_pytest(monkeypatch):

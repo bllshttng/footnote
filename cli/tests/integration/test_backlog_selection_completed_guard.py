@@ -7,6 +7,7 @@ persisted status is still a stale "ready". Without a completed_at guard,
 already-done node.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -22,7 +23,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -37,7 +38,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def test_completed_node_excluded_from_next_and_ready(tmp_graph):
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-DONE", "title": "done", "status": "ready",
          "plan_path": "p.md", "project": "x",
          "completed_at": "2026-06-20T00:00:00Z"},

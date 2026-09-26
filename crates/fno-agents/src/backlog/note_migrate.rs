@@ -47,7 +47,6 @@ fn run_inventory(graph: &std::path::Path, json_out: bool) -> i32 {
             return 1;
         }
     };
-    let backend = crate::backlog::backend(graph);
     let mut nodes_with_notes = 0usize;
     let mut total_notes = 0usize;
     let mut total_chars = 0usize;
@@ -78,7 +77,6 @@ fn run_inventory(graph: &std::path::Path, json_out: bool) -> i32 {
         println!(
             "{}",
             json!({
-                "backend": backend.name(),
                 "nodes_scanned": entries.len(),
                 "nodes_with_notes": nodes_with_notes,
                 "total_notes": total_notes,
@@ -88,8 +86,7 @@ fn run_inventory(graph: &std::path::Path, json_out: bool) -> i32 {
         );
     } else {
         println!(
-            "backend={} nodes={} with_notes={} notes={} chars={}",
-            backend.name(),
+            "backend=sqlite nodes={} with_notes={} notes={} chars={}",
             entries.len(),
             nodes_with_notes,
             total_notes,
@@ -988,7 +985,7 @@ mod tests {
     fn the_short_json_spelling_parses_like_the_long_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, serde_json::json!({"entries": []}).to_string()).unwrap();
+        crate::graph_store::seed_rows(&graph, &[]).unwrap();
         let base = vec![
             "inventory".to_string(),
             "--graph".to_string(),

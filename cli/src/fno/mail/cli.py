@@ -732,12 +732,8 @@ def _ruling_graph_path(workdir: Path) -> Path:
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         pass
     settings = load_settings_for_repo(repo_root)
-    override = settings.paths.graph_json
-    raw = override if override is not None else settings.state_dir
-    resolved = paths.resolve_configured_path(
-        raw, project_root=repo_root, settings=settings
-    )
-    return resolved if override is not None else resolved / "graph.json"
+    resolver = paths.resolve_configured_path
+    return resolver(settings.state_dir, project_root=repo_root, settings=settings) / "graph.json"
 
 
 def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:

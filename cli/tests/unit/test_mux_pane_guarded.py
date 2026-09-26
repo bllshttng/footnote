@@ -21,7 +21,12 @@ follow-up that once drove it from Python is the Rust runtime now.
 """
 
 import json
+import subprocess
 from types import SimpleNamespace
+
+# The real run, bound before any test patches subprocess.run: the fake's
+# foreign-call passthrough must not resolve the patch and recurse.
+_REAL_RUN = subprocess.run
 
 import pytest
 
@@ -40,10 +45,29 @@ def _idle_pane(monkeypatch):
     transport failing. Stub the verdict so each test keeps asserting the thing
     it was written for. The gate itself has its own tests in
     ``test_dispatch_mux_send.py``, which does NOT use this fixture.
+
+    The wholesale stub also swallows the Rust envelope renderer's subprocess
+    call, whose empty stdout wrapped every payload as the empty string -- so
+    the confirm-by-content marker was empty and nothing could ever confirm.
+    Stub the renderer with a deterministic minimal envelope instead.
     """
     monkeypatch.setattr(
         "fno.mail.pane_transport.prompt_refusal",
         lambda **_kwargs: None,
+    )
+    _stub_envelope(monkeypatch)
+
+
+def _stub_envelope(monkeypatch):
+    """Replace the Rust ``mail-envelope`` render with a minimal open tag, body,
+    and close tag: everything the envelope contract's confirm marker needs,
+    nothing that reaches for an ambient binary."""
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope,
+        "_render_in_rust",
+        lambda payload: "<fno_mail>\n{}\n</fno_mail>".format(payload.get("body", "")),
     )
 
 
@@ -207,6 +231,11 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
     real_run = dispatch.subprocess.run
 
     def _run(argv, **kwargs):
+        # The envelope render (`fno-agents mail-envelope`) is a foreign call
+        # whose stdout IS the payload: a synthetic empty success sends empty
+        # panes, so foreign calls run for real and stay unrecorded.
+        if argv[1:3] != ["mux", "pane"]:
+            return _REAL_RUN(argv, **kwargs)
         calls.append(list(argv))
         if "mail-envelope" in argv:
             return real_run(argv, **kwargs)

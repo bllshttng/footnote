@@ -3,7 +3,7 @@
      regenerate from crates/fno-agents/src/harness_capabilities.toml. -->
 # Harness capability matrix (features)
 
-What each harness can DO, rendered from the capability table (`map_version 21`). One row per supported harness - including roster entries with no capability row, which read unmeasured everywhere - and one column per feature key.
+What each harness can DO, rendered from the capability table (map_version 22). One row per supported harness, including roster entries with no capability row, which read unmeasured everywhere, and one column per feature key. The table carries 8 feature-key instruments that were refused as blind and converted to honest unprobeables: their word-match patterns matched a sentence denying the capability as readily as support, so the reader could not report absence, and a state they settled renders unmeasured with the reason reader refused as blind.
 
 | State | Meaning |
 |---|---|
@@ -12,18 +12,61 @@ What each harness can DO, rendered from the capability table (`map_version 21`).
 | `absent` | measured not to exist on this harness |
 | `unmeasured` | nobody has looked |
 
-Every non-native cell settles the same way: `fno agents harness probe <harness>` runs the instrument the table declares for that key. Until the reader port lands the probe reports feature keys as undeclared rows: the dimension is inert by the split ruling, and this doc measures the table, not the readers. The pane-driving mechanics are a different dimension and live in the capability table itself, never here.
-
+Every non-native cell settles the same way: a live-tier run of the declared instrument earns the cell, and until then it reads unmeasured with its reason. The pane-driving mechanics are a different dimension and live in the capability table itself, never here.
 
 | harness | acp | attach | hooks | mcp | plugins | review | rpc | server | skills_dir | spawn | subagent_dispatch |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| claude | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
-| codex | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
-| gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `capable` |
-| agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| opencode | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| pi | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| hermes | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| openclaw | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| cursor-agent | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| grok | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| claude | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (reader refused as blind) |
+| codex | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (reader refused as blind) |
+| gemini | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (reader refused as blind) |
+| agy | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `native` (1.1.24, 2026-09-03) | `unmeasured` (no reader declared) |
+| opencode | `unmeasured` (no reader declared) | `native` (2026-09-03) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) |
+| pi | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `native` (0.84.2, 2026-09-01) | `unmeasured` (no reader declared) |
+| hermes | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) |
+| openclaw | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) |
+| cursor-agent | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (reader declared but not run) | `unmeasured` (no reader declared) |
+| grok | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `unmeasured` (no reader declared) | `native` (1.0.13, 2026-09-02) | `unmeasured` (no reader declared) |
+
+
+## Journey classes
+
+The ten user-journey classes the cross-harness audits name, one row per class, one cell per harness. A cell reads unmeasured until a live-tier run earns it; nobody looked is not measured absence. The wait-for-CI row is settled by code, not by a table word: the watch lease permits only claude to idle, and every other harness reads absent with its refusal quoted.
+
+| journey | instrument | claude | codex | gemini | agy | opencode | pi | hermes | openclaw | cursor-agent | grok |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fresh-install | the fresh-install read is the OpenCode installation surface's filtered catalog reader, which has not landed; the unfiltered catalog read is refused as blind because another plugin's mirrored fno: registrations satisfy it with no footnote install | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| spawn-turn-resume | runner: live rubric: SPAWN + IDENTITY lines (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| parent-children | the behavior it measures, a parent worker holding children under a concurrency cap, is owned by the continuation-correctness work and has not landed; until then the cell reads unmeasured, never asserted | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| send-during-active-work | runner: live rubric: MAIL BOTH WAYS line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| wait-for-ci | runner: the watch lease (loopcheck): only a claude session may idle today; every other harness reads absent with its refusal quoted (live tier) | `native` | `absent` watching ignored: harness codex cannot idle | `absent` watching ignored: harness gemini cannot idle | `absent` watching ignored: harness agy cannot idle | `absent` watching ignored: harness opencode cannot idle | `absent` watching ignored: harness pi cannot idle | `absent` watching ignored: harness hermes cannot idle | `absent` watching ignored: harness openclaw cannot idle | `absent` watching ignored: harness cursor-agent cannot idle | `absent` watching ignored: harness grok cannot idle |
+| compact-reopen | runner: live rubric: SURVIVE line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| restart-viewport | no live fleet restart is part of the work that declares this journey, so the viewport restart is unprobeable here; nobody looked is not measured absence, and the cell renders unmeasured | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| review-ship | declared, never driven: the review-and-ship journey opens a review lane against a live PR, which no one-shot instrument reaches and no isolated run may open | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| native-remote-view | runner: live rubric: VIEW line (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| cleanup | runner: live rubric: row-removal check (live tier) | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+
+## Measured over declared
+
+- claude: 0 of 11 measured
+- codex: 0 of 11 measured
+- gemini: 0 of 11 measured
+- agy: 1 of 11 measured (9%)
+- opencode: 1 of 11 measured (9%)
+- pi: 1 of 11 measured (9%)
+- hermes: 0 of 11 measured
+- openclaw: 0 of 11 measured
+- cursor-agent: 0 of 11 measured
+- grok: 1 of 11 measured (9%)
+
+## Readers (row legend)
+
+- claude: no cell carries a measurement receipt
+- codex: no cell carries a measurement receipt
+- gemini: no cell carries a measurement receipt
+- agy: spawn by agy spawn journey (1.1.24, 2026-09-03)
+- opencode: attach by daemon-kept attach journey (2026-09-03)
+- pi: spawn by thread keeper journey (0.84.2, 2026-09-01)
+- hermes: no cell carries a measurement receipt
+- openclaw: no cell carries a measurement receipt
+- cursor-agent: no cell carries a measurement receipt
+- grok: spawn by session-id resume journey (1.0.13, 2026-09-02)

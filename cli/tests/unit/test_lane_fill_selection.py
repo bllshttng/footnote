@@ -8,6 +8,7 @@ monkeypatched so the selector's logic is tested without shelling
 `fno backlog ready`; the claims root is isolated to `tmp_path`.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -287,23 +288,16 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     from fno.graph import cli as gcli
 
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-in", "title": "in", "status": "ready", "mission_id": "m-7"},
-                    {"id": "x-out", "title": "out", "status": "ready"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    seed_graph(path, [
+        {"id": "x-in", "title": "in", "status": "ready", "mission_id": "m-7"},
+        {"id": "x-out", "title": "out", "status": "ready"},
+    ])
     # The selection decision is served by the keeper now: the graph is pinned
     # through FNO_CONFIG (the client seam), and claims resolve under a
     # redirected root - never the operator's real claims.
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[paths]\\ngraph_json = "{path}"\\n', encoding="utf-8"
+        f'state_dir = "{tmp_path}"\n', encoding="utf-8"
     )
     (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_CONFIG", str(config))
@@ -328,7 +322,7 @@ def _isolated_graph(tmp_path, monkeypatch):
     file via `_seed_graph`.
     """
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
 
@@ -342,7 +336,7 @@ def _seed_graph(graph_path, entries):
         row.setdefault("title", e.get("id", "node"))
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
-    graph_path.write_text(json.dumps({"entries": complete}))
+    seed_graph(graph_path, json.dumps({"entries": complete}))
 
 
 def _plan(tmp_path, name: str, files: list[str]) -> str:

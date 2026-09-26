@@ -667,12 +667,8 @@ fn materialize(case: &Case) -> (Materialized, Ctx) {
         now_ms,
     };
     let entries = (case.entries)(&ctx);
-    let graph = serde_json::json!({ "entries": entries });
-    std::fs::write(
-        dir.path().join("graph.json"),
-        serde_json::to_string_pretty(&graph).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&dir.path().join("graph.json"), &entries)
+        .expect("seed graph.db");
     for plan in case.plans {
         let path = planroot.join(plan.name);
         std::fs::write(&path, plan.contents).unwrap();
@@ -703,10 +699,7 @@ fn materialize(case: &Case) -> (Materialized, Ctx) {
     }
     std::fs::write(
         dir.path().join("config.toml"),
-        format!(
-            "[paths]\ngraph_json = \"{}\"\n",
-            dir.path().join("graph.json").display()
-        ),
+        format!("state_dir = \"{}\"\n", dir.path().display()),
     )
     .unwrap();
     (Materialized { dir }, ctx)
@@ -913,7 +906,7 @@ fn run_rows_oracle(repo: &Path, dir: &Path, case: &Case) -> (i32, String, String
 
 fn rust_rows(ctx: &Ctx, case: &Case, dir: &Path) -> Value {
     let graph = dir.join("graph.json");
-    let entries = fno_agents::graph_store::read_defaulted(&graph, false).expect("rust read");
+    let entries = fno_agents::graph_store::read_rows(&graph).expect("rust read");
     let mut claimed = std::collections::BTreeSet::new();
     if !case.claims.is_empty() {
         let dirs = vec![dir.join("claims-root/.fno/claims")];

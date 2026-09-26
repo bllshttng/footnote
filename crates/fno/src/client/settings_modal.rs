@@ -49,9 +49,9 @@ pub(crate) fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, V
 }
 
 impl View {
-    /// Build the settings modal: general toggles plus theme and prefix pickers.
-    pub(super) fn build_settings_modal(&self) -> AuxPopup {
-        let tab = self.settings_tab;
+    /// One settings tab's rows and actions (extracted from
+    /// `build_settings_modal` so every tab's width can be measured).
+    pub(super) fn settings_rows_for(&self, tab: SettingsTab) -> (Vec<PopupRow>, Vec<AuxAction>) {
         let mut rows = Vec::new();
         let mut actions: Vec<AuxAction> = Vec::new();
         match tab {
@@ -107,6 +107,28 @@ impl View {
                 );
             }
         }
+        (rows, actions)
+    }
+
+    /// Build the settings modal: general toggles plus theme and prefix pickers.
+    pub(super) fn build_settings_modal(&self) -> AuxPopup {
+        let tab = self.settings_tab;
+        let (rows, actions) = self.settings_rows_for(tab);
+        // One width across every tab (tabbed-modal width): the modal measures
+        // all four and pins the widest, so switching tabs never resizes.
+        let widest = [
+            SettingsTab::General,
+            SettingsTab::Theme,
+            SettingsTab::Keys,
+            SettingsTab::Colors,
+        ]
+        .iter()
+        .map(|t| {
+            let (rows, _) = self.settings_rows_for(*t);
+            Popup::new(rows, Anchor::Center).content_width()
+        })
+        .max()
+        .unwrap_or(0);
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
             .tabs(vec![
@@ -115,7 +137,8 @@ impl View {
                 ("keys".to_string(), tab == SettingsTab::Keys),
                 ("colors".to_string(), tab == SettingsTab::Colors),
             ])
-            .footer("tab switches section · esc close");
+            .footer("tab switches section · esc close")
+            .min_width(widest);
         AuxPopup { popup, actions }
     }
 

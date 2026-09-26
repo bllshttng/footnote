@@ -1,6 +1,7 @@
 """Acceptance tests for the grouped human node view and residue migration."""
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}\n')
+    seed_graph(graph, '{"entries": []}\n')
     import fno.graph._constants as constants
     import fno.graph.store as store
 
@@ -43,8 +44,7 @@ def _read_entries(graph: Path) -> list[dict]:
 
 
 def test_grouped_view_is_opt_in_and_preserves_flat_default(tmp_graph):
-    tmp_graph.write_text(
-        json.dumps(
+    seed_graph(tmp_graph, json.dumps(
             {
                 "entries": [
                     {
@@ -57,8 +57,7 @@ def test_grouped_view_is_opt_in_and_preserves_flat_default(tmp_graph):
                 ]
             }
         )
-        + "\n"
-    )
+        + "\n")
 
     flat = runner.invoke(app, ["backlog", "get", "x-851b"])
     grouped = runner.invoke(app, ["backlog", "get", "x-851b", "--grouped"])
@@ -83,8 +82,7 @@ def test_grouped_schema_fields_are_explicitly_assigned():
 
 
 def test_unknown_populated_field_is_visible_in_residual(tmp_graph):
-    tmp_graph.write_text(
-        json.dumps(
+    seed_graph(tmp_graph, json.dumps(
             {
                 "entries": [
                     {
@@ -97,8 +95,7 @@ def test_unknown_populated_field_is_visible_in_residual(tmp_graph):
                 ]
             }
         )
-        + "\n"
-    )
+        + "\n")
 
     result = runner.invoke(app, ["backlog", "get", "x-851b", "--grouped"])
 
@@ -118,7 +115,7 @@ def test_updated_at_migration_is_idempotent_and_preserves_other_fields(tmp_graph
         "details": "keep me",
     }
     control = {"id": "x-control", "title": "Control", "details": "untouched"}
-    tmp_graph.write_text(json.dumps({"entries": [original, control]}) + "\n")
+    seed_graph(tmp_graph, json.dumps({"entries": [original, control]}) + "\n")
 
     dry_run = runner.invoke(app, ["backlog", "migrate-updated-at"])
     assert dry_run.exit_code == 0, dry_run.output

@@ -1,14 +1,9 @@
 //! The typed backlog API: every query and mutation a caller needs, in
-//! Linear's shape, with the backend switch inside this file. A caller moves
-//! onto this surface once and never learns which store answered; the JSON
-//! read arm and the shadow write are what task 17.1 deletes at the flip.
+//! Linear's shape, with storage details kept behind this API.
 //!
-//! Composition rule (AC12): no SQL lives here and no table is named in a
-//! string. Reads go through `graph_store`'s read pipeline (JSON backend) or
-//! the owning modules' export (SQLite backend); every write routes through
-//! `graph_store::locked_mutate`, which writes the JSON leg plus the
-//! relational shadow, or the backend-owned tables, per the backend the
-//! store names right now. One transaction per mutation; the store's
+//! Composition rule: no SQL lives here and no table is named in a string.
+//! Reads go through `graph_store`'s read pipeline or the owning modules;
+//! mutations write through the SQLite store. One transaction per mutation; the store's
 //! mutation counter (`graph_meta.api_version`) moves by one per write, so
 //! `version` grows across legacy writers too.
 
@@ -22,10 +17,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-const MUTATE_TIMEOUT: Duration = Duration::from_secs(5);
-
 #[derive(Debug)]
 pub struct ApiError(pub String);
 
@@ -267,10 +258,7 @@ fn decode_cursor(cursor: &str) -> Option<(i64, String)> {
 
 // -- reads -----------------------------------------------------------------
 
-/// Every row, in store order (file position under the JSON leg, ordinal
-/// order under SQLite). The position in this list IS the ordinal the
-/// pagination cursors name, in both arms. The rows surface defaulted
-/// through the one backend switch, `graph_store::read_rows`.
+/// Every row in store order, defaulted through `graph_store::read_rows`.
 fn read_rows(store: &Store) -> Result<Vec<Value>, ApiError> {
     Ok(crate::graph_store::read_rows(&store.graph)?)
 }
@@ -279,10 +267,8 @@ fn read_rows(store: &Store) -> Result<Vec<Value>, ApiError> {
 /// feeds them from the cache, the store-reading functions delegate here so
 /// the two halves cannot drift. `defaulted` is read_rows' tail; `node_in`,
 /// `nodes_in` and `rows_in` are `node`, `nodes` and `rows` without the
-/// store read. A row the model cannot represent is skipped, the import's
-/// rule (the JSON leg stays authoritative and parity surfaces the gap);
-/// `rows_in` carries such a row through VERBATIM, so a reader seam cannot
-/// silently drop it.
+/// store read. A row the model cannot represent is skipped; `rows_in` carries
+/// such a row through verbatim, so a reader seam cannot silently drop it.
 pub fn defaulted(mut rows: Vec<Value>) -> Vec<Value> {
     crate::graph_store::apply_defaults(&mut rows, false);
     rows
@@ -547,24 +533,7 @@ fn mutate(
     mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    // The store owns a pre-materialization seed too: with no db on disk the
-    // single-row path's first open folds the seed, so an unnamed store never
-    // falls to the json leg just for being young. Only a store explicitly
-    // named json keeps the whole-graph rollback cycle.
-    let named_json = crate::backlog::backend(&store.graph) == crate::backlog::Backend::Json
-        && crate::backlog::database_path(&store.graph).exists();
-    if !named_json {
-        // Single-row path: the immediate transaction reads
-        // the current authoritative rows, writes only the changed node's
-        // aggregates, and the gate event names this mutation (AC24).
-        return crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))
-            .map_err(ApiError);
-    }
-    let landed =
-        crate::graph_store::mutate_rows(&store.graph, MUTATE_TIMEOUT, None, None, |rows| {
-            apply(rows).map_err(crate::graph_store::StoreError::Invalid)
-        })?;
-    Ok(landed.is_some())
+    crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows)).map_err(ApiError)
 }
 
 fn fresh_version(store: &Store) -> i64 {

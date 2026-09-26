@@ -5,13 +5,12 @@ fn store_findings_open_blocks_and_resolved_does_not() {
     // AC4: an open finding reaches the gate's view; a resolve clears it.
     let tmp = tempfile::tempdir().unwrap();
     let graph = tmp.path().join("graph.json");
-    std::fs::write(
+    crate::graph_store::seed_rows(
         &graph,
-        serde_json::json!({"entries": [
-            {"id": "x-1", "slug": "x-1", "title": "n", "type": "feature",
-             "status": "ready", "priority": "p1"}
-        ]})
-        .to_string(),
+        &[serde_json::json!({
+            "id": "x-1", "slug": "x-1", "title": "n", "type": "feature",
+            "status": "ready", "priority": "p1"
+        })],
     )
     .unwrap();
     let store = crate::backlog::api::Store::new(&graph);

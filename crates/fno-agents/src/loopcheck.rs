@@ -139,7 +139,7 @@ mod review_findings;
 mod review_inputs;
 mod self_review_floor;
 mod settings;
-mod watch_lease;
+pub(crate) mod watch_lease;
 pub(crate) use args::{parse_args, try_flag_value, LoopCheckArgs};
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason, merge_slot_reason};
 use authorship::carry_author_session_forward;

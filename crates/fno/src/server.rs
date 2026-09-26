@@ -39,10 +39,10 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
     AgentNoPaneReason, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState,
     ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
-    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement,
-    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
-    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PanePlacement,
+    PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement, RestoreRow,
+    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PaneChunk, PtyShell};
 use crate::restore_liveness::{
@@ -963,31 +963,27 @@ pub(crate) enum CoreMsg {
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
     /// (4a-G2). Sent only when the set changed; the core stores it and
-    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`
-    /// (US4) is the reader's off-loop cwd -> git-branch resolution for
-    /// the row cwds, joined into each row's `subline` at layout time; a cwd
-    /// with no resolvable branch is simply absent (the subline degrades to the
-    /// cwd tail).
-    /// `tails` is the same shape one level over: the reader's off-loop
-    /// session-uuid -> most-recent-assistant-line map, joined into each row's
-    /// `tail` at layout time. A uuid with no readable transcript is absent, so
-    /// the extended table's cell renders empty rather than fabricated.
+    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`,
+    /// `tails` and `ctx` are the reader's off-loop maps, joined into each
+    /// row's subline/tail and each pane's `PaneMeta` at layout time; an
+    /// absent reading degrades to an absent cell, never a fabrication.
     AgentRows {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
+        ctx: HashMap<String, String>,
         /// The reader's registry+roster read succeeded (parsed bytes,
         /// last-good, or a confirmed-vanished file; a present-but-unreadable
         /// file reads false). Gates the daemon-side registry-absence death
         /// rule, which must stay inert while the read state is unknown.
         read_ok: bool,
     },
-    /// A fresh session-uuid -> message-tail map with no row change
-    /// behind it. Transcripts grow independently of the registry, so the tail
-    /// pass runs every tick; when only it moved, this pushes the map alone
-    /// rather than forcing an unchanged row set through.
+    /// Tails (and ctx, v91) moved with no row change behind them:
+    /// transcripts grow independently of the registry, so when only this
+    /// pass moved, it pushes alone rather than forcing a row set through.
     AgentTails {
         tails: HashMap<String, String>,
+        ctx: HashMap<String, String>,
     },
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
     /// probe (`fno agents list --json`, one process for the whole fleet).
@@ -1228,28 +1224,11 @@ fn tab_label(
     (i + 1).to_string()
 }
 
-/// A pane's display label for the session navigator (v22). Unlike
-/// [`tab_label`] (which prefers a dir name so a tab reads as its worktree), a
-/// pane's discriminator WITHIN a tab is what it is running, so `cmd` leads when
-/// the pane carries no registered name. Chain: registered name
-/// (`FNO_AGENT_SELF`) -> `cmd` -> `node` -> cwd basename -> `shell`. Sanitized
-/// like a wire name (these land in chrome cells). Never an ordinal - a plain
-/// pane is `shell`, not a number the operator cannot map back.
-fn pane_label(name: Option<&str>, node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
-    for c in [name, cmd, node].into_iter().flatten() {
-        let clean = sanitize_tab_name(c);
-        if !clean.is_empty() {
-            return clean;
-        }
-    }
-    let base = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    let clean = sanitize_tab_name(base);
-    if clean.is_empty() {
-        "shell".to_string()
-    } else {
-        clean
-    }
-}
+/// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
+/// (file-budget ratchet); re-imported so callers and tests resolve.
+use pane_meta::pane_label;
+
+mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
 /// the environment so a test can probe a scratch dir without mutating
@@ -1590,6 +1569,8 @@ pub(crate) struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
+    /// (v91) The context reading per transcript key, beside `tails`.
+    ctx_by_session: HashMap<String, String>,
     /// (v48) Latest reachability-evidence map from the off-loop truth probe,
     /// joined into each agent row's `basis` / `last_activity_age_s` at layout
     /// time. The key is the row's full harness session id when it
@@ -1633,6 +1614,9 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
+    /// Per-pane last attended-hold arm time: a keystroke past the window
+    /// since the last arm re-arms the pane session's mail hold.
+    hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -8610,14 +8594,14 @@ impl Core {
                 },
             );
             let focus = tab.focus;
-            // Rect-driven pane sizing: only geometry that actually changed
-            // hits the PTY, so a resize storm's no-op tail is free (AC1-FR's
-            // bounded-update half; the storm's head coalesces at the channel).
+            // Rect-driven pane sizing: only real geometry changes hit the
+            // PTY (AC1-FR). A framed pane's pty is its CONTENT rect.
             for (pid, r) in &rects {
                 if let Some(entry) = self.panes.get_mut(pid) {
-                    if entry.requested_size != (r.rows, r.cols) {
-                        entry.requested_size = (r.rows, r.cols);
-                        if let Err(e) = entry.pty.resize(r.rows, r.cols, 0, 0) {
+                    let content = crate::pane_border::content_rect(*r);
+                    if entry.requested_size != (content.rows, content.cols) {
+                        entry.requested_size = (content.rows, content.cols);
+                        if let Err(e) = entry.pty.resize(content.rows, content.cols, 0, 0) {
                             // Grid and kernel winsize would disagree: log it.
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
@@ -8633,7 +8617,7 @@ impl Core {
                             // wrong-size grid (the byte-exact reattach
                             // race this branch's keeper hop introduced).
                         } else {
-                            entry.vt.resize(r.rows, r.cols);
+                            entry.vt.resize(content.rows, content.cols);
                         }
                         // Ask the child to repaint once the resize dust
                         // settles: arm a deferred nudge the 1s core tick fires.
@@ -8839,15 +8823,22 @@ impl Core {
                             .iter()
                             .map(|pid| {
                                 let e = self.panes.get(pid);
-                                PaneMeta {
-                                    id: *pid,
-                                    label: pane_label(
-                                        e.and_then(|e| e.name.as_deref()),
-                                        e.and_then(|e| e.node.as_deref()),
-                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
-                                        e.and_then(|e| e.cmd.as_deref()),
-                                    ),
-                                }
+                                let ctx = pane_meta::pane_ctx(
+                                    &self.agents,
+                                    &self.session_name,
+                                    &self.ctx_by_session,
+                                    *pid,
+                                );
+                                pane_meta::pane_meta(
+                                    *pid,
+                                    e.and_then(|e| e.name.as_deref()),
+                                    e.and_then(|e| e.node.as_deref()),
+                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                    e.and_then(|e| e.cmd.as_deref()),
+                                    e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
+                                        .map(String::as_str),
+                                    ctx.as_deref(),
+                                )
                             })
                             .collect(),
                     })
@@ -11671,15 +11662,8 @@ impl Core {
                             }
                         }
                     }
-                    // W4 touch telemetry: a keystroke past the relay guard is
-                    // a human steering this pane; PaneSend (script API) and
-                    // relay writes never reach here.
-                    self.touch(focus, "inject", true);
-                    // A submit key past the relay guard is a human pressing
-                    // Enter: one operator_submit witness row (human_input).
-                    if human_input::is_submit(&bytes) {
-                        self.witness_submit(focus);
-                    }
+                    // Touch telemetry, the attended hold, the submit witness.
+                    self.input_tail(focus, &bytes);
                 }
                 Flow::Continue
             }
@@ -12480,8 +12464,9 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::AgentTails { tails } => {
+            CoreMsg::AgentTails { tails, ctx } => {
                 self.tail_by_session = tails;
+                self.ctx_by_session = ctx;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -12503,6 +12488,7 @@ impl Core {
                 rows,
                 branches,
                 tails,
+                ctx,
                 read_ok,
             } => {
                 self.agents_read_ok = read_ok;
@@ -12531,6 +12517,7 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                self.ctx_by_session = ctx;
                 // Row changes are the journal's change signal: a
                 // spawn or removal writes both. Refresh the cached scan here,
                 // off the per-push paths that read it.
@@ -12887,6 +12874,7 @@ async fn serve(
         launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
+        ctx_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
         truth_seq: 0,
         backlog: Vec::new(),
@@ -12898,6 +12886,7 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
+        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
@@ -12952,6 +12941,7 @@ async fn serve(
             // map pushed, so an unchanged result stays off the wire.
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
+            let mut last_ctx: HashMap<String, String> = HashMap::new();
             // Shared so the path cache survives across blocking-pool passes.
             let tail_reader = std::sync::Arc::new(std::sync::Mutex::new(
                 crate::transcript_tail::TailReader::new(),
@@ -13133,14 +13123,14 @@ async fn serve(
                 // was most of this loop's CPU.
                 let uuids = last_uuids.clone();
                 let reader = tail_reader.clone();
-                let tails = tokio::task::spawn_blocking(move || {
+                let (tails, ctx) = tokio::task::spawn_blocking(move || {
                     // Poison-recover rather than expect: a panic in one pass
                     // must not blank the column on every later tick (the
                     // cache is a HashMap, safe to reuse mid-poison).
                     reader
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .tails(&uuids)
+                        .tails_and_ctx(&uuids)
                 })
                 .await
                 .unwrap_or_default();
@@ -13168,11 +13158,13 @@ async fn serve(
                     .await
                     .unwrap_or_default();
                     last_tails = tails.clone();
+                    last_ctx = ctx.clone();
                     if core_tx
                         .send(CoreMsg::AgentRows {
                             rows,
                             branches,
                             tails,
+                            ctx,
                             read_ok: state.read_ok(),
                         })
                         .await
@@ -13180,11 +13172,16 @@ async fn serve(
                     {
                         return; // core loop gone; the server is shutting down
                     }
-                } else if tails != last_tails {
+                } else if tails != last_tails || ctx != last_ctx {
                     // Rows unchanged but somebody said something: push the tails
                     // alone rather than forcing a whole row set through.
                     last_tails = tails.clone();
-                    if core_tx.send(CoreMsg::AgentTails { tails }).await.is_err() {
+                    last_ctx = ctx.clone();
+                    if core_tx
+                        .send(CoreMsg::AgentTails { tails, ctx })
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }

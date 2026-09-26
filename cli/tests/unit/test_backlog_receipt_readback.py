@@ -1,6 +1,7 @@
 """Receipts must be backed by a store read-back."""
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ runner = CliRunner()
 
 def _graph(tmp_path: Path, monkeypatch, entries: list[dict]) -> Path:
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(graph, json.dumps({"entries": entries}) + "\n")
     import fno.graph._constants as constants
     import fno.graph.store as store
 

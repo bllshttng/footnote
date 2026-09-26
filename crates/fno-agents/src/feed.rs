@@ -610,7 +610,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         // should know the lifecycle leg is absent, so its absence keeps its
         // own note (AC3) where a present-but-empty store is just empty.
         let path = graph_path(home);
-        if !path.exists() {
+        if !crate::backlog::database_path(&path).exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
             match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
