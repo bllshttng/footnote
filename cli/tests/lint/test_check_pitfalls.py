@@ -286,19 +286,28 @@ def test_an_absent_registry_still_skips_the_verb_check(tmp_path: Path) -> None:
 # already pass on that deletion.
 
 
-def _agents_without(tmp_path: Path, old: str, new: str) -> Path:
-    """The shipped corpus with one qualifier edited out."""
-    text = AGENTS.read_text(encoding="utf-8")
-    assert text.count(old) == 1, f"expected exactly one {old!r}"
-    path = tmp_path / "AGENTS.md"
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
-    return path
+def _pinned_lint_repo(tmp_path: Path, entries) -> Path:
+    """A fixture repo whose lint carries an injected pin.
+
+    Pins ride live entries, so the shipped table can be empty while the
+    mechanism stays tested: the pin and its corpus travel together here.
+    """
+    lint, stub = _copied_lint_repo(tmp_path, entries)
+    text = lint.read_text(encoding="utf-8")
+    old = "PINNED_PHRASES=''"
+    assert old in text, "shipped pin table shape changed; update this fixture"
+    lint.write_text(
+        text.replace(old, "PINNED_PHRASES=$'capability probe\\tmail probe'", 1),
+        encoding="utf-8",
+    )
+    stub.write_text('#!/usr/bin/env bash\necho "preamble: 1 / 100 B"\nexit 0\n')
+    return lint
 
 
-def test_dropping_the_mail_probe_qualifier_fails(tmp_path: Path) -> None:
+def test_dropping_a_pinned_qualifier_fails(tmp_path: Path) -> None:
     """Broadened to "mail", it rejects a worker's own autonomous evidence."""
-    path = _agents_without(tmp_path, "a mail probe", "mail")
-    r = _run(path)
+    lint = _pinned_lint_repo(tmp_path, [("capability probe", "a probe", FRESH)])
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
     assert r.returncode == 1
     assert "mail probe" in r.stderr
 
@@ -309,8 +318,8 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
     Without this, the first entry to age out at 60 days wedges the gate on
     prose the corpus is supposed to have dropped.
     """
-    path = _fixture(tmp_path, [GOOD])
-    r = _run(path)
+    lint = _pinned_lint_repo(tmp_path, [GOOD])
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
     assert r.returncode == 0, r.stderr
     assert "live lockfile" not in r.stderr
 
