@@ -1287,11 +1287,11 @@ resume = "native-session"
 # wk-x61bc journey and is not re-proven per harness.
 autonomous_pane = false
 route_on_pane = false
-# grok HAS a lifecycle hook surface - the live TUI fires `session_start` and
-# `user_prompt_submit` hooks it reads from config - but no fno loop extension
-# exists for it. "" keeps looping dispatch refused until that boundary is
-# proven, exactly as the cursor-agent row does.
-loop_participation = "extension"
+# grok runs the plugin's Stop group only from a trusted location, so the row
+# is `native` and the dispatch gate asks the grok plugin status (a trusted
+# fno plugin reachable through `grok inspect`) before it admits a looping
+# dispatch.
+loop_participation = "native"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""

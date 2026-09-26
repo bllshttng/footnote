@@ -1,12 +1,16 @@
 //! The two read leaves the dispatch-verb retirement left behind (
 //! change 2): `capabilities` reads the packaged harness capability table and
 //! `target-family` classifies a message against the merge-posture family
-//! table. Both answer a question scripts ask through the Python router, which
-//! execs them as arguments of the `status` action (d-fe66560a keeps the
-//! binary's action list shrink-only); they never touch the daemon.
+//! table. With `--harness`, `target-family` also answers the loop gate: the
+//! third question a dispatch asks, whether a looping dispatch at that
+//! harness closes its loop on THIS machine. Both answer a question scripts
+//! ask through the Python router, which execs them as arguments of the
+//! `status` action (d-fe66560a keeps the binary's action list shrink-only);
+//! they never touch the daemon.
 
 use crate::merge_posture::is_target_family;
 use serde_json::Value;
+use std::path::Path;
 
 /// `capabilities <harness> [--json|-J]`: one harness's config-independent
 /// capability contract, read straight from the packaged table. The successor
@@ -88,6 +92,8 @@ fn capabilities_json(harness: &str) -> Result<Value, String> {
 /// table is the same one the Rust merge-posture reads use.
 pub fn run_target_family(args: &[String]) -> i32 {
     let mut message: Option<String> = None;
+    let mut harness: Option<String> = None;
+    let mut extension_src: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -98,12 +104,40 @@ pub fn run_target_family(args: &[String]) -> i32 {
             }
             message = Some(v.to_string());
             i += 1;
+        } else if let Some(v) = arg.strip_prefix("--harness=") {
+            if harness.is_some() {
+                eprintln!("fno agents target-family: --harness given twice");
+                return 2;
+            }
+            harness = Some(v.to_string());
+            i += 1;
+        } else if let Some(v) = arg.strip_prefix("--extension-src=") {
+            if extension_src.is_some() {
+                eprintln!("fno agents target-family: --extension-src given twice");
+                return 2;
+            }
+            extension_src = Some(v.to_string());
+            i += 1;
         } else if arg == "--message" || arg == "-m" {
             if message.is_some() || i + 1 >= args.len() {
                 eprintln!("fno agents target-family: --message takes exactly one value");
                 return 2;
             }
             message = Some(args[i + 1].clone());
+            i += 2;
+        } else if arg == "--harness" {
+            if harness.is_some() || i + 1 >= args.len() {
+                eprintln!("fno agents target-family: --harness takes exactly one value");
+                return 2;
+            }
+            harness = Some(args[i + 1].clone());
+            i += 2;
+        } else if arg == "--extension-src" {
+            if extension_src.is_some() || i + 1 >= args.len() {
+                eprintln!("fno agents target-family: --extension-src takes exactly one value");
+                return 2;
+            }
+            extension_src = Some(args[i + 1].clone());
             i += 2;
         } else {
             eprintln!("fno agents target-family: unknown argument {arg:?}");
@@ -114,13 +148,93 @@ pub fn run_target_family(args: &[String]) -> i32 {
         eprintln!("fno agents target-family: --message is required");
         return 2;
     };
-    let verdict = if is_target_family(&message) {
-        "family"
-    } else {
-        "other"
+    let Some(harness) = harness else {
+        let verdict = if is_target_family(&message) {
+            "family"
+        } else {
+            "other"
+        };
+        println!("{verdict}");
+        return 0;
     };
-    println!("{verdict}");
+    let family = is_target_family(&message);
+    let refusal = if !family {
+        None
+    } else {
+        match capabilities_json(&harness) {
+            Err(text) => Some(text),
+            Ok(row) => {
+                let participation = row["loop_participation"].as_str().unwrap_or_default();
+                let loop_extension = row["loop_extension"].as_str().unwrap_or_default();
+                let src = extension_src.as_deref().map(Path::new);
+                let probe = || crate::plugin_install::loop_install_probe(&harness, src);
+                loop_gate_refusal(&harness, participation, loop_extension, &message, probe)
+            }
+        }
+    };
+    let out = serde_json::json!({ "family": family, "refusal": refusal });
+    println!("{out}");
     0
+}
+
+/// The loop gate, ported from Python `check_loop_participation`: `Some`
+/// refuses a looping dispatch at `harness`, `None` admits it. The probe
+/// closure carries the machine's install facts so the decision stays pure:
+/// a non-looping command and a plain native row never run it, and the grok
+/// probe (a 30-second-bounded `grok inspect`) runs only for a looping
+/// command at a native row whose install the gate must ask about.
+fn loop_gate_refusal(
+    harness: &str,
+    participation: &str,
+    loop_extension: &str,
+    command: &str,
+    probe: impl FnOnce() -> Option<Result<(), String>>,
+) -> Option<String> {
+    if !is_target_family(command) {
+        return None;
+    }
+    match participation {
+        "native" => {
+            if let Some(Err(detail)) = probe() {
+                return Some(format!(
+                    "refused: harness '{harness}' closes its loop through \
+                     footnote's plugin hooks, and {harness} will not run them \
+                     on this machine ({detail}). Run 'fno config plugin \
+                     install {harness}', then dispatch again - a loop whose \
+                     stop gate never runs would take '{command}' and never \
+                     stop."
+                ));
+            }
+            crate::loop_readiness::pre_launch_refusal(harness, command)
+        }
+        "extension" if !loop_extension.is_empty() => {
+            let verdict = probe();
+            match verdict {
+                Some(Ok(())) => None,
+
+                _ => Some(format!(
+                    "refused: harness '{harness}' closes its loop through a \
+                     fno-installed extension that is absent or stale on this \
+                     machine. Run 'fno config setup' to install it, then \
+                     dispatch again - a loop whose stop gate is not installed \
+                     would take '{command}' and never stop."
+                )),
+            }
+        }
+        _ => {
+            let why = if participation == "none" {
+                "no lifecycle boundary invokes loop-check"
+            } else {
+                "its loop rides a harness-native extension fno has not \
+                 written yet and nothing invokes loop-check"
+            };
+            Some(format!(
+                "refused: harness '{harness}' declares loop_participation = \
+                 '{participation}', so {why} and the looping command \
+                 '{command}' would never stop. Dispatch a one-shot instead."
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +288,107 @@ mod tests {
             run_capabilities(&["codex".to_string(), "--jsn".to_string()]),
             2
         );
+    }
+
+    #[test]
+    fn grok_native_with_an_absent_probe_refuses_and_names_the_fix() {
+        let refusal = loop_gate_refusal("grok", "native", "", "/fno:target x-1", || {
+            Some(Err("absent: no enabled fno plugin with hooks".to_string()))
+        })
+        .expect("an absent plugin must refuse");
+        assert!(refusal.contains("grok"));
+        assert!(refusal.contains("fno config plugin install grok"));
+        assert!(refusal.contains("absent"));
+        assert!(refusal.contains("never stop"));
+    }
+
+    #[test]
+    fn grok_native_with_an_untrusted_probe_carries_the_path() {
+        let refusal = loop_gate_refusal("grok", "native", "", "/fno:target x-1", || {
+            Some(Err(
+                "untrusted: /h/.claude/plugins/cache/footnote/fno/0.3.2 (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)"
+                    .to_string(),
+            ))
+        })
+        .expect("an untrusted plugin must refuse");
+        assert!(refusal.contains("/h/.claude/plugins/cache/footnote/fno/0.3.2"));
+    }
+
+    #[test]
+    fn grok_native_with_a_reachable_probe_admits() {
+        assert_eq!(
+            loop_gate_refusal("grok", "native", "", "/fno:target x-1", || Some(Ok(()))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_non_looping_command_admits_without_running_the_probe() {
+        assert_eq!(
+            loop_gate_refusal("grok", "native", "", "/think what breaks here", || {
+                panic!("the probe must not run for a non-looping command")
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_and_agy_native_rows_admit_through_the_readiness_legs() {
+        assert_eq!(
+            loop_gate_refusal("claude", "native", "", "/target x-1", || None),
+            None
+        );
+        assert_eq!(
+            loop_gate_refusal("agy", "native", "", "/target x-1", || None),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_refuses_with_the_declared_row_and_never_stop() {
+        let refusal = loop_gate_refusal("gemini", "none", "", "$fno:target x-1", || None)
+            .expect("gemini must refuse a looping dispatch");
+        assert!(refusal.contains("gemini"));
+        assert!(refusal.contains("loop_participation"));
+        assert!(refusal.contains("never stop"));
+    }
+
+    #[test]
+    fn pi_with_a_failing_probe_refuses_naming_the_setup_fix() {
+        let refusal = loop_gate_refusal(
+            "pi",
+            "extension",
+            "cli/src/fno/setup/assets/pi/footnote.ts",
+            "/fno:target x-1",
+            || {
+                Some(Err(
+                    "pi extension /p/footnote.ts is absent or stale".to_string()
+                ))
+            },
+        )
+        .expect("a missing pi extension must refuse");
+        assert!(refusal.contains("fno config setup"));
+        assert!(refusal.contains("absent or stale"));
+    }
+
+    #[test]
+    fn an_extension_row_without_a_probe_refuses() {
+        assert!(loop_gate_refusal(
+            "opencode",
+            "extension",
+            "cli/src/fno/setup/assets/opencode/footnote.js",
+            "/fno:target x-1",
+            || None,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn an_extension_row_with_an_empty_artifact_names_the_unwritten_extension() {
+        let refusal = loop_gate_refusal("cursor-agent", "extension", "", "/fno:target x-1", || {
+            panic!("no probe runs for an empty artifact")
+        })
+        .expect("an unwritten extension must refuse");
+        assert!(refusal.contains("has not written yet"));
     }
 }
