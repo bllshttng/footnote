@@ -106,6 +106,7 @@ pub fn parse_pane_args(
         let mut split = None;
         let mut tab = None;
         let mut at = None;
+        let mut from: Option<String> = None;
         let mut at_current = false;
         let mut max_panes = None;
         // run keeps the common flags as loop arms, not a fence-less
@@ -199,6 +200,21 @@ pub fn parse_pane_args(
                     }
                     i += 1;
                 }
+                // The named cell a split halves: `portal N`, a worker
+                // name, or `current` (resolved here from FNO_PANE, the
+                // way --at current is). Resolved server-side to the pane
+                // the named cell's screen runs.
+                "--from" | "from" => {
+                    let Some(v) = sargs.get(i + 1) else {
+                        return Err("--from needs a value".into());
+                    };
+                    if v == "current" {
+                        at_current = true;
+                    } else {
+                        from = Some(v.to_string());
+                    }
+                    i += 1;
+                }
                 "--max-panes" => {
                     let Some(value) = sargs.get(i + 1) else {
                         return Err("--max-panes needs a value".into());
@@ -250,6 +266,7 @@ pub fn parse_pane_args(
             split,
             tab,
             at,
+            from,
             fallback,
             max_panes,
             fit,

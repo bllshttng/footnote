@@ -6,22 +6,21 @@
 use super::*;
 
 /// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
-/// [--workspace NAME] [--at PANE]` (hidden): the outside-the-TUI
+/// [--from CELL] [--workspace NAME] [--at PANE]` (hidden): the outside-the-TUI
 /// reach behind `fno agents attach <name>`. Sends the ThreadPane control verb,
 /// which runs the exact command a TUI reach runs, and prints where it landed.
 /// A missing server is its own exit code so the CLI caller can fall through to
 /// the inline attach instead of reading a generic failure as one.
 ///
-/// `--portal N` names which portal to reach through; omitted is
-/// portal 0. This is the addressing door: two calls naming 0 and 1 put two
-/// threads in two panes, which the tab menu's Join actions then tile.
-///
-/// `--portal new` asks the server for a portal of its own in a new
-/// tab: a MACHINE reach (retask, mail force) must never repoint a seat a
-/// person is using, and portal 0 is usually the operator's own.
+/// An explicit placement flag CREATES a portal, human or agent:
+/// `--portal new`, or `--portal N` when N is not open. No flag tunes: the
+/// reach focuses the row's open portal, and with none open the door's own
+/// portal 0 opens for it (the TV rule; the operator's own portals never
+/// multiply from a reach).
 ///
 /// The placement flags reuse the pane path's spellings and ride the
-/// verb's `placement` field. They steer a FRESH open; a portal that already
+/// verb's `placement` field. `--from portal N|worker|current` names the
+/// cell a `--split` halves. They steer a FRESH open; a portal that already
 /// has a live seat keeps its geometry (the server says so) - same contract
 /// the server holds for the TUI.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
@@ -93,6 +92,19 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
                 return EXIT_USAGE;
             }
         }
+    }
+    if let Some(v) = &parsed.from {
+        if v == "current" {
+            // Same shape as `--at current`: the control door has no
+            // calling pane; resolve `current` before the reach (the spawn
+            // placement layer does, from FNO_PANE).
+            eprintln!(
+                "fno mux thread: --from current needs a calling pane; \
+                 the thread door has none"
+            );
+            return EXIT_USAGE;
+        }
+        placement.from = Some(v.clone());
     }
     let Some(name) = parsed
         .name

@@ -1336,20 +1336,9 @@ async fn run(args: Vec<String>) -> i32 {
             eprintln!("{message}");
             return 2;
         }
-        // The default view (mirrors the Python seam): a bare spawn that took
-        // the built-in thread default from INSIDE a mux opens portal 0 on its
-        // worker. An explicit --portal wins; outside a mux nothing auto-opens.
-        if substrate == "bg"
-            && params.get("substrate").is_none()
-            && params.get("portal").is_none()
-            && std::env::var("FNO_PANE")
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-        {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert("portal".into(), Value::from(0u8));
-            }
-        }
+        // A DEFAULT never opens a view: a bare spawn is a paneless thread,
+        // inside a mux or out. Only an explicit placement flag opens
+        // anything, and it opens through place_thread_portal_after_spawn.
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
             // Provider parity with the optional-provider Python resolver: a
@@ -1955,11 +1944,33 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
         ("--split", "split"),
         ("--at", "at"),
         ("--tab", "tab"),
+        ("--from", "from"),
     ] {
         if let Some(v) = params.get(key).and_then(|v| v.as_str()) {
             if !v.is_empty() {
                 args.push(flag.to_string());
                 args.push(v.to_string());
+            }
+        }
+    }
+    // `--from current` names the calling pane: resolve it HERE, where
+    // FNO_PANE still names the pane the spawn ran inside, and ride the
+    // plain `--at` anchor the server splits beside.
+    if params.get("from").and_then(Value::as_str).map(str::trim) == Some("current") {
+        let fno_pane = std::env::var("FNO_PANE")
+            .ok()
+            .and_then(|s| s.trim().trim_start_matches('%').parse::<u64>().ok());
+        match fno_pane {
+            Some(pane) => {
+                args.push("--at".to_string());
+                args.push(pane.to_string());
+            }
+            None => {
+                return Err(format!(
+                    "--from current needs a calling pane; run the spawn \
+                     inside a mux pane (FNO_PANE unset) or name the cell: \
+                     `--from portal N` / `--from <worker>`"
+                ));
             }
         }
     }
@@ -3649,6 +3660,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--at" => {
                 params.insert("at".into(), str_arg(&mut it, "--at")?);
+            }
+            // The named cell a split halves: `portal N`, a worker name, or
+            // `current`. `current` stays literal here: the placement layer
+            // resolves it from FNO_PANE when the spawn ran inside a pane.
+            "--from" => {
+                params.insert("from".into(), str_arg(&mut it, "--from")?);
             }
             "--from" => {
                 // `promote <name> --from <session-uuid>`: the session to resume

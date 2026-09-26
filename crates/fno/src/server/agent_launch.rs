@@ -102,9 +102,23 @@ pub(crate) struct LaunchDesk {
     /// request ids are client-minted and per-client, so the client id is
     /// what makes one attempt's key distinct from another client's.
     pending: HashSet<(u64, u64)>,
+    /// The placement a thread launch carries: the spawn argv rides none of
+    /// it, and the composer's portal opens server-side on the Launched
+    /// receipt through the requesting client's own reach.
+    placements: HashMap<(u64, u64), ComposerPlacement>,
     /// Terminal updates, insertion-ordered for eviction.
     finished: HashMap<(u64, u64), AgentLaunchUpdate>,
     order: VecDeque<(u64, u64)>,
+}
+
+/// The composer launch's portal placement, taken from the desk on the
+/// Launched receipt: an explicit index, or `new` (the server picks), plus
+/// the tab selector and split direction the popup named.
+#[derive(Debug, Clone)]
+pub(crate) struct ComposerPlacement {
+    portal: Option<u8>,
+    tab: Option<String>,
+    split: Option<String>,
 }
 
 /// Finished attempts remembered for replay. Small: a popup session rarely
@@ -128,8 +142,18 @@ impl LaunchDesk {
         })
     }
 
-    fn mark_started(&mut self, client: u64, request_id: u64) {
-        self.pending.insert((client, request_id));
+    fn mark_started(&mut self, client: u64, request_id: u64, placement: Option<ComposerPlacement>) {
+        let key = (client, request_id);
+        self.pending.insert(key);
+        if let Some(placement) = placement {
+            self.placements.insert(key, placement);
+        }
+    }
+
+    /// Take a launch's portal placement off the desk: consumed exactly
+    /// once, on the Launched receipt.
+    fn take_placement(&mut self, client: u64, request_id: u64) -> Option<ComposerPlacement> {
+        self.placements.remove(&(client, request_id))
     }
 
     /// Read-only replay of an attempt's terminal state (test reader).
@@ -315,7 +339,17 @@ impl super::Core {
             self.send_launch_update(id, update);
             return;
         }
-        self.launch_desk.mark_started(id, req.request_id);
+        self.launch_desk.mark_started(
+            id,
+            req.request_id,
+            // A thread launch's placement rides the desk, not the spawn
+            // argv; a pane launch keeps its flags in the argv.
+            (req.substrate != "pane").then(|| ComposerPlacement {
+                portal: req.portal,
+                tab: req.placement.clone(),
+                split: req.split.clone(),
+            }),
+        );
         self.send_launch_update(
             id,
             AgentLaunchUpdate {
@@ -377,6 +411,15 @@ impl super::Core {
     /// never strand the client's disabled button.
     pub(super) fn agent_launch_update(&mut self, id: u64, update: AgentLaunchUpdate, retry: u8) {
         if self.send_launch_update(id, update.clone()) {
+            // The composer's portal: an operator gesture on a thread
+            // launch, opened through the requesting client's own reach on
+            // the Launched receipt. A failed open is one notice naming the
+            // Enter gesture; the launch stays Launched.
+            if let LaunchState::Launched { name, .. } = &update.state {
+                if let Some(placement) = self.launch_desk.take_placement(id, update.request_id) {
+                    self.open_composer_portal(id, name, placement);
+                }
+            }
             self.launch_desk.settle(id, update);
             return;
         }
@@ -410,6 +453,56 @@ impl super::Core {
                 .try_send(ServerMsg::AgentLaunch(update))
                 .is_ok(),
         }
+    }
+
+    /// The composer's own portal: the same attached-client reach the
+    /// sideline Enter gesture runs, carrying the request's tab or split
+    /// and the explicit index or a server-picked new one. The requesting
+    /// client's view lands on it.
+    fn open_composer_portal(&mut self, client_id: u64, name: &str, placement: ComposerPlacement) {
+        let Some(view) = self.client_view(client_id) else {
+            self.notice(
+                client_id,
+                format!("{name} launched paneless; open its portal from the sideline (P, then +)"),
+            );
+            return;
+        };
+        let vp = self.tab_rect(view.1);
+        let split = placement.split.as_deref().map(|d| match d {
+            "left" => crate::tree::Dir::Left,
+            "up" => crate::tree::Dir::Up,
+            "down" => crate::tree::Dir::Down,
+            _ => crate::tree::Dir::Right,
+        });
+        let tab = placement.tab.as_deref().map(|t| {
+            if t == "new" {
+                crate::proto::TabSel::New
+            } else {
+                crate::proto::TabSel::Name(t.to_string())
+            }
+        });
+        let mut eff = crate::proto::PanePlacement {
+            split,
+            tab,
+            ..Default::default()
+        };
+        let (portal_idx, explicit) = match placement.portal {
+            Some(n) => (n, true),
+            None => match self.next_free_portal() {
+                Some(idx) => (idx, false),
+                None => {
+                    self.notice(
+                        client_id,
+                        format!(
+                            "{name} launched; every portal index is live - close one, then reach it from the sideline (P, then +)"
+                        ),
+                    );
+                    return;
+                }
+            },
+        };
+        eff.portal = explicit.then_some(portal_idx);
+        self.reach_portal(client_id, view, vp, portal_idx, name, &eff, explicit);
     }
 }
 
@@ -465,7 +558,7 @@ mod tests {
         // Unknown key: nothing replayed.
         assert!(desk.in_flight_or_done(1, 7).is_none());
         // Started: a duplicate key reads Starting and must not re-spawn.
-        desk.mark_started(1, 7);
+        desk.mark_started(1, 7, None);
         assert_eq!(
             desk.in_flight_or_done(1, 7),
             Some(AgentLaunchUpdate {
@@ -499,7 +592,7 @@ mod tests {
         // Two clients minting the same client-local request id are DISTINCT
         // attempts: one's terminal state must never replay to the other.
         let mut desk = LaunchDesk::default();
-        desk.mark_started(1, 1);
+        desk.mark_started(1, 1, None);
         assert!(
             desk.in_flight_or_done(2, 1).is_none(),
             "client 2's id 1 is a fresh attempt"

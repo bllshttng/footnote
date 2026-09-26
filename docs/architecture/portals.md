@@ -1,85 +1,68 @@
 # Portals
 
-A portal is the dedicated pane a thread is shown through, indexed from 0.
+The operator named the model, 2026-09-26: "No pane is EVER a portal. A portal is a window into any pane. Any pane can get assigned into a portal. It's like a TV and the threads are different channels we are flipping through."
 
-This does not change substrate semantics. A thread is the persistent lane and still hosts no pane until one is created. A portal is what one is.
+A portal is an index, a placement (which tab and which split in it) and a channel. It is never a pane and never a tab. The screen pane is only what the TV plays now: a live viewer, a parked screen, or nothing. Nothing means the operator closed the portal. The thread is a channel. Tuning swaps the screen and never moves the window.
 
-## Why the name
+This does not change substrate semantics. A thread is the persistent lane and still hosts no pane until one is created.
 
-The operator named it, 2026-09-02: "i think we should call viewports: portal since it's a portal to view multiple harness threads."
+## Who creates and closes
 
-A viewport is a passive window onto something. A portal is the thing you go through to reach a live harness thread. That is what this is.
-
-This project already forbids confusing five axes: harness, provider, model, effort and account. It keeps pane, thread and headless each meaning one exact thing. `viewport` reads as a sixth near-synonym for pane. `portal` names the relation rather than the geometry, so it does not compete.
-
-## What lifted
-
-The server hosted exactly ONE thread viewport. `crates/fno/src/server.rs` declared `thread_pane: Option<(String, u64, TabId)>`. It repointed that one slot at whichever thread had focus, so two threads never sat side by side. The field is now `portals: BTreeMap<u8, Portal>`.
-
-`BTreeMap` rather than `HashMap` is a determinism property, not a preference. Iteration is index-ordered, so the sideline's portal column never reshuffles between frames.
-
-The tiling primitive already existed. The tab menu offers Join Left, Join Right, Join Up and Join Down. Panes already tile inside one tab. Only the cap of one had to go.
-
-## Addressing
+Only an explicit gesture creates or closes a portal. A default never creates one.
 
 | Door | Gesture |
 |---|---|
-| CLI, spawn | `fno agents spawn --substrate thread --portal N` (one call; `--tab`/`--split` honored on a fresh open), or `fno mux thread <name> --portal N`. Omitted is portal 0. |
-| CLI, default spawn | A bare `fno agents spawn` seats a thread wherever the harness seats one and, from inside a mux, opens portal 0 on it automatically. `--portal N` names another index. |
-| CLI, an existing row | `fno mux thread <key>` shows one live paneless row through a portal (or focuses the portal it already has) and never creates, resumes, or duplicates a worker. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints: a thread-shaped Codex row answers to the full id, Claude to its printed `short_id`. The match is exact, no prefix and no substring; those tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`. Zero matches, or several rows answering the same key, refuse and spawn no worker. |
-| Sideline, portal 0 | Enter (or a click) on a paneless live row. |
-| Sideline, a new portal | `P` opens the portal picker. Enter or `t` on the `+` row opens the next free index in a new tab. shift+HJKL on the `+` row opens it as a split beside the focused pane. |
-| Sideline, an already-shown row | The row's portal takes focus with Enter, or `fno mux thread reseat <name> --portal N` moves it to another index. |
-| Layout | The existing Join actions tile open portals. |
-| Close | The row menu's `Close portal` entry (`c`), prefix+x on the focused seat, or `fno mux pane kill <seat>` for a client that is not attached (`fno mux pane ls --json` prints `portal` on a seat). Closing the portal never touches the row. |
+| Any verb, explicit flag | `fno mux thread <key> --portal new` opens the next free index. `--portal N` opens N if N is not open, and tunes if it is. `--split DIR --from portal N\|worker\|current` halves the named cell: split right from portal 0 gives the next index, and a 2x2 comes from splitting down from each of those. A spawn carries the same flags and opens the portal right after its receipt names the new index. Human or agent, the rule is the same: the flag is the ask. |
+| Any verb, no flag | Tune. The reach focuses the row's open portal. With none open, the door's own portal 0 serves it. A bare `fno agents spawn` is a paneless thread and opens nothing. |
+| Sideline | Enter on a paneless live row reaches it. `P` opens the portal picker. The `+` row opens the next free index (shift+HJKL as a split beside the focused pane). |
+| Composer | The new-agent popup carries the placement in its launch request. The portal opens server-side on the launch receipt, through the requesting client's own reach. |
+| A side effect | Never creates. Retask, `fno mux command` and every other machine call tune an existing portal or open a transient view that is not a portal at all. |
 
-The one-call spawn form, its geometry rules, and its refusals are documented in [fno-agents-spawn.md](../guides/fno-agents-spawn.md).
+Closing is the operator's gesture only: the row menu's `Close portal` entry (`c`), prefix+x on the focused seat, or `fno mux pane kill <seat>`. A spawn, a reach, a restart, a finished worker or a dead viewer never closes one. Closing a portal never stops the row it showed.
 
-A bare digit is deliberately NOT the sideline gesture for an index. `0`..`9` on the peek overlay is the answerable-prompt path. So `P` pairs with `p` (the placement picker) the way `X` pairs with `x`.
+`<key>` is the agent name, or the full `session` id `fno agents whoami` prints. The match is exact, no prefix and no substring. Those tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`. Zero matches, or several rows answering the same key, refuse and spawn no worker.
+
+## The transient view
+
+A side effect sometimes needs a screen with no portal behind it. `fno mux command` typing into a paneless row is the case. The view door opens the row's viewer in a pane whose argv carries `FNO_VIEW_TRANSIENT=1`. No `portals` entry is written and nothing is persisted. The restore prune reaps a leftover view instead of tabbing it. The owned view closes once the command's caller finishes, the same Drop contract the owned portal had.
+
+## The parked screen
+
+When a channel ends, the portal stays and says so. A viewer whose process exits leaves the portal on its no-signal screen: `portal N: no signal - <channel> ended`. The screen is a keeper-hosted tail process that takes no input. No interactive shell is minted, so a death can never multiply tabs. The screen carries `FNO_PORTAL_HELD=<channel>` in its own argv, and every portal door reads that provenance, never command presence.
+
+The same mint serves a restore-held slot. The seat comes back parked on its channel until a reach or a focus fills it. `[mux.restore] policy = resume` still fills held portals at startup, because that setting is the operator's ask. A parked portal whose row never returns stays a readable screen naming the row.
+
+A fill must prove it is the same session. The portal slot records the row's full session id at capture. A key that resolves under a different id now is a different thread wearing a familiar label. The fill refuses, keeps the seat held, and names both ids.
+
+## Restore brings back exactly what the operator had
+
+The operator's tabs, splits and portals come back placed as before, each held on its last channel until the operator tunes it. Nothing starts a process unasked.
+
+A stored index is never reshuffled: portal 3 is held at 3. A duplicate stored slot holds once at its own index. The second seat closes, with a notice. No index above the stored maximum ever appears.
+
+The one-time stand-in prune runs after the slots bind. The shapes an older server minted close instead of coming back. They are: a `portalN` shell, an orphaned held screen, a leftover transient view, or a paneless row's shell stand-in. A pane whose child runs a child of its own is never a candidate. The operator typed `vim` into that shell. This server's own held worker placeholders are resume doors, kept on purpose.
 
 ## Rows are not per-portal
 
 `proto::AgentRow::pane_id` is a POINTER to whichever pane hosts that agent. `None` means a watch-only row. The relation is a pointer, never a pairing, so one row moving between portals stays ONE row. A design that mints a row per portal re-creates the duplicate-row problem the mux operator UX epic exists to remove.
 
-The sideline renders `◫N` for the portal showing a row. The server DERIVES that index at projection time. It matches the row's pane against the open portal seats. Nothing is stored per row, so the index never goes stale.
+The sideline renders `◫N` for the portal showing a row. The server DERIVES that index at projection time from the open portal seats. Nothing is stored per row, so the index never goes stale.
 
 Pane ids allocate from zero, so pane 0 is a valid seat. Every portal lookup matches on the `Option` and compares seats for EQUALITY. A truthiness test there is the defect that once made six live workers invisible, and it hides on every other pane id.
 
-## Three rules that are easy to get wrong
+## A channel is a key a row answered
 
-**Portals persist as slots and restore held.** A pane binds a session to geometry. A thread binds a session to a row. Both facts still hold. What is persisted is not the thread. It is the slot `(index, row_key)` in its tab's stored tree, written by `SlotCapture::name_leaf` beside every other slot. The binding stays `Shell`, because at restore the seat IS a shell until the first reach fills it. A tab holding only portals is a tab like any other: it is captured whole, name included.
-
-Restore holds the seat idle. A named shell takes the slot the tree kept, the `Portal` entry goes back in the map, and the pane says what it waits for. The held message is screen text. The server paints it onto the seat's screen once and types nothing at the placeholder shell. The operator reads it once, not again as an echoed command and a third time as command output. Held idle is the only safe shape, not a compromise. For opencode and agy `interactive_attach` is unsupported, so a portal onto them can only be a RESUME, and a resume starts a real agent process. Eager restore of three portals spawns three agents unasked. The operator's focus spends the process.
-
-The placeholder carries `FNO_PORTAL_HELD=<row>` in its own argv. A keeper re-adopts the shell and derives `cmd: Some` from that argv, but the marker keeps the seat held. Every portal door reads this provenance, never command presence. The doors are re-arm, fill, restore classification, default retarget, same-row focus, viewer search, landing, and the restore result. That is how a surviving viewer still re-arms live without a second viewer minted beside it.
-
-**A seat whose viewer survived re-arms live. A fill must prove it is the same session.** The portal slot records the row's full session id at capture. The viewer pane is keeper-hosted, so after a restart the adopted viewer joins its stored leaf. The seat then re-arms LIVE with no held message and no second viewer. A fill of a still-held seat starts from the recorded session id. If the row's key now resolves under a different id, that is a different thread wearing a familiar label. The fill refuses, keeps the seat held, and names both ids. A slot from an older store recorded no id and fills unguarded.
-
-Three gestures fill a held seat. Focusing the seat pane runs the row's reach, whose repoint respawns the viewer in that seat. Reaching the row with no explicit index goes home to the held seat that names the row. An explicit `fno mux workspace restore` fills every held seat whose row answers. The operator typed the command that spends the process, so the ask is already there. A seat held at index 1 fills at 1, instead of stranding while a fresh viewer mints at 0. An explicit `--portal N` still means N and never hijacks a held seat. A held portal whose row never returns stays a readable shell naming the row, which is the honest placeholder. A fill attempt whose row resolves to zero live rows, or to several, keeps the seat held. The attempt gets one refusal naming the portal index, the row key, and one action. The post-resume case is the common one. A restarted row reads exited until its own session restamps it. The refusal names `fno agents register` as the action. An ambiguous key names the pane-specific action instead. Under the default `hold` startup policy the seats stay idle until one of those gestures runs. Only `[mux.restore] policy = resume` fills them unasked at startup, because that setting IS the ask.
-
-**A portal outlives its row, and closing a portal is its own gesture.** A portal is just another viewport. Removing a row is not removing a pane. When a seat's viewer dies, the seat stays open as an idle shell at the same leaf. The row was reaped or stopped, or the viewer exited on its own. The notice says `viewer exited, seat kept`. The shell under it is a usable terminal, and the next reach for any row can take the seat.
-
-An operator close never mints a stand-in. N deliberate closes never leave N shells holding N tabs open. The close path splits by CAUSE, never by the free-text reason string. `close_viewer_died` covers the exit arm, the reap backstop, and a session retire. It always runs the stand-in swap for a live viewer seat. `close_pane_reasoned` covers prefix+x, `fno mux pane kill`, and the Close portal menu entry. It closes the pane like any pane's. Closing a portal never stops, kills or removes the row it showed. The thread keeps running and can be shown again anywhere. The last-pane rule still holds: closing the session's only pane ends the session. Close portal refuses that case instead of ending it.
-
-Liveness is counted from `panes`, not from `portals.len()`. An entry left stale-naming a closed pane is deliberate. The reach reads its remembered tab id, so a replacement viewer lands back where the operator had it. That is what the single slot always did. Counting entries instead lets a dead row disarm the swap for a real portal.
-
-**The `>=1-pane` invariant needs nothing added.** Its only statement lives in `sweep_dead_sideline` and compiles to `panes.len() <= 1`, a whole-session pane count. Portals are panes, so N portals move away from that floor rather than toward it. A portal-specific invariant is a second, weaker rule competing with a guard that already holds.
-
-## A portal follows the session its viewer shows
-
-A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the row key, the attach mapping and the pane name to that row. A title that names no single free row drops the claim, so no row wears a seat that shows something else. A seat whose key names no single row also wears no `◫` marker, so the picker does not list it.
-
-Only claude viewer seats are followed, gated on the attach program in the seat's `cmd`. Plain attach panes and other harnesses are not, and a title naming a row another portal shows never steals it.
+A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the channel, the attach mapping and the pane name to that row. A title that names no single free row drops the attach claim and touches nothing else. The channel only ever holds a key a row answered, so free title text never becomes one. A title naming a row another portal shows never steals it.
 
 ## Wire
 
-`PanePlacement.portal: Option<u8>`, `PanePlacement.portal_new: bool` and `AgentRow.portal: Option<u8>` arrived in proto v64. All three are additive and `#[serde(default)]`, so the compatibility floor did not move. A v63 client still attaches.
+`PanePlacement.portal: Option<u8>` and `PanePlacement.portal_new: bool` arrived in proto v64. `AgentRow.portal` arrived the same generation. `PanePlacement.view` and `PanePlacement.from` arrived in v93. All are additive and `#[serde(default)]`, so the compatibility floor did not move. A v63 client still attaches.
 
 `portal` names an index. `portal_new` asks for the next free one and names none, because the caller must not choose it. Two clients computing "next free" from the rows they last rendered pick the same number, and the second reach repoints the first one's new portal. The server handles reaches one at a time, so it allocates. An explicit index wins over `portal_new`.
 
-The allocator reads liveness, not presence, the same read `close_pane` uses. An entry whose pane closed elsewhere holds no portal, so its index is free. The reach's stale-slot path then reads that leftover entry for its remembered tab, which lands the new viewer where the old one was.
+`view` asks for a screen that is never a portal. `from` names the cell a split halves: `portal N`, a worker name, or `current`. A calling pane resolves `current` before the reach. The server resolves `from` to the anchor pane before any geometry runs. If both `at` and `from` name a pane, `at` wins.
 
-`PanePlacement.thread_pane: bool` stays for one generation as a deprecated alias meaning portal 0. Code reads it only through `PanePlacement::portal_target()`. That folds the two fields into one value at the server's decode edge, so nothing past that point sees two fields that overlap. When `MIN_COMPAT_PROTO` passes 64, drop the bool.
+`PanePlacement.thread_pane: bool` stays for one generation as a deprecated alias meaning portal 0. Code reads it only through `PanePlacement::portal_target()`. That folds the two fields into one value at the server's decode edge, so nothing past that point sees two fields that overlap. Drop the bool once `MIN_COMPAT_PROTO` passes 64.
 
 Changing the bool in place is a change to an existing shape. The versioning rule in `proto.rs` says such a change must move the floor too, which refuses every client older than the build. Adding a field does not.
 
@@ -89,8 +72,8 @@ A portal is a VIEWER, not an agent. The thread session runs whether or not a pan
 
 Measured 2026-09-02 with `fno doctor footprint`: fleet CPU 2.077 cores at 17.3 percent of capacity, descendant CPU 1.286 cores across 154 processes, verdict within.
 
-Every pane drains and renders its PTY, so portals cost redraw work. That plus the seat mechanic is the real bound. This is why there is no numeric cap. When a measurement asks for a cap, add one.
+Every pane drains and renders its PTY, so portals cost redraw work. That plus the screen mechanic is the real bound. This is why there is no numeric cap. When a measurement asks for a cap, add one.
 
 ## A conversion leaves no portal
 
-Converting a pane session to a thread (`fno agents resume <name> --substrate thread`) is a substrate change, not a view change. Afterward the mux server hosts nothing for that session. The conversion opens no portal and leaves none behind. To look at the converted thread, open one with `fno mux thread <name>`. A portal never changes the substrate: `fno mux thread reseat` moves the viewer while the server keeps hosting the process.
+Converting a pane session to a thread (`fno agents resume <name> --substrate thread`) is a substrate change, not a view change. Afterward the mux server hosts nothing for that session. The conversion opens no portal and leaves none behind. To look at the converted thread, tune one with `fno mux thread <name>`. A portal never changes the substrate. The reseat verb moves the worker into the named portal's screen while the server keeps hosting the process.

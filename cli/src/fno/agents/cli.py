@@ -2802,16 +2802,6 @@ def cmd_spawn(
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
 
-    pane_view = (
-        defaulted and substrate == "bg" and spawn_succeeded
-        and result.kind == "created" and os.environ.get("FNO_PANE")
-    )
-    if pane_view:
-        # Post-receipt, best effort: a placement failure never recolors the verdict.
-        from fno.agents.spawn_defaults import place_default_view
-
-        place_default_view(result.name)
-
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:
 #: Click already spends 2 on usage errors including "no such command", so a
