@@ -163,6 +163,16 @@ Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retract
 
 The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and a damaged index is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
 
+## Law carries a scope
+
+Law is recorded where it is made, and scope names who it governs. The vocabulary has two values: `global` and `project:<slug>`. The slug is the settings project name, the same vocabulary a graph node's `project` field uses. A law and the nodes it governs answer one resolver.
+
+The law door (`fno inbox law set`) stamps the recording session's project by default. Widening to `global` is explicit on the law-match crate verb: its `record-scope` request carries `global`, because law is never inherited by silence. A repo outside the work map makes the door refuse and name the path it failed to place. The door fails closed so a guessed stamp never lands, while every reader fails open.
+
+Every law reader filters. Global law reaches every session. A project law reaches only that project's sessions. A row with no scope reaches only fno sessions, because all 82 pre-scope rows were recorded in fno. The general ones get promoted by an explicit re-record widened on the crate verb.
+
+Readers return the count they withheld, and the report's JSON carries the note. The stage block lists a law's scope on its line. A workspace tier (`workspace:<name>`) is a rung nobody has reached. The field is a free string, so adding it later needs a reader branch and no migration.
+
 ## Where law reaches a session
 
 No session loads law in bulk. The SessionStart law read is deleted (ruling of 2026-09-14): it read every live row, blew the hook's ten-second bound, and delivered nothing. A law reaches a session two ways, and neither loads all law. First, a law the superuser confirms graduates through the `graduation` field every law row carries. `enforced` with `doc:<rules file>=>marker:<text>` points at a rule file the harness loads whole. `enforced` with `gate:<cmd>=>marker:<text>` points at a refusal at the moment the law applies. Second, `ask` keeps reading law for one subject at ask time, so the law-match refusal still fires where the question is asked.

@@ -2206,6 +2206,7 @@ fn render_list_with_discovered_lane() {
         Some(3),
         Some(3),
         None,
+        &Value::Null,
     );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
@@ -2214,7 +2215,7 @@ fn render_list_with_discovered_lane() {
     // Without a codex probe the key is absent, not null.
     assert!(parsed.get("codex_loaded").is_none());
 
-    let table = render_list_table(&agents, &discovered, Some(3), Some(3));
+    let table = render_list_table(&agents, &discovered, Some(3), Some(3), &Value::Null);
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
     // ADDRESS leads and the alias is demoted to LABEL. The alias led this
     // table for its whole life, so it was the leftmost thing a reader
@@ -2249,7 +2250,16 @@ fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
             cwd: "/repo".into(),
         },
     ]));
-    let out = render_list_json(&agents, &filters, &json!([]), &[], None, None, Some(&block));
+    let out = render_list_json(
+        &agents,
+        &filters,
+        &json!([]),
+        &[],
+        None,
+        None,
+        Some(&block),
+        &Value::Null,
+    );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["codex_loaded"]["available"], true);
     assert_eq!(
@@ -2289,7 +2299,7 @@ fn render_list_table_carries_the_mailbox_address() {
         }
     ]);
 
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(3), Some(3), &Value::Null);
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2342,7 +2352,7 @@ fn render_list_table_has_checked_and_pid_columns_not_live() {
             "log_path": null,
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(3), Some(3), &Value::Null);
     let lines: Vec<&str> = table.lines().collect();
     // AC5-UI: header shows STATUS + CHECKED + PID, and LIVE is gone.
     assert!(
@@ -2418,7 +2428,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(3), Some(3), &Value::Null);
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2467,7 +2477,7 @@ fn render_list_table_names_a_total_probe_outage() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(43), Some(0));
+    let table = render_list_table(&agents, &[], Some(43), Some(0), &Value::Null);
     assert!(
         table.contains("truth probe failed: 0 of 43 rows answered"),
         "outage must be named, got: {table}"
@@ -2477,7 +2487,7 @@ fn render_list_table_names_a_total_probe_outage() {
         "the statuses must be disclaimed: {table}"
     );
 
-    let healthy = render_list_table(&agents, &[], Some(43), Some(43));
+    let healthy = render_list_table(&agents, &[], Some(43), Some(43), &Value::Null);
     assert!(
         !healthy.contains("truth probe failed"),
         "a healthy page carries no outage line: {healthy}"

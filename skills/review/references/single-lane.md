@@ -64,7 +64,7 @@ For the one question this diff answers (take it from the plan's `surface:` block
 
 ### Test value
 
-When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. A new test must name the observable behavior it protects, a credible regression, why existing coverage misses that failure, and no test-only production seam. Flag as a candidate any test matching a junk pattern there. The list includes assertion-free probes, exact source greps, self-comparisons, duplicates of an owner-boundary proof, and fixtures supplying the asserted receipt. The exception is a test whose retention-bar contract the skill names. This angle costs nothing on a diff that touches no test.
+When the diff adds or changes a test, apply the authoring gate and junk-pattern list from `skills/test-audit/SKILL.md`. When authoring answers are incomplete or a junk-pattern match lacks a verified retention-bar contract, raise a BLOCKING finding. Do not label it advisory or cleanup. If its independent retention-bar contract is named and verified, retain the matching test. Check assertion-free probes, exact source greps, self-comparisons, duplicate owner-boundary proofs, and fixtures supplying the asserted receipt. This angle costs nothing on a diff that touches no test.
 
 ### Reuse
 
