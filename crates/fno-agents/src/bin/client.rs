@@ -196,6 +196,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("hook") {
         std::process::exit(fno_agents::hook::dispatch(&args[1..]));
     }
+    // `mail-hold`: transport-only (no client action - the shrink law allows
+    // none); the mux server's keystroke arm and `king cancel` are the
+    // callers. The arm runs detached-safe and answers in microseconds, so
+    // it dispatches before the runtime builds, with the other early arms.
+    if args.first().map(String::as_str) == Some("mail-hold") {
+        std::process::exit(fno_agents::mail_hold::run_mail_hold(&args[1..]));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
