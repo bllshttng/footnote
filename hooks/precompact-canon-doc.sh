@@ -427,12 +427,22 @@ _unowned_session_blocks() {
         known = index(heading, k1) > 0 || index(heading, k2) > 0 \
              || index(heading, k3) > 0 || index(heading, k4) > 0
         keep = !known
+        bhead = heading
         if (keep && heading != "") buf = buf heading "\n"
         heading = ""
       }
       if (keep) {
         buf = buf $0 "\n"
-        if (index($0, "<!-- /fno:session -->") > 0) { printf "%s", buf; buf = ""; keep = 0 }
+        if (index($0, "<!-- /fno:session -->") > 0) {
+          # One copy per heading, ever: if the writer ever regenerates a
+          # section this pass also captures (a label list drift), the copy
+          # already on disk must not compound into a second one per fire.
+          if (bhead == "" || !(bhead in seen)) {
+            if (bhead != "") seen[bhead] = 1
+            printf "%s", buf
+          }
+          buf = ""; keep = 0
+        }
       }
     }
     END { printf "%s", buf }
