@@ -740,6 +740,102 @@ async fn rm_drops_a_codex_thread_row_whose_actor_is_gone() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// x-976b: rm of a codex thread row stamps a tombstone beside the registry,
+/// so the harness-store healer refuses to adopt the same session back under
+/// a fresh short-id name (the adopted duplicate that blocked resume). The
+/// row here carries the dead-actor shape the gone-row test uses; the
+/// tombstone is the point, not the teardown.
+#[tokio::test]
+async fn rm_stamps_a_tombstone_for_the_removed_codex_session() {
+    let _guard = crate::path_test_guard();
+    let home = short_home("rmthreadtomb");
+    let cwd = tempfile::tempdir().unwrap();
+    let mut row = thread_entry("t-rm-tomb", AgentStatus::Live, None);
+    row.cwd = cwd.path().to_string_lossy().into_owned();
+    row.project_root = row.cwd.clone();
+    row.harness_session_id = Some("01a0aba4-0934-7f10-aac3-67c76bfd244c".into());
+    row.codex_session_id = Some("01a0aba4-0934-7f10-aac3-67c76bfd244c".into());
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    ctx.codex_threads.lock().await.insert(
+        "t-rm-tomb".into(),
+        std::sync::Arc::new(crate::codex_thread::CodexThreadActor::with_dead_actor()),
+    );
+    let request = Request::new(1, "agent.rm", json!({"name": "t-rm-tomb"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a codex row must not read the claude roster"),
+        &|_| panic!("rm must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a thread row has no mux ref to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "{:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    let raw = std::fs::read_to_string(home.root().join("rm_tombstones.json"))
+        .expect("rm wrote the tombstone file");
+    let tombstones: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+    assert_eq!(tombstones.len(), 1);
+    assert_eq!(tombstones[0]["harness"], "codex");
+    assert_eq!(
+        tombstones[0]["session_id"],
+        "01a0aba4-0934-7f10-aac3-67c76bfd244c"
+    );
+    assert!(tombstones[0]["removed_at"].is_u64());
+    assert!(crate::rm_tombstone::recent(
+        &home,
+        "codex",
+        "01a0aba4-0934-7f10-aac3-67c76bfd244c"
+    ));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// The tombstone is harness-agnostic: a claude row rm'd through the same
+/// cascade stamps the same file, because the store fallback adopts claude
+/// transcripts by the same door.
+#[tokio::test]
+async fn rm_stamps_a_tombstone_for_a_removed_claude_session() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = short_home("rmclaudetomb");
+    let row = claude_rm_row(
+        "stopped-worker",
+        "aaaa1111",
+        "aaaa1111-1111-2222-3333-444444444444",
+    );
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+    let snapshots = claude_row_then_absent("aaaa1111", "stopped");
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &snapshots,
+        &|_| Ok(()),
+        &|_| true,
+        &|_, _| Ok(true),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(response.error().is_none(), "{response:?}");
+    assert!(crate::rm_tombstone::recent(
+        &home,
+        "claude",
+        "aaaa1111-1111-2222-3333-444444444444"
+    ));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 #[tokio::test]
 async fn rm_ends_a_live_non_thread_codex_row_with_no_stop_leg() {
     // Law d-81c6da7e: rm ends a live codex row itself (the widened
