@@ -426,3 +426,97 @@ def test_undefer_after_contain_keeps_containment(tmp_graph):
     assert row["contained_in"] == owner
     now = datetime.now(timezone.utc)
     assert selection_guards(row, _by_id(tmp_graph), now) == f"contained:{owner}"
+
+
+# ---------------------------------------------------------------------------
+# Releasing containment drops the owner's PR link
+# ---------------------------------------------------------------------------
+
+
+def test_release_drops_owner_pr_link_and_records_released_from(tmp_graph):
+    """AC1-HP: a release drops the PR the containment bind stamped on the
+    child, so the owner's merge cannot close a node that no longer ships
+    inside it. The owner keeps its own PR."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    other = _seed_idea(tmp_graph, "other epic")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] in (owner, child):
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    r = _invoke("backlog", "update", child, "--parent", other)
+    assert r.exit_code == 0, r.output
+    rows = _by_id(tmp_graph)
+    c = rows[child]
+    assert c.get("contained_in") is None
+    assert c.get("pr_number") is None
+    assert c.get("pr_url") is None
+    assert c.get("merge_status") is None
+    assert c.get("released_from") == owner
+    assert rows[owner]["pr_number"] == 900
+
+
+def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
+    """AC2-EDGE: only the owner's PR goes; the child's own additional PR
+    stays. Re-containing clears released_from so the closure bind honors the
+    node again."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] == owner:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+            if e["id"] == child:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+                e["additional_prs"] = [
+                    {"number": 901, "url": "https://github.com/o/r/pull/901"}
+                ]
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    assert _invoke("backlog", "update", child, "--parent", "null").exit_code == 0
+    c = _by_id(tmp_graph)[child]
+    assert c.get("pr_number") is None
+    assert c["additional_prs"] == [
+        {"number": 901, "url": "https://github.com/o/r/pull/901"}
+    ]
+    assert c.get("released_from") == owner
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    c2 = _by_id(tmp_graph)[child]
+    assert c2["contained_in"] == owner
+    assert "released_from" not in c2
+
+
+def test_release_keeps_same_number_pr_from_another_repo(tmp_graph):
+    """PR numbers are repository-local: a child PR numbered #900 in another
+    repo is independent delivery, not the owner's inherited ref, so the
+    release keeps it and drops only the same-repo #900."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] == owner:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+            if e["id"] == child:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/other/repo/pull/900"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    assert _invoke("backlog", "update", child, "--parent", "null").exit_code == 0
+    c = _by_id(tmp_graph)[child]
+    assert c["pr_number"] == 900
+    assert c["pr_url"] == "https://github.com/other/repo/pull/900"
