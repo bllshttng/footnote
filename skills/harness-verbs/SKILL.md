@@ -5,7 +5,7 @@ description: Run this before you run or mail a harness-native command. Renders y
 
 # Know your own harness before you run or mail a native command
 
-footnote drives several coding CLIs (claude, codex, opencode, agy, pi, cursor-agent, grok). Each has its own native slash verbs. The measured roster, each verb's risk class, and a one-line when-to-use live in the capability table; `fno-agents verbs` renders your row of it.
+footnote drives several coding CLIs (claude, codex, opencode, agy, pi, cursor-agent, grok). Each has its own native slash verbs. The measured roster, each verb's risk class, and a one-line when-to-use live in the capability table. `fno-agents verbs` renders your row of it.
 
 ## Run this first
 
@@ -21,7 +21,7 @@ Read the roster before you reach for a native verb you have not run in this harn
 
 `fno agents mail send --raw` runs a command on another session, as user-shaped text. Two rules:
 
-1. `--raw` is commands only, never a message. A message goes wrapped (the plain send wraps it; the sender stays visible).
+1. `--raw` is commands only, never a message. A message goes wrapped (the plain send wraps it, and the sender stays visible).
 2. A `session-ending` or `context-destroying` verb is refused by the mail guard unless the send names it: `--ack-verb-risk <verb>`. The refusal names the risk class and the remedy. An acked send still carries the verb's full effect. The ack is an acknowledgment, not a safety net.
 
 ## Pitfalls
