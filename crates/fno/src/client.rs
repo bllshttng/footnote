@@ -6744,6 +6744,7 @@ impl View {
         match self.density {
             Density::Regular => {
                 let (rows, depths) = self.tree_rows_with_depths();
+                let (rows, depths) = self.sort_agent_runs(rows, depths);
                 self.card_rows(rows, depths)
             }
             Density::Slim => {
@@ -6764,14 +6765,19 @@ impl View {
         }
     }
 
-    /// The extended density keeps the regular structural enumeration. Agent
-    /// rows are grouped with their optional sublines and sorted only within
-    /// the contiguous group beneath one section header.
-    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
-        let (rows, depths) = self.tree_rows_with_depths();
+    /// Sorts agent runs the way the extended table orders them: each
+    /// contiguous run of agent rows between non-agent rows orders by the
+    /// active column (kings compared against each other, workers ordered
+    /// inside their own lineage level), so the card view and the table read
+    /// in the sorted order and the painted age is the value sorted on.
+    fn sort_agent_runs<'a>(
+        &self,
+        rows: Vec<DisplayRow<'a>>,
+        depths: Vec<usize>,
+    ) -> (Vec<DisplayRow<'a>>, Vec<usize>) {
         let needs = self.attention_needs();
         let now = crate::digest_overlay::now_secs();
-        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len());
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
 
@@ -6800,15 +6806,22 @@ impl View {
             }
         }
         append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+        out.into_iter().unzip()
+    }
 
-        let has_agent = out
-            .iter()
-            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
-        out.insert(0, (DisplayRow::TableHead, 0));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let (mut rows, mut depths) = self.sort_agent_runs(rows, depths);
+        let has_agent = rows.iter().any(|row| matches!(row, DisplayRow::Agent(_)));
+        rows.insert(0, DisplayRow::TableHead);
+        depths.insert(0, 0);
         if !has_agent {
-            out.insert(1, (DisplayRow::TableEmpty, 0));
+            rows.insert(1, DisplayRow::TableEmpty);
+            depths.insert(1, 0);
         }
-        let (rows, depths) = out.into_iter().unzip();
         self.card_rows(rows, depths)
     }
 
@@ -7263,10 +7276,57 @@ fn append_sorted_agent_group<'a>(
         )
     });
     for (items, _) in subtrees {
+        let items = sort_lineage_level(items, sort, needs, now_secs);
         for (rows, _) in items {
             out.extend(rows);
         }
     }
+}
+
+/// Sorts one lineage level in place. `items[0]` is the level's root and keeps
+/// its place; every later item starts (one level deeper) or continues (deeper
+/// still) a child run, runs order by their leading agent, and each run's own
+/// children sort the same way. Sublines ride inside their agent's item, so an
+/// agent never separates from its detail rows.
+fn sort_lineage_level<'a>(
+    mut items: Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
+    sort: AgentSort,
+    needs: &HashMap<String, NeedKind>,
+    now_secs: u64,
+) -> Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)> {
+    let Some(root_depth) = items
+        .first()
+        .and_then(|(rows, _)| rows.first())
+        .map(|(_, d)| *d)
+    else {
+        return items;
+    };
+    let mut runs: Vec<Vec<_>> = Vec::new();
+    for item in items.drain(1..) {
+        let depth = item.0.first().map(|(_, d)| *d).unwrap_or(root_depth);
+        if depth <= root_depth + 1 || runs.is_empty() {
+            runs.push(vec![item]);
+        } else {
+            runs.last_mut().expect("non-empty run above").push(item);
+        }
+    }
+    runs.sort_by(|a, b| {
+        compare_agent_rows(
+            a[0].1,
+            b[0].1,
+            sort,
+            needs.get(a[0].1.name.as_str()).copied(),
+            needs.get(b[0].1.name.as_str()).copied(),
+            now_secs,
+        )
+    });
+    // The root survived `drain(1..)` at index 0; the sorted child runs
+    // append after it, so the level keeps its head and its order.
+    items.extend(
+        runs.into_iter()
+            .flat_map(|run| sort_lineage_level(run, sort, needs, now_secs)),
+    );
+    items
 }
 
 fn compare_agent_rows(
