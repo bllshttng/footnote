@@ -50,6 +50,17 @@ enum MatchRequest {
     /// code (0 recorded, 1 recorded-but-index-failed, 3 refused).
     #[serde(rename = "record")]
     Record(RecordDoorRequest),
+    /// The subject-addressed retraction door: `argv` is the
+    /// `fno inbox law retract` command line. Same ownership as `record`:
+    /// the door owns stdout (the retracted id) and the exit code
+    /// (0 retracted, 3 refused).
+    #[serde(rename = "retract")]
+    Retract(RecordDoorRequest),
+    /// The subject-addressed history read: `argv` is the
+    /// `fno inbox law history` command line. Prints one JSON answer and
+    /// exits 0, like `stage` and `match`.
+    #[serde(rename = "history")]
+    History(RecordDoorRequest),
     #[serde(rename = "scope-split")]
     ScopeSplit(ScopeSplitRequest),
 }
@@ -776,13 +787,22 @@ fn stage_answer_with(
         };
         match laws {
             Ok(index) => {
-                let matching = stage_matching_lines(
+                let mut matching = stage_matching_lines(
                     &index,
                     keywords,
                     &idents,
                     node_id.as_deref().unwrap_or(""),
                     scope_project.as_deref(),
                 );
+                // Graduated laws ride the stage block: a live law whose
+                // graduation follow-up node has closed asks for its own
+                // retraction by subject (x-9ca3). The retraction obligation
+                // is not stage-local, so the check reads every live law -
+                // and pays its graph reads only when such a law exists.
+                // Hermetic callers (an explicit index path) skip it.
+                if index_path.is_none() {
+                    matching.extend(graduated_retraction_lines(&index));
+                }
                 if !matching.is_empty() || !unread.is_empty() || index.damaged > 0 {
                     let additional_context = if matching.is_empty() {
                         render_read_receipt(index.damaged, &unread)
@@ -1349,6 +1369,8 @@ pub(crate) struct RecordDoor {
 }
 
 const RECORD_USAGE: &str = "usage: fno inbox law set <subject> [decision] [--decision-file f|-] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--read cmd]... [--global] [--paths glob,glob]";
+const RETRACT_USAGE: &str = "usage: fno inbox law retract <subject-or-decision-id> --reason <why>";
+const HISTORY_USAGE: &str = "usage: fno inbox law history <subject-or-decision-id> [--json]";
 
 fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
     let mut door = RecordDoor {
@@ -1421,6 +1443,17 @@ fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
 
 fn mint_decision_id() -> String {
     // 'd-<hex>', matching decide/__init__.py::mint_decision_id (8 hex chars).
+    format!("d-{}", random_hex8())
+}
+
+/// 'r-<hex>', the Python `decision_retracted` builder's shape.
+fn mint_retraction_id() -> String {
+    format!("r-{}", random_hex8())
+}
+
+/// 8 hex chars from getrandom, with a pid+clock fallback. A collision costs
+/// one duplicate id.
+fn random_hex8() -> String {
     let mut buf = [0u8; 4];
     if getrandom::fill(&mut buf).is_err() {
         // Fallback entropy: pid + clock. A collision costs one duplicate id.
@@ -1431,8 +1464,7 @@ fn mint_decision_id() -> String {
                 .unwrap_or(0);
         buf.copy_from_slice(&seed.to_le_bytes()[..4]);
     }
-    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    format!("d-{hex}")
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn attended_terminal() -> bool {
@@ -1819,9 +1851,59 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
             door.subject
         ));
     }
+    // Auto-supersede: on a subject with exactly one live law, an edit IS a
+    // supersession - the operator should never have to name the id that the
+    // index already knows (x-9ca3). Two or more live laws refuse: the caller
+    // must say which one dies. An explicit --supersedes always wins, and an
+    // unreadable index never blocks a write that is legal without it.
+    let mut supersedes = door.supersedes.clone();
+    let auto_superseded;
+    if supersedes.is_none() && !door.subject.trim().is_empty() {
+        match decision_index::default_store_live() {
+            Ok(index) => {
+                let same: Vec<String> = index
+                    .rows
+                    .iter()
+                    .filter(|r| decision_index::is_law(r))
+                    .filter(|r| {
+                        r.get("subject")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim()
+                            .eq_ignore_ascii_case(door.subject.trim())
+                    })
+                    .filter_map(|r| {
+                        r.get("decision_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                match same.len() {
+                    0 => auto_superseded = None,
+                    1 => {
+                        auto_superseded = Some(same[0].clone());
+                        supersedes = Some(same[0].clone());
+                    }
+                    n => {
+                        let ids = same.join(", ");
+                        return door_refuse(&format!(
+                            "{n} live laws under the subject {:?} ({}). Say which one dies \
+                             with --supersedes <id>, or retract the extras: \
+                             fno inbox law retract <subject-or-id> --reason \"...\"",
+                            door.subject.trim(),
+                            ids
+                        ));
+                    }
+                }
+            }
+            Err(_) => auto_superseded = None,
+        }
+    } else {
+        auto_superseded = None;
+    }
     // Supersession: the target must be recoverable, and a chat recording may
     // retire its own kind, never the operator's.
-    if let Some(sup) = &door.supersedes {
+    if let Some(sup) = &supersedes {
         let index = match decision_index::default_store_live() {
             Ok(i) => i,
             Err(reason) => {
@@ -1878,7 +1960,7 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
             data["rationale"] = json!(text_cap(rationale, 2000));
         }
     }
-    if let Some(sup) = &door.supersedes {
+    if let Some(sup) = &supersedes {
         data["supersedes"] = json!(sup);
     }
     if let Some(rows) = &read_rows {
@@ -1930,6 +2012,9 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
         );
     }
     println!("{decision_id}");
+    if let Some(old) = &auto_superseded {
+        eprintln!("superseded {old}");
+    }
     // The best-effort rule-time join, on stderr: near laws first, then the
     // open questions the new law may answer.
     let law_row = LawRow {
@@ -1959,6 +2044,376 @@ fn text_cap(text: &str, cap: usize) -> String {
     text.chars().take(cap).collect()
 }
 
+// The retract door: the `retract` mode carrying the `fno inbox law retract`
+// argv. Addresses a law by its subject, the handle operators and nodes
+// actually hold; a decision id works too. The write is the port of
+// `retract_decision` (cli/src/fno/decide/__init__.py): the retraction
+// envelope lands in the project journal, the recall index, and the graph
+// store, and the original decision stays in the append-only history.
+
+#[derive(Default)]
+struct RetractDoor {
+    token: String,
+    reason: String,
+    json: bool,
+}
+
+fn parse_retract_door(args: &[String], usage: &str) -> Result<RetractDoor, String> {
+    let mut door = RetractDoor::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--reason" => {
+                i += 1;
+                door.reason = args
+                    .get(i)
+                    .ok_or_else(|| format!("--reason needs a value\n{usage}"))?
+                    .clone();
+            }
+            "--json" => door.json = true,
+            f if f.starts_with('-') && f != "-" => {
+                return Err(format!("no such option: {f}\n{usage}"));
+            }
+            _ => {
+                if !door.token.is_empty() {
+                    return Err(format!("exactly one subject or decision id\n{usage}"));
+                }
+                door.token = args[i].clone();
+            }
+        }
+        i += 1;
+    }
+    if door.token.is_empty() {
+        return Err(format!("a subject or decision id is required\n{usage}"));
+    }
+    if usage == RETRACT_USAGE && door.reason.trim().is_empty() {
+        return Err(format!("--reason is required\n{usage}"));
+    }
+    Ok(door)
+}
+
+fn row_id(row: &Value) -> &str {
+    row.get("decision_id").and_then(Value::as_str).unwrap_or("")
+}
+
+fn row_subject(row: &Value) -> &str {
+    row.get("subject").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Every flattened decision row, any lifecycle, from the machine's default
+/// store. The history read renders the retired rows; the retract door reads
+/// the same source so the two never disagree about what is live.
+fn all_decision_rows() -> Result<(Vec<Value>, usize), String> {
+    decision_index::read_store_rows(
+        &crate::graph_get::default_graph_path(),
+        &decision_index::default_state_path("decisions.jsonl"),
+    )
+}
+
+fn run_retract_door(argv: &[String]) -> i32 {
+    let door = match parse_retract_door(argv, RETRACT_USAGE) {
+        Ok(d) => d,
+        Err(usage) => {
+            eprintln!("fno inbox law retract: {usage}");
+            return 2;
+        }
+    };
+    // The authority gate before any read: a law-lane retraction refuses
+    // every non-operator caller, the rule `retract_decision` enforces
+    // (decide/__init__.py) and the ask gate relies on
+    // (`retraction_needs_operator`).
+    let caller = match resolve_caller() {
+        Ok(c) => c,
+        Err(message) => return door_refuse(&message),
+    };
+    if caller.authority != "operator" {
+        return door_refuse(&format!(
+            "retracting a law needs operator authority (got {}); \
+             run it from an attended terminal",
+            caller.authority
+        ));
+    }
+    let (rows, damaged) = match all_decision_rows() {
+        Ok(pair) => pair,
+        Err(reason) => {
+            return door_refuse(&format!(
+                "the decision index could not be read ({reason}); nothing retracted"
+            ))
+        }
+    };
+    if damaged > 0 {
+        eprintln!(
+            "fno inbox law retract: {damaged} index row(s) could not be parsed; \
+             the answer may be incomplete."
+        );
+    }
+    let retired = decision_index::retirement_map(&rows);
+    let token = door.token.trim();
+    let target = if is_decision_id(token) {
+        let want = token.to_lowercase();
+        match rows.iter().find(|r| row_id(r).to_lowercase() == want) {
+            None => {
+                return door_refuse(&format!(
+                    "decision {token} is not recoverable from the decision index"
+                ))
+            }
+            Some(row) => match retired.get(&want) {
+                Some((_, "retracted")) => {
+                    return door_refuse(&format!(
+                        "{token} is already retracted; nothing live to retract"
+                    ))
+                }
+                Some((_, "superseded")) => {
+                    return door_refuse(&format!(
+                        "{token} is superseded and already out of the live set; \
+                         retract its successor instead"
+                    ))
+                }
+                _ => row.clone(),
+            },
+        }
+    } else {
+        let subject_cf = token.to_lowercase();
+        let hits: Vec<&Value> = rows
+            .iter()
+            .filter(|r| !retired.contains_key(&row_id(r).to_lowercase()))
+            .filter(|r| decision_index::is_law(r))
+            .filter(|r| row_subject(r).trim().eq_ignore_ascii_case(&subject_cf))
+            .collect();
+        match hits.len() {
+            0 => {
+                let near = near_miss_subject_lines(token, &rows);
+                return door_refuse(&format!(
+                    "no live law under the subject {token:?}.{}{}",
+                    if near.is_empty() { "" } else { " Near: " },
+                    near.join("; ")
+                ));
+            }
+            1 => hits[0].clone(),
+            n => {
+                let ids: Vec<&str> = hits.iter().map(|r| row_id(r)).collect();
+                return door_refuse(&format!(
+                    "{n} live laws under the subject {token:?} ({}). Retract by id, \
+                     or supersede all but one with an explicit --supersedes.",
+                    ids.join(", ")
+                ));
+            }
+        }
+    };
+    if !decision_index::is_law(&target) {
+        return door_refuse(&format!(
+            "{} is not a law-lane decision; retract it with `fno backlog decide-retract {}`",
+            row_id(&target),
+            row_id(&target)
+        ));
+    }
+    write_retraction(&target, &door.reason, &caller)
+}
+
+/// Near-miss subjects for a refused retract/history read: live law subjects
+/// sharing at least one token with the asked subject, at most 5.
+fn near_miss_subject_lines(token: &str, rows: &[Value]) -> Vec<String> {
+    let want = tokens(token);
+    let mut near: Vec<String> = Vec::new();
+    for row in rows.iter().filter(|r| decision_index::is_law(r)) {
+        let subject = row_subject(row);
+        if subject.trim().eq_ignore_ascii_case(token.trim()) || want.is_empty() {
+            continue;
+        }
+        if !tokens(subject)
+            .intersection(&want)
+            .cloned()
+            .collect::<Vec<_>>()
+            .is_empty()
+        {
+            let id = row_id(row);
+            near.push(format!("{subject} ({id})"));
+        }
+    }
+    near.truncate(5);
+    near
+}
+
+/// The port of `retract_decision`'s write: durability first (project
+/// journal), then the recall index, then the graph store. Prints the
+/// retracted id alone on stdout, the narrative on stderr.
+fn write_retraction(target: &Value, reason: &str, caller: &Caller) -> i32 {
+    let decision_id = row_id(target).to_string();
+    let subject = row_subject(target).trim().to_string();
+    let retraction_id = mint_retraction_id();
+    let ts = now_iso();
+    let mut data = json!({
+        "retraction_id": retraction_id,
+        "target_decision_id": decision_id,
+        "subject": if subject.is_empty() { "(unscoped)".to_string() } else { subject },
+        "reason": text_cap(reason.trim(), 2000),
+        "retracted_by": caller.decided_by,
+        "authority_source": caller.authority,
+    });
+    if let Some(a) = &caller.attested_by {
+        data["attested_by"] = json!(a);
+    }
+    if let Some(r) = &caller.relayed_by {
+        data["relayed_by"] = json!(r);
+    }
+    let envelope =
+        json!({"ts": ts, "type": "decision_retracted", "source": "target", "data": data});
+    let journal = project_events_journal();
+    if let Err(e) = crate::event_store::append_envelope(&journal, &envelope.to_string(), None) {
+        return door_refuse(&format!("the project journal write failed ({e})"));
+    }
+    let index_path = decision_index::default_state_path("decisions.jsonl");
+    if let Err(e) = crate::event_store::append_envelope(&index_path, &envelope.to_string(), None) {
+        eprintln!(
+            "fno inbox law retract: retracted {decision_id} to the project journal, \
+             but the recall index write failed ({e}). Run `fno backlog decide-reindex`; \
+             do not re-run the retract command."
+        );
+        return 1;
+    }
+    let graph_path = crate::graph_get::default_graph_path();
+    if let Err(e) = crate::backlog::api::decision_retract(
+        &crate::backlog::api::Store::new(&graph_path),
+        envelope.clone(),
+    ) {
+        eprintln!(
+            "fno inbox law retract: retracted {decision_id}, but the graph store refused \
+             the retraction ({e:?}). The retraction is durable in the journal and the index."
+        );
+    }
+    println!("{decision_id}");
+    eprintln!(
+        "fno inbox law retract: retracted {decision_id}. The original decision remains \
+         in the append-only history."
+    );
+    0
+}
+
+/// The `history` read: one JSON answer over the whole chain behind a subject
+/// or decision id - the live row plus every retired row, each with its
+/// lifecycle. The subject-addressed read `fno inbox decisions` does not
+/// offer; it stays here so the Python verb is untouched.
+fn run_history_read(argv: &[String]) -> i32 {
+    let door = match parse_retract_door(argv, HISTORY_USAGE) {
+        Ok(d) => d,
+        Err(usage) => {
+            eprintln!("fno inbox law history: {usage}");
+            return 2;
+        }
+    };
+    let (rows, _damaged) = match all_decision_rows() {
+        Ok(pair) => pair,
+        Err(reason) => {
+            eprintln!("fno inbox law history: the decision index could not be read ({reason})");
+            return 1;
+        }
+    };
+    let answer = history_answer(door.token.trim(), &rows);
+    if answer
+        .get("chain")
+        .and_then(Value::as_array)
+        .map_or(true, Vec::is_empty)
+    {
+        let near = near_miss_subject_lines(door.token.trim(), &rows);
+        eprintln!(
+            "fno inbox law history: no decision under {:?}.{}{}",
+            door.token.trim(),
+            if near.is_empty() { "" } else { " Near: " },
+            near.join("; ")
+        );
+        return 3;
+    }
+    println!("{answer}");
+    0
+}
+
+/// The pure history answer: the chain behind a subject or decision id,
+/// newest first, each row carrying its lifecycle (`live` | `superseded` |
+/// `retracted`), with the live row promoted. An unknown id yields an empty
+/// chain; a subject with no rows yields an empty chain.
+fn history_answer(token: &str, rows: &[Value]) -> Value {
+    let retired = decision_index::retirement_map(rows);
+    let subject_cf = token.to_lowercase();
+    let chain: Vec<&Value> = if is_decision_id(token) {
+        let want = token.to_lowercase();
+        // The chain behind an id: the row itself plus the rows it relates to
+        // (its own supersedes target, and every row superseding it).
+        match rows.iter().find(|r| row_id(r).to_lowercase() == want) {
+            None => Vec::new(),
+            Some(anchor) => {
+                let mut chain: Vec<&Value> = Vec::new();
+                if let Some(prev) = anchor.get("supersedes").and_then(Value::as_str) {
+                    if let Some(row) = rows
+                        .iter()
+                        .find(|r| row_id(r).to_lowercase() == prev.to_lowercase())
+                    {
+                        chain.push(row);
+                    }
+                }
+                chain.push(anchor);
+                for row in rows.iter().filter(|r| {
+                    r.get("supersedes")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_lowercase()
+                        == want
+                }) {
+                    chain.push(row);
+                }
+                chain
+            }
+        }
+    } else {
+        rows.iter()
+            .filter(|r| row_subject(r).trim().eq_ignore_ascii_case(&subject_cf))
+            .collect()
+    };
+    let mut ordered: Vec<(String, &Value)> = chain
+        .iter()
+        .map(|r| {
+            (
+                r.get("ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                *r,
+            )
+        })
+        .collect();
+    ordered.sort_by(|a, b| b.0.cmp(&a.0));
+    let rows_json: Vec<Value> = ordered
+        .into_iter()
+        .map(|(_, r)| {
+            let id_cf = row_id(r).to_lowercase();
+            let lifecycle = match retired.get(&id_cf) {
+                Some((_, "retracted")) => json!("retracted"),
+                Some((_, "superseded")) => json!("superseded"),
+                _ => json!("live"),
+            };
+            json!({
+                "decision_id": row_id(r),
+                "subject": r.get("subject").cloned().unwrap_or(Value::Null),
+                "decision": r.get("decision").cloned().unwrap_or(Value::Null),
+                "ts": r.get("ts").cloned().unwrap_or(Value::Null),
+                "scope": r.get("scope").cloned().unwrap_or(Value::Null),
+                "graduation": r.get("graduation").cloned().unwrap_or(Value::Null),
+                "lifecycle": lifecycle,
+            })
+        })
+        .collect();
+    let live = rows_json
+        .iter()
+        .find(|r| r.get("lifecycle") == Some(&json!("live")))
+        .cloned();
+    let answer = json!({
+        "token": token,
+        "matched_by": if is_decision_id(token) { "decision_id" } else { "subject" },
+        "live": live,
+        "chain": rows_json,
+    });
+    answer
+}
+
 /// Near-law lines for a law being recorded: live laws on the same subject
 /// (casefold equality) or a nearby subject (shared `tokens()`), at most 5,
 /// newest first. A warning at record time, never a refusal.
@@ -1980,7 +2435,7 @@ fn near_law_lines_from(index: &decision_index::Index, law: &LawRow) -> Vec<Strin
         }
         let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
         lines.push(format!(
-            "law: {new_id} sits near live law {id} ({subject}): {}. If it repeats that ruling, retract it: fno backlog decide-retract {new_id} --reason \"repeats {id}\". If it replaces that ruling, record it again with --supersedes {id}.",
+            "law: {new_id} sits near live law {id} ({subject}): {}. If it repeats that ruling, retract it: fno inbox law retract {new_id} --reason \"repeats {id}\". If it replaces it cross-subject, record with --supersedes {id}. Same-subject repeats supersede automatically now.",
             one_line(decision, 120)
         ));
     }
@@ -1995,6 +2450,54 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
         Ok(index) => near_law_lines_from(&index, law),
         Err(reason) => vec![format!("law: near-law check skipped ({reason})")],
     }
+}
+
+/// A live law whose graduation follow-up node has closed asks for its own
+/// retraction, by subject, in the stage block every session already reads
+/// (x-9ca3). The graph read pays only when such a law exists.
+fn graduated_retraction_lines(index: &decision_index::Index) -> Vec<String> {
+    graduated_retraction_lines_in(index, node_is_closed)
+}
+
+fn graduated_retraction_lines_in(
+    index: &decision_index::Index,
+    is_closed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for row in &index.rows {
+        let Some(grad) = row.get("graduation") else {
+            continue;
+        };
+        if grad.get("kind").and_then(Value::as_str) != Some("should-be-enforced-but-i-did-not") {
+            continue;
+        }
+        let Some(follow_up) = grad.get("follow_up").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(node_id) = follow_up.strip_prefix("node:") else {
+            continue;
+        };
+        if !is_closed(node_id) {
+            continue;
+        }
+        let id = row_id(row);
+        let subject = row_subject(row).trim();
+        lines.push(format!(
+            "law: {id} ({subject}) graduated: its node {node_id} closed. \
+             Retract it: fno inbox law retract {subject} --reason \"graduation node {node_id} closed\""
+        ));
+    }
+    lines
+}
+
+/// A follow-up node counts as closed at `done` or `superseded`; an
+/// unreadable graph reads as open, never as closed.
+fn node_is_closed(node_id: &str) -> bool {
+    let store = crate::backlog::api::Store::new(&crate::graph_get::default_graph_path());
+    matches!(
+        crate::backlog::api::node(&store, node_id),
+        Ok(Some(node)) if matches!(node.status, crate::backlog::model::Status::Done | crate::backlog::model::Status::Superseded)
+    )
 }
 
 /// The `fno inbox law match` transport: one JSON request on stdin, one JSON
@@ -2035,6 +2538,12 @@ pub fn run_law_match_str(input: &str) -> i32 {
         MatchRequest::Record(r) => {
             // The door owns stdout and the exit code; no envelope here.
             return run_record_door(&r.argv, &r.stdin);
+        }
+        MatchRequest::Retract(r) => {
+            return run_retract_door(&r.argv);
+        }
+        MatchRequest::History(r) => {
+            return run_history_read(&r.argv);
         }
         MatchRequest::Ask(r) => serde_json::to_string(&ask_answer(&r)).expect("serializes"),
         MatchRequest::Law(r) => {
@@ -2696,7 +3205,7 @@ mod tests {
         let line = &lines[0];
         assert!(line.contains("d-777e7d1f"), "{line}");
         assert!(line.contains("review-rounds-sufficient"), "{line}");
-        assert!(line.contains("decide-retract"), "{line}");
+        assert!(line.contains("law retract"), "{line}");
         assert!(line.contains("--supersedes"), "{line}");
         // The new law is named only as the subject of the line, never as a
         // near hit of itself.
@@ -3531,6 +4040,213 @@ mod scope_tests {
         );
         assert_eq!(code, 0);
         assert!(env.index_text().contains("d-c4a7c4a7"));
+    }
+
+    #[test]
+    fn a_same_subject_repeat_supersedes_automatically() {
+        let env = DoorEnv::new();
+        let index = env.0.path().join("decisions.jsonl");
+        std::fs::write(
+            &index,
+            concat!(
+                "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+                "\"data\":{\"decision_id\":\"d-0ad0ad0a\",\"subject\":\"merge-authority\",",
+                "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"chat_attested\"}}\n"
+            ),
+        )
+        .expect("writes");
+        let code = record_door_write(
+            door("merge-authority", "Merges belong to whoever asks"),
+            "Merges belong to whoever asks".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0, "the repeat records");
+        let text = env.index_text();
+        assert!(
+            text.contains("\"supersedes\":\"d-0ad0ad0a\""),
+            "the new row supersedes the one live law: {text}"
+        );
+    }
+
+    #[test]
+    fn several_live_laws_refuse_the_same_subject_edit() {
+        let env = DoorEnv::new();
+        let index = env.0.path().join("decisions.jsonl");
+        let law_a = concat!(
+            "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+            "\"data\":{\"decision_id\":\"d-aaaa0001\",\"subject\":\"merge-authority\",",
+            "\"decision\":\"First\",\"authority_source\":\"chat_attested\"}}\n"
+        );
+        let law_b = concat!(
+            "{\"ts\":\"2026-09-01T00:00:01Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+            "\"data\":{\"decision_id\":\"d-bbbb0002\",\"subject\":\"merge-authority\",",
+            "\"decision\":\"Second\",\"authority_source\":\"chat_attested\"}}\n"
+        );
+        std::fs::write(&index, format!("{law_a}{law_b}")).expect("writes");
+        let code = record_door_write(
+            door("merge-authority", "Merges belong to whoever asks"),
+            "Merges belong to whoever asks".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 3, "the edit refuses: two live laws, no id named");
+        assert_eq!(env.index_text().lines().count(), 2, "nothing new recorded");
+    }
+
+    #[test]
+    fn the_retract_door_resolves_a_subject_and_writes_the_retraction() {
+        let env = DoorEnv::new();
+        let index = env.0.path().join("decisions.jsonl");
+        std::fs::write(
+            &index,
+            concat!(
+                "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+                "\"data\":{\"decision_id\":\"d-0ad0ad0a\",\"subject\":\"portal-test\",",
+                "\"decision\":\"One pane is never a portal\",\"authority_source\":\"operator\"}}\n"
+            ),
+        )
+        .expect("writes");
+        let code = write_retraction(
+            &serde_json::json!({
+                "decision_id": "d-0ad0ad0a",
+                "subject": "portal-test",
+                "decision": "One pane is never a portal",
+                "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z"
+            }),
+            "verify cleanup",
+            &Caller::as_authority("operator"),
+        );
+        assert_eq!(code, 0);
+        // DoorEnv::index_text filters to operator_decision rows; the
+        // retraction needs the unfiltered journal read.
+        let text = crate::event_store::journal_text(&index, &[]);
+        assert!(text.contains("\"type\":\"decision_retracted\""), "{text}");
+        assert!(
+            text.contains("\"target_decision_id\":\"d-0ad0ad0a\""),
+            "{text}"
+        );
+        // The retracted row no longer reads as live: the live derivation
+        // (the same pass `fno inbox law set` consults for auto-supersede)
+        // drops it.
+        let live = decision_index::read_live(&index).expect("reads");
+        assert!(live.rows.is_empty(), "{:?}", live.rows);
+    }
+
+    #[test]
+    fn history_answer_renders_the_chain_and_lifecycles() {
+        // The flattened shape the store reader hands out: data fields at the
+        // top level and `_event_type` carrying the envelope type.
+        let rows = vec![
+            serde_json::json!({
+                "_event_type": "operator_decision",
+                "decision_id": "d-aaaa0001", "subject": "portal-test",
+                "decision": "First", "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z"
+            }),
+            serde_json::json!({
+                "_event_type": "operator_decision",
+                "decision_id": "d-bbbb0002", "subject": "portal-test",
+                "decision": "Second", "authority_source": "operator",
+                "ts": "2026-09-02T00:00:00Z", "supersedes": "d-aaaa0001"
+            }),
+            serde_json::json!({
+                "_event_type": "decision_retracted", "ts": "2026-09-03T00:00:00Z",
+                "retraction_id": "r-cccc0003", "target_decision_id": "d-bbbb0002", "reason": "graduated"
+            }),
+        ];
+        let answer = history_answer("portal-test", &rows);
+        assert_eq!(answer["matched_by"], json!("subject"));
+        let chain = answer["chain"].as_array().expect("array");
+        assert_eq!(chain.len(), 2, "{answer}");
+        assert_eq!(chain[0]["decision_id"], json!("d-bbbb0002"), "newest first");
+        assert_eq!(chain[0]["lifecycle"], json!("retracted"));
+        assert_eq!(chain[1]["lifecycle"], json!("superseded"));
+        assert!(answer["live"].is_null(), "nothing live after a retraction");
+    }
+
+    #[test]
+    fn the_retract_door_parser_demands_a_token_and_a_reason() {
+        let ok = parse_retract_door(
+            &[
+                "portal-test".to_string(),
+                "--reason".to_string(),
+                "why".to_string(),
+            ],
+            RETRACT_USAGE,
+        )
+        .expect("ok");
+        assert_eq!(ok.token, "portal-test");
+        assert_eq!(ok.reason, "why");
+        assert!(parse_retract_door(&["portal-test".to_string()], RETRACT_USAGE).is_err());
+        assert!(parse_retract_door(&[], RETRACT_USAGE).is_err());
+        assert!(parse_retract_door(
+            &[
+                "a".to_string(),
+                "b".to_string(),
+                "--reason".to_string(),
+                "r".to_string()
+            ],
+            RETRACT_USAGE
+        )
+        .is_err());
+        assert!(parse_retract_door(
+            &["portal-test".to_string(), "--bogus".to_string()],
+            HISTORY_USAGE
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn near_miss_lines_name_lookalike_law_subjects() {
+        let rows = vec![
+            serde_json::json!({
+                "decision_id": "d-aaaa0001", "subject": "portal-viewport",
+                "decision": "No pane is ever a portal", "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z"
+            }),
+            serde_json::json!({
+                "decision_id": "d-bbbb0002", "subject": "file-budget",
+                "decision": "Stay in budget", "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z"
+            }),
+        ];
+        let near = near_miss_subject_lines("portal-test", &rows);
+        assert_eq!(near.len(), 1, "{near:?}");
+        assert!(near[0].contains("portal-viewport"), "{near:?}");
+        assert!(near[0].contains("d-aaaa0001"), "{near:?}");
+    }
+
+    #[test]
+    fn a_graduated_law_with_a_closed_node_prompts_its_retraction() {
+        let index = decision_index::Index {
+            rows: vec![serde_json::json!({
+                "decision_id": "d-0ad0ad0a", "subject": "portal-test",
+                "decision": "One pane is never a portal",
+                "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z",
+                "graduation": {"kind": "should-be-enforced-but-i-did-not", "follow_up": "node:x-9ca30001"}
+            })],
+            damaged: 0,
+        };
+        let lines = graduated_retraction_lines_in(&index, |id| id == "x-9ca30001");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("fno inbox law retract portal-test"),
+            "{lines:?}"
+        );
+        let open = graduated_retraction_lines_in(&index, |_| false);
+        assert!(open.is_empty(), "an open node prompts nothing");
+        let plain = decision_index::Index {
+            rows: vec![serde_json::json!({
+                "decision_id": "d-bbbb0002", "subject": "plain",
+                "authority_source": "operator", "ts": "2026-09-01T00:00:00Z"
+            })],
+            damaged: 0,
+        };
+        assert!(
+            graduated_retraction_lines_in(&plain, |_| true).is_empty(),
+            "a law with no graduation kind adds no read and no line"
+        );
     }
 
     #[test]
