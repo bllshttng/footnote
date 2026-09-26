@@ -30,8 +30,7 @@ _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
 #: key is cried wolf.
 _HONORED_LEGACY_KEYS = frozenset({"recovery.retire_grace_s"})
 #: Top-level blocks retired with the md attention arm (attention-items.md
-#: "Config keys"): a leftover row is dead config, and "unknown; ignored"
-#: reads as if it once worked by modeling. Named as retired instead.
+#: "Config keys"): a leftover row is dead config, named as retired.
 _RETIRED_BLOCKS = frozenset({"attention", "reach_me"})
 
 _Model = Optional[type[BaseModel]]
@@ -171,10 +170,8 @@ def unknown_key_problems(
         for key in unknown:
             block = key.split(".", 1)[0]
             if block in _RETIRED_BLOCKS:
-                problems.append(
-                    f"[[{block}]] rows are retired (set in {path}): question "
-                    "pages need no setup. Delete the row."
-                )
+                problems.append(f"[[{block}]] rows are retired (set in {path}): "
+                                "question pages need no setup. Delete the row.")
                 continue
             hints = _near_miss_keys(key)
             tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
