@@ -163,7 +163,6 @@ def init_cmd(
 def _reign_hold(argv: list[str] | None = None) -> None:
     """Fire-and-forget the reign hold: default arms `--for <checkin_interval>`
     on this session; the beat's `hold --off` drains it."""
-    import os
     import re
     import shutil
     import subprocess
@@ -174,9 +173,8 @@ def _reign_hold(argv: list[str] | None = None) -> None:
         match = re.match(r"(\d+)([smhd])", str(load_settings().king.checkin_interval))
         count, unit = match.groups() if match else ("55", "m")
         minutes = max(1, int(count) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] // 60)
-        # The running binary first (the cmd_hold idiom): a PATH `fno` can be
-        # several merges behind the code that just armed the hold.
-        binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
+        # The running binary first (cmd_hold's idiom): a PATH `fno` lags.
+        binary = sys.argv[0] if Path(sys.argv[0]).is_file() else shutil.which("fno")
         argv = [binary or sys.argv[0], "agents", "mail", "hold", "--for", str(minutes)]
     try:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
