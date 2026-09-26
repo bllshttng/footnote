@@ -1015,6 +1015,26 @@ def _no_live_evidence_gate(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_loop_gate(monkeypatch):
+    """Hermetic default for the loop gate.
+
+    `fno.agents.harness_map.check_loop_participation` answers through the
+    `fno-agents status --target-family --harness` leaf, and in the test
+    environment that resolver can find a real installed binary whose grok
+    arm runs a bounded `grok inspect`. The default admits every looping
+    dispatch; tests of the refusals install their own responder on
+    `fno.agents.harness_map._loop_gate_answer`.
+    """
+
+    def _admit(harness, command):
+        return {"refusal": None}
+
+    import fno.agents.harness_map as harness_map
+
+    monkeypatch.setattr(harness_map, "_loop_gate_answer", _admit)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_resume_pin(monkeypatch):
     """Hermetic default for the resume-pin transport.
 

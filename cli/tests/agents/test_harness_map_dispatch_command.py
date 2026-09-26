@@ -26,7 +26,7 @@ def _installed_loop_extensions(monkeypatch):
     test_harness_loop_participation.py."""
     import fno.agents.harness_map as harness_map
 
-    monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
+    monkeypatch.setattr(harness_map, "_loop_gate_answer", lambda h, c: {"refusal": None})
 
 
 @pytest.mark.parametrize(

@@ -484,7 +484,7 @@ def _validate_row(harness: str, caps: dict) -> None:
     # loop through a shell hook and a `none` row closes it through nothing.
     # The converse is legal and load-bearing - an `extension` row with an
     # EMPTY path is a harness whose extension fno has not written yet, and
-    #:func:`check_loop_participation` refuses a looping dispatch at it.
+    # the loop gate in capability_leaves.rs refuses a looping dispatch at it.
     if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
         raise _contract_error(
             harness, "loop_extension",
@@ -749,82 +749,37 @@ def spawn_seed_receipt_fragment(effective_message: Optional[str]) -> str:
     )
 
 
-def _loop_extension_installed(harness: str) -> bool:
-    """Whether this harness's shipped loop artifact is actually installed at
-    the harness's own load surface - not merely shipped in the repo.
+def _loop_gate_answer(harness: str, command: str) -> dict:
+    from fno.rust_binary import call_binary_json
+    from fno.setup.integration import _pi_extension_src
 
-    A ``loop_extension`` row names a repo path, but the harness only loads
-    the copy fno's installer placed at its own extension dir. Advertising a
-    closable loop while that copy is absent or stale would dispatch a worker
-    with nothing to stop it - the hang the field exists to prevent. A row
-    whose harness declares no installer is treated as not installed: an
-    extension row ships together with its install arm (opencode and pi both
-    did), so the missing arm is a gap to refuse, never a claim to wave
-    through.
-    """
-    try:
-        from fno.setup import integration
-    except ImportError:
-        return False
-    checkers = {
-        "opencode": integration._opencode_is_installed,
-        "pi": integration._pi_is_installed,
-    }
-    checker = checkers.get(harness)
-    if checker is None:
-        return False
-    try:
-        return bool(checker())
-    except OSError:
-        return False
+    args = ["--target-family", "--message", command, "--harness", harness,
+            "--extension-src", str(_pi_extension_src())]
+    err, answer = call_binary_json("status", args, timeout=45)
+    if err is not None or not isinstance(answer, dict):
+        return {"refusal": (
+            f"refused: the loop gate for harness {harness!r} could not be read "
+            f"({err or 'unreadable answer'}), so the looping command {command!r} "
+            f"is not admitted. An fno-agents older than this fno answers "
+            f"'unknown argument'; run 'fno doctor update --rust'."
+        )}
+    return answer
 
 
 def check_loop_participation(harness: str, command: str) -> None:
     """Refuse a LOOPING dispatch at a harness that cannot close a loop.
 
-    ``command`` is judged by :func:`is_target_family`, the same vocabulary the
-    merge-posture carrier judges, so a one-shot ``/think`` or a bare
-    ``opencode run`` passes untouched. A harness
-    whose ``loop_participation`` names no reachable boundary would otherwise
-    take the dispatch and produce a worker with nothing to stop it: the hang
-    this field exists to prevent, not a failure anything reports.
-
-    The refusal text carries the fact rather than a code, because a runtime
-    string cannot drift from the behavior it describes the way a doc can.
+    ``command`` is judged by :func:`is_target_family`, so a one-shot passes
+    untouched. The decision lives in ``capability_leaves.rs`` (the
+    ``fno-agents status --target-family --harness`` leaf), which reads the
+    same packaged table and asks the per-harness install probes; an
+    unreadable leaf refuses, never admits.
     """
     if not is_target_family(command):
         return
-    caps = capabilities(harness)
-    participation = caps["loop_participation"]
-    if participation == "native":
-        from fno.rust_binary import call_binary_json
-        args = ["readiness", "--pre-launch", "--harness", harness, "--command", command]
-        error, _ = call_binary_json("loop", args)
-        if error:
-            raise DispatchResolveError(error)
-        return
-    if participation == "extension" and caps.get("loop_extension"):
-        if not _loop_extension_installed(harness):
-            raise DispatchResolveError(
-                f"refused: harness {harness!r} closes its loop through a "
-                f"fno-installed extension that is absent or stale on this "
-                f"machine. Run 'fno config setup' to install it, then "
-                f"dispatch again - a loop whose stop gate is not installed "
-                f"would take {command!r} and never stop."
-            )
-        return
-    if participation == "none":
-        why = "no lifecycle boundary invokes loop-check"
-    else:
-        why = (
-            "its loop rides a harness-native extension fno has not written yet "
-            "and nothing invokes loop-check"
-        )
-    raise DispatchResolveError(
-        f"refused: harness {harness!r} declares loop_participation = "
-        f"{participation!r}, so {why} and the looping command {command!r} would "
-        f"never stop. Dispatch a one-shot instead."
-    )
+    refusal = _loop_gate_answer(harness, command).get("refusal")
+    if refusal:
+        raise DispatchResolveError(refusal)
 
 
 def dispatch_command(harness: str, allow_merge: bool = False) -> str:
