@@ -24,13 +24,13 @@ pub mod court_overlay;
 pub mod digest_overlay;
 pub mod dispatch_launch;
 pub mod event_cli;
-pub mod law_cli;
 pub mod event_store;
 pub mod feed_overlay;
 #[cfg(test)]
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
+pub mod law_cli;
 pub mod link;
 pub mod live_store_fence;
 pub mod mouse;
