@@ -1119,7 +1119,6 @@ pub fn resolve_branch(cwd: &Path) -> Option<String> {
             .next()
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let crown_name = None;
     }
     // Detached HEAD: a bare 40-hex sha -> short form. Anything else is malformed.
     (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..8].to_string())
@@ -1977,6 +1976,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let crown_name = None;
         let spawned_by_session = row
             .get("spawned_by_session")
             .and_then(|v| v.as_str())
