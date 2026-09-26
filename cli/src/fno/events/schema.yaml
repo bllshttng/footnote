@@ -4061,6 +4061,12 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
+        reads:
+          type: array
+          description: "Optional. Executed evidence rows (cmd, exit code, output head) backing a code fact the ruling asserts. Listed by the reader projection before this declaration existed; declared here so the schema and the projection agree."
+        scope:
+          type: string
+          description: "Optional. Who the law governs: `global`, or `project:<slug>`. A row with no scope reads as project:fno, because every row recorded before this field existed was recorded in fno. The law door stamps the recording session's project by default; widening to global is an explicit --global, because law is never inherited by silence. Readers filter to global plus the session's project and fail open with a named reason when the project cannot be resolved."
     consumers: [operator, fno inbox decisions]
 
   - name: operator_notice
