@@ -112,6 +112,17 @@ else
   fail "T2 rc=$RC out='$OUT'"
 fi
 
+# T2b: the pre-edit text ended with a newline and the edit dropped it; the
+# baseline must keep that newline byte-exactly or the finding is silenced.
+printf 'body' > "$REPO/docs/cut.md"
+OUT="$(payload '{"tool_name": "Write", "cwd": "'"${REPO}"'", "tool_input": {"file_path": "'"${REPO}"'/docs/cut.md"}, "tool_response": {"originalFile": "body\n"}}' | run_shim)"
+RC=$?
+if [[ $RC -eq 0 && "$OUT" == *"docs/cut.md"*"last line has no newline and before this edit did"* ]]; then
+  pass "T2b a dropped final newline survives the originalFile round-trip"
+else
+  fail "T2b rc=$RC out='$OUT'"
+fi
+
 # T3: an Edit renames top-level heal while the committed test still
 # patches the dotted path; the context names that file and line.
 /usr/bin/git -C "$REPO" checkout -- cli/tests/unit/test_helpers.py

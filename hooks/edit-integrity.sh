@@ -31,16 +31,23 @@ TARGETS="$(payload_write_targets "$PAYLOAD" 2>/dev/null || true)"
 
 # Claude hands back the pre-edit text in tool_response.originalFile; with
 # exactly one path it becomes the baseline, so a cut in an uncommitted
-# file is caught and an intended drop is reported once. A codex
-# apply_patch payload, a new file, or a payload without the field gets no
-# --before and the entry falls back to git.
+# file is caught and an intended drop is reported once. The text lands in
+# the file byte-exactly - jq -j adds no newline and command substitution
+# is never used, because $() strips the trailing newline and an
+# unterminated-looking baseline would silence the cut-short finding. A
+# codex apply_patch payload, a new file, or a payload without the field
+# gets no --before and the entry falls back to git.
 BEFORE_FILE=""
 _before_from_payload() {
-    local original=""
+    BEFORE_FILE="$(mktemp "${TMPDIR:-/tmp}/edit-integrity-before-XXXXXX")" || return 0
     if command -v jq >/dev/null 2>&1; then
-        original="$(printf '%s' "$PAYLOAD" | jq -r '.tool_response.originalFile | strings' 2>/dev/null || true)"
+        printf '%s' "$PAYLOAD" | jq -j '.tool_response.originalFile | strings' >"$BEFORE_FILE" 2>/dev/null || {
+            rm -f "$BEFORE_FILE"
+            BEFORE_FILE=""
+            return 0
+        }
     elif command -v python3 >/dev/null 2>&1; then
-        original="$(printf '%s' "$PAYLOAD" | python3 -c '
+        printf '%s' "$PAYLOAD" | python3 -c '
 import json, sys
 try:
     value = json.load(sys.stdin).get("tool_response", {}).get("originalFile")
@@ -48,14 +55,19 @@ try:
         sys.stdout.write(value)
 except Exception:
     pass
-' 2>/dev/null || true)"
-    fi
-    [ -n "$original" ] || return 0
-    BEFORE_FILE="$(mktemp "${TMPDIR:-/tmp}/edit-integrity-before-XXXXXX")" || return 0
-    printf '%s' "$original" >"$BEFORE_FILE" 2>/dev/null || {
+' >"$BEFORE_FILE" 2>/dev/null || {
+            rm -f "$BEFORE_FILE"
+            BEFORE_FILE=""
+            return 0
+        }
+    else
         rm -f "$BEFORE_FILE"
         BEFORE_FILE=""
         return 0
+    fi
+    [ -s "$BEFORE_FILE" ] || {
+        rm -f "$BEFORE_FILE"
+        BEFORE_FILE=""
     }
 }
 if [ "$(printf '%s\n' "$TARGETS" | grep -c .)" = "1" ]; then
