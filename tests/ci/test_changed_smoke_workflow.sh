@@ -179,17 +179,24 @@ check(changed.get("steps", [{}])[0].get("with", {}).get("fetch-depth") == 0,
 
 # Full test lanes follow the crate-owned affected selector. The existing
 # integration job is already sharded; this change only routes its eligibility.
+# Each if also carries !cancelled(): the sizer above is PR-only, so on a push
+# it skips and GitHub's implicit success() would skip every transitive
+# dependent with it - main would run no tests.
 for name in ("smoke-pytest", "smoke-rest"):
-    check(jobs[name].get("if") == "needs.pr-affected.outputs.python_full == 'true'",
-          f"{name} follows the Python full-suite selector",
+    job_if = str(jobs[name].get("if", ""))
+    check("needs.pr-affected.outputs.python_full" in job_if
+          and "!cancelled()" in job_if,
+          f"{name} follows the Python full-suite selector over the implicit success gate",
           f"{name} has if: {jobs[name].get('if')!r}")
 for name in ("hook-latency", "test-agents", "test-agents-integration", "test-mux"):
     job = jobs[name]
     needs = job.get("needs")
     needs = [needs] if isinstance(needs, str) else list(needs or [])
-    check(job.get("if") == "needs.pr-affected.outputs.cargo == 'true'"
+    job_if = str(job.get("if", ""))
+    check("needs.pr-affected.outputs.cargo" in job_if
+          and "!cancelled()" in job_if
           and "pr-affected" in needs,
-          f"{name} follows the Cargo affected selector",
+          f"{name} follows the Cargo affected selector over the implicit success gate",
           f"{name} has if: {job.get('if')!r} and needs {needs!r}")
 needs_agents = jobs["test-agents"].get("needs")
 needs_agents = [needs_agents] if isinstance(needs_agents, str) else list(needs_agents or [])
