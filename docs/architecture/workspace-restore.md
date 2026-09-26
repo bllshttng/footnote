@@ -79,7 +79,7 @@ A revival re-seats a row that already held a seat, so it never asks the spawn ga
 
 ## After a reboot, without a tap
 
-The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. A worker counts when it was live at the boot: a live-ish status, or an exit stamped after the boot began. It revives when `claude agents --json --all` lists its job as stopped or failed and its node is not done, merged or superseded. Kings go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. A row the pass never reached still revives on one tap.
+The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. If a worker was live at the boot, it counts: a live-ish status, or an exit stamped after the boot began. If `claude agents --json --all` lists its job as stopped or failed and its node is still open, it revives. Kings go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. A row the pass never reached still revives on one tap.
 
 ## Files
 
